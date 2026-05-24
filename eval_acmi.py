@@ -46,7 +46,14 @@ except Exception:
     pass
 
 from rule_based_agent import blue_coordinated_actions
-from train_vanilla_mappo import VanillaActor, _compute_obs_dim, _flatten_obs
+from train_vanilla_mappo import (
+    VanillaActor,
+    _classify_death_reason,
+    _compute_obs_dim,
+    _episode_outcome,
+    _flatten_obs,
+    _safe_div,
+)
 
 # Diagnostic marker 4
 try:
@@ -265,6 +272,8 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
 
     # ---- Death reason tracking ----
     death_reasons: dict[str, str] = {}      # agent_id → reason (recorded on death)
+    red_missiles_total = 0.0
+    blue_missiles_total = 0.0
 
     # ---- 5. 对战循环 ----
     step = 0
@@ -312,6 +321,11 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
             # 环境步进
             obs, rewards, terminated, truncated, info = env.step(actions)
             step += 1
+
+            for rid in red_ids:
+                red_missiles_total += info.get(rid, {}).get("missiles_fired_this_step", 0)
+            for bid in blue_ids:
+                blue_missiles_total += info.get(bid, {}).get("missiles_fired_this_step", 0)
 
             # ---- Record death reasons from this step ----
             for aid in red_ids + blue_ids:
@@ -410,6 +424,32 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                         reasons = mt.get(team, {})
                         if reasons:
                             print(f"    {team}: {_fmt(Counter(reasons))}", flush=True)
+                red_deaths_missile = sum(
+                    v for k, v in red_deaths.items()
+                    if _classify_death_reason(k) == "missile")
+                blue_deaths_missile = sum(
+                    v for k, v in blue_deaths.items()
+                    if _classify_death_reason(k) == "missile")
+                red_missile_hits = blue_deaths_missile
+                blue_missile_hits = red_deaths_missile
+                red_total_deaths = sum(red_deaths.values())
+                blue_total_deaths = sum(blue_deaths.values())
+                rwr_single = 1.0 if _episode_outcome(red_alive, blue_alive) == "red" else 0.0
+
+                print("  Paper metrics:", flush=True)
+                print(f"    RedAlive / BlueAlive: {red_alive} / {blue_alive}", flush=True)
+                print(f"    Red missiles fired / Blue missiles fired: "
+                      f"{red_missiles_total:.0f} / {blue_missiles_total:.0f}",
+                      flush=True)
+                print(f"    Red missile hits / Blue missile hits: "
+                      f"{red_missile_hits} / {blue_missile_hits}", flush=True)
+                print(f"    Red missile hit rate / Blue missile hit rate: "
+                      f"{_safe_div(red_missile_hits, red_missiles_total):.6f} / "
+                      f"{_safe_div(blue_missile_hits, blue_missiles_total):.6f}",
+                      flush=True)
+                print(f"    KD_Red: {_safe_div(blue_total_deaths, red_total_deaths):.6f}",
+                      flush=True)
+                print(f"    RWR_single_episode: {rwr_single:.6f}", flush=True)
                 if trackers:
                     print(f"  可视化导弹轨迹: {len(trackers)} 条", flush=True)
     except Exception:

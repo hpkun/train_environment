@@ -702,6 +702,29 @@ def _current_entropy_coef(config, _total_steps: int = 0) -> float:
     return config.entropy_coef
 
 
+def _safe_div(num: float, den: float) -> float:
+    return float(num) / max(float(den), 1.0)
+
+
+def _classify_death_reason(reason: str | None) -> str:
+    if not reason:
+        return "other"
+    r = str(reason).lower()
+    if "shot" in r or "missile" in r or "hit" in r:
+        return "missile"
+    if "crash" in r or "ground" in r or "altitude" in r:
+        return "crash"
+    return "other"
+
+
+def _episode_outcome(red_alive: int, blue_alive: int) -> str:
+    if blue_alive == 0 and red_alive > 0:
+        return "red"
+    if red_alive == 0 and blue_alive > 0:
+        return "blue"
+    return "draw"
+
+
 def _ppo_update_legacy(actor, critic, actor_opt, critic_opt, buffer, config, device,
                        total_steps: int = 0):
     """MAPPO CTDE update: centralized critic sees global state (all red obs concat).
@@ -1030,7 +1053,14 @@ def main():
     csv_writer.writerow(["Iteration", "Step", "ActorLoss", "CriticLoss",
                          "Entropy", "RedMeanReward", "RedWinRate",
                          "RedRewardStd", "WinRateRecent",
-                         "RedMissiles", "BlueMissiles"])
+                         "RedMissiles", "BlueMissiles",
+                         "Episodes", "RedWins", "BlueWins", "Draws",
+                         "RedAliveMean", "BlueAliveMean",
+                         "RedDeathsMissile", "RedDeathsCrash",
+                         "BlueDeathsMissile", "BlueDeathsCrash",
+                         "RedMissileHits", "BlueMissileHits",
+                         "RedMissileHitRate", "BlueMissileHitRate",
+                         "KD_Red", "RWR"])
     csv_file.flush()
 
     print(f"设备: {device}")
@@ -1104,6 +1134,8 @@ def main():
     blue_wins = 0
     draws = 0
     death_stats = {"red": Counter(), "blue": Counter()}
+    red_missiles_total = 0.0
+    blue_missiles_total = 0.0
     best_win_rate = 0.0
     best_reward = -float("inf")
 
@@ -1114,6 +1146,8 @@ def main():
     recent_ep_comps_red: deque[dict] = deque(maxlen=50)
     recent_ep_missiles_red = deque(maxlen=50)
     recent_ep_missiles_blue = deque(maxlen=50)
+    recent_ep_red_alive = deque(maxlen=50)
+    recent_ep_blue_alive = deque(maxlen=50)
     current_ep_reward_red = np.zeros(config.num_envs, dtype=np.float32)
     current_ep_comp_red = {k: np.zeros(config.num_envs, dtype=np.float64)
                            for k in COMP_KEYS}
@@ -1238,11 +1272,13 @@ def main():
 
                 inf = infos_list[env_idx]
                 for rid in red_ids:
-                    current_ep_missiles_red[env_idx] += inf.get(rid, {}).get(
-                        "missiles_fired_this_step", 0)
+                    fired = inf.get(rid, {}).get("missiles_fired_this_step", 0)
+                    current_ep_missiles_red[env_idx] += fired
+                    red_missiles_total += fired
                 for bid in blue_ids:
-                    current_ep_missiles_blue[env_idx] += inf.get(bid, {}).get(
-                        "missiles_fired_this_step", 0)
+                    fired = inf.get(bid, {}).get("missiles_fired_this_step", 0)
+                    current_ep_missiles_blue[env_idx] += fired
+                    blue_missiles_total += fired
 
                 # ---- episodic settlement AFTER accumulation (terminal r_end is included) ----
                 if all(don.values()):
@@ -1254,10 +1290,11 @@ def main():
                     red_alive = sum(
                         1 for rid in red_ids
                         if info.get(rid, {}).get("alive", False))
-                    if blue_alive == 0 and red_alive > 0:
+                    outcome = _episode_outcome(red_alive, blue_alive)
+                    if outcome == "red":
                         red_wins += 1
                         iter_red_wins += 1
-                    elif red_alive == 0 and blue_alive > 0:
+                    elif outcome == "blue":
                         blue_wins += 1
                     else:
                         draws += 1
@@ -1277,6 +1314,8 @@ def main():
                         {k: float(current_ep_comp_red[k][env_idx]) for k in COMP_KEYS})
                     recent_ep_missiles_red.append(float(current_ep_missiles_red[env_idx]))
                     recent_ep_missiles_blue.append(float(current_ep_missiles_blue[env_idx]))
+                    recent_ep_red_alive.append(float(red_alive))
+                    recent_ep_blue_alive.append(float(blue_alive))
                     current_ep_reward_red[env_idx] = 0.0
                     for k in COMP_KEYS:
                         current_ep_comp_red[k][env_idx] = 0.0
@@ -1320,6 +1359,29 @@ def main():
         red_win_rate = red_wins / max(total_episodes, 1)
         std_r_red = float(np.std(recent_ep_rewards_red)) if len(recent_ep_rewards_red) > 1 else 0.0
         iter_win_rate = iter_red_wins / max(iter_episodes, 1)
+        red_alive_mean = np.mean(recent_ep_red_alive) if recent_ep_red_alive else 0.0
+        blue_alive_mean = np.mean(recent_ep_blue_alive) if recent_ep_blue_alive else 0.0
+
+        red_deaths_missile = sum(
+            v for k, v in death_stats["red"].items()
+            if _classify_death_reason(k) == "missile")
+        red_deaths_crash = sum(
+            v for k, v in death_stats["red"].items()
+            if _classify_death_reason(k) == "crash")
+        blue_deaths_missile = sum(
+            v for k, v in death_stats["blue"].items()
+            if _classify_death_reason(k) == "missile")
+        blue_deaths_crash = sum(
+            v for k, v in death_stats["blue"].items()
+            if _classify_death_reason(k) == "crash")
+        red_missile_hits = blue_deaths_missile
+        blue_missile_hits = red_deaths_missile
+        red_total_deaths = sum(death_stats["red"].values())
+        blue_total_deaths = sum(death_stats["blue"].values())
+        red_missile_hit_rate = _safe_div(red_missile_hits, red_missiles_total)
+        blue_missile_hit_rate = _safe_div(blue_missile_hits, blue_missiles_total)
+        kd_red = _safe_div(blue_total_deaths, red_total_deaths)
+        rwr = _safe_div(red_wins, total_episodes)
 
         # Average per-component breakdown across completed episodes
         if recent_ep_comps_red:
@@ -1343,7 +1405,20 @@ def main():
                              f"{std_r_red:.4f}",
                              f"{iter_win_rate:.6f}",
                              f"{avg_m_red:.1f}",
-                             f"{avg_m_blue:.1f}"])
+                             f"{avg_m_blue:.1f}",
+                             total_episodes, red_wins, blue_wins, draws,
+                             f"{red_alive_mean:.4f}",
+                             f"{blue_alive_mean:.4f}",
+                             red_deaths_missile,
+                             red_deaths_crash,
+                             blue_deaths_missile,
+                             blue_deaths_crash,
+                             red_missile_hits,
+                             blue_missile_hits,
+                             f"{red_missile_hit_rate:.6f}",
+                             f"{blue_missile_hit_rate:.6f}",
+                             f"{kd_red:.6f}",
+                             f"{rwr:.6f}"])
         csv_file.flush()
 
         # ---- 持久化：results/ 绘图数据 (累计 + 每 1M 步自动保存) ----
@@ -1356,6 +1431,22 @@ def main():
             "WinRateCumul":   red_win_rate,
             "RedMissiles":    avg_m_red,
             "BlueMissiles":   avg_m_blue,
+            "Episodes":       total_episodes,
+            "RedWins":        red_wins,
+            "BlueWins":       blue_wins,
+            "Draws":          draws,
+            "RedAliveMean":   red_alive_mean,
+            "BlueAliveMean":  blue_alive_mean,
+            "RedDeathsMissile": red_deaths_missile,
+            "RedDeathsCrash": red_deaths_crash,
+            "BlueDeathsMissile": blue_deaths_missile,
+            "BlueDeathsCrash": blue_deaths_crash,
+            "RedMissileHits": red_missile_hits,
+            "BlueMissileHits": blue_missile_hits,
+            "RedMissileHitRate": red_missile_hit_rate,
+            "BlueMissileHitRate": blue_missile_hit_rate,
+            "KD_Red":         kd_red,
+            "RWR":            rwr,
             "ActorLoss":      stats["actor_loss"],
             "CriticLoss":     stats["critic_loss"],
             "Entropy":        stats["entropy"],
