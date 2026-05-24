@@ -167,6 +167,9 @@ python train_attention_mappo.py --num-red 1 --num-blue 1 --num-envs 1 --total-en
 - 已新增 `paper_state_extractor.py`。
 - 它尝试从 simulator/native state 构造论文 Table 1/Table 2 的 10 维观测。
 - 当前 `alpha/beta` 可能仍是 placeholder 0，除非 simulator 已提供对应属性。
+- pass13 后 extractor 会尝试从 JSBSim property 读取 `aero/alpha-rad`、`aero/alpha-deg`、`aero/beta-rad`、`aero/beta-deg`。
 - `q_LOS` 的定义仍需和论文几何定义核对。
 - `radar_detected=False` 时会按论文 Table 2 Note 将速度角和目标速度置 0。
+- `scripts/smoke_paper_state_extractor_env.py` 会打印每个 entity 的物理字段，用于本地检查数值方向和量级。
+- Codex 不运行该脚本，用户本地运行。
 - 该模块尚未接入训练；后续需要先验证数值合理性，再决定是否让 `train_attention_mappo.py` 使用它。

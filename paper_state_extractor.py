@@ -56,9 +56,29 @@ def _get_alpha_beta_placeholder(sim) -> tuple[float, float]:
         if callable(getter):
             beta = float(getter())
             break
-    # Placeholder: AircraftSimulator currently does not expose alpha/beta.
-    # A strict implementation should read JSBSim aerodynamic properties.
+
+    if alpha is None:
+        alpha = _read_jsbsim_angle_property(
+            sim, rad_name="aero/alpha-rad", deg_name="aero/alpha-deg")
+    if beta is None:
+        beta = _read_jsbsim_angle_property(
+            sim, rad_name="aero/beta-rad", deg_name="aero/beta-deg")
+
     return float(alpha if alpha is not None else 0.0), float(beta if beta is not None else 0.0)
+
+
+def _read_jsbsim_angle_property(sim, rad_name: str, deg_name: str) -> float | None:
+    getter = getattr(sim, "get_property_value", None)
+    if not callable(getter):
+        return None
+    try:
+        return float(getter(rad_name))
+    except Exception:
+        pass
+    try:
+        return float(np.deg2rad(getter(deg_name)))
+    except Exception:
+        return None
 
 
 def extract_self_state(sim) -> np.ndarray:
@@ -114,10 +134,7 @@ def extract_relative_state(observer_sim, target_sim,
     horizontal = float(np.linalg.norm(rel_pos_body[:2]))
     theta_los_body = float(np.arctan2(z_body, horizontal))
     psi_los_body = float(np.arctan2(y_body, x_body))
-    if d <= 1e-8:
-        q_los = 0.0
-    else:
-        q_los = float(np.arccos(np.clip(x_body / d, -1.0, 1.0)))
+    q_los = compute_q_los_placeholder(rel_pos_body)
 
     rel_vel_body = r_bi @ (tgt_vel - obs_vel)
     rel_vel_horizontal = float(np.linalg.norm(rel_vel_body[:2]))
@@ -142,6 +159,21 @@ def extract_relative_state(observer_sim, target_sim,
         q_los,
         d,
     ], dtype=np.float32)
+
+
+def compute_q_los_placeholder(rel_pos_body: np.ndarray) -> float:
+    """Placeholder LOS angle against the body x-axis.
+
+    This returns arccos(clamp(x_body / d, -1, 1)), where d is relative distance.
+    It represents the angle between line-of-sight and aircraft forward body x.
+    The definition must be reviewed against the paper's geometry and the
+    existing AO/TA conventions before training use.
+    """
+    rel_pos_body = np.asarray(rel_pos_body, dtype=np.float64)
+    distance = float(np.linalg.norm(rel_pos_body))
+    if distance <= 1e-8:
+        return 0.0
+    return float(np.arccos(np.clip(float(rel_pos_body[0]) / distance, -1.0, 1.0)))
 
 
 def _ordered_team_sims(env, agent_id: str):
@@ -215,3 +247,40 @@ def build_strict_paper_entity_observation(env, agent_id: str):
         },
     }
     return entities, entity_mask, meta
+
+
+def describe_paper_entities(entities: np.ndarray, mask: np.ndarray,
+                            meta: dict | None = None) -> str:
+    """Return a readable diagnostic dump for paper-style entity tensors."""
+    entities = np.asarray(entities)
+    mask = np.asarray(mask)
+    lines = [
+        f"entities.shape: {tuple(entities.shape)}",
+        f"mask: {mask.tolist()}",
+    ]
+    if entities.shape[0] > 0:
+        names = ["x", "y", "h", "V", "roll", "pitch",
+                 "heading", "alpha", "beta", "Vd"]
+        values = ", ".join(
+            f"{name}={float(value):.6g}"
+            for name, value in zip(names, entities[0])
+        )
+        lines.append(f"self[0]: {values}")
+
+    rel_names = [
+        "x_body", "y_body", "z_body", "theta_v_body", "psi_v_body",
+        "V", "theta_LOS_body", "psi_LOS_body", "q_LOS", "d",
+    ]
+    for idx in range(1, entities.shape[0]):
+        values = ", ".join(
+            f"{name}={float(value):.6g}"
+            for name, value in zip(rel_names, entities[idx])
+        )
+        lines.append(f"relative[{idx}]: {values}")
+
+    if meta is not None:
+        if "alpha_beta" in meta:
+            lines.append(f"meta.alpha_beta: {meta['alpha_beta']}")
+        if "q_los" in meta:
+            lines.append(f"meta.q_los: {meta['q_los']}")
+    return "\n".join(lines)

@@ -10,7 +10,12 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from paper_state_extractor import extract_relative_state, extract_self_state
+from paper_state_extractor import (
+    compute_q_los_placeholder,
+    describe_paper_entities,
+    extract_relative_state,
+    extract_self_state,
+)
 
 
 class FakeSim:
@@ -45,6 +50,16 @@ def main():
     self_state = extract_self_state(observer)
     rel_state = extract_relative_state(observer, target, radar_detected=True)
     rel_masked = extract_relative_state(observer, target, radar_detected=False)
+    q_forward = compute_q_los_placeholder(np.array([1.0, 0.0, 0.0]))
+    q_side = compute_q_los_placeholder(np.array([0.0, 1.0, 0.0]))
+    description = describe_paper_entities(
+        np.stack([self_state, rel_state]),
+        np.array([0, 0], dtype=np.int64),
+        {
+            "alpha_beta": "placeholder_zero_if_unavailable",
+            "q_los": "placeholder_definition_needs_review",
+        },
+    )
 
     assert self_state.shape == (10,)
     assert rel_state.shape == (10,)
@@ -55,6 +70,10 @@ def main():
     assert np.isfinite(self_state).all()
     assert np.isfinite(rel_state).all()
     assert np.isfinite(rel_masked).all()
+    assert np.isclose(q_forward, 0.0)
+    assert np.isclose(q_side, np.pi / 2)
+    assert isinstance(description, str)
+    assert "entities.shape" in description
 
     print("paper state extractor static smoke test passed")
 
