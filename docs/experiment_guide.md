@@ -115,3 +115,10 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --random --num-red 1 -
 - `*.pyc`
 
 如果生成了上述文件，请保持它们处于 git ignored 状态，不要加入提交。
+
+## 10. 下一阶段：EntityObservationEncoder 准备
+
+- 已新增 `entity_obs_utils.py`，可将当前 Dict observation 转成 entity-wise tensor。
+- 当前 tensor 暂时仍使用环境的 11 维工程化 entity vector。
+- 该工具暂未接入训练，只用于后续实现 MAPPO-Attention / BRMA-MAPPO。
+- 后续仍需决定是否严格改成论文 Table 1 / Table 2 的 10 维表示。
