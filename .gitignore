@@ -3,6 +3,8 @@ test.py
 smoke_train_log.csv
 smoke_checkpoints/
 smoke_eval.acmi
+smoke_attention_log.csv
+smoke_attention_checkpoints/
 results/smoke_*.csv
 results
 runs

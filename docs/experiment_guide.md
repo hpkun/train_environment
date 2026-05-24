@@ -161,3 +161,12 @@ python train_attention_mappo.py --num-red 1 --num-blue 1 --num-envs 1 --total-en
   - self state: `x, y, h, V, phi, theta, psi, alpha, beta, Vd`
   - relative state: `x_body, y_body, z_body, theta_v_body, psi_v_body, V, theta_LOS_body, psi_LOS_body, q_LOS, d`
 - 在完成 strict observation 前，`train_attention_mappo.py` 的结果只能视作工程 baseline，而不是论文 MAPPO-Attention 消融结果。
+
+## 14. Strict paper observation prototype
+
+- 已新增 `paper_state_extractor.py`。
+- 它尝试从 simulator/native state 构造论文 Table 1/Table 2 的 10 维观测。
+- 当前 `alpha/beta` 可能仍是 placeholder 0，除非 simulator 已提供对应属性。
+- `q_LOS` 的定义仍需和论文几何定义核对。
+- `radar_detected=False` 时会按论文 Table 2 Note 将速度角和目标速度置 0。
+- 该模块尚未接入训练；后续需要先验证数值合理性，再决定是否让 `train_attention_mappo.py` 使用它。
