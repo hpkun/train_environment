@@ -122,3 +122,12 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --random --num-red 1 -
 - 当前 tensor 暂时仍使用环境的 11 维工程化 entity vector。
 - 该工具暂未接入训练，只用于后续实现 MAPPO-Attention / BRMA-MAPPO。
 - 后续仍需决定是否严格改成论文 Table 1 / Table 2 的 10 维表示。
+
+## 11. MAPPO-Attention 准备
+
+- 已新增 `attention_models.py`。
+- 目前包含 `EntityObservationEncoder`、`AttentionActor`、`AttentionCritic`。
+- 当前模块尚未接入训练，仅通过纯 PyTorch smoke test 验证 shape。
+- 下一步才会新增 `train_attention_mappo.py` 或在独立分支中接入训练。
+- 当前 attention encoder 使用 11 维工程化 entity vector，不是最终论文 Table 1 / Table 2 的 10 维严格版本。
+- 当前还没有实现 biased random mask 和 mask vector generator。
