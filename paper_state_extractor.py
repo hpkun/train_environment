@@ -42,43 +42,67 @@ def _rotation_inertial_to_body(roll, pitch, heading) -> np.ndarray:
     return body_to_inertial.T.astype(np.float64)
 
 
-def _get_alpha_beta_placeholder(sim) -> tuple[float, float]:
-    """Return alpha/beta if exposed by simulator, otherwise placeholder zeros."""
+def _get_alpha_beta_with_source(sim) -> tuple[float, float, str, str]:
+    """Return alpha/beta plus source labels for diagnostics."""
     alpha = None
     beta = None
+    alpha_source = "placeholder:0"
+    beta_source = "placeholder:0"
     for name in ("get_alpha", "get_attack_angle"):
         getter = getattr(sim, name, None)
         if callable(getter):
-            alpha = float(getter())
+            try:
+                alpha = float(getter())
+                alpha_source = f"getter:{name}"
+            except Exception:
+                alpha = None
             break
     for name in ("get_beta", "get_sideslip_angle"):
         getter = getattr(sim, name, None)
         if callable(getter):
-            beta = float(getter())
+            try:
+                beta = float(getter())
+                beta_source = f"getter:{name}"
+            except Exception:
+                beta = None
             break
 
     if alpha is None:
-        alpha = _read_jsbsim_angle_property(
-            sim, rad_name="aero/alpha-rad", deg_name="aero/alpha-deg")
+        alpha, alpha_source = _read_jsbsim_angle_property(
+            sim, rad_name="aero/alpha-rad", deg_name="aero/alpha-deg",
+            fallback_source="placeholder:0")
     if beta is None:
-        beta = _read_jsbsim_angle_property(
-            sim, rad_name="aero/beta-rad", deg_name="aero/beta-deg")
+        beta, beta_source = _read_jsbsim_angle_property(
+            sim, rad_name="aero/beta-rad", deg_name="aero/beta-deg",
+            fallback_source="placeholder:0")
 
-    return float(alpha if alpha is not None else 0.0), float(beta if beta is not None else 0.0)
+    return (
+        float(alpha if alpha is not None else 0.0),
+        float(beta if beta is not None else 0.0),
+        alpha_source,
+        beta_source,
+    )
 
 
-def _read_jsbsim_angle_property(sim, rad_name: str, deg_name: str) -> float | None:
+def _get_alpha_beta_placeholder(sim) -> tuple[float, float]:
+    """Return alpha/beta if exposed by simulator, otherwise placeholder zeros."""
+    alpha, beta, _alpha_source, _beta_source = _get_alpha_beta_with_source(sim)
+    return alpha, beta
+
+
+def _read_jsbsim_angle_property(sim, rad_name: str, deg_name: str,
+                                fallback_source: str) -> tuple[float | None, str]:
     getter = getattr(sim, "get_property_value", None)
     if not callable(getter):
-        return None
+        return None, fallback_source
     try:
-        return float(getter(rad_name))
+        return float(getter(rad_name)), f"jsbsim:{rad_name}"
     except Exception:
         pass
     try:
-        return float(np.deg2rad(getter(deg_name)))
+        return float(np.deg2rad(getter(deg_name))), f"jsbsim:{deg_name}"
     except Exception:
-        return None
+        return None, fallback_source
 
 
 def extract_self_state(sim) -> np.ndarray:
@@ -88,14 +112,19 @@ def extract_self_state(sim) -> np.ndarray:
     ``Vd`` is down velocity; with NEU z-up velocity, ``Vd = -v_up``.
     Alpha/beta are placeholder zeros unless the simulator exposes getters.
     """
+    return extract_self_state_with_meta(sim)[0]
+
+
+def extract_self_state_with_meta(sim) -> tuple[np.ndarray, dict]:
+    """Extract self state and alpha/beta source diagnostics."""
     position = np.asarray(sim.get_position(), dtype=np.float64)
     velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
     roll, pitch, heading = np.asarray(sim.get_rpy(), dtype=np.float64)
-    alpha, beta = _get_alpha_beta_placeholder(sim)
+    alpha, beta, alpha_source, beta_source = _get_alpha_beta_with_source(sim)
 
     speed = float(np.linalg.norm(velocity))
     down_velocity = float(-velocity[2])
-    return np.array([
+    state = np.array([
         position[0],
         position[1],
         position[2],
@@ -107,6 +136,10 @@ def extract_self_state(sim) -> np.ndarray:
         beta,
         down_velocity,
     ], dtype=np.float32)
+    return state, {
+        "alpha_source": alpha_source,
+        "beta_source": beta_source,
+    }
 
 
 def extract_relative_state(observer_sim, target_sim,
@@ -165,9 +198,11 @@ def compute_q_los_placeholder(rel_pos_body: np.ndarray) -> float:
     """Placeholder LOS angle against the body x-axis.
 
     This returns arccos(clamp(x_body / d, -1, 1)), where d is relative distance.
-    It represents the angle between line-of-sight and aircraft forward body x.
-    The definition must be reviewed against the paper's geometry and the
-    existing AO/TA conventions before training use.
+    It represents the angle between line-of-sight and the observer aircraft's
+    forward body x-axis, so it describes observer-to-target LOS deviation.  It
+    is not yet equivalent to the target-tail / 3-9-line angle used by the
+    environment's TA/AO and missile logic.  The definition must be reviewed
+    before using it for reward terms, masking, or ranking.
     """
     rel_pos_body = np.asarray(rel_pos_body, dtype=np.float64)
     distance = float(np.linalg.norm(rel_pos_body))
@@ -213,9 +248,14 @@ def build_strict_paper_entity_observation(env, agent_id: str):
     mask = []
 
     if _is_valid_sim(ego_sim):
-        rows.append(extract_self_state(ego_sim))
+        self_state, self_meta = extract_self_state_with_meta(ego_sim)
+        rows.append(self_state)
         mask.append(0)
     else:
+        self_meta = {
+            "alpha_source": "placeholder:0",
+            "beta_source": "placeholder:0",
+        }
         rows.append(np.zeros(10, dtype=np.float32))
         mask.append(1)
 
@@ -236,8 +276,11 @@ def build_strict_paper_entity_observation(env, agent_id: str):
     meta = {
         "entity_dim": 10,
         "schema": "paper_table1_table2_prototype",
-        "alpha_beta": "placeholder_zero_if_unavailable",
-        "q_los": "placeholder_definition_needs_review",
+        "alpha_beta": {
+            "alpha_source": self_meta["alpha_source"],
+            "beta_source": self_meta["beta_source"],
+        },
+        "q_los": "observer_body_x_axis_angle_placeholder_not_target_tail_angle",
         "radar_detected": radar_mode,
         "layout": {
             "n_ego": 1,
@@ -280,7 +323,12 @@ def describe_paper_entities(entities: np.ndarray, mask: np.ndarray,
 
     if meta is not None:
         if "alpha_beta" in meta:
-            lines.append(f"meta.alpha_beta: {meta['alpha_beta']}")
+            alpha_beta = meta["alpha_beta"]
+            if isinstance(alpha_beta, dict):
+                lines.append(f"meta.alpha_source: {alpha_beta.get('alpha_source')}")
+                lines.append(f"meta.beta_source: {alpha_beta.get('beta_source')}")
+            else:
+                lines.append(f"meta.alpha_beta: {alpha_beta}")
         if "q_los" in meta:
             lines.append(f"meta.q_los: {meta['q_los']}")
     return "\n".join(lines)

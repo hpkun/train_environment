@@ -11,10 +11,12 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from paper_state_extractor import (
+    _get_alpha_beta_with_source,
     compute_q_los_placeholder,
     describe_paper_entities,
     extract_relative_state,
     extract_self_state,
+    extract_self_state_with_meta,
 )
 
 
@@ -34,6 +36,13 @@ class FakeSim:
     def get_rpy(self):
         return self._rpy
 
+    def get_property_value(self, name):
+        if name == "aero/alpha-rad":
+            return 0.1
+        if name == "aero/beta-rad":
+            return -0.05
+        raise KeyError(name)
+
 
 def main():
     observer = FakeSim(
@@ -48,6 +57,8 @@ def main():
     )
 
     self_state = extract_self_state(observer)
+    self_state_meta, self_meta = extract_self_state_with_meta(observer)
+    alpha, beta, alpha_source, beta_source = _get_alpha_beta_with_source(observer)
     rel_state = extract_relative_state(observer, target, radar_detected=True)
     rel_masked = extract_relative_state(observer, target, radar_detected=False)
     q_forward = compute_q_los_placeholder(np.array([1.0, 0.0, 0.0]))
@@ -56,12 +67,19 @@ def main():
         np.stack([self_state, rel_state]),
         np.array([0, 0], dtype=np.int64),
         {
-            "alpha_beta": "placeholder_zero_if_unavailable",
-            "q_los": "placeholder_definition_needs_review",
+            "alpha_beta": self_meta,
+            "q_los": "observer_body_x_axis_angle_placeholder_not_target_tail_angle",
         },
     )
 
     assert self_state.shape == (10,)
+    assert self_state_meta.shape == (10,)
+    assert np.isclose(alpha, 0.1)
+    assert np.isclose(beta, -0.05)
+    assert alpha_source == "jsbsim:aero/alpha-rad"
+    assert beta_source == "jsbsim:aero/beta-rad"
+    assert self_meta["alpha_source"] == "jsbsim:aero/alpha-rad"
+    assert self_meta["beta_source"] == "jsbsim:aero/beta-rad"
     assert rel_state.shape == (10,)
     assert rel_masked.shape == (10,)
     assert rel_masked[3] == 0.0
