@@ -1333,22 +1333,6 @@ class UavCombatEnv(gymnasium.Env):
         front-low-RCS / side-high-RCS approximation and only aligns the Rmax
         relation to the fourth root of RCS.
         """
-        # Paper 2.1.2: Rmax = K * RCS^(1/4), implemented below.
-        """RCS-based radar detection range: R_max = K · √RCS(TA).
-
-        TA (Target Aspect): angle between the *target's* velocity vector and
-        the LOS from target to ego ∈ [0, π].
-          - TA ∈ [0°, 30°]   → nose-on  (front deadzone)  → RCS = 0.1
-          - TA ∈ [30°, 90°]  → front quarter → side        → RCS ramps 0.1 → 2.0
-          - TA ∈ [90°, 150°] → side → rear quarter          → RCS ramps 2.0 → 0.1
-          - TA ∈ [150°, 180°]→ tail-on (rear deadzone)      → RCS = 0.1
-
-        Paper: "The average RCS within ±30 degrees forward of the aircraft
-        is on the order of 0.1 square meters."
-        """
-        # Paper-inspired RCS approximation: the paper uses z-axis/y-axis
-        # angular table interpolation, but does not provide table data. Keep
-        # the existing front-low-RCS / side-high-RCS approximation.
         ta_abs_deg = np.rad2deg(TA)
 
         if ta_abs_deg <= 30.0:

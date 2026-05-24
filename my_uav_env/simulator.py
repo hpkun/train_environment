@@ -636,27 +636,6 @@ class MissileSimulator(BaseSimulator):
         else:
             self._state_trans(action)
 
-    def _roll_hit_probability_heading_legacy(self) -> bool:
-        """Paper eq.: P_hit = 0.05 + 0.95 × directional_match_factor.
-
-        The directional match factor measures how well-aligned the missile and
-        target headings are at the moment of intercept.  cos(heading_diff) = 1
-        (pure tail-chase) gives the highest P_hit; cos = 0 (perpendicular /
-        beam aspect) gives P_hit ≈ 0.525.
-        """
-        m_yaw = float(self._posture[2])
-        t_yaw = float(self.target_aircraft.get_rpy()[2])
-
-        heading_diff = abs(m_yaw - t_yaw)
-        # Wrap to [0, π]
-        if heading_diff > np.pi:
-            heading_diff = 2.0 * np.pi - heading_diff
-
-        directional_match = (np.cos(heading_diff) + 1.0) / 2.0  # → [0, 1]
-        P_hit = 0.05 + 0.95 * directional_match
-
-        return np.random.random() < P_hit
-
     def _roll_hit_probability(self) -> bool:
         """Paper 2.1.3 hit probability using missile velocity and LOS.
 
