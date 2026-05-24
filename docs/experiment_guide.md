@@ -142,6 +142,11 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --random --num-red 1 -
   - `attention_training_log.csv`
   - `results/attention_mappo_results.csv`
   - `checkpoints_attention/`
+- `train_attention_mappo.py` 支持 `--obs-adapter current` 和 `--obs-adapter paper-placeholder`。
+- `current` 是默认，使用当前 11 维工程化 entity vector。
+- `paper-placeholder` 使用 10 维 placeholder adapter，不是 strict Table 1/Table 2 物理量。
+- strict paper extractor 已在 `paper_state_extractor.py` 中作为原型存在，但尚未接入 SubprocVecEnv 训练。
+- 使用 `paper-placeholder` 时应使用独立 checkpoint 目录，例如 `checkpoints_attention_paper_placeholder`。
 
 smoke 命令：
 
@@ -151,6 +156,15 @@ python train_attention_mappo.py --num-red 1 --num-blue 1 --num-envs 1 --total-en
 ```
 
 这条命令会触发 JSBSim 环境 reset，Codex 不运行；由本地用户运行。
+
+paper-placeholder smoke 命令：
+
+```powershell
+conda activate brmamappo
+python train_attention_mappo.py --obs-adapter paper-placeholder --num-red 1 --num-blue 1 --num-envs 1 --total-env-steps 20 --replay-buffer-size 10 --max-episode-length 10 --device cpu --log-file smoke_attention_paper_log.csv --results-file results/smoke_attention_paper_results.csv --checkpoint-dir smoke_attention_paper_checkpoints
+```
+
+这条命令同样会触发 JSBSim 环境 reset，Codex 不运行；由本地用户运行。
 
 ## 13. 论文式 observation adapter 准备
 

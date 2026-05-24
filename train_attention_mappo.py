@@ -20,6 +20,7 @@ import torch.nn.functional as F
 
 from attention_models import AttentionActor
 from entity_obs_utils import build_entity_observation
+from paper_obs_utils import build_paper_entity_observation_from_env_obs
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     CentralizedCritic,
@@ -92,6 +93,19 @@ class AttentionRolloutBuffer:
 def parse_args_attention():
     args = parse_args()
     argv = sys.argv[1:]
+    obs_adapter = "current"
+    if "--obs-adapter" in argv:
+        idx = argv.index("--obs-adapter")
+        if idx + 1 >= len(argv):
+            raise SystemExit("--obs-adapter requires one of: current, paper-placeholder")
+        obs_adapter = argv[idx + 1]
+    elif any(item.startswith("--obs-adapter=") for item in argv):
+        obs_adapter = next(
+            item.split("=", 1)[1] for item in argv
+            if item.startswith("--obs-adapter="))
+    if obs_adapter not in ("current", "paper-placeholder"):
+        raise SystemExit("--obs-adapter must be one of: current, paper-placeholder")
+    args.obs_adapter = obs_adapter
     if "--log-file" not in argv:
         args.log_file = "attention_training_log.csv"
     if "--results-file" not in argv:
@@ -101,8 +115,16 @@ def parse_args_attention():
     return args
 
 
-def _zero_entity_like(obs_np: dict) -> tuple[np.ndarray, np.ndarray]:
-    entities, mask = build_entity_observation(obs_np)
+def _build_attention_entities(obs_np: dict, obs_adapter: str):
+    if obs_adapter == "current":
+        return build_entity_observation(obs_np)
+    if obs_adapter == "paper-placeholder":
+        return build_paper_entity_observation_from_env_obs(obs_np)
+    raise ValueError(f"Unknown obs_adapter: {obs_adapter}")
+
+
+def _zero_entity_like(obs_np: dict, obs_adapter: str) -> tuple[np.ndarray, np.ndarray]:
+    entities, mask = _build_attention_entities(obs_np, obs_adapter)
     return np.zeros_like(entities, dtype=np.float32), np.ones_like(mask, dtype=np.int64)
 
 
@@ -287,10 +309,12 @@ def _write_results(results_log: list[dict], results_file: str):
 def main():
     args = parse_args_attention()
     config = make_config_from_args(args)
+    config.obs_adapter = args.obs_adapter
     _set_main_process_seed(config.seed)
     device = _select_device(config.device)
 
     obs_dim = _compute_obs_dim(config.num_red, config.num_blue, is_red=True)
+    entity_dim = 11 if config.obs_adapter == "current" else 10
     os.makedirs(config.checkpoint_dir, exist_ok=True)
 
     csv_file = open(config.log_file, "w", newline="")
@@ -319,6 +343,13 @@ def main():
     print(f"  results_file: {config.results_file}")
     print(f"  checkpoint_dir: {config.checkpoint_dir}")
     print(f"  seed: {config.seed}")
+    print(f"  obs_adapter: {config.obs_adapter}")
+    print(f"  entity_dim: {entity_dim}")
+    if (config.obs_adapter == "paper-placeholder"
+            and config.checkpoint_dir == "checkpoints_attention"):
+        print("[WARN] paper-placeholder uses entity_dim=10; use a separate "
+              "checkpoint_dir to avoid mixing with current adapter checkpoints.",
+              flush=True)
 
     min_episodes_to_eval = 50
     num_steps = config.replay_buffer_size // config.num_envs
@@ -331,7 +362,7 @@ def main():
     red_ids = [f"red_{i}" for i in range(config.num_red)]
     blue_ids = [f"blue_{i}" for i in range(config.num_blue)]
 
-    actor = AttentionActor(entity_dim=11, action_dim=config.action_dim,
+    actor = AttentionActor(entity_dim=entity_dim, action_dim=config.action_dim,
                            hidden_size=config.mlp_hidden,
                            rnn_hidden=config.rnn_hidden_size).to(device)
     global_obs_dim = obs_dim * config.num_red
@@ -411,7 +442,8 @@ def main():
                 env_actions = {}
                 if not env_obs or len(env_obs) == 0:
                     zero_flat = np.zeros(obs_dim, dtype=np.float32)
-                    zero_entities = np.zeros((1 + config.num_red - 1 + config.num_blue, 11),
+                    zero_entities = np.zeros((1 + config.num_red - 1 + config.num_blue,
+                                              entity_dim),
                                              dtype=np.float32)
                     one_mask = np.ones((zero_entities.shape[0],), dtype=np.int64)
                     for i, rid in enumerate(red_ids):
@@ -442,13 +474,15 @@ def main():
                     red_obs_flat_all.append(obs_flat)
                     alive = not np.allclose(obs_np["ego_state"], 0.0)
                     if alive:
-                        entities_np, entity_mask_np = build_entity_observation(obs_np)
+                        entities_np, entity_mask_np = _build_attention_entities(
+                            obs_np, config.obs_adapter)
                         entity_batch.append(entities_np)
                         mask_batch.append(entity_mask_np)
                         alive_obs_flat.append(obs_flat)
                         alive_red_indices.append(i)
                     else:
-                        entities_np, entity_mask_np = _zero_entity_like(obs_np)
+                        entities_np, entity_mask_np = _zero_entity_like(
+                            obs_np, config.obs_adapter)
                         env_actions[rid] = np.zeros(config.action_dim, dtype=np.float32)
                         buffer.store_step(
                             step, env_idx, i, entities_np, entity_mask_np, obs_flat,
