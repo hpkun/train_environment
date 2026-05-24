@@ -1,0 +1,5 @@
+eval_acmi.py started
+imports_stage1: numpy+torch loaded
+imports_stage2: my_uav_env loaded
+imports_stage3: all imports done
+main_block: entered

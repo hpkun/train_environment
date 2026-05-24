@@ -1,0 +1,4 @@
+jsbsim>=1.0.0
+numpy>=1.21.0
+gymnasium>=0.29.0
+pymap3d>=3.0.0

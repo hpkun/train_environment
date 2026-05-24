@@ -1,0 +1,1 @@
+Iteration,Step,ActorLoss,CriticLoss,MaskLoss,KL,MaskEnt,RedMeanReward,BlueMeanReward,RedWinRate,RedMissiles,BlueMissiles
