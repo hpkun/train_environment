@@ -151,3 +151,13 @@ python train_attention_mappo.py --num-red 1 --num-blue 1 --num-envs 1 --total-en
 ```
 
 这条命令会触发 JSBSim 环境 reset，Codex 不运行；由本地用户运行。
+
+## 13. 论文式 observation adapter 准备
+
+- 已新增 `paper_obs_utils.py`。
+- 当前只是把现有 11 维工程化 entity vector 转成 10 维接口占位。
+- 它还不是严格论文 Table 1/Table 2 的物理量复现。
+- 后续若要严格复现，需要从 simulator/native state 中构造：
+  - self state: `x, y, h, V, phi, theta, psi, alpha, beta, Vd`
+  - relative state: `x_body, y_body, z_body, theta_v_body, psi_v_body, V, theta_LOS_body, psi_LOS_body, q_LOS, d`
+- 在完成 strict observation 前，`train_attention_mappo.py` 的结果只能视作工程 baseline，而不是论文 MAPPO-Attention 消融结果。

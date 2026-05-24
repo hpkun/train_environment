@@ -1,0 +1,3 @@
+Iteration,Step,ActorLoss,CriticLoss,Entropy,RedMeanReward,RedWinRate,RedRewardStd,WinRateRecent,RedMissiles,BlueMissiles,Episodes,RedWins,BlueWins,Draws,RedAliveMean,BlueAliveMean,RedDeathsMissile,RedDeathsCrash,BlueDeathsMissile,BlueDeathsCrash,RedMissileHits,BlueMissileHits,RedMissileHitRate,BlueMissileHitRate,KD_Red,RWR
+1,10,-0.073342,0.002839,0.214656,0.1392,0.000000,0.0000,0.000000,0.0,0.0,1,0,0,1,1.0000,1.0000,0,0,0,0,0,0,0.000000,0.000000,0.000000,0.000000
+2,20,-0.066243,0.002691,0.214339,0.0945,0.000000,0.0448,0.000000,0.0,0.0,2,0,0,2,1.0000,1.0000,0,0,0,0,0,0,0.000000,0.000000,0.000000,0.000000
