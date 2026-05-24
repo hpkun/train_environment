@@ -1005,50 +1005,6 @@ class UavCombatEnv(gymnasium.Env):
 
         return total
 
-    def _altitude_reward_linear_legacy(self, sim: AircraftSimulator) -> float:
-        """Paper eq (17): relative altitude advantage over enemies.
-
-        Δz = z_ego − mean(z_enemies_alive)
-
-          H_min =    0 m  → no reward below enemy
-          H_att = 2000 m  → begin optimal altitude-advantage band
-          H_adv = 5000 m  → end optimal band, diminishing returns start
-          H_max =10000 m  → ceiling, zero advantage (battlefield vertical limit)
-
-        Segments:
-          Δz ≤ H_min:           r = 0
-          H_min < Δz < H_att:   r = (Δz − H_min) / (H_att − H_min)      → 0 → +1
-          H_att ≤ Δz ≤ H_adv:   r = 1                                    (plateau)
-          H_adv < Δz ≤ H_max:   r = 1 − (Δz − H_adv) / (H_max − H_adv)  → +1 → 0
-          Δz > H_max:           r = 0
-        """
-        alt_ego = sim.get_geodetic()[2]
-        enemies = self.red_planes if sim.color == "Blue" else self.blue_planes
-        enemy_alts = [s.get_geodetic()[2] for s in enemies.values() if s.is_alive]
-        if not enemy_alts:
-            return 0.0
-
-        dz = alt_ego - float(np.mean(enemy_alts))
-
-        H_MIN = 0.0
-        H_ATT = 2000.0
-        H_ADV = 5000.0
-        H_MAX = 10000.0
-
-        # Paper eq.17 uses quadratic segments but does not provide explicit
-        # h1/h2 coefficients. Use normalized quadratics with the same endpoints:
-        # 0 at H_MIN/H_MAX and 1 at the plateau boundaries.
-        if dz <= H_MIN:
-            reward = 0.0
-        elif dz < H_ATT:
-            return (dz - H_MIN) / (H_ATT - H_MIN)     # 0 → +1
-        elif dz <= H_ADV:
-            return 1.0                                  # plateau
-        elif dz <= H_MAX:
-            return 1.0 - (dz - H_ADV) / (H_MAX - H_ADV)  # +1 → 0
-        else:
-            return 0.0
-
     def _altitude_reward(self, sim: AircraftSimulator) -> float:
         """Paper eq.17 altitude reward using normalized quadratic segments.
 
