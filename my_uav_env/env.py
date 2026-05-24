@@ -1041,18 +1041,16 @@ class UavCombatEnv(gymnasium.Env):
         return float(np.clip(reward, 0.0, 1.0))
 
     def _boundary_penalty(self, sim: AircraftSimulator) -> float:
-        """Horizontal battlefield boundary penalty (paper eq.18: fixed −10).
+        """Horizontal battlefield boundary penalty.
 
-        |x| > 40 000 m  or  |y| > 40 000 m  →  −10  (each axis).
+        Paper eq.18: return a fixed -10 if either |x| or |y| exceeds 4e4.
+        The penalty is not accumulated per axis.
         """
         pos = sim.get_position()
         x, y = pos[0], pos[1]
-        penalty = 0.0
-        if abs(x) > self.BATTLEFIELD_HALF_SIZE:
-            penalty -= 10.0
-        if abs(y) > self.BATTLEFIELD_HALF_SIZE:
-            penalty -= 10.0
-        return penalty
+        if abs(x) > self.BATTLEFIELD_HALF_SIZE or abs(y) > self.BATTLEFIELD_HALF_SIZE:
+            return -10.0
+        return 0.0
 
     # ------------------------------------------------------------------
     #  Observation normalisation

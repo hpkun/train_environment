@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, choices=("auto", "cpu", "cuda"),
                         default="auto")
+    parser.add_argument("--enable-blue-gcas", action="store_true", default=False)
     parser.add_argument("--output", type=str,
                         default="results/eval_vanilla_mappo.csv")
     return parser.parse_args()
@@ -133,11 +134,13 @@ def _death_counts(death_reasons: dict[str, str], ids: list[str]) -> Counter:
 
 
 def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
-                    max_steps: int, device: torch.device, episode_idx: int):
+                    max_steps: int, device: torch.device, episode_idx: int,
+                    enable_blue_gcas: bool):
     env = UavCombatEnv(
         max_num_blue=num_blue,
         max_num_red=num_red,
         max_steps=max_steps,
+        enable_gcas_for_blue=enable_blue_gcas,
         suppress_jsbsim_output=True,
     )
     try:
@@ -279,6 +282,7 @@ def main():
     _set_seed(args.seed)
     device = _select_device(args.device)
     actor, rnn_hidden_size, _checkpoint = _load_actor(args, device)
+    print(f"enable_blue_gcas: {args.enable_blue_gcas}", flush=True)
 
     output_dir = os.path.dirname(args.output)
     if output_dir:
@@ -309,6 +313,7 @@ def main():
                 max_steps=args.max_steps,
                 device=device,
                 episode_idx=ep,
+                enable_blue_gcas=args.enable_blue_gcas,
             )
             rows.append(row)
             writer.writerow(row)

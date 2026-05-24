@@ -36,6 +36,8 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe train_vanilla_mappo.py
 - `results/vanilla_mappo_results.csv`
 - `checkpoints/`
 
+训练默认 `enable_blue_gcas=False`。
+
 ## 4. 论文式 6v6 训练命令模板
 
 下面是 6v6 训练命令模板。注意：当前仍只是 vanilla MAPPO baseline，不是 BRMA-MAPPO。
@@ -46,7 +48,7 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe train_vanilla_mappo.py --num-red 6 
 
 ## 5. 批量评估
 
-`evaluate_vanilla_mappo.py` 不生成 ACMI，主要用于多局统计论文式指标。
+`evaluate_vanilla_mappo.py` 不生成 ACMI，主要用于多局统计论文式指标。默认 `enable_blue_gcas=False`，与训练脚本和 ACMI 单局评估保持一致。若需要显式开启蓝方 GCAS，可添加 `--enable-blue-gcas`。
 
 随机策略 smoke test：
 
@@ -64,7 +66,7 @@ vanilla MLP baseline 的 flattened observation 维度随规模变化，因此不
 
 ## 6. Tacview ACMI 单局可视化
 
-`eval_acmi.py` 用于单局 Tacview 可视化，不用于批量统计。
+`eval_acmi.py` 用于单局 Tacview 可视化，不用于批量统计。该脚本默认显式使用 `enable_gcas_for_blue=False`。
 
 ```powershell
 D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --checkpoint checkpoints/vanilla_actor_best.pt --num-red 2 --num-blue 2 --max-steps 1400 --output eval_battle.acmi
@@ -82,6 +84,7 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --random --num-red 1 -
 - 导弹 `0.25s` lock delay。
 - 导弹 `0.5s` launch interval。
 - 导弹命中概率使用 missile velocity 与 LOS dot product。
+- boundary reward 使用 eq.18 的固定单次越界惩罚。
 - roll reward 使用 eq.16 double-condition。
 - altitude reward 使用二次分段近似。
 - terminal reward 按 per-agent API 均分。
@@ -98,7 +101,7 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --random --num-red 1 -
 - critic 仍使用 red agents flattened observations concat，不是论文 native global state。
 - RCS 仍是 front/side approximation，不是论文 RCS table interpolation。
 - PID 控制器含工程稳定项。
-- 导弹数量默认 999，论文未明确无限弹药。
+- 论文没有明确给出每架 UAV 的固定载弹量；当前环境保留默认 `num_missiles_per_plane=999`，等价于不让载弹量成为主要限制因素。由于论文没有提供具体载弹量，该项暂不作为优先对齐目标。
 
 ## 9. Git ignore 注意事项
 
