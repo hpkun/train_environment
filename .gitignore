@@ -1,5 +1,9 @@
 # ignore files
 test.py
+smoke_train_log.csv
+smoke_checkpoints/
+smoke_eval.acmi
+results/smoke_*.csv
 results
 runs
 *.npy
@@ -13,6 +17,7 @@ runs
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
+*.pyc
 *.py[cod]
 *$py.class
 
