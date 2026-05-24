@@ -9,8 +9,10 @@ train_vanilla_mappo.py —— 纯 MLP MAPPO 基线训练脚本
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import os
+import random
 
 # ---- 多进程性能：禁止底层库的线程池竞争 ----
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -105,6 +107,13 @@ class Config:
 
     # ---- 训练总量 ----
     total_env_steps: int = 10_000_000
+
+    # ---- Runtime / persistence ----
+    log_file: str = "vanilla_training_log.csv"
+    results_file: str = "results/vanilla_mappo_results.csv"
+    checkpoint_dir: str = "checkpoints"
+    seed = None
+    device: str = "auto"
 
 
 # ==============================================================================
@@ -1037,18 +1046,98 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
     }
 
 
-def main():
+def parse_args():
+    defaults = Config()
+    parser = argparse.ArgumentParser(
+        description="Train vanilla MAPPO baseline for my_uav_env.")
+    parser.add_argument("--num-red", type=int, default=defaults.num_red)
+    parser.add_argument("--num-blue", type=int, default=defaults.num_blue)
+    parser.add_argument("--num-envs", type=int, default=defaults.num_envs)
+    parser.add_argument("--total-env-steps", type=int,
+                        default=defaults.total_env_steps)
+    parser.add_argument("--max-episode-length", type=int,
+                        default=defaults.max_episode_length)
+    parser.add_argument("--replay-buffer-size", type=int,
+                        default=defaults.replay_buffer_size)
+    parser.add_argument("--n-minibatches", type=int,
+                        default=defaults.n_minibatches)
+    parser.add_argument("--actor-lr", type=float, default=defaults.actor_lr)
+    parser.add_argument("--critic-lr", type=float, default=defaults.critic_lr)
+    parser.add_argument("--entropy-coef", type=float,
+                        default=defaults.entropy_coef)
+    parser.add_argument("--enable-blue-gcas", action="store_true",
+                        default=defaults.enable_blue_gcas)
+    parser.add_argument("--resume-from-best", action="store_true",
+                        default=defaults.resume_from_best)
+    parser.add_argument("--log-file", type=str, default=defaults.log_file)
+    parser.add_argument("--results-file", type=str,
+                        default=defaults.results_file)
+    parser.add_argument("--checkpoint-dir", type=str,
+                        default=defaults.checkpoint_dir)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--device", type=str, choices=("auto", "cpu", "cuda"),
+                        default=defaults.device)
+    return parser.parse_args()
+
+
+def make_config_from_args(args) -> Config:
     config = Config()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    config.num_red = args.num_red
+    config.num_blue = args.num_blue
+    config.num_envs = args.num_envs
+    config.total_env_steps = args.total_env_steps
+    config.max_episode_length = args.max_episode_length
+    config.replay_buffer_size = args.replay_buffer_size
+    config.n_minibatches = args.n_minibatches
+    config.actor_lr = args.actor_lr
+    config.critic_lr = args.critic_lr
+    config.entropy_coef = args.entropy_coef
+    config.enable_blue_gcas = args.enable_blue_gcas
+    config.resume_from_best = args.resume_from_best
+    config.log_file = args.log_file
+    config.results_file = args.results_file
+    config.checkpoint_dir = args.checkpoint_dir
+    config.seed = args.seed
+    config.device = args.device
+    return config
+
+
+def _set_main_process_seed(seed):
+    if seed is None:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _select_device(device_arg: str) -> torch.device:
+    if device_arg == "cpu":
+        return torch.device("cpu")
+    if device_arg == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        print("[WARN] --device cuda requested but CUDA is unavailable; "
+              "falling back to CPU.", flush=True)
+        return torch.device("cpu")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def main():
+    args = parse_args()
+    config = make_config_from_args(args)
+    _set_main_process_seed(config.seed)
+    device = _select_device(config.device)
 
     # 计算展平观测维度 (红方视角)
     obs_dim = _compute_obs_dim(config.num_red, config.num_blue, is_red=True)
 
     # ---- 持久化：创建 checkpoint 目录 ----
-    os.makedirs("checkpoints", exist_ok=True)
+    os.makedirs(config.checkpoint_dir, exist_ok=True)
 
     # ---- 持久化：CSV 日志 ----
-    csv_file = open("vanilla_training_log.csv", "w", newline="")
+    csv_file = open(config.log_file, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["Iteration", "Step", "ActorLoss", "CriticLoss",
                          "Entropy", "RedMeanReward", "RedWinRate",
@@ -1064,14 +1153,25 @@ def main():
     csv_file.flush()
 
     print(f"设备: {device}")
+    print("Final config:")
+    print(f"  num_red / num_blue: {config.num_red} / {config.num_blue}")
+    print(f"  num_envs: {config.num_envs}")
+    print(f"  total_env_steps: {config.total_env_steps}")
+    print(f"  max_episode_length: {config.max_episode_length}")
+    print(f"  replay_buffer_size: {config.replay_buffer_size}")
+    print(f"  log_file: {config.log_file}")
+    print(f"  results_file: {config.results_file}")
+    print(f"  checkpoint_dir: {config.checkpoint_dir}")
+    print(f"  seed: {config.seed}")
+    print(f"  device: {device}")
     print(f"架构: Vanilla MLP + GRU (无注意力, 无掩码)")
     print(f"场景: {config.num_red}v{config.num_blue} (红方 RL, 蓝方规则)")
     print(f"展平 obs 维度: {obs_dim}")
     print(f"buffer: {config.replay_buffer_size} 步 ({config.num_envs} env × "
           f"{config.replay_buffer_size // config.num_envs} steps)")
     print(f"MLP hidden: {config.mlp_hidden},  RNN hidden: {config.rnn_hidden_size}")
-    print(f"CSV 日志: vanilla_training_log.csv")
-    print(f"模型存档: checkpoints/ (每 10 iter, 保留最新 5 个)")
+    print(f"CSV 日志: {config.log_file}")
+    print(f"模型存档: {config.checkpoint_dir}/ (每 10 iter, 保留最新 5 个)")
 
     # ---- 评估准入准则 ----
     MIN_EPISODES_TO_EVAL = 50  # 最少完成 50 局后才允许覆盖 best 模型
@@ -1103,17 +1203,17 @@ def main():
     critic_opt = torch.optim.Adam(critic.parameters(), lr=config.critic_lr)
 
     # ---- 3. 从 best checkpoint 恢复训练 (消融 r_ceil 后重新起航) ----
-    actor_best_path = "checkpoints/vanilla_actor_best.pt"
-    critic_best_path = "checkpoints/centralized_critic_best.pt"
+    actor_best_path = os.path.join(config.checkpoint_dir, "vanilla_actor_best.pt")
+    critic_best_path = os.path.join(config.checkpoint_dir, "centralized_critic_best.pt")
     if (config.resume_from_best and os.path.exists(actor_best_path)
             and os.path.exists(critic_best_path)):
         actor.load_state_dict(torch.load(actor_best_path, map_location=device,
                                          weights_only=True))
         critic.load_state_dict(torch.load(critic_best_path, map_location=device,
                                           weights_only=True))
-        print(f"✓ 已加载 best checkpoint 权重 (actor + critic)")
+        print(f"[OK] 已加载 best checkpoint 权重 (actor + critic)")
     else:
-        print(f"⚠ best checkpoint 不存在，使用随机初始化权重")
+        print(f"[WARN] best checkpoint 不存在，使用随机初始化权重")
 
     # ---- 4. 初始 RNN 状态 ----
     rnn_hidden_actor = np.zeros(
@@ -1462,13 +1562,15 @@ def main():
         milestone_cur = total_steps // 1_000_000
         milestone_prev = (total_steps - config.num_envs * num_steps) // 1_000_000
         if milestone_cur > milestone_prev or total_steps >= config.total_env_steps:
-            os.makedirs("results", exist_ok=True)
-            with open("results/vanilla_mappo_results.csv", "w", newline="") as f:
+            results_dir = os.path.dirname(config.results_file)
+            if results_dir:
+                os.makedirs(results_dir, exist_ok=True)
+            with open(config.results_file, "w", newline="") as f:
                 w = csv.writer(f)
                 w.writerow(results_log[0].keys())
                 for row in results_log:
                     w.writerow(row.values())
-            print(f"  [Results saved] results/vanilla_mappo_results.csv "
+            print(f"  [Results saved] {config.results_file} "
                   f"({len(results_log)} rows)", flush=True)
 
         # ---- 终端打印 ----
@@ -1500,13 +1602,17 @@ def main():
 
         # ---- 持久化：高频轮转存档 (每 10 iter, 保留最新 5 个) ----
         if iteration % 10 == 0:
-            actor_path = f"checkpoints/vanilla_actor_latest_{iteration:06d}.pt"
-            critic_path = f"checkpoints/centralized_critic_latest_{iteration:06d}.pt"
+            actor_path = os.path.join(
+                config.checkpoint_dir, f"vanilla_actor_latest_{iteration:06d}.pt")
+            critic_path = os.path.join(
+                config.checkpoint_dir, f"centralized_critic_latest_{iteration:06d}.pt")
             torch.save(actor.state_dict(), actor_path)
             torch.save(critic.state_dict(), critic_path)
             # 轮转清理：删除超出保留数量的旧 checkpoint
-            _cleanup_rotating_checkpoints("checkpoints", "vanilla_actor_latest", keep=5)
-            _cleanup_rotating_checkpoints("checkpoints", "centralized_critic_latest", keep=5)
+            _cleanup_rotating_checkpoints(config.checkpoint_dir,
+                                          "vanilla_actor_latest", keep=5)
+            _cleanup_rotating_checkpoints(config.checkpoint_dir,
+                                          "centralized_critic_latest", keep=5)
 
         # ---- 持久化：最佳模型拦截 (需满足评估准入准则) ----
         # 以近期奖励为主指标（反映当前模型真实表现），累计胜率为 tiebreaker
@@ -1517,20 +1623,24 @@ def main():
                 best_win_rate = red_win_rate
                 best_reward = avg_r_red
                 torch.save(actor.state_dict(),
-                           "checkpoints/vanilla_actor_best.pt")
+                           os.path.join(config.checkpoint_dir,
+                                        "vanilla_actor_best.pt"))
                 torch.save(critic.state_dict(),
-                           "checkpoints/centralized_critic_best.pt")
+                           os.path.join(config.checkpoint_dir,
+                                        "centralized_critic_best.pt"))
                 print(f"  *** New Best Model Saved! "
                       f"(Reward={best_reward:+.2f}, WinRate={best_win_rate:.4f}) ***")
 
         iteration += 1
 
     # ---- 持久化：最终模型存档 ----
-    torch.save(actor.state_dict(), "checkpoints/vanilla_actor_final.pt")
-    torch.save(critic.state_dict(), "checkpoints/centralized_critic_final.pt")
+    torch.save(actor.state_dict(),
+               os.path.join(config.checkpoint_dir, "vanilla_actor_final.pt"))
+    torch.save(critic.state_dict(),
+               os.path.join(config.checkpoint_dir, "centralized_critic_final.pt"))
     print("=" * 70)
-    print(f"最终模型已保存至 checkpoints/")
-    print(f"Results 已保存至 results/vanilla_mappo_results.csv ({len(results_log)} rows)")
+    print(f"最终模型已保存至 {config.checkpoint_dir}/")
+    print(f"Results 已保存至 {config.results_file} ({len(results_log)} rows)")
     print(f"总 Episodes: {total_episodes}  "
           f"红方胜: {red_wins}  蓝方胜: {blue_wins}  平局: {draws}  "
           f"红方胜率: {red_win_rate:.4f}")
