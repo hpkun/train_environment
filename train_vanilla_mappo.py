@@ -1291,8 +1291,10 @@ def main():
     death_stats = {"red": Counter(), "blue": Counter()}
     red_missiles_total = 0.0
     blue_missiles_total = 0.0
-    best_win_rate = 0.0
-    best_reward = -float("inf")
+    best_reward_value = -float("inf")
+    best_reward_win_rate = 0.0
+    best_winrate_value = -float("inf")
+    best_winrate_reward = -float("inf")
 
     # Episodic reward trackers — only fully-completed episodes contribute (Red only)
     recent_ep_rewards_red = deque(maxlen=50)
@@ -1672,21 +1674,51 @@ def main():
                                           "centralized_critic_latest", keep=5)
 
         # ---- 持久化：最佳模型拦截 (需满足评估准入准则) ----
-        # 以近期奖励为主指标（反映当前模型真实表现），累计胜率为 tiebreaker
+        # best_reward: selects by recent average reward
+        # best_winrate: selects by recent iteration win rate, reward as tie-breaker
+        # legacy best.pt aliases best_winrate for evaluator compatibility
         if total_episodes >= MIN_EPISODES_TO_EVAL:
-            is_better = (red_win_rate > best_win_rate) or (
-                abs(red_win_rate - best_win_rate) < 1e-6 and avg_r_red > best_reward)
-            if is_better:
-                best_win_rate = red_win_rate
-                best_reward = avg_r_red
+            # ---- best_reward checkpoint ----
+            if avg_r_red > best_reward_value:
+                best_reward_value = avg_r_red
+                best_reward_win_rate = red_win_rate
+                torch.save(actor.state_dict(),
+                           os.path.join(config.checkpoint_dir,
+                                        "vanilla_actor_best_reward.pt"))
+                torch.save(critic.state_dict(),
+                           os.path.join(config.checkpoint_dir,
+                                        "centralized_critic_best_reward.pt"))
+                print(f"  *** New Best Reward Model Saved! "
+                      f"(Reward={best_reward_value:+.2f}, "
+                      f"RecentWinRate={iter_win_rate:.4f}, "
+                      f"CumulWinRate={red_win_rate:.4f}) ***")
+
+            # ---- best_winrate checkpoint ----
+            winrate_is_better = (
+                iter_win_rate > best_winrate_value
+                or (abs(iter_win_rate - best_winrate_value) < 1e-6
+                    and avg_r_red > best_winrate_reward)
+            )
+            if winrate_is_better:
+                best_winrate_value = iter_win_rate
+                best_winrate_reward = avg_r_red
+                torch.save(actor.state_dict(),
+                           os.path.join(config.checkpoint_dir,
+                                        "vanilla_actor_best_winrate.pt"))
+                torch.save(critic.state_dict(),
+                           os.path.join(config.checkpoint_dir,
+                                        "centralized_critic_best_winrate.pt"))
+                # legacy compatibility alias
                 torch.save(actor.state_dict(),
                            os.path.join(config.checkpoint_dir,
                                         "vanilla_actor_best.pt"))
                 torch.save(critic.state_dict(),
                            os.path.join(config.checkpoint_dir,
                                         "centralized_critic_best.pt"))
-                print(f"  *** New Best Model Saved! "
-                      f"(Reward={best_reward:+.2f}, WinRate={best_win_rate:.4f}) ***")
+                print(f"  *** New Best WinRate Model Saved! "
+                      f"(RecentWinRate={best_winrate_value:.4f}, "
+                      f"Reward={best_winrate_reward:+.2f}, "
+                      f"CumulWinRate={red_win_rate:.4f}) ***")
 
         iteration += 1
 
