@@ -9,6 +9,8 @@ import logging
 import numpy as np
 import gymnasium
 
+from reward_utils import ta_angle_advantage_fixed, td_distance_advantage
+
 from .simulator import AircraftSimulator, MissileSimulator
 from .pid_controller import PIDController
 from .utils import get2d_AO_TA_R
@@ -971,33 +973,13 @@ class UavCombatEnv(gymnasium.Env):
             AO, TA, R = get2d_AO_TA_R(ego_feat, enm_feat)
 
             # Ta_i^j — ego's angle advantage (AO in degrees, paper eq 20)
-            q_deg = np.rad2deg(AO)
-            if q_deg <= 4.0:
-                Ta_ij = 1.0
-            elif q_deg <= 15.0:
-                Ta_ij = 1.0 - 2.0 * (q_deg - 4.0) / 15.0
-            elif q_deg <= 35.0:
-                Ta_ij = 1.0 - 3.5 * (q_deg - 15.0) / 180.0
-            else:
-                Ta_ij = 0.0
+            Ta_ij = ta_angle_advantage_fixed(np.rad2deg(AO))
 
             # Td_i^j — distance advantage (km, paper eq 21)
-            D_km = R / 1000.0
-            if D_km <= 15.0:
-                Td_ij = 1.0
-            else:
-                Td_ij = np.exp(1.0 - D_km / 15.0)
+            Td_ij = td_distance_advantage(R)
 
             # Ta_j^i — enemy's angle advantage (TA in degrees, paper eq 20)
-            ta_deg = np.rad2deg(TA)
-            if ta_deg <= 4.0:
-                Ta_ji = 1.0
-            elif ta_deg <= 15.0:
-                Ta_ji = 1.0 - 2.0 * (ta_deg - 4.0) / 15.0
-            elif ta_deg <= 35.0:
-                Ta_ji = 1.0 - 3.5 * (ta_deg - 15.0) / 180.0
-            else:
-                Ta_ji = 0.0
+            Ta_ji = ta_angle_advantage_fixed(np.rad2deg(TA))
 
             Td_ji = Td_ij  # same distance
 

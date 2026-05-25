@@ -257,6 +257,27 @@ else:
 
 在完成上述核对之前，不应替换 `_situation_reward()` 的实际调用逻辑。
 
+#### Pass19 fixed Ta update
+
+本轮已将实际 `UavCombatEnv._situation_reward()` 使用的 Ta 函数切换为 `reward_utils.ta_angle_advantage_fixed()`：
+
+- `q <= 4°`: `1.0`
+- `4° < q <= 15°`: 从 `1.0` 线性降到 `0.5`
+- `15° < q <= 35°`: 从 `0.5` 线性降到 `0.0`
+- `q > 35°`: `0.0`
+- 最终 clamp 到 `[0, 1]`
+
+旧的 `ta_angle_advantage_current()` 仍保留在 `reward_utils.py`，用于追踪历史行为和对比旧训练日志。`td_distance_advantage()` 目前仍直接复用旧的 Td 距离公式。
+
+该修正没有采用论文中可能存在的 `10` 倍 Ta 量级，而是保持当前 baseline 的归一化 reward 尺度，只修复负值和分段不连续问题。若后续确认论文原始实验使用 `10` 倍 Ta，应作为单独 reward-scale ablation，而不是混入当前 vanilla / attention baseline。
+
+本轮仍未修改：
+
+- AO/TA/R 的几何来源。
+- `r_adv = 1.0 * Ta_i^j * Td_i^j - 0.8 * Ta_j^i * Td_j^i` 的组合公式。
+- reward 权重 `0.15 * r_adv`。
+- 训练脚本、观测、动作、导弹、雷达逻辑。
+
 ### 5.7 Terminal reward eq.23
 
 当前 `_compute_rewards()`：
