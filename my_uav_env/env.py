@@ -52,7 +52,7 @@ def _make_entity_vec(ego_pos, ego_vel, tgt_pos, tgt_vel, tgt_rpy, alive: bool):
                          tgt_vel[0], tgt_vel[1], -tgt_vel[2]], dtype=np.float64)
     AO_unsigned, TA, R, side_flag = get2d_AO_TA_R(ego_feat, enm_feat,
                                                    return_side=True)
-    AO_signed = AO_unsigned * float(side_flag)  # + right, − left, 0 dead-ahead
+    AO_signed = _signed_ao_from_unsigned_and_side(AO_unsigned, side_flag)
 
     V_tgt = float(np.linalg.norm(tgt_vel))
 
@@ -61,6 +61,28 @@ def _make_entity_vec(ego_pos, ego_vel, tgt_pos, tgt_vel, tgt_rpy, alive: bool):
         np.sin(tgt_rpy[0]), np.cos(tgt_rpy[0]),
         np.sin(tgt_rpy[1]), np.cos(tgt_rpy[1]),
     ], dtype=np.float32)
+
+
+def _signed_ao_from_unsigned_and_side(ao_unsigned: float, side_flag: float) -> float:
+    """Return signed AO while preserving front/back collinear cases.
+
+    ``get2d_AO_TA_R(return_side=True)`` returns ``side_flag = sign(cross(v_ego_xy, los_xy))``.
+    When the velocity and LOS are exactly collinear (target directly ahead or behind),
+    the cross product is zero and ``side_flag == 0``.  Multiplying by zero collapses
+    the unsigned AO to 0 for *both* cases, making behind indistinguishable from ahead
+    in the 11-dim entity observation vector.
+
+    This helper preserves the full unsigned AO when side_flag == 0:
+
+    - side_flag > 0: target on right → +AO_unsigned
+    - side_flag < 0: target on left  → −AO_unsigned
+    - side_flag == 0: collinear → +AO_unsigned (≈ 0 ahead, ≈ π behind)
+    """
+    if side_flag > 0:
+        return float(ao_unsigned)
+    if side_flag < 0:
+        return float(-ao_unsigned)
+    return float(ao_unsigned)
 
 
 class UavCombatEnv(gymnasium.Env):
