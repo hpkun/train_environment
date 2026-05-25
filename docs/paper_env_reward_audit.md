@@ -1,5 +1,7 @@
 # Paper environment/reward audit
 
+Detailed reward formula correction plan is in [docs/reward_formula_alignment_plan.md](reward_formula_alignment_plan.md).
+
 本文档用于 Paper alignment pass 17：对照论文 §2 的环境、观测、动作与奖励定义，审计当前项目实现状态。本文只记录差异与建议优先级，不修改环境、训练逻辑或 BRMA 相关代码。
 
 ## 结论摘要
