@@ -178,3 +178,14 @@ python -m compileall reward_utils.py entity_obs_utils.py paper_obs_utils.py pape
 - No behaviour changed; no imports in training scripts updated.
 - All four alignment modules now live in `my_uav_env/alignment/` alongside
   their root-level compatibility shims.
+
+### Pass E — update internal imports (completed)
+
+- All project-internal imports updated to `my_uav_env.alignment.*`:
+  - `reward_utils` → `my_uav_env.alignment.reward_utils` (8 files)
+  - `entity_obs_utils` → `my_uav_env.alignment.entity_obs` (2 files)
+  - `paper_obs_utils` → `my_uav_env.alignment.obs_adapter` (2 files)
+  - `paper_state_extractor` → `my_uav_env.alignment.state_extractor` (2 files)
+- Root compatibility shims retained (not deleted).
+- Next pass (F) may delete the root compatibility files after confirming
+  no external imports remain.

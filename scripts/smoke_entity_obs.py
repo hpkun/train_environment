@@ -10,7 +10,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from entity_obs_utils import build_entity_observation, infer_entity_layout
+from my_uav_env.alignment.entity_obs import build_entity_observation, infer_entity_layout
 from my_uav_env import UavCombatEnv
 
 

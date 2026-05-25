@@ -15,7 +15,7 @@ import torch
 
 from attention_models import AttentionActor
 from my_uav_env import UavCombatEnv
-from reward_utils import REWARD_VERSION
+from my_uav_env.alignment.reward_utils import REWARD_VERSION
 from rule_based_agent import blue_coordinated_actions
 from train_attention_mappo import _build_attention_entities
 from train_vanilla_mappo import (

@@ -10,7 +10,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from paper_state_extractor import (
+from my_uav_env.alignment.state_extractor import (
     _get_alpha_beta_with_source,
     compute_q_los_placeholder,
     describe_paper_entities,

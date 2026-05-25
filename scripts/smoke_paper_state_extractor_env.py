@@ -12,7 +12,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from my_uav_env import UavCombatEnv
-from paper_state_extractor import (
+from my_uav_env.alignment.state_extractor import (
     build_strict_paper_entity_observation,
     describe_paper_entities,
 )

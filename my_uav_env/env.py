@@ -9,7 +9,7 @@ import logging
 import numpy as np
 import gymnasium
 
-from reward_utils import ta_angle_advantage_fixed, td_distance_advantage
+from my_uav_env.alignment.reward_utils import ta_angle_advantage_fixed, td_distance_advantage
 
 from .simulator import AircraftSimulator, MissileSimulator
 from .pid_controller import PIDController

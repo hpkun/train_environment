@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from reward_utils import ta_angle_advantage_fixed, td_distance_advantage
+from my_uav_env.alignment.reward_utils import ta_angle_advantage_fixed, td_distance_advantage
 
 
 def _assert_close(actual: float, expected: float, tol: float = 1e-9) -> None:

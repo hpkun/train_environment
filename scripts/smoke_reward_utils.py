@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from reward_utils import (
+from my_uav_env.alignment.reward_utils import (
     sample_ta_table,
     ta_angle_advantage_candidate_continuous,
     ta_angle_advantage_current,

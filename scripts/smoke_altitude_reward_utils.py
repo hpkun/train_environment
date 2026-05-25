@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from reward_utils import (
+from my_uav_env.alignment.reward_utils import (
     altitude_reward_current,
     altitude_reward_pairwise_mean_candidate,
     altitude_reward_paper_candidate,

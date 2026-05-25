@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from reward_utils import REWARD_VERSION
+from my_uav_env.alignment.reward_utils import REWARD_VERSION
 
 torch.set_num_threads(1)
 try:

@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from my_uav_env import UavCombatEnv
-from reward_utils import REWARD_VERSION
+from my_uav_env.alignment.reward_utils import REWARD_VERSION
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     VanillaActor,

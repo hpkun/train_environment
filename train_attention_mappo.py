@@ -19,9 +19,9 @@ import torch
 import torch.nn.functional as F
 
 from attention_models import AttentionActor
-from entity_obs_utils import build_entity_observation
-from paper_obs_utils import build_paper_entity_observation_from_env_obs
-from reward_utils import REWARD_VERSION
+from my_uav_env.alignment.entity_obs import build_entity_observation
+from my_uav_env.alignment.obs_adapter import build_paper_entity_observation_from_env_obs
+from my_uav_env.alignment.reward_utils import REWARD_VERSION
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     CentralizedCritic,

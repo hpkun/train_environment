@@ -10,7 +10,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from paper_obs_utils import (
+from my_uav_env.alignment.obs_adapter import (
     build_paper_entity_observation_from_env_obs,
     compare_current_and_paper_adapter_shapes,
     infer_paper_entity_layout,
