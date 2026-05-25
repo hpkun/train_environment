@@ -147,3 +147,12 @@ python -m compileall reward_utils.py entity_obs_utils.py paper_obs_utils.py pape
 - `my_uav_env/alignment/__init__.py` created as the sub-package entry point.
 - Next pass should move `entity_obs_utils.py` → `my_uav_env/alignment/entity_obs.py`
   following the same pattern.
+
+### Pass B — entity_obs_utils (completed)
+
+- `entity_obs_utils.py` implementation moved to `my_uav_env/alignment/entity_obs.py`.
+- Root `entity_obs_utils.py` is now a thin compatibility re-export:
+  `from my_uav_env.alignment.entity_obs import *`.
+- No behaviour changed; no imports in training scripts updated.
+- Next pass should move `paper_obs_utils.py` → `my_uav_env/alignment/obs_adapter.py`
+  following the same pattern.
