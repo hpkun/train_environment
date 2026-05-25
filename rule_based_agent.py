@@ -239,6 +239,7 @@ def blue_coordinated_actions(
     num_red: int,
     engaged_targets: set[str] | None = None,
     own_positions: dict[str, np.ndarray] | None = None,
+    own_headings: dict[str, float] | None = None,
 ) -> dict[str, np.ndarray]:
     """Greedy target deconfliction: distribute blues across different reds.
 
@@ -283,7 +284,8 @@ def blue_coordinated_actions(
             actions[bid] = _blue_pursuit_action_impl(
                 blue_obs[bid], num_blue, num_red, int(bid.split("_")[1]),
                 forced_target_idx=None,
-                own_position=own_positions.get(bid) if own_positions else None)
+                own_position=own_positions.get(bid) if own_positions else None,
+                own_heading=own_headings.get(bid) if own_headings else None)
         return actions
 
     # Score every blue × red pair
@@ -344,7 +346,8 @@ def blue_coordinated_actions(
         actions[bid] = _blue_pursuit_action_impl(
             blue_obs[bid], num_blue, num_red, b_idx,
             forced_target_idx=assignments[b_idx],
-            own_position=own_positions.get(bid) if own_positions else None)
+            own_position=own_positions.get(bid) if own_positions else None,
+            own_heading=own_headings.get(bid) if own_headings else None)
     return actions
 
 
@@ -354,11 +357,13 @@ def blue_coordinated_actions(
 
 def blue_pursuit_action(obs: dict, num_blue: int, num_red: int, blue_id: int,
                         missile_warning: bool = False,
-                        own_position: np.ndarray | None = None) -> np.ndarray:
+                        own_position: np.ndarray | None = None,
+                        own_heading: float | None = None) -> np.ndarray:
     """Per-aircraft entry point (legacy — prefer ``blue_coordinated_actions``)."""
     return _blue_pursuit_action_impl(obs, num_blue, num_red, blue_id,
                                      forced_target_idx=None,
-                                     own_position=own_position)
+                                     own_position=own_position,
+                                     own_heading=own_heading)
 
 
 # ==============================================================================
@@ -372,6 +377,7 @@ def _blue_pursuit_action_impl(
     blue_id: int,
     forced_target_idx: int | None,
     own_position: np.ndarray | None = None,
+    own_heading: float | None = None,
 ) -> np.ndarray:
     """四层状态机自动驾驶仪（优先级从高到低）。
 
@@ -396,7 +402,10 @@ def _blue_pursuit_action_impl(
     # Current heading from NED velocity (needed for delta→absolute conversion)
     our_vn = float(obs["velocity"][0])
     our_ve = float(obs["velocity"][1])
-    our_heading = np.arctan2(our_ve, our_vn)  # rad, [−π, π]
+    track_heading = np.arctan2(our_ve, our_vn)
+    # Prefer aircraft yaw from sim.get_rpy()[2] for absolute heading actions.
+    # Velocity track heading is only the fallback for legacy callers.
+    our_heading = float(own_heading) if own_heading is not None else track_heading
 
     # Rescale helper: internal convention → env.py paper §2.4 targets
     #   pitch_new  = pitch_int × 1.0        → target_pitch  ∈ [−90°, +90°]
@@ -437,6 +446,16 @@ def _blue_pursuit_action_impl(
         heading_cmd = -np.sign(ego_roll) * 1.0             # wings level
         return _rescale(0.45, float(heading_cmd), 1.0)     # +40.5°, full throttle
 
+    if _should_override_for_boundary_safety(own_position, our_heading):
+        alt_error = SAFE_COMBAT_ALT - alt_m
+        boundary_pitch = np.clip(alt_error / 2000.0, -0.05, 0.15) + _TRIM_BASELINE
+        heading_cmd = _boundary_patrol_heading_command(own_position, our_heading)
+        vel_cmd = max(
+            _blue_cruise_speed_command(own_position, current_heading=our_heading),
+            0.35,
+        )
+        return _rescale(float(boundary_pitch), float(heading_cmd), float(vel_cmd))
+
     # =========================================================================
     #  ANTI-STALL — early energy management before the stall-protect layer
     # =========================================================================
@@ -450,14 +469,6 @@ def _blue_pursuit_action_impl(
     # =========================================================================
     #  COMBAT — Lead Pursuit with graduated dive restriction
     # =========================================================================
-    if _should_override_for_boundary_safety(own_position, our_heading):
-        alt_error = SAFE_COMBAT_ALT - alt_m
-        boundary_pitch = np.clip(alt_error / 2000.0, -0.05, 0.15) + _TRIM_BASELINE
-        heading_cmd = _boundary_patrol_heading_command(own_position, our_heading)
-        vel_cmd = _blue_cruise_speed_command(
-            own_position, current_heading=our_heading)
-        return _rescale(float(boundary_pitch), float(heading_cmd), float(vel_cmd))
-
     enemy_states = obs["enemy_states"]
     death_mask   = obs["death_mask"]
 
@@ -499,12 +510,11 @@ def _blue_pursuit_action_impl(
         _prev_heading_cmd.pop(blue_id, None)
         alt_error = SAFE_COMBAT_ALT - alt_m
         cruise_pitch = np.clip(alt_error / 2000.0, -0.10, 0.12) + _TRIM_BASELINE
-        current_heading = _current_heading_from_obs(obs)
         heading_cmd = _blue_cruise_heading_command(
             obs, blue_id, own_position=own_position,
-            current_heading=current_heading)
+            current_heading=our_heading)
         vel_cmd = _blue_cruise_speed_command(
-            own_position, current_heading=current_heading)
+            own_position, current_heading=our_heading)
         return _rescale(float(cruise_pitch), float(heading_cmd), float(vel_cmd))
 
     tgt = enemy_states[target_idx]
@@ -565,7 +575,6 @@ def _blue_pursuit_action_impl(
     # =========================================================================
     our_vn = float(obs["velocity"][0])
     our_ve = float(obs["velocity"][1])
-    our_heading = np.arctan2(our_ve, our_vn)        # radians, [−π, π]
     our_speed = max(np.hypot(our_vn, our_ve), 1.0)
 
     # ---- Body-frame → NED rotation for position deltas ----

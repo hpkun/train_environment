@@ -358,6 +358,11 @@ If Blue is very close to the boundary and still flying outward, the same
 ownship-only safety layer can override combat pursuit heading/speed so pursuit
 does not drag Blue out of the battlefield. This still does not expose Red global
 position or enforce a hard boundary.
+Tacview nose direction corresponds to the simulator yaw (`sim.get_rpy()[2]`).
+Training and evaluation now pass that yaw into the Blue rule policy through
+`get_blue_own_kinematics()`, so boundary safety uses yaw heading when available
+instead of velocity-track heading. Velocity heading remains only a compatibility
+fallback.
 
 ## 20. ACMI battlefield boundary debug
 

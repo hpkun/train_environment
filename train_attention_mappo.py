@@ -322,6 +322,30 @@ def _fetch_blue_own_positions(vec_env, timeout: float = 30.0) -> list[dict]:
     return [item if isinstance(item, dict) else {} for item in raw]
 
 
+def _fetch_blue_own_kinematics(
+    vec_env,
+    timeout: float = 30.0,
+) -> tuple[list[dict], list[dict]]:
+    """Fetch blue ownship positions/headings from worker envs."""
+
+    raw = vec_env.env_method("get_blue_own_kinematics", timeout=timeout)
+    positions_list: list[dict] = []
+    headings_list: list[dict] = []
+    for item in raw:
+        pos: dict = {}
+        hdg: dict = {}
+        if isinstance(item, dict):
+            for bid, data in item.items():
+                if isinstance(data, dict):
+                    if "position" in data:
+                        pos[bid] = data["position"]
+                    if "heading" in data:
+                        hdg[bid] = data["heading"]
+        positions_list.append(pos)
+        headings_list.append(hdg)
+    return positions_list, headings_list
+
+
 def ppo_update_attention(actor, critic, actor_opt, critic_opt,
                          buffer: AttentionRolloutBuffer, config: Config,
                          device: torch.device, total_steps: int = 0):
@@ -656,7 +680,8 @@ def main():
         for step in range(num_steps):
             actions_list = []
             engaged_sets = vec_env.env_method("refresh_engaged_targets")
-            blue_own_positions_list = _fetch_blue_own_positions(vec_env)
+            blue_own_positions_list, blue_own_headings_list = (
+                _fetch_blue_own_kinematics(vec_env))
 
             for env_idx in range(config.num_envs):
                 env_obs = raw_obs_list[env_idx]
@@ -682,7 +707,8 @@ def main():
                 env_actions.update(blue_coordinated_actions(
                     blue_obs_dict, config.num_blue, config.num_red,
                     engaged_targets=engaged_sets[env_idx],
-                    own_positions=blue_own_positions_list[env_idx]))
+                    own_positions=blue_own_positions_list[env_idx],
+                    own_headings=blue_own_headings_list[env_idx]))
 
                 red_obs_flat_all = []
                 entity_batch = []

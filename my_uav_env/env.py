@@ -411,6 +411,23 @@ class UavCombatEnv(gymnasium.Env):
                 result[bid] = np.asarray(sim.get_position(), dtype=np.float32)
         return result
 
+    def get_blue_own_kinematics(self) -> dict[str, dict]:
+        """Return blue ownship position and heading for rule-based policy.
+
+        This is not part of learning observation and does not expose enemy
+        state. It is only used by the hand-coded blue policy for boundary
+        patrol/safety.
+        """
+
+        result: dict[str, dict] = {}
+        for bid, sim in self.blue_planes.items():
+            if sim is not None and sim.is_alive:
+                result[bid] = {
+                    "position": np.asarray(sim.get_position(), dtype=np.float32),
+                    "heading": float(sim.get_rpy()[2]),
+                }
+        return result
+
     def step(self, actions: dict):
         self.current_step += 1
         self._crashed_this_step.clear()

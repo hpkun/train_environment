@@ -134,6 +134,11 @@ Boundary safety now also applies before combat pursuit, but only when Blue is
 very near the boundary and heading outward. This override uses only Blue
 ownship position/heading, does not inspect Red position, and remains a soft
 control layer rather than a hard boundary.
+When available, Blue boundary logic now uses ownship yaw heading from
+`sim.get_rpy()[2]` via `get_blue_own_kinematics()`. Velocity-track heading is
+only the fallback for legacy callers. This aligns rule-policy heading math with
+the aircraft nose direction shown in Tacview and with the environment PID's
+absolute target-heading control.
 
 ## 7. ACMI battlefield boundary debug
 

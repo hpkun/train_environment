@@ -248,6 +248,27 @@ def _fetch_blue_own_positions(vec_env) -> list[dict]:
     return [item if isinstance(item, dict) else {} for item in raw]
 
 
+def _fetch_blue_own_kinematics(vec_env) -> tuple[list[dict], list[dict]]:
+    """Fetch blue ownship positions/headings from worker envs."""
+
+    raw = vec_env.env_method("get_blue_own_kinematics")
+    positions_list: list[dict] = []
+    headings_list: list[dict] = []
+    for item in raw:
+        pos: dict = {}
+        hdg: dict = {}
+        if isinstance(item, dict):
+            for bid, data in item.items():
+                if isinstance(data, dict):
+                    if "position" in data:
+                        pos[bid] = data["position"]
+                    if "heading" in data:
+                        hdg[bid] = data["heading"]
+        positions_list.append(pos)
+        headings_list.append(hdg)
+    return positions_list, headings_list
+
+
 # ==============================================================================
 #  辅助函数
 # ==============================================================================
@@ -853,7 +874,8 @@ def main():
 
             # Fetch engaged-targets sets from all envs (one pipe round-trip)
             engaged_sets = vec_env.env_method("refresh_engaged_targets")
-            blue_own_positions_list = _fetch_blue_own_positions(vec_env)
+            blue_own_positions_list, blue_own_headings_list = (
+                _fetch_blue_own_kinematics(vec_env))
 
             for env_idx in range(config.num_envs):
                 env_obs = raw_obs_list[env_idx]  # dict[agent_id → obs_dict]
@@ -865,7 +887,8 @@ def main():
                 env_actions.update(blue_coordinated_actions(
                     blue_obs_dict, config.num_blue, config.num_red,
                     engaged_targets=engaged_sets[env_idx],
-                    own_positions=blue_own_positions_list[env_idx]))
+                    own_positions=blue_own_positions_list[env_idx],
+                    own_headings=blue_own_headings_list[env_idx]))
 
                 # ---- 红方：Actor 采样 ----
                 red_obs_tensors = []
