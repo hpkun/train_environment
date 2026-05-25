@@ -91,28 +91,48 @@ class AttentionRolloutBuffer:
 
 
 def parse_args_attention():
-    args = parse_args()
-    argv = sys.argv[1:]
+    raw_argv = sys.argv[1:]
+    clean_argv = []
     obs_adapter = "current"
-    if "--obs-adapter" in argv:
-        idx = argv.index("--obs-adapter")
-        if idx + 1 >= len(argv):
-            raise SystemExit("--obs-adapter requires one of: current, paper-placeholder")
-        obs_adapter = argv[idx + 1]
-    elif any(item.startswith("--obs-adapter=") for item in argv):
-        obs_adapter = next(
-            item.split("=", 1)[1] for item in argv
-            if item.startswith("--obs-adapter="))
+
+    i = 0
+    while i < len(raw_argv):
+        item = raw_argv[i]
+        if item == "--obs-adapter":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit("--obs-adapter requires one of: current, paper-placeholder")
+            obs_adapter = raw_argv[i + 1]
+            i += 2
+            continue
+        if item.startswith("--obs-adapter="):
+            obs_adapter = item.split("=", 1)[1]
+            i += 1
+            continue
+        clean_argv.append(item)
+        i += 1
+
     if obs_adapter not in ("current", "paper-placeholder"):
         raise SystemExit("--obs-adapter must be one of: current, paper-placeholder")
+
+    old_argv = sys.argv
+    try:
+        sys.argv = [old_argv[0]] + clean_argv
+        args = parse_args()
+    finally:
+        sys.argv = old_argv
+
     args.obs_adapter = obs_adapter
-    if "--log-file" not in argv:
+    if not _has_cli_option(clean_argv, "--log-file"):
         args.log_file = "attention_training_log.csv"
-    if "--results-file" not in argv:
+    if not _has_cli_option(clean_argv, "--results-file"):
         args.results_file = "results/attention_mappo_results.csv"
-    if "--checkpoint-dir" not in argv:
+    if not _has_cli_option(clean_argv, "--checkpoint-dir"):
         args.checkpoint_dir = "checkpoints_attention"
     return args
+
+
+def _has_cli_option(argv: list[str], name: str) -> bool:
+    return name in argv or any(item.startswith(name + "=") for item in argv)
 
 
 def _build_attention_entities(obs_np: dict, obs_adapter: str):
