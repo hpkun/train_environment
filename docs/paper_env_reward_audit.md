@@ -237,6 +237,26 @@ else:
 2. 为 `Ta(q)` 写纯函数与单元测试，检查 `q=0,4,15,35` 附近是否连续、是否非负。
 3. 再决定 `_situation_reward()` 是否继续使用当前 AO/TA，或改为从 strict paper observation 的 `q_LOS` / LOS geometry 计算。
 
+#### Pass18 function audit
+
+本轮新增 `reward_utils.py`，只用于纯函数审计和测试，没有接入 `UavCombatEnv._situation_reward()`，因此不会改变当前训练奖励。
+
+新增函数：
+
+- `ta_angle_advantage_current(q_deg)`：完全复刻当前 `_situation_reward()` 的 Ta 分段，包括 15 度附近的负值和不连续行为。
+- `td_distance_advantage_current(distance_m)`：完全复刻当前 Td 距离逻辑，先把 m 转为 km，再按 15 km 阈值计算。
+- `ta_angle_advantage_candidate_continuous(q_deg)`：仅作为连续、非负参考曲线，用于对照当前实现，不代表论文最终公式。
+- `sample_ta_table(func)`：输出固定角度采样表，便于文档和 smoke test 观察。
+
+下一步仍必须根据论文 eq.20 原文决定：
+
+- Ta 第一段到底应为 `1.0`、`10`，还是论文中的其他尺度。
+- Ta 是否需要归一化后再进入 `r_adv`。
+- Ta 是否允许负值；如果不允许，是否应显式 clamp。
+- 当前 AO/TA 是否等价于论文 `q_Los`，或应换成 strict paper observation 中的 LOS 几何。
+
+在完成上述核对之前，不应替换 `_situation_reward()` 的实际调用逻辑。
+
 ### 5.7 Terminal reward eq.23
 
 当前 `_compute_rewards()`：
