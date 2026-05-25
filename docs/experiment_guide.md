@@ -354,6 +354,10 @@ still happen, but straight-line exits should be reduced. When using
 The patrol is closed-loop on Blue's own outward motion: if Blue is flying
 outward near the boundary it turns and slows more strongly; if it is already
 turning inward, correction is reduced to avoid oscillation.
+If Blue is very close to the boundary and still flying outward, the same
+ownship-only safety layer can override combat pursuit heading/speed so pursuit
+does not drag Blue out of the battlefield. This still does not expose Red global
+position or enforce a hard boundary.
 
 ## 20. ACMI battlefield boundary debug
 

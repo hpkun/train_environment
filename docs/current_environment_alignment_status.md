@@ -130,6 +130,10 @@ The patrol also considers the outward heading component: outbound motion near
 the boundary receives stronger turn and lower speed, tangent motion receives
 moderate correction, and already-inbound motion receives weaker correction to
 reduce oscillation.
+Boundary safety now also applies before combat pursuit, but only when Blue is
+very near the boundary and heading outward. This override uses only Blue
+ownship position/heading, does not inspect Red position, and remains a soft
+control layer rather than a hard boundary.
 
 ## 7. ACMI battlefield boundary debug
 

@@ -206,6 +206,29 @@ def _blue_cruise_speed_command(
     return float(np.clip(base, 0.15, 1.0))
 
 
+def _should_override_for_boundary_safety(
+    own_position: np.ndarray | None,
+    current_heading: float,
+    boundary_half_size: float = 40000.0,
+    boundary_margin: float = 12000.0,
+) -> bool:
+    """Return True when boundary safety should override combat pursuit.
+
+    This only uses Blue ownship position and heading. It does not inspect
+    enemy state or change target selection.
+    """
+
+    if own_position is None:
+        return False
+    pressure = _boundary_patrol_pressure(
+        own_position, boundary_half_size, boundary_margin)
+    outward = _boundary_outward_heading_component(own_position, current_heading)
+    return bool(
+        (pressure >= 0.75 and outward > 0.15)
+        or (pressure >= 1.0 and outward > -0.2)
+    )
+
+
 # ==============================================================================
 #  blue_coordinated_actions —— 协同目标分配入口（推荐调用此函数）
 # ==============================================================================
@@ -427,6 +450,14 @@ def _blue_pursuit_action_impl(
     # =========================================================================
     #  COMBAT — Lead Pursuit with graduated dive restriction
     # =========================================================================
+    if _should_override_for_boundary_safety(own_position, our_heading):
+        alt_error = SAFE_COMBAT_ALT - alt_m
+        boundary_pitch = np.clip(alt_error / 2000.0, -0.05, 0.15) + _TRIM_BASELINE
+        heading_cmd = _boundary_patrol_heading_command(own_position, our_heading)
+        vel_cmd = _blue_cruise_speed_command(
+            own_position, current_heading=our_heading)
+        return _rescale(float(boundary_pitch), float(heading_cmd), float(vel_cmd))
+
     enemy_states = obs["enemy_states"]
     death_mask   = obs["death_mask"]
 
