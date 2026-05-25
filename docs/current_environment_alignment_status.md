@@ -126,6 +126,10 @@ The no-target patrol is pre-boundary and speed-aware: it starts applying
 center-turn pressure before the 40 km battlefield edge and reduces cruise
 speed as boundary pressure increases. It still only uses Blue ownship position
 and does not impose a hard boundary, teleport, bounce, or termination rule.
+The patrol also considers the outward heading component: outbound motion near
+the boundary receives stronger turn and lower speed, tangent motion receives
+moderate correction, and already-inbound motion receives weaker correction to
+reduce oscillation.
 
 ## 7. ACMI battlefield boundary debug
 

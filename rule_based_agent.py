@@ -82,8 +82,9 @@ def _boundary_patrol_heading_command(
     where 1.0 corresponds to the existing +10 degree heading authority.  This
     helper only uses ownship position and heading; it does not use enemy state.
 
-    Heading strength is pressure-scaled: early patrol is gentle, near-boundary
-    patrol approaches full authority.
+    Heading strength is pressure- and outward-motion-scaled: outbound flight
+    near the boundary gets strong correction, inbound flight gets weak
+    correction to reduce oscillation.
     """
 
     pressure = _boundary_patrol_pressure(
@@ -95,10 +96,40 @@ def _boundary_patrol_heading_command(
     x, y = float(pos[0]), float(pos[1])
     center_bearing = np.arctan2(-y, -x)
     heading_error = (center_bearing - current_heading + np.pi) % (2 * np.pi) - np.pi
-    raw_cmd = heading_error / np.deg2rad(10.0)
-    gain = float(np.clip(0.3 + pressure, 0.3, 1.0))
-    heading_cmd = raw_cmd * gain
+    center_cmd = heading_error / np.deg2rad(10.0)
+    outward = _boundary_outward_heading_component(own_position, current_heading)
+    if outward > 0.2:
+        gain = float(np.clip(0.7 + pressure, 0.7, 1.0))
+    elif outward > -0.2:
+        gain = float(np.clip(0.3 + 0.5 * pressure, 0.3, 0.8))
+    else:
+        gain = float(np.clip(0.15 + 0.3 * pressure, 0.15, 0.5))
+    heading_cmd = center_cmd * gain
     return float(np.clip(heading_cmd, -1.0, 1.0))
+
+
+def _boundary_outward_heading_component(
+    own_position: np.ndarray,
+    current_heading: float,
+) -> float:
+    """Return how much current heading points outward from battlefield center.
+
+    Returns approximately +1 for directly outward, 0 for tangent, and -1 for
+    directly inward. Coordinates follow the project convention:
+    own_position = [north, east, up], current_heading = atan2(ve, vn).
+    """
+
+    pos = np.asarray(own_position, dtype=np.float32)
+    if pos.shape[0] < 2:
+        return 0.0
+    xy = np.array([float(pos[0]), float(pos[1])], dtype=np.float32)
+    norm = float(np.hypot(xy[0], xy[1]))
+    if norm < 1e-6:
+        return 0.0
+    outward_unit = xy / norm
+    heading_unit = np.array(
+        [np.cos(current_heading), np.sin(current_heading)], dtype=np.float32)
+    return float(np.clip(np.dot(heading_unit, outward_unit), -1.0, 1.0))
 
 
 def _boundary_patrol_pressure(
@@ -122,10 +153,17 @@ def _boundary_patrol_pressure(
     return float(np.clip(pressure, 0.0, 1.5))
 
 
+def _current_heading_from_obs(obs: dict) -> float:
+    """Return current heading from observation velocity in north/east order."""
+
+    return float(np.arctan2(float(obs["velocity"][1]), float(obs["velocity"][0])))
+
+
 def _blue_cruise_heading_command(
     obs: dict,
     blue_id: int,
     own_position: np.ndarray | None = None,
+    current_heading: float | None = None,
 ) -> float:
     """Return internal heading command for no-target cruise.
 
@@ -143,14 +181,14 @@ def _blue_cruise_heading_command(
         # env-side helper or explicit caller-supplied position.
         return 0.0
 
-    our_vn = float(obs["velocity"][0])
-    our_ve = float(obs["velocity"][1])
-    current_heading = np.arctan2(our_ve, our_vn)
+    if current_heading is None:
+        current_heading = _current_heading_from_obs(obs)
     return _boundary_patrol_heading_command(own_position, current_heading)
 
 
 def _blue_cruise_speed_command(
     own_position: np.ndarray | None = None,
+    current_heading: float | None = None,
 ) -> float:
     """Return internal velocity command for no-target cruise."""
 
@@ -159,7 +197,13 @@ def _blue_cruise_speed_command(
     pressure = _boundary_patrol_pressure(own_position)
     if pressure <= 0.0:
         return 1.0
-    return float(np.clip(1.0 - 0.8 * min(pressure, 1.0), 0.2, 1.0))
+    outward = 0.0
+    if current_heading is not None:
+        outward = _boundary_outward_heading_component(own_position, current_heading)
+    base = 1.0 - 0.8 * min(pressure, 1.0)
+    if outward > 0.2:
+        base -= 0.2 * min(outward, 1.0)
+    return float(np.clip(base, 0.15, 1.0))
 
 
 # ==============================================================================
@@ -424,9 +468,12 @@ def _blue_pursuit_action_impl(
         _prev_heading_cmd.pop(blue_id, None)
         alt_error = SAFE_COMBAT_ALT - alt_m
         cruise_pitch = np.clip(alt_error / 2000.0, -0.10, 0.12) + _TRIM_BASELINE
+        current_heading = _current_heading_from_obs(obs)
         heading_cmd = _blue_cruise_heading_command(
-            obs, blue_id, own_position=own_position)
-        vel_cmd = _blue_cruise_speed_command(own_position)
+            obs, blue_id, own_position=own_position,
+            current_heading=current_heading)
+        vel_cmd = _blue_cruise_speed_command(
+            own_position, current_heading=current_heading)
         return _rescale(float(cruise_pitch), float(heading_cmd), float(vel_cmd))
 
     tgt = enemy_states[target_idx]

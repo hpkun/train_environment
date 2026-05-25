@@ -351,6 +351,9 @@ The patrol now starts before the 40 km boundary and lowers no-target cruise
 speed as Blue approaches the edge. It is still not a hard boundary: crossing can
 still happen, but straight-line exits should be reduced. When using
 `--draw-boundary`, Tacview can show whether Blue begins turning before the edge.
+The patrol is closed-loop on Blue's own outward motion: if Blue is flying
+outward near the boundary it turns and slows more strongly; if it is already
+turning inward, correction is reduced to avoid oscillation.
 
 ## 20. ACMI battlefield boundary debug
 
