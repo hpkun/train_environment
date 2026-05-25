@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from my_uav_env import UavCombatEnv
+from reward_utils import REWARD_VERSION
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     VanillaActor,
@@ -250,6 +251,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                 blue_deaths_missile + blue_deaths_crash,
                 red_deaths_missile + red_deaths_crash,
             ),
+            "RewardVersion": REWARD_VERSION,
         }
     finally:
         env.close()
@@ -260,6 +262,7 @@ def _print_summary(rows: list[dict], output_path: str):
     print("=" * 70)
     print("Summary")
     print(f"Episodes: {episodes}")
+    print(f"Reward version: {REWARD_VERSION}")
     print(f"Red win rate: {_safe_div(sum(r['RedWin'] for r in rows), episodes):.6f}")
     print(f"Blue win rate: {_safe_div(sum(r['BlueWin'] for r in rows), episodes):.6f}")
     print(f"Draw rate: {_safe_div(sum(r['Draw'] for r in rows), episodes):.6f}")
@@ -283,6 +286,7 @@ def main():
     device = _select_device(args.device)
     actor, rnn_hidden_size, _checkpoint = _load_actor(args, device)
     print(f"enable_blue_gcas: {args.enable_blue_gcas}", flush=True)
+    print(f"reward_version: {REWARD_VERSION}", flush=True)
 
     output_dir = os.path.dirname(args.output)
     if output_dir:
@@ -296,7 +300,7 @@ def main():
         "RedMissileHitRate", "BlueMissileHitRate",
         "RedDeathsMissile", "RedDeathsCrash",
         "BlueDeathsMissile", "BlueDeathsCrash",
-        "KD_Red",
+        "KD_Red", "RewardVersion",
     ]
 
     rows = []

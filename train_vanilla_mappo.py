@@ -30,6 +30,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from reward_utils import REWARD_VERSION
+
 torch.set_num_threads(1)
 try:
     torch.set_num_interop_threads(1)
@@ -1145,11 +1147,11 @@ def main():
                          "RedMissiles", "BlueMissiles",
                          "Episodes", "RedWins", "BlueWins", "Draws",
                          "RedAliveMean", "BlueAliveMean",
-                         "RedDeathsMissile", "RedDeathsCrash",
-                         "BlueDeathsMissile", "BlueDeathsCrash",
-                         "RedMissileHits", "BlueMissileHits",
-                         "RedMissileHitRate", "BlueMissileHitRate",
-                         "KD_Red", "RWR"])
+                          "RedDeathsMissile", "RedDeathsCrash",
+                          "BlueDeathsMissile", "BlueDeathsCrash",
+                          "RedMissileHits", "BlueMissileHits",
+                          "RedMissileHitRate", "BlueMissileHitRate",
+                          "KD_Red", "RWR", "RewardVersion"])
     csv_file.flush()
 
     print(f"设备: {device}")
@@ -1164,6 +1166,7 @@ def main():
     print(f"  checkpoint_dir: {config.checkpoint_dir}")
     print(f"  seed: {config.seed}")
     print(f"  device: {device}")
+    print(f"  reward_version: {REWARD_VERSION}")
     print(f"架构: Vanilla MLP + GRU (无注意力, 无掩码)")
     print(f"场景: {config.num_red}v{config.num_blue} (红方 RL, 蓝方规则)")
     print(f"展平 obs 维度: {obs_dim}")
@@ -1518,7 +1521,8 @@ def main():
                              f"{red_missile_hit_rate:.6f}",
                              f"{blue_missile_hit_rate:.6f}",
                              f"{kd_red:.6f}",
-                             f"{rwr:.6f}"])
+                             f"{rwr:.6f}",
+                             REWARD_VERSION])
         csv_file.flush()
 
         # ---- 持久化：results/ 绘图数据 (累计 + 每 1M 步自动保存) ----
@@ -1547,6 +1551,7 @@ def main():
             "BlueMissileHitRate": blue_missile_hit_rate,
             "KD_Red":         kd_red,
             "RWR":            rwr,
+            "RewardVersion":  REWARD_VERSION,
             "ActorLoss":      stats["actor_loss"],
             "CriticLoss":     stats["critic_loss"],
             "Entropy":        stats["entropy"],

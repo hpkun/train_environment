@@ -278,6 +278,22 @@ else:
 - reward 权重 `0.15 * r_adv`。
 - 训练脚本、观测、动作、导弹、雷达逻辑。
 
+#### Pass20 reward version logging
+
+pass20 后，当前 reward version 明确标记为 `fixed_ta_v1`。
+
+含义：
+
+- `fixed_ta_v1` 表示 `_situation_reward()` 的 Ta 函数已经使用 pass19 的连续、非负、归一化版本。
+- 旧行为仍保留在 `reward_utils.ta_angle_advantage_current()` 中，仅用于审计和旧日志解释。
+- pass19 前生成的训练/评估日志应视为 legacy reward，不应与 `fixed_ta_v1` 实验直接混合比较。
+- pass20 后，`train_vanilla_mappo.py`、`train_attention_mappo.py`、`evaluate_vanilla_mappo.py`、`evaluate_attention_mappo.py` 的 CSV 输出会追加 `RewardVersion` 字段。
+
+新实验建议使用显式文件名，例如：
+
+- `vanilla_fixed_ta_v1.csv`
+- `attention_fixed_ta_v1.csv`
+
 ### 5.7 Terminal reward eq.23
 
 当前 `_compute_rewards()`：

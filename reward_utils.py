@@ -9,6 +9,15 @@ from __future__ import annotations
 import math
 from typing import Callable
 
+REWARD_VERSION = "fixed_ta_v1"
+"""Reward version identifier for logs and evaluation outputs.
+
+``fixed_ta_v1`` means the situation reward Ta function has been changed from
+the historical current piecewise formula to a continuous, non-negative,
+normalized curve.  The legacy behavior remains available through
+``ta_angle_advantage_current()`` for audits only.
+"""
+
 
 def ta_angle_advantage_current(q_deg: float) -> float:
     """Current angle-advantage formula copied from env._situation_reward().

@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from attention_models import AttentionActor
 from entity_obs_utils import build_entity_observation
 from paper_obs_utils import build_paper_entity_observation_from_env_obs
+from reward_utils import REWARD_VERSION
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     CentralizedCritic,
@@ -346,7 +347,7 @@ def main():
         "Draws", "RedAliveMean", "BlueAliveMean", "RedDeathsMissile",
         "RedDeathsCrash", "BlueDeathsMissile", "BlueDeathsCrash",
         "RedMissileHits", "BlueMissileHits", "RedMissileHitRate",
-        "BlueMissileHitRate", "KD_Red", "RWR",
+        "BlueMissileHitRate", "KD_Red", "RWR", "RewardVersion",
     ])
     csv_file.flush()
 
@@ -365,6 +366,7 @@ def main():
     print(f"  seed: {config.seed}")
     print(f"  obs_adapter: {config.obs_adapter}")
     print(f"  entity_dim: {entity_dim}")
+    print(f"  reward_version: {REWARD_VERSION}")
     if (config.obs_adapter == "paper-placeholder"
             and config.checkpoint_dir == "checkpoints_attention"):
         print("[WARN] paper-placeholder uses entity_dim=10; use a separate "
@@ -687,7 +689,7 @@ def main():
             blue_deaths_missile, blue_deaths_crash,
             red_missile_hits, blue_missile_hits,
             f"{red_missile_hit_rate:.6f}", f"{blue_missile_hit_rate:.6f}",
-            f"{kd_red:.6f}", f"{rwr:.6f}",
+            f"{kd_red:.6f}", f"{rwr:.6f}", REWARD_VERSION,
         ])
         csv_file.flush()
 
@@ -716,6 +718,7 @@ def main():
             "BlueMissileHitRate": blue_missile_hit_rate,
             "KD_Red": kd_red,
             "RWR": rwr,
+            "RewardVersion": REWARD_VERSION,
             "ActorLoss": stats["actor_loss"],
             "CriticLoss": stats["critic_loss"],
             "Entropy": stats["entropy"],

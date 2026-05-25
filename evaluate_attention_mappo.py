@@ -15,6 +15,7 @@ import torch
 
 from attention_models import AttentionActor
 from my_uav_env import UavCombatEnv
+from reward_utils import REWARD_VERSION
 from rule_based_agent import blue_coordinated_actions
 from train_attention_mappo import _build_attention_entities
 from train_vanilla_mappo import (
@@ -271,6 +272,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             ),
             "ObsAdapter": obs_adapter,
             "EntityDim": entity_dim,
+            "RewardVersion": REWARD_VERSION,
         }
     finally:
         env.close()
@@ -284,6 +286,7 @@ def _print_summary(rows: list[dict], output_path: str,
     print(f"Episodes: {episodes}")
     print(f"Obs adapter: {obs_adapter}")
     print(f"Entity dim: {entity_dim}")
+    print(f"Reward version: {REWARD_VERSION}")
     print(f"Red win rate: {_safe_div(sum(r['RedWin'] for r in rows), episodes):.6f}")
     print(f"Blue win rate: {_safe_div(sum(r['BlueWin'] for r in rows), episodes):.6f}")
     print(f"Draw rate: {_safe_div(sum(r['Draw'] for r in rows), episodes):.6f}")
@@ -309,6 +312,7 @@ def main():
     print(f"obs_adapter: {args.obs_adapter}", flush=True)
     print(f"entity_dim: {entity_dim}", flush=True)
     print(f"enable_blue_gcas: {args.enable_blue_gcas}", flush=True)
+    print(f"reward_version: {REWARD_VERSION}", flush=True)
 
     output_dir = os.path.dirname(args.output)
     if output_dir:
@@ -322,7 +326,7 @@ def main():
         "RedMissileHitRate", "BlueMissileHitRate",
         "RedDeathsMissile", "RedDeathsCrash",
         "BlueDeathsMissile", "BlueDeathsCrash",
-        "KD_Red", "ObsAdapter", "EntityDim",
+        "KD_Red", "ObsAdapter", "EntityDim", "RewardVersion",
     ]
 
     rows = []

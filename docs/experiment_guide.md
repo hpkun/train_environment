@@ -221,3 +221,16 @@ python evaluate_attention_mappo.py --random --obs-adapter current --num-red 1 --
 ```
 
 这条 smoke 命令会触发 JSBSim 环境 reset，Codex 不运行；由本地用户运行。
+
+## 16. Reward version 标记
+
+pass19 后，当前 reward version 为 `fixed_ta_v1`。
+
+`fixed_ta_v1` 表示 situation reward 中的 Ta 角度优势函数已经从旧的分段实现切换为连续、非负、归一化版本。旧实现会在 15 度附近产生负值和不连续跳变，因此 pass19 前后的训练日志不应直接混合比较。
+
+注意：
+
+- pass19 前生成的 `vanilla_training_log.csv`、`attention_training_log.csv` 或评估 CSV 应视为 legacy reward。
+- pass20 后，训练和批量评估 CSV 会追加 `RewardVersion` 字段。
+- 新实验建议使用带版本名的日志文件，例如 `vanilla_fixed_ta_v1.csv`、`attention_fixed_ta_v1.csv`。
+- 如果后续确认论文原始实验使用 10 倍 Ta 量级，应另开 reward-scale ablation，不要和 `fixed_ta_v1` baseline 混合。
