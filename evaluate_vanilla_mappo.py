@@ -161,8 +161,10 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
 
             blue_obs_dict = {bid: obs[bid] for bid in blue_ids}
             engaged = env.refresh_engaged_targets()
+            blue_own_positions = env.get_blue_own_positions()
             actions.update(blue_coordinated_actions(
-                blue_obs_dict, num_blue, num_red, engaged_targets=engaged))
+                blue_obs_dict, num_blue, num_red, engaged_targets=engaged,
+                own_positions=blue_own_positions))
 
             if actor is not None:
                 alive_indices = []

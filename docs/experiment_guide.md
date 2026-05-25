@@ -336,13 +336,13 @@ This command triggers JSBSim/env reset and is for local user runs only; Codex do
 Blue rule policy target pursuit is still based on its existing observation and
 target-selection logic. It has not been given radar-blind red-position tracking.
 
-When Blue has no valid target, the old cruise branch keeps the current heading.
-In Tacview this can look like Blue never turns back and eventually leaves the
-battlefield. `rule_based_agent.py` now has an optional boundary patrol helper
-for this no-target cruise case. The helper turns toward the battlefield center
-only when the caller supplies Blue ownship position and Blue is near the
+When Blue has no valid target, the old cruise branch kept the current heading.
+In Tacview this could look like Blue never turns back and eventually leaves the
+battlefield. The training and evaluation entry points now pass Blue ownship
+positions from `UavCombatEnv.get_blue_own_positions()` into the rule policy, so
+no-target Blue cruise turns back toward the battlefield center near the
 boundary.
 
-Current training and evaluation entry points do not pass `own_position` yet, so
-the new helper is available for a later integration pass without changing the
-existing training behavior.
+This is rule-based battlefield keeping, not a learning observation and not
+radar-blind Red tracking. The helper receives only Blue ownship positions, not
+Red positions.

@@ -641,6 +641,13 @@ class SubprocVecEnv:
                 p.terminate()
 
 
+def _fetch_blue_own_positions(vec_env, timeout: float = 30.0) -> list[dict]:
+    """Fetch blue ownship positions from worker envs for rule-policy patrol."""
+
+    raw = vec_env.env_method("get_blue_own_positions", timeout=timeout)
+    return [item if isinstance(item, dict) else {} for item in raw]
+
+
 # ==============================================================================
 #  Rollout Buffer (无掩码字段，精简版)
 # ==============================================================================
@@ -1333,6 +1340,7 @@ def main():
 
             # Fetch engaged-targets sets from all envs (one pipe round-trip)
             engaged_sets = vec_env.env_method("refresh_engaged_targets")
+            blue_own_positions_list = _fetch_blue_own_positions(vec_env)
 
             for env_idx in range(config.num_envs):
                 env_obs = raw_obs_list[env_idx]
@@ -1348,7 +1356,8 @@ def main():
                 blue_obs_dict = {bid: env_obs[bid] for bid in blue_ids}
                 env_actions.update(blue_coordinated_actions(
                     blue_obs_dict, config.num_blue, config.num_red,
-                    engaged_targets=engaged_sets[env_idx]))
+                    engaged_targets=engaged_sets[env_idx],
+                    own_positions=blue_own_positions_list[env_idx]))
 
                 # 红方 Actor 采样 + 全局观测构建
                 red_obs_flat_all = []  # all agents (alive/dead) for global state

@@ -397,6 +397,20 @@ class UavCombatEnv(gymnasium.Env):
                 self._engaged_targets.add(m._target_id)
         return self._engaged_targets
 
+    def get_blue_own_positions(self) -> dict[str, np.ndarray]:
+        """Return current blue ownship positions for cruise boundary patrol.
+
+        This is not part of the learning observation and does not expose enemy
+        state. It is only used by the hand-coded blue policy to avoid no-target
+        cruise flying indefinitely out of the battlefield.
+        """
+
+        result: dict[str, np.ndarray] = {}
+        for bid, sim in self.blue_planes.items():
+            if sim is not None and sim.is_alive:
+                result[bid] = np.asarray(sim.get_position(), dtype=np.float32)
+        return result
+
     def step(self, actions: dict):
         self.current_step += 1
         self._crashed_this_step.clear()
