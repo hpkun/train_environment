@@ -13,6 +13,7 @@ import argparse
 import csv
 import os
 import random
+import sys
 
 # ---- 多进程性能：禁止底层库的线程池竞争 ----
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -1052,6 +1053,10 @@ def parse_args():
     defaults = Config()
     parser = argparse.ArgumentParser(
         description="Train vanilla MAPPO baseline for my_uav_env.")
+    parser.add_argument("--preset", type=str, default=None,
+                        help="Experiment preset name (see --list-presets)")
+    parser.add_argument("--list-presets", action="store_true", default=False,
+                        help="List available presets and exit")
     parser.add_argument("--num-red", type=int, default=defaults.num_red)
     parser.add_argument("--num-blue", type=int, default=defaults.num_blue)
     parser.add_argument("--num-envs", type=int, default=defaults.num_envs)
@@ -1080,6 +1085,33 @@ def parse_args():
     parser.add_argument("--device", type=str, choices=("auto", "cpu", "cuda"),
                         default=defaults.device)
     return parser.parse_args()
+
+
+_VANILLA_PRESET_CLI_FLAGS = {
+    "num_red", "num_blue", "num_envs", "total_env_steps",
+    "max_episode_length", "replay_buffer_size", "n_minibatches",
+    "actor_lr", "critic_lr", "entropy_coef",
+    "enable_blue_gcas", "resume_from_best",
+    "log_file", "results_file", "checkpoint_dir", "device",
+}
+
+
+def _apply_preset_vanilla(args, preset: dict):
+    """Apply preset values to args for any key not explicitly given on CLI."""
+    cli_flags = set()
+    for item in sys.argv:
+        if item.startswith("--"):
+            name = item.lstrip("-").replace("-", "_")
+            cli_flags.add(name)
+    for key, value in preset.items():
+        if key not in _VANILLA_PRESET_CLI_FLAGS:
+            continue
+        if key == "device":
+            flag = "device"
+        else:
+            flag = key
+        if flag not in cli_flags:
+            setattr(args, key, value)
 
 
 def make_config_from_args(args) -> Config:
@@ -1134,6 +1166,19 @@ def _ensure_parent_dir(path: str):
 
 def main():
     args = parse_args()
+
+    if args.list_presets:
+        from configs.experiment_presets import list_presets
+        print("Available presets:")
+        for name in list_presets():
+            print(f"  {name}")
+        return
+
+    if args.preset is not None:
+        from configs.experiment_presets import get_preset
+        preset = get_preset(args.preset)
+        _apply_preset_vanilla(args, preset)
+
     config = make_config_from_args(args)
     _set_main_process_seed(config.seed)
     device = _select_device(config.device)

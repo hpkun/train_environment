@@ -38,7 +38,44 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe train_vanilla_mappo.py
 
 训练默认 `enable_blue_gcas=False`。
 
-## 4. 论文式 6v6 训练命令模板
+## 4. Preset-based commands
+
+项目支持通过 `--preset` 缩短常用命令。列出所有 preset：
+
+```powershell
+conda activate brmamappo
+python train_vanilla_mappo.py --list-presets
+python train_attention_mappo.py --list-presets
+```
+
+常用 preset 示例：
+
+```powershell
+# vanilla 1v1 smoke (20 steps, cpu)
+python train_vanilla_mappo.py --preset vanilla_1v1_smoke
+
+# vanilla 2v2 smoke (~10k steps, see reward signals)
+python train_vanilla_mappo.py --preset vanilla_2v2_smoke
+
+# vanilla 2v2 main (10M steps, full training)
+python train_vanilla_mappo.py --preset vanilla_2v2_main
+
+# attention smoke variants
+python train_attention_mappo.py --preset attention_1v1_smoke
+python train_attention_mappo.py --preset attention_2v2_current_smoke
+python train_attention_mappo.py --preset attention_2v2_placeholder_smoke
+```
+
+CLI 参数仍可覆盖 preset：
+
+```powershell
+python train_vanilla_mappo.py --preset vanilla_2v2_smoke --total-env-steps 2000
+```
+
+当前默认 reward version 为 `fixed_ta_alt_eq17_3dlos_v1`。详见
+[docs/current_environment_alignment_status.md](current_environment_alignment_status.md)。
+
+## 5. 论文式 6v6 训练命令模板
 
 下面是 6v6 训练命令模板。注意：当前仍只是 vanilla MAPPO baseline，不是 BRMA-MAPPO。
 
@@ -46,7 +83,7 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe train_vanilla_mappo.py
 D:\conda_envs\envs_dirs\brmamappo\python.exe train_vanilla_mappo.py --num-red 6 --num-blue 6 --num-envs 8 --total-env-steps 10000000 --max-episode-length 1400 --device auto --log-file logs/vanilla_6v6.csv --results-file results/vanilla_6v6_results.csv --checkpoint-dir checkpoints_vanilla_6v6
 ```
 
-## 5. 批量评估
+## 6. 批量评估
 
 `evaluate_vanilla_mappo.py` 不生成 ACMI，主要用于多局统计论文式指标。默认 `enable_blue_gcas=False`，与训练脚本和 ACMI 单局评估保持一致。若需要显式开启蓝方 GCAS，可添加 `--enable-blue-gcas`。
 
@@ -64,7 +101,7 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe evaluate_vanilla_mappo.py --checkpo
 
 vanilla MLP baseline 的 flattened observation 维度随规模变化，因此不能直接把 2v2 checkpoint 用到 6v6、8v8 或 10v10。这不是 BRMA zero-shot 设置。
 
-## 6. Tacview ACMI 单局可视化
+## 7. Tacview ACMI 单局可视化
 
 `eval_acmi.py` 用于单局 Tacview 可视化，不用于批量统计。该脚本默认显式使用 `enable_gcas_for_blue=False`。
 
@@ -78,7 +115,7 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --checkpoint checkpoin
 D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --random --num-red 1 --num-blue 1 --max-steps 10 --output smoke_eval.acmi
 ```
 
-## 7. 当前已对齐论文的内容
+## 8. 当前已对齐论文的内容
 
 - 雷达 `Rmax = K * RCS^(1/4)`。
 - 导弹 `0.25s` lock delay。
@@ -90,7 +127,7 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --random --num-red 1 -
 - terminal reward 按 per-agent API 均分。
 - 增加论文式评估指标。
 
-## 8. 当前仍未对齐论文的内容
+## 9. 当前仍未对齐论文的内容
 
 - 默认训练仍是 2v2，不是论文 6v6。
 - 算法仍是 vanilla MAPPO，不是 BRMA-MAPPO。
@@ -103,7 +140,7 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --random --num-red 1 -
 - PID 控制器含工程稳定项。
 - 论文没有明确给出每架 UAV 的固定载弹量；当前环境保留默认 `num_missiles_per_plane=999`，等价于不让载弹量成为主要限制因素。由于论文没有提供具体载弹量，该项暂不作为优先对齐目标。
 
-## 9. Git ignore 注意事项
+## 10. Git ignore 注意事项
 
 以下文件不应提交：
 
@@ -116,14 +153,14 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --random --num-red 1 -
 
 如果生成了上述文件，请保持它们处于 git ignored 状态，不要加入提交。
 
-## 10. 下一阶段：EntityObservationEncoder 准备
+## 11. 下一阶段：EntityObservationEncoder 准备
 
 - 已新增 `entity_obs_utils.py`，可将当前 Dict observation 转成 entity-wise tensor。
 - 当前 tensor 暂时仍使用环境的 11 维工程化 entity vector。
 - 该工具暂未接入训练，只用于后续实现 MAPPO-Attention / BRMA-MAPPO。
 - 后续仍需决定是否严格改成论文 Table 1 / Table 2 的 10 维表示。
 
-## 11. MAPPO-Attention 准备
+## 12. MAPPO-Attention 准备
 
 - 已新增 `attention_models.py`。
 - 目前包含 `EntityObservationEncoder`、`AttentionActor`、`AttentionCritic`。
@@ -132,7 +169,7 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe eval_acmi.py --random --num-red 1 -
 - 当前 attention encoder 使用 11 维工程化 entity vector，不是最终论文 Table 1 / Table 2 的 10 维严格版本。
 - 当前还没有实现 biased random mask 和 mask vector generator。
 
-## 12. MAPPO-Attention baseline
+## 13. MAPPO-Attention baseline
 
 - 已新增 `train_attention_mappo.py`。
 - 这是 actor-side EntityObservationEncoder baseline。
@@ -166,7 +203,7 @@ python train_attention_mappo.py --obs-adapter paper-placeholder --num-red 1 --nu
 
 这条命令同样会触发 JSBSim 环境 reset，Codex 不运行；由本地用户运行。
 
-## 13. 论文式 observation adapter 准备
+## 14. 论文式 observation adapter 准备
 
 - 已新增 `paper_obs_utils.py`。
 - 当前只是把现有 11 维工程化 entity vector 转成 10 维接口占位。
@@ -176,7 +213,7 @@ python train_attention_mappo.py --obs-adapter paper-placeholder --num-red 1 --nu
   - relative state: `x_body, y_body, z_body, theta_v_body, psi_v_body, V, theta_LOS_body, psi_LOS_body, q_LOS, d`
 - 在完成 strict observation 前，`train_attention_mappo.py` 的结果只能视作工程 baseline，而不是论文 MAPPO-Attention 消融结果。
 
-## 14. Strict paper observation prototype
+## 15. Strict paper observation prototype
 
 - `UavCombatEnv` 已暴露 `get_strict_entity_observation(agent_id)` 和
   `get_strict_team_observations(team)`。
@@ -203,7 +240,7 @@ python scripts/smoke_strict_observation_env.py
 - Codex 不运行该脚本，用户本地运行。
 - 该模块尚未接入训练；后续需要先验证数值合理性，再决定是否让 `train_attention_mappo.py` 使用它。
 
-## 15. MAPPO-Attention 批量评估
+## 16. MAPPO-Attention 批量评估
 
 - 已新增 `evaluate_attention_mappo.py`。
 - 它评估 attention actor checkpoint，不生成 ACMI。
@@ -234,7 +271,7 @@ python evaluate_attention_mappo.py --random --obs-adapter current --num-red 1 --
 
 这条 smoke 命令会触发 JSBSim 环境 reset，Codex 不运行；由本地用户运行。
 
-## 16. Reward version 标记
+## 17. Reward version 标记
 
 当前 reward version 为 `fixed_ta_alt_eq17_3dlos_v1`。
 

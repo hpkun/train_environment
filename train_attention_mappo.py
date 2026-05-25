@@ -95,6 +95,8 @@ def parse_args_attention():
     raw_argv = sys.argv[1:]
     clean_argv = []
     obs_adapter = "current"
+    preset_name = None
+    list_presets = False
 
     i = 0
     while i < len(raw_argv):
@@ -109,8 +111,29 @@ def parse_args_attention():
             obs_adapter = item.split("=", 1)[1]
             i += 1
             continue
+        if item == "--preset":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit("--preset requires a preset name")
+            preset_name = raw_argv[i + 1]
+            i += 2
+            continue
+        if item.startswith("--preset="):
+            preset_name = item.split("=", 1)[1]
+            i += 1
+            continue
+        if item == "--list-presets":
+            list_presets = True
+            i += 1
+            continue
         clean_argv.append(item)
         i += 1
+
+    if list_presets:
+        from configs.experiment_presets import list_presets as _lp
+        print("Available presets:")
+        for name in _lp():
+            print(f"  {name}")
+        raise SystemExit(0)
 
     if obs_adapter not in ("current", "paper-placeholder"):
         raise SystemExit("--obs-adapter must be one of: current, paper-placeholder")
@@ -123,6 +146,12 @@ def parse_args_attention():
         sys.argv = old_argv
 
     args.obs_adapter = obs_adapter
+
+    if preset_name is not None:
+        from configs.experiment_presets import get_preset
+        preset = get_preset(preset_name)
+        _apply_preset_attention(args, preset, raw_argv)
+
     if not _has_cli_option(clean_argv, "--log-file"):
         args.log_file = "attention_training_log.csv"
     if not _has_cli_option(clean_argv, "--results-file"):
@@ -130,6 +159,30 @@ def parse_args_attention():
     if not _has_cli_option(clean_argv, "--checkpoint-dir"):
         args.checkpoint_dir = "checkpoints_attention"
     return args
+
+
+_ATTENTION_PRESET_CLI_FLAGS = {
+    "num_red", "num_blue", "num_envs", "total_env_steps",
+    "max_episode_length", "replay_buffer_size", "n_minibatches",
+    "actor_lr", "critic_lr", "entropy_coef",
+    "enable_blue_gcas", "resume_from_best",
+    "log_file", "results_file", "checkpoint_dir", "device",
+    "obs_adapter",
+}
+
+
+def _apply_preset_attention(args, preset: dict, raw_argv: list[str]):
+    """Apply preset values to args for any key not explicitly given on CLI."""
+    cli_flags = set()
+    for item in raw_argv:
+        if item.startswith("--"):
+            name = item.lstrip("-").split("=", 1)[0].replace("-", "_")
+            cli_flags.add(name)
+    for key, value in preset.items():
+        if key not in _ATTENTION_PRESET_CLI_FLAGS:
+            continue
+        if key not in cli_flags:
+            setattr(args, key, value)
 
 
 def _has_cli_option(argv: list[str], name: str) -> bool:
