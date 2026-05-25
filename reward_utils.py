@@ -76,6 +76,83 @@ def td_distance_advantage(distance_m: float) -> float:
     return td_distance_advantage_current(distance_m)
 
 
+def altitude_reward_current(dz_m: float) -> float:
+    """Current altitude reward curve copied from env._altitude_reward().
+
+    ``dz_m`` is ego altitude minus the mean enemy altitude in the current
+    environment implementation.
+    """
+    h_min = 0.0
+    h_att = 2000.0
+    h_adv = 5000.0
+    h_max = 10000.0
+
+    if dz_m <= h_min:
+        reward = 0.0
+    elif dz_m < h_att:
+        x = (dz_m - h_att) / (h_att - h_min)
+        reward = 1.0 - x * x
+    elif dz_m <= h_adv:
+        reward = 1.0
+    elif dz_m <= h_max:
+        x = (dz_m - h_adv) / (h_max - h_adv)
+        reward = 1.0 - x * x
+    else:
+        reward = 0.0
+    return max(0.0, min(1.0, reward))
+
+
+def altitude_reward_paper_candidate(dz_m: float) -> float:
+    """Candidate paper-style altitude curve with a high-altitude 0.1 tail.
+
+    This is not wired into the environment.  It follows the pass21 reading of
+    paper eq.17 using the current project thresholds because exact h1/h2 and
+    altitude constants still need visual verification against the paper.
+    """
+    h_min = 0.0
+    h_att = 2000.0
+    h_adv = 5000.0
+    h_max = 10000.0
+    tail = 0.1
+
+    if dz_m <= h_min:
+        reward = 0.0
+    elif dz_m < h_att:
+        x = (dz_m - h_att) / (h_att - h_min)
+        reward = 1.0 - x * x
+    elif dz_m <= h_adv:
+        reward = 1.0
+    elif dz_m <= h_max:
+        x = (dz_m - h_adv) / (h_max - h_adv)
+        reward = 1.0 - (1.0 - tail) * x * x
+    else:
+        reward = tail
+    return max(0.0, min(1.0, reward))
+
+
+def altitude_reward_pairwise_mean_candidate(
+    ego_alt_m: float,
+    enemy_altitudes_m: list[float],
+) -> float:
+    """Mean of paper-candidate altitude rewards over pairwise enemy deltas."""
+    if not enemy_altitudes_m:
+        return 0.0
+    values = [
+        altitude_reward_paper_candidate(ego_alt_m - enemy_alt)
+        for enemy_alt in enemy_altitudes_m
+    ]
+    return float(sum(values) / len(values))
+
+
+def sample_altitude_table(
+    func: Callable[[float], float],
+) -> list[tuple[float, float]]:
+    """Sample an altitude reward function at fixed diagnostic deltas."""
+    dz_values = [-1000.0, 0.0, 1000.0, 2000.0,
+                 5000.0, 7500.0, 10000.0, 12000.0]
+    return [(dz, float(func(dz))) for dz in dz_values]
+
+
 def sample_ta_table(func: Callable[[float], float]) -> list[tuple[float, float]]:
     """Sample a Ta function at fixed diagnostic angles."""
     angles = [0.0, 4.0, 10.0, 15.0, 20.0, 35.0, 40.0]

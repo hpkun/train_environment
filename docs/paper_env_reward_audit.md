@@ -169,6 +169,14 @@ return 0.0
 
 优先级：P1。
 
+Pass22 note:
+
+- `reward_utils.py` now contains `altitude_reward_current()` and paper-candidate altitude helpers.
+- `altitude_reward_current()` mirrors the current environment curve for pure testing.
+- `altitude_reward_paper_candidate()` adds the paper-like `0.1` high-altitude tail, but is not wired into the environment.
+- `altitude_reward_pairwise_mean_candidate()` expresses a possible pairwise relative-altitude interpretation.
+- Current `UavCombatEnv._altitude_reward()` behavior is unchanged; any future switch should use a new reward version, not `fixed_ta_v1`.
+
 ### 5.4 Boundary reward eq.18
 
 当前 `_boundary_penalty()`：

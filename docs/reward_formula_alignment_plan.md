@@ -177,6 +177,38 @@ r_R = sum_i r_i + r_end
    - `r_death` crash penalty and per-agent terminal sharing should be preserved until formula-aligned baselines are stable.
    - If removed, do it as an explicit ablation with a new reward version.
 
+## 5. Pass22 altitude reward function audit
+
+Pass22 adds pure altitude reward helpers to `reward_utils.py` without wiring them into `UavCombatEnv._altitude_reward()`.
+
+New helper functions:
+
+- `altitude_reward_current(dz_m)`: exactly mirrors the current environment's dz-only curve. In the environment, `dz_m` is currently `ego_altitude - mean(enemy_altitudes)`.
+- `altitude_reward_paper_candidate(dz_m)`: candidate paper-style curve using current thresholds but adding the high-altitude `0.1` tail indicated by the eq.17 PDF extraction.
+- `altitude_reward_pairwise_mean_candidate(ego_alt_m, enemy_altitudes_m)`: computes `altitude_reward_paper_candidate(ego_alt - enemy_alt)` for each enemy and returns the mean.
+- `sample_altitude_table(func)`: diagnostic sampling over fixed dz values.
+
+Current environment status:
+
+- Still uses `UavCombatEnv._altitude_reward()` unchanged.
+- Still compares ego altitude against the mean alive enemy altitude.
+- Still returns 0 above `H_MAX=10000`.
+- Still uses reward version `fixed_ta_v1`.
+
+Candidate behavior:
+
+- `dz <= 0`: 0
+- `0 < dz < 2000`: quadratic rise from 0 to 1
+- `2000 <= dz <= 5000`: 1
+- `5000 < dz <= 10000`: quadratic fall from 1 to 0.1
+- `dz > 10000`: 0.1
+
+Next decision:
+
+- Decide whether paper eq.17 should be implemented as pairwise relative altitude over each enemy, rather than current mean enemy altitude.
+- Confirm exact paper constants for `H_min`, `H_att`, `H_adv`, `H_max`, `D_att,max`, `h1`, and `h2`.
+- If the environment switches to the paper candidate, create a new reward version such as `fixed_ta_altitude_paper_v1`; do not keep calling it `fixed_ta_v1`.
+
 ## 5. No-code-change statement
 
 This pass does not change any training or environment behavior. It only adds this correction plan document and links it from the existing audit document.
