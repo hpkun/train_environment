@@ -7,6 +7,8 @@ smoke_attention_log.csv
 smoke_attention_checkpoints/
 smoke_attention_paper_log.csv
 smoke_attention_paper_checkpoints/
+smoke_signed_ao_log.csv
+smoke_signed_ao_checkpoints/
 results/smoke_*.csv
 results
 runs

@@ -21,8 +21,11 @@ from __future__ import annotations
 import numpy as np
 
 from my_uav_env.alignment.geometry_diagnostics import (
-    compute_body_x_q_los,
     compute_current_ao_ta_r,
+)
+from my_uav_env.alignment.los_geometry import (
+    compute_3d_range,
+    compute_body_x_q_los,
     compute_velocity_q_los,
 )
 from my_uav_env.alignment.reward_utils import (
@@ -64,8 +67,7 @@ def situation_reward_3d_body_x_candidate(
     """
     q_ij = compute_body_x_q_los(ego_pos, ego_rpy, target_pos)
     q_ji = compute_body_x_q_los(target_pos, target_rpy, ego_pos)
-    distance = float(np.linalg.norm(
-        np.asarray(target_pos) - np.asarray(ego_pos)))
+    distance = compute_3d_range(ego_pos, target_pos)
     Ta_ij = ta_angle_advantage_fixed(np.rad2deg(q_ij))
     Ta_ji = ta_angle_advantage_fixed(np.rad2deg(q_ji))
     Td = td_distance_advantage(distance)
@@ -87,8 +89,7 @@ def situation_reward_3d_velocity_candidate(
     """
     q_ij = compute_velocity_q_los(ego_pos, ego_vel, target_pos)
     q_ji = compute_velocity_q_los(target_pos, target_vel, ego_pos)
-    distance = float(np.linalg.norm(
-        np.asarray(target_pos) - np.asarray(ego_pos)))
+    distance = compute_3d_range(ego_pos, target_pos)
     Ta_ij = ta_angle_advantage_fixed(np.rad2deg(q_ij))
     Ta_ji = ta_angle_advantage_fixed(np.rad2deg(q_ji))
     Td = td_distance_advantage(distance)

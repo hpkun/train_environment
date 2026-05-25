@@ -9,6 +9,7 @@ import logging
 import numpy as np
 import gymnasium
 
+from my_uav_env.alignment.los_geometry import compute_3d_range, compute_body_x_q_los
 from my_uav_env.alignment.reward_utils import (
     altitude_reward_pairwise_mean_eq17,
     ta_angle_advantage_fixed,
@@ -981,35 +982,33 @@ class UavCombatEnv(gymnasium.Env):
     # ------------------------------------------------------------------
 
     def _situation_reward(self, ego_sim: AircraftSimulator) -> float:
-        """r_adv^i = Σ_j (1.0 × Ta_i^j × Td_i^j - 0.8 × Ta_j^i × Td_j^i)."""
+        """r_adv^i = Σ_j (1.0 × Ta_i^j × Td_i^j - 0.8 × Ta_j^i × Td_j^i).
+
+        Uses 3D body-x q_LOS (paper Table 2 geometry) instead of the old
+        2D horizontal AO/TA.  ``q_ij`` is the angle between ego's body
+        x-axis and the LOS to the enemy; ``q_ji`` is the same from the
+        enemy's perspective.  Distance is 3D Euclidean.
+        """
         ego_pos = ego_sim.get_position()
-        ego_vel = ego_sim.get_velocity()
-        ego_feat = np.array([ego_pos[0], ego_pos[1], -ego_pos[2],
-                             ego_vel[0], ego_vel[1], -ego_vel[2]])
+        ego_rpy = ego_sim.get_rpy()
 
         enemies = self.red_planes if ego_sim.color == "Blue" else self.blue_planes
         total = 0.0
         for enemy_sim in enemies.values():
             if not enemy_sim.is_alive:
                 continue
-            enm_pos = enemy_sim.get_position()
-            enm_vel = enemy_sim.get_velocity()
-            enm_feat = np.array([enm_pos[0], enm_pos[1], -enm_pos[2],
-                                 enm_vel[0], enm_vel[1], -enm_vel[2]])
-            AO, TA, R = get2d_AO_TA_R(ego_feat, enm_feat)
+            enemy_pos = enemy_sim.get_position()
+            enemy_rpy = enemy_sim.get_rpy()
 
-            # Ta_i^j — ego's angle advantage (AO in degrees, paper eq 20)
-            Ta_ij = ta_angle_advantage_fixed(np.rad2deg(AO))
+            q_ij = compute_body_x_q_los(ego_pos, ego_rpy, enemy_pos)
+            q_ji = compute_body_x_q_los(enemy_pos, enemy_rpy, ego_pos)
+            d_3d = compute_3d_range(ego_pos, enemy_pos)
 
-            # Td_i^j — distance advantage (km, paper eq 21)
-            Td_ij = td_distance_advantage(R)
+            Ta_ij = ta_angle_advantage_fixed(np.rad2deg(q_ij))
+            Td_ij = td_distance_advantage(d_3d)
+            Ta_ji = ta_angle_advantage_fixed(np.rad2deg(q_ji))
 
-            # Ta_j^i — enemy's angle advantage (TA in degrees, paper eq 20)
-            Ta_ji = ta_angle_advantage_fixed(np.rad2deg(TA))
-
-            Td_ji = Td_ij  # same distance
-
-            total += 1.0 * Ta_ij * Td_ij - 0.8 * Ta_ji * Td_ji
+            total += 1.0 * Ta_ij * Td_ij - 0.8 * Ta_ji * Td_ij
 
         return total
 

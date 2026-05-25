@@ -320,3 +320,19 @@ Implications:
   against Table 2: is it a body-frame LOS angle, a velocity-LOS angle, or
   the 2D horizontal AO?  The answer determines which candidate (if any)
   should replace the current formula.
+
+### Actual situation reward switch (completed)
+
+`_situation_reward()` has been switched from 2D AO/TA to 3D body-x q_LOS:
+
+- `q_ij = compute_body_x_q_los(ego_pos, ego_rpy, enemy_pos)` — LOS from ego
+  to enemy relative to ego body x-axis.
+- `q_ji = compute_body_x_q_los(enemy_pos, enemy_rpy, ego_pos)` — same from
+  enemy perspective.
+- Distance uses `compute_3d_range` (3D Euclidean) instead of horizontal-only R.
+- Ta/Td composition formula and weights (1.0 / 0.8) are unchanged.
+- Reward version updated to `fixed_ta_alt_eq17_3dlos_v1`.
+
+The 2D AO/TA formulation is preserved in `situation_reward_candidates.py`
+as `current_formula` for ablation comparisons.  `get2d_AO_TA_R()` is not
+deleted and remains available for other uses (entity observation, etc.).

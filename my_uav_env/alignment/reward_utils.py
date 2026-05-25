@@ -9,18 +9,20 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-REWARD_VERSION = "fixed_ta_alt_eq17_v1"
+REWARD_VERSION = "fixed_ta_alt_eq17_3dlos_v1"
 """Reward version identifier for logs and evaluation outputs.
 
-``fixed_ta_alt_eq17_v1`` means:
+``fixed_ta_alt_eq17_3dlos_v1`` means:
 
 1. situation reward Ta uses the ``fixed_ta_v1`` continuous, non-negative,
    normalized curve;
 2. altitude reward uses a pairwise eq.17-style curve with the high-altitude
-   0.1 tail.
+   0.1 tail;
+3. situation reward geometry has switched from 2D horizontal AO/TA to
+   3D body-x q_LOS and 3D Euclidean distance.
 
-Pass19-before logs are legacy reward. ``fixed_ta_v1`` logs should not be mixed
-with ``fixed_ta_alt_eq17_v1`` results.
+``fixed_ta_alt_eq17_v1`` and earlier logs should not be mixed with
+``fixed_ta_alt_eq17_3dlos_v1`` results.
 """
 
 

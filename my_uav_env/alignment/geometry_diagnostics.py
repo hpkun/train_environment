@@ -8,62 +8,17 @@ from __future__ import annotations
 
 import numpy as np
 
+from my_uav_env.alignment.los_geometry import (
+    angle_between_vectors_rad,
+    compute_body_x_q_los,
+    compute_velocity_q_los,
+)
 from my_uav_env.alignment.reward_utils import ta_angle_advantage_fixed, td_distance_advantage
 from my_uav_env.alignment.state_extractor import (
     _rotation_inertial_to_body,
     compute_q_los_placeholder,
 )
 from my_uav_env.utils import get2d_AO_TA_R
-
-
-# ---------------------------------------------------------------------------
-#  Low-level geometry helpers
-# ---------------------------------------------------------------------------
-
-def angle_between_vectors_rad(a: np.ndarray, b: np.ndarray) -> float:
-    """Return the 3D angle in [0, pi] between two vectors.
-
-    Returns 0.0 if either vector has near-zero norm.
-    """
-    a = np.asarray(a, dtype=np.float64)
-    b = np.asarray(b, dtype=np.float64)
-    a_norm = float(np.linalg.norm(a))
-    b_norm = float(np.linalg.norm(b))
-    if a_norm < 1e-9 or b_norm < 1e-9:
-        return 0.0
-    cos_angle = float(np.dot(a, b)) / (a_norm * b_norm)
-    return float(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
-
-
-def compute_body_x_q_los(
-    observer_pos: np.ndarray,
-    observer_rpy: np.ndarray,
-    target_pos: np.ndarray,
-) -> float:
-    """3D angle between the observer body x-axis and the LOS to target.
-
-    Uses ``_rotation_inertial_to_body()`` to rotate the relative position
-    into the observer's body frame, then returns ``compute_q_los_placeholder``.
-    Range: [0, pi].
-    """
-    rel_pos_body = _rotation_inertial_to_body(
-        float(observer_rpy[0]), float(observer_rpy[1]), float(observer_rpy[2]),
-    ) @ (np.asarray(target_pos, dtype=np.float64)
-         - np.asarray(observer_pos, dtype=np.float64))
-    return compute_q_los_placeholder(rel_pos_body)
-
-
-def compute_velocity_q_los(
-    observer_pos: np.ndarray,
-    observer_vel: np.ndarray,
-    target_pos: np.ndarray,
-) -> float:
-    """3D angle between the observer velocity vector and the LOS to target.
-
-    Range: [0, pi].  Returns 0.0 if distance or velocity is near-zero.
-    """
-    rel_pos = np.asarray(target_pos, dtype=np.float64) - np.asarray(observer_pos, dtype=np.float64)
-    return angle_between_vectors_rad(observer_vel, rel_pos)
 
 
 def compute_pairwise_3d_q_los(

@@ -385,10 +385,13 @@ GCAS 状态：
    - `geometry_diagnostics.py` 已用于对比 current AO/TA 与 strict body-frame q_los。
    - `situation_reward_candidates.py` 已新增 body-x 3D 和 velocity-LOS 3D 候选函数。
    - 在高度差场景下，2D AO/TA 与 3D q_LOS 已被诊断为不同（above-ahead: 2D=0° vs 3D≈11.3°）。
-   - 当前环境 `_situation_reward()` 尚未切换，2D AO/TA 是现状 baseline。
+   - 当前环境 `_situation_reward()` **已切换** 到 3D body-x q_LOS + 3D distance。
+   - `los_geometry.py` 提供 canonical `compute_body_x_q_los` / `compute_3d_range`。
+   - `get2d_AO_TA_R()` 公共函数未删除，仍可用于其它几何/观测用途。
+   - 2D AO/TA 候选公式保留在 `situation_reward_candidates.py` 供消融对比。
+   - Reward version 更新为 `fixed_ta_alt_eq17_3dlos_v1`。
    - 已修复 `_make_entity_vec` 中 AO_signed 的共线歧义：`side_flag==0` 时保留 unsigned AO，
-     避免正后方目标在 11 维 observation 中被错误表示为 0（与正前方混淆）。`get2d_AO_TA_R()`
-     公共函数未改，reward 行为未受影响。
+     避免正后方目标在 11 维 observation 中被错误表示为 0（与正前方混淆）。
 3. P1：核对 pitch/speed reward 的精确斜率与权重量级。
 4. P1：验证 `paper_state_extractor.py` 的旋转矩阵、alpha/beta、q_LOS 数值方向。
 5. P1：设计真正的 paper global state critic 输入。
