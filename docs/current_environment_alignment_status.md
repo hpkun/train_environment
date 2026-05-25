@@ -122,6 +122,11 @@ positions and does not expose Red positions. Remaining Blue policy items still
 need separate audit: AWACS fallback, `DOOMED_ALT` body-frame z handling, and
 whether the full rule policy matches the paper baseline.
 
+The no-target patrol is pre-boundary and speed-aware: it starts applying
+center-turn pressure before the 40 km battlefield edge and reduces cruise
+speed as boundary pressure increases. It still only uses Blue ownship position
+and does not impose a hard boundary, teleport, bounce, or termination rule.
+
 ## 7. ACMI battlefield boundary debug
 
 Tacview ACMI battlefield boundary visualization is available as an opt-in debug

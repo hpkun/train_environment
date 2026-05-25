@@ -74,7 +74,7 @@ def _boundary_patrol_heading_command(
     own_position: np.ndarray,
     current_heading: float,
     boundary_half_size: float = 40000.0,
-    boundary_margin: float = 8000.0,
+    boundary_margin: float = 18000.0,
 ) -> float:
     """Return no-target patrol heading command near the battlefield boundary.
 
@@ -83,18 +83,38 @@ def _boundary_patrol_heading_command(
     helper only uses ownship position and heading; it does not use enemy state.
     """
 
-    pos = np.asarray(own_position, dtype=np.float32)
-    if pos.shape[0] < 2:
-        return 0.0
-    x, y = float(pos[0]), float(pos[1])
-    inner_limit = boundary_half_size - boundary_margin
-    if abs(x) <= inner_limit and abs(y) <= inner_limit:
+    pressure = _boundary_patrol_pressure(
+        own_position, boundary_half_size, boundary_margin)
+    if pressure <= 0.0:
         return 0.0
 
+    pos = np.asarray(own_position, dtype=np.float32)
+    x, y = float(pos[0]), float(pos[1])
     center_bearing = np.arctan2(-y, -x)
     heading_error = (center_bearing - current_heading + np.pi) % (2 * np.pi) - np.pi
     heading_cmd = heading_error / np.deg2rad(10.0)
     return float(np.clip(heading_cmd, -1.0, 1.0))
+
+
+def _boundary_patrol_pressure(
+    own_position: np.ndarray,
+    boundary_half_size: float = 40000.0,
+    boundary_margin: float = 18000.0,
+) -> float:
+    """Return no-target boundary pressure for cruise patrol.
+
+    0 means safely inside the inner patrol area, 0..1 means approaching the
+    battlefield boundary, and >1 means outside the nominal battlefield.
+    """
+
+    pos = np.asarray(own_position, dtype=np.float32)
+    if pos.shape[0] < 2:
+        return 0.0
+    x, y = float(pos[0]), float(pos[1])
+    radial_distance = max(abs(x), abs(y))
+    inner_limit = boundary_half_size - boundary_margin
+    pressure = (radial_distance - inner_limit) / max(boundary_margin, 1e-6)
+    return float(np.clip(pressure, 0.0, 1.5))
 
 
 def _blue_cruise_heading_command(
@@ -122,6 +142,19 @@ def _blue_cruise_heading_command(
     our_ve = float(obs["velocity"][1])
     current_heading = np.arctan2(our_ve, our_vn)
     return _boundary_patrol_heading_command(own_position, current_heading)
+
+
+def _blue_cruise_speed_command(
+    own_position: np.ndarray | None = None,
+) -> float:
+    """Return internal velocity command for no-target cruise."""
+
+    if own_position is None:
+        return 1.0
+    pressure = _boundary_patrol_pressure(own_position)
+    if pressure <= 0.0:
+        return 1.0
+    return float(np.clip(1.0 - 0.8 * min(pressure, 1.0), 0.2, 1.0))
 
 
 # ==============================================================================
@@ -388,7 +421,8 @@ def _blue_pursuit_action_impl(
         cruise_pitch = np.clip(alt_error / 2000.0, -0.10, 0.12) + _TRIM_BASELINE
         heading_cmd = _blue_cruise_heading_command(
             obs, blue_id, own_position=own_position)
-        return _rescale(float(cruise_pitch), float(heading_cmd), 1.0)
+        vel_cmd = _blue_cruise_speed_command(own_position)
+        return _rescale(float(cruise_pitch), float(heading_cmd), float(vel_cmd))
 
     tgt = enemy_states[target_idx]
 
