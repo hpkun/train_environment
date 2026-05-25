@@ -96,4 +96,8 @@ Root compatibility shims (still retained):
    `train_attention_mappo.py --obs-adapter strict` or the
    `attention_1v1_strict_smoke` preset.
 5. **Design native global state critic** input (paper-style, not just flat concat).
-6. **Only then** proceed to MaskVectorGenerator / BRMA-MAPPO.
+6. **BRMA preparation pass 1** adds standalone `brma.mask_generator`
+   infrastructure for type-aware / uniform random masks. It is still not wired
+   into `AttentionActor` or `train_attention_mappo.py`.
+7. **Only after paper mask formulas are verified** proceed to
+   MaskVectorGenerator integration / BRMA-MAPPO.
