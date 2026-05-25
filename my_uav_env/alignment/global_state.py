@@ -16,6 +16,7 @@ def flatten_strict_team_observations(
     team_obs: dict,
     agent_ids: list[str] | None = None,
     include_masks: bool = True,
+    normalize: bool = False,
 ) -> np.ndarray:
     """Flatten strict team observations into a 1-D critic input vector.
 
@@ -25,6 +26,7 @@ def flatten_strict_team_observations(
         agent_ids: ordering of agent IDs.  If None, uses ``sorted(team_obs.keys())``.
         include_masks: if True, append entity_mask (float32) after each agent's
             flattened entities.
+        normalize: if True, apply ``normalize_strict_entities`` before flattening.
 
     Returns:
         1-D float32 array.
@@ -42,10 +44,17 @@ def flatten_strict_team_observations(
                 f"agent_id {aid!r} not found in team_obs "
                 f"(available: {sorted(team_obs.keys())})")
         entities, mask, _meta = team_obs[aid]
+        if normalize:
+            entities = _norm_entities(entities, mask)
         parts.append(np.asarray(entities, dtype=np.float32).ravel())
         if include_masks:
             parts.append(np.asarray(mask, dtype=np.float32).ravel())
     return np.concatenate(parts).astype(np.float32)
+
+
+def _norm_entities(entities, mask):
+    from my_uav_env.alignment.normalization import normalize_strict_entities
+    return normalize_strict_entities(entities, mask)
 
 
 def infer_strict_team_global_state_dim(
@@ -73,6 +82,7 @@ def build_strict_team_global_state(
     num_blue: int,
     agent_prefix: str = "red",
     include_masks: bool = True,
+    normalize: bool = False,
 ) -> np.ndarray:
     """Build a fixed-dim strict team global state and validate the shape.
 
@@ -81,6 +91,7 @@ def build_strict_team_global_state(
         num_red, num_blue: team sizes.
         agent_prefix: ``"red"`` or ``"blue"``.
         include_masks: forwarded to ``flatten_strict_team_observations``.
+        normalize: forwarded to ``flatten_strict_team_observations``.
 
     Returns:
         1-D float32 array whose length equals
@@ -92,7 +103,8 @@ def build_strict_team_global_state(
         num_red, num_blue, entity_dim=10, include_masks=include_masks,
     )
     flat = flatten_strict_team_observations(team_obs, agent_ids=agent_ids,
-                                            include_masks=include_masks)
+                                            include_masks=include_masks,
+                                            normalize=normalize)
     if flat.shape[0] != expected_dim:
         raise ValueError(
             f"Expected global state dim {expected_dim}, got {flat.shape[0]}. "

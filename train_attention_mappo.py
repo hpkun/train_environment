@@ -25,6 +25,7 @@ from my_uav_env.alignment.global_state import (
     describe_strict_global_state_layout,
     infer_strict_team_global_state_dim,
 )
+from my_uav_env.alignment.normalization import normalize_strict_entities
 from my_uav_env.alignment.obs_adapter import build_paper_entity_observation_from_env_obs
 from my_uav_env.alignment.reward_utils import REWARD_VERSION
 from rule_based_agent import blue_coordinated_actions
@@ -291,6 +292,7 @@ def _build_global_obs_for_env(
             num_blue=config.num_blue,
             agent_prefix="red",
             include_masks=True,
+            normalize=True,
         ).astype(np.float32)
 
     raise ValueError(f"Unknown critic_state: {config.critic_state!r}")
@@ -573,6 +575,8 @@ def main():
             and config.checkpoint_dir == "checkpoints_attention"):
         print("[WARN] strict-global uses different critic input dimension; "
               "use a separate checkpoint_dir.")
+    if config.obs_adapter == "strict" or config.critic_state == "strict-global":
+        print("Strict observation normalization: enabled")
 
     actor_opt = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
     critic_opt = torch.optim.Adam(critic.parameters(), lr=config.critic_lr)
@@ -691,6 +695,8 @@ def main():
                                     entities_np, dtype=np.float32)
                                 entity_mask_np = np.asarray(
                                     entity_mask_np, dtype=np.int64)
+                                entities_np = normalize_strict_entities(
+                                    entities_np, entity_mask_np)
                             else:
                                 entities_np, entity_mask_np = _zero_entity_like(
                                     obs_np, config.obs_adapter)

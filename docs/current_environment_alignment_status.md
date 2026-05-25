@@ -55,7 +55,7 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | Ta scale | Current `fixed_ta_v1` uses `[0, 1]` scale; paper eq.20 may use `10` first segment | P1 — needs ablation, not silent swap |
 | q_LOS definition | Current choice is body-x LOS angle; velocity-q candidate exists in `situation_reward_candidates.py` | P1 — pending paper confirmation |
 | Observation space | Still 11-dim engineering Dict, not strict Table 1 / Table 2 10-dim | P1 |
-| Strict paper observation | `train_attention_mappo.py --obs-adapter strict` can use strict 10-dim actor observations via env worker method calls | P1 |
+| Strict paper observation | `train_attention_mappo.py --obs-adapter strict` uses strict 10-dim actor observations with normalization | P1 |
 | Strict observation API | `UavCombatEnv.get_strict_entity_observation()` and `get_strict_team_observations()` exposed; `reset()`/`step()` still return 11-dim engineering Dict | P1 |
 | Critic global state | `train_attention_mappo.py --critic-state strict-global` wires strict team global state into critic; `--critic-state engineering` keeps legacy flattened obs | P1 — needs training validation |
 | Global state candidate | `global_state.py` wired into attention training via `--critic-state strict-global` (2v2 dim=88 vs engineering 106) | P1 |
