@@ -279,3 +279,44 @@ Current status:
 - No reward behaviour has been changed by this diagnostic pass.
 - Future geometry alignment should be treated as a separate pass from Ta
   scale alignment (see §4 item 3).
+
+## 9. 3D situation reward candidates
+
+A new module `my_uav_env/alignment/situation_reward_candidates.py` provides
+three candidate situation-reward formulations for ablation experiments:
+
+| Formulation | q_ij definition | 3D? |
+|---|---|---|
+| `current_formula` | 2D AO from `get2d_AO_TA_R` (horizontal only) | no |
+| `3d_body_x_candidate` | angle between LOS and body x-axis | yes |
+| `3d_velocity_candidate` | angle between LOS and velocity vector | yes |
+
+All three use the same Ta/Td decomposition (1.0 / 0.8 weights) from the
+current environment.  The difference is **which angle** feeds into `Ta()`.
+
+Key observations from the four canonical geometry cases:
+
+| Case | current (2D) | body-x (3D) | velocity (3D) | Note |
+|---|---|---|---|---|
+| Head-on same alt | +0.200 | +0.200 | +0.200 | all identical when level |
+| Behind same alt | +1.000 | 0.000 | 0.000 | 2D AO=0° (collinear→side_flag=0) vs 3D q=180° (Ta=0) |
+| Right side same alt | −0.800 | −0.800 | −0.800 | all identical when level |
+| **Above ahead** | **+0.200** | **+0.134** | **+0.134** | 2D misses 11.3° elevation; 3D correctly penalises |
+
+Implications:
+
+- When both aircraft are level at the same altitude and the ego is flying
+  straight, all three formulations agree.
+- When there is an altitude difference, the 3D candidates produce lower
+  ego-advantage values because the non-zero elevation angle reduces `Ta`.
+- The "behind" case exposes a known side_flag=0 edge case in `get2d_AO_TA_R`:
+  when velocity and LOS are exactly collinear in the horizontal plane, the
+  signed AO collapses to 0 regardless of the unsigned angle (0° or 180°).
+  The 3D candidates do not have this issue because they compute the full 3D
+  angle without a side-flag convention.
+- **None of these candidates are wired into `_situation_reward()`.** The
+  environment still uses the current 2D AO/TA formulation.
+- Before switching, the paper's `q_Los` definition in eq.20 must be confirmed
+  against Table 2: is it a body-frame LOS angle, a velocity-LOS angle, or
+  the 2D horizontal AO?  The answer determines which candidate (if any)
+  should replace the current formula.

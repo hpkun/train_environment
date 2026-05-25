@@ -8,12 +8,96 @@ from __future__ import annotations
 
 import numpy as np
 
+from my_uav_env.alignment.reward_utils import ta_angle_advantage_fixed, td_distance_advantage
 from my_uav_env.alignment.state_extractor import (
     _rotation_inertial_to_body,
     compute_q_los_placeholder,
 )
 from my_uav_env.utils import get2d_AO_TA_R
 
+
+# ---------------------------------------------------------------------------
+#  Low-level geometry helpers
+# ---------------------------------------------------------------------------
+
+def angle_between_vectors_rad(a: np.ndarray, b: np.ndarray) -> float:
+    """Return the 3D angle in [0, pi] between two vectors.
+
+    Returns 0.0 if either vector has near-zero norm.
+    """
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    a_norm = float(np.linalg.norm(a))
+    b_norm = float(np.linalg.norm(b))
+    if a_norm < 1e-9 or b_norm < 1e-9:
+        return 0.0
+    cos_angle = float(np.dot(a, b)) / (a_norm * b_norm)
+    return float(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
+
+
+def compute_body_x_q_los(
+    observer_pos: np.ndarray,
+    observer_rpy: np.ndarray,
+    target_pos: np.ndarray,
+) -> float:
+    """3D angle between the observer body x-axis and the LOS to target.
+
+    Uses ``_rotation_inertial_to_body()`` to rotate the relative position
+    into the observer's body frame, then returns ``compute_q_los_placeholder``.
+    Range: [0, pi].
+    """
+    rel_pos_body = _rotation_inertial_to_body(
+        float(observer_rpy[0]), float(observer_rpy[1]), float(observer_rpy[2]),
+    ) @ (np.asarray(target_pos, dtype=np.float64)
+         - np.asarray(observer_pos, dtype=np.float64))
+    return compute_q_los_placeholder(rel_pos_body)
+
+
+def compute_velocity_q_los(
+    observer_pos: np.ndarray,
+    observer_vel: np.ndarray,
+    target_pos: np.ndarray,
+) -> float:
+    """3D angle between the observer velocity vector and the LOS to target.
+
+    Range: [0, pi].  Returns 0.0 if distance or velocity is near-zero.
+    """
+    rel_pos = np.asarray(target_pos, dtype=np.float64) - np.asarray(observer_pos, dtype=np.float64)
+    return angle_between_vectors_rad(observer_vel, rel_pos)
+
+
+def compute_pairwise_3d_q_los(
+    ego_pos: np.ndarray,
+    ego_vel: np.ndarray,
+    ego_rpy: np.ndarray,
+    target_pos: np.ndarray,
+    target_vel: np.ndarray,
+    target_rpy: np.ndarray,
+) -> dict:
+    """Compute all three q_LOS definitions for both ego and target.
+
+    Returns a dict with keys ego_body_x_q_{rad,deg}, target_body_x_q_{rad,deg},
+    ego_velocity_q_{rad,deg}, target_velocity_q_{rad,deg}.
+    """
+    ego_body_x = compute_body_x_q_los(ego_pos, ego_rpy, target_pos)
+    tgt_body_x = compute_body_x_q_los(target_pos, target_rpy, ego_pos)
+    ego_vel_q = compute_velocity_q_los(ego_pos, ego_vel, target_pos)
+    tgt_vel_q = compute_velocity_q_los(target_pos, target_vel, ego_pos)
+    return {
+        "ego_body_x_q_rad": ego_body_x,
+        "target_body_x_q_rad": tgt_body_x,
+        "ego_velocity_q_rad": ego_vel_q,
+        "target_velocity_q_rad": tgt_vel_q,
+        "ego_body_x_q_deg": float(np.rad2deg(ego_body_x)),
+        "target_body_x_q_deg": float(np.rad2deg(tgt_body_x)),
+        "ego_velocity_q_deg": float(np.rad2deg(ego_vel_q)),
+        "target_velocity_q_deg": float(np.rad2deg(tgt_vel_q)),
+    }
+
+
+# ---------------------------------------------------------------------------
+#  2D AO/TA (current environment) and body LOS
+# ---------------------------------------------------------------------------
 
 def make_feat_2d(pos_neu: np.ndarray, vel_neu: np.ndarray) -> np.ndarray:
     """Convert NEU (z-up) position / velocity to the 6-dim feature used by get2d_AO_TA_R.
@@ -104,6 +188,10 @@ def compute_body_los_angles(
     }
 
 
+# ---------------------------------------------------------------------------
+#  Diagnostic print helper
+# ---------------------------------------------------------------------------
+
 def describe_geometry_case(
     name: str,
     ego_pos: np.ndarray,
@@ -111,10 +199,14 @@ def describe_geometry_case(
     ego_rpy: np.ndarray,
     tgt_pos: np.ndarray,
     tgt_vel: np.ndarray,
+    tgt_rpy: np.ndarray,
 ) -> str:
     """Return a human-readable diagnostic block for one geometry case."""
     ao_ta = compute_current_ao_ta_r(ego_pos, ego_vel, tgt_pos, tgt_vel)
     los = compute_body_los_angles(ego_pos, ego_rpy, tgt_pos)
+    q3d = compute_pairwise_3d_q_los(
+        ego_pos, ego_vel, ego_rpy, tgt_pos, tgt_vel, tgt_rpy,
+    )
     lines = [
         f"=== {name} ===",
         f"  Ego pos (NEU):    [{ego_pos[0]:.0f}, {ego_pos[1]:.0f}, {ego_pos[2]:.0f}]",
@@ -123,19 +215,29 @@ def describe_geometry_case(
         f"{np.rad2deg(ego_rpy[1]):.1f}, {np.rad2deg(ego_rpy[2]):.1f}]",
         f"  Tgt pos (NEU):    [{tgt_pos[0]:.0f}, {tgt_pos[1]:.0f}, {tgt_pos[2]:.0f}]",
         f"  Tgt vel (NEU):    [{tgt_vel[0]:.0f}, {tgt_vel[1]:.0f}, {tgt_vel[2]:.0f}]",
+        f"  Tgt rpy (deg):    [{np.rad2deg(tgt_rpy[0]):.1f}, "
+        f"{np.rad2deg(tgt_rpy[1]):.1f}, {np.rad2deg(tgt_rpy[2]):.1f}]",
         f"  --- current 2D AO/TA (horizontal plane only) ---",
         f"  AO = {ao_ta['AO_deg']:+.2f} deg",
         f"  TA = {ao_ta['TA_deg']:+.2f} deg",
         f"  R  = {ao_ta['R_m']:.1f} m",
-        f"  --- body-frame 3D LOS angles ---",
+        f"  --- body-frame 3D LOS angles (ego → target) ---",
         f"  x_body = {los['x_body']:.4f}, y_body = {los['y_body']:.4f}, "
         f"z_body = {los['z_body']:.4f}",
         f"  theta_los (elevation) = {los['theta_los_deg']:+.3f} deg",
         f"  psi_los   (azimuth)    = {los['psi_los_deg']:+.3f} deg",
         f"  q_los_body_x           = {los['q_los_body_x_deg']:+.3f} deg",
+        f"  --- 3D q_LOS candidates ---",
+        f"  ego body-x q      = {q3d['ego_body_x_q_deg']:+.3f} deg",
+        f"  target body-x q   = {q3d['target_body_x_q_deg']:+.3f} deg",
+        f"  ego velocity q    = {q3d['ego_velocity_q_deg']:+.3f} deg",
+        f"  target velocity q = {q3d['target_velocity_q_deg']:+.3f} deg",
         f"  --- note ---",
-        "  AO/TA from get2d_AO_TA_R uses 2D horizontal geometry;",
-        "  q_los_body_x is the 3D angle between LOS and ego body x-axis.",
-        "  They are NOT equivalent when there is a vertical offset between aircraft.",
+        "  Current AO/TA = 2D horizontal geometry (get2d_AO_TA_R).",
+        "  body-x q      = 3D angle between LOS and body x-axis.",
+        "  velocity q    = 3D angle between LOS and velocity vector.",
+        "  Which of these corresponds to the paper's q_LOS (eq.20) needs",
+        "  confirmation against the paper's Table 2 variable definitions.",
+        "  They are NOT equivalent when there is a vertical offset.",
     ]
     return "\n".join(lines)

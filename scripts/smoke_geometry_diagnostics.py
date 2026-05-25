@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from my_uav_env.alignment.geometry_diagnostics import (
     compute_body_los_angles,
     compute_current_ao_ta_r,
+    compute_pairwise_3d_q_los,
     describe_geometry_case,
 )
 
@@ -28,10 +29,11 @@ def main() -> None:
     ego_rpy1 = np.array([0.0, 0.0, 0.0])
     tgt_pos1 = np.array([10000.0, 0.0, 6000.0])
     tgt_vel1 = np.array([-300.0, 0.0, 0.0])
+    tgt_rpy1 = np.array([0.0, 0.0, np.pi])
 
     print(describe_geometry_case("Case 1: head-on, target ahead",
                                  ego_pos1, ego_vel1, ego_rpy1,
-                                 tgt_pos1, tgt_vel1))
+                                 tgt_pos1, tgt_vel1, tgt_rpy1))
     print()
 
     # ---- Case 2: target behind ----
@@ -40,10 +42,11 @@ def main() -> None:
     ego_rpy2 = np.array([0.0, 0.0, 0.0])
     tgt_pos2 = np.array([-10000.0, 0.0, 6000.0])
     tgt_vel2 = np.array([-300.0, 0.0, 0.0])
+    tgt_rpy2 = np.array([0.0, 0.0, np.pi])
 
     print(describe_geometry_case("Case 2: target behind",
                                  ego_pos2, ego_vel2, ego_rpy2,
-                                 tgt_pos2, tgt_vel2))
+                                 tgt_pos2, tgt_vel2, tgt_rpy2))
     print()
 
     # ---- Case 3: target right side ----
@@ -52,10 +55,11 @@ def main() -> None:
     ego_rpy3 = np.array([0.0, 0.0, 0.0])
     tgt_pos3 = np.array([0.0, 10000.0, 6000.0])
     tgt_vel3 = np.array([0.0, -300.0, 0.0])
+    tgt_rpy3 = np.array([0.0, 0.0, -np.pi / 2])
 
     print(describe_geometry_case("Case 3: target right side",
                                  ego_pos3, ego_vel3, ego_rpy3,
-                                 tgt_pos3, tgt_vel3))
+                                 tgt_pos3, tgt_vel3, tgt_rpy3))
     print()
 
     # ---- Case 4: target above ahead ----
@@ -64,10 +68,11 @@ def main() -> None:
     ego_rpy4 = np.array([0.0, 0.0, 0.0])
     tgt_pos4 = np.array([10000.0, 0.0, 8000.0])
     tgt_vel4 = np.array([-300.0, 0.0, 0.0])
+    tgt_rpy4 = np.array([0.0, 0.0, np.pi])
 
     print(describe_geometry_case("Case 4: target above ahead",
                                  ego_pos4, ego_vel4, ego_rpy4,
-                                 tgt_pos4, tgt_vel4))
+                                 tgt_pos4, tgt_vel4, tgt_rpy4))
     print()
 
     # ---- Assertions ----
@@ -89,7 +94,7 @@ def main() -> None:
     assert los4["theta_los_deg"] > 0.0
 
     # All AO/TA/R finite
-    for case_name, ep, ev, tp, tv in [
+    for _case_name, ep, ev, tp, tv in [
         ("head-on", ego_pos1, ego_vel1, tgt_pos1, tgt_vel1),
         ("behind", ego_pos2, ego_vel2, tgt_pos2, tgt_vel2),
         ("right", ego_pos3, ego_vel3, tgt_pos3, tgt_vel3),
@@ -100,6 +105,17 @@ def main() -> None:
         assert np.isfinite(ao_ta["TA_rad"])
         assert np.isfinite(ao_ta["R_m"])
         assert ao_ta["R_m"] > 0.0
+
+    # All 3D q_LOS finite
+    for _case_name, ep, ev, er, tp, tv, tr in [
+        ("head-on", ego_pos1, ego_vel1, ego_rpy1, tgt_pos1, tgt_vel1, tgt_rpy1),
+        ("behind", ego_pos2, ego_vel2, ego_rpy2, tgt_pos2, tgt_vel2, tgt_rpy2),
+        ("right", ego_pos3, ego_vel3, ego_rpy3, tgt_pos3, tgt_vel3, tgt_rpy3),
+        ("above", ego_pos4, ego_vel4, ego_rpy4, tgt_pos4, tgt_vel4, tgt_rpy4),
+    ]:
+        q3d = compute_pairwise_3d_q_los(ep, ev, er, tp, tv, tr)
+        for key, val in q3d.items():
+            assert np.isfinite(val), f"{_case_name} {key} not finite: {val}"
 
     # Case 1 same-alt: 2D AO and body q_los should be close
     ao_ta1 = compute_current_ao_ta_r(ego_pos1, ego_vel1, tgt_pos1, tgt_vel1)
@@ -112,9 +128,6 @@ def main() -> None:
     ao_ta4 = compute_current_ao_ta_r(ego_pos4, ego_vel4, tgt_pos4, tgt_vel4)
     los4_q = los4["q_los_body_x_deg"]
     ao4_unsigned = abs(ao_ta4["AO_deg"])
-    # With a 2000 m altitude difference over 10000 m horizontal, the
-    # 3D elevation is about arctan(2000/10000) ≈ 11.3°.  The 2D AO sees
-    # pure head-on (0°) while the 3D q_los sees the vertical offset.
     assert abs(ao4_unsigned - los4_q) > 0.5, (
         f"alt-diff: 2D AO={ao4_unsigned:.2f} and 3D q_los={los4_q:.2f} "
         f"should differ due to vertical offset")
