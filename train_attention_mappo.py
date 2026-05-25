@@ -327,6 +327,12 @@ def _write_results(results_log: list[dict], results_file: str):
             writer.writerow(row.values())
 
 
+def _ensure_parent_dir(path: str):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 def main():
     args = parse_args_attention()
     config = make_config_from_args(args)
@@ -338,6 +344,7 @@ def main():
     entity_dim = 11 if config.obs_adapter == "current" else 10
     os.makedirs(config.checkpoint_dir, exist_ok=True)
 
+    _ensure_parent_dir(config.log_file)
     csv_file = open(config.log_file, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow([

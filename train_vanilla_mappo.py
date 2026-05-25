@@ -1126,6 +1126,12 @@ def _select_device(device_arg: str) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _ensure_parent_dir(path: str):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 def main():
     args = parse_args()
     config = make_config_from_args(args)
@@ -1139,6 +1145,7 @@ def main():
     os.makedirs(config.checkpoint_dir, exist_ok=True)
 
     # ---- 持久化：CSV 日志 ----
+    _ensure_parent_dir(config.log_file)
     csv_file = open(config.log_file, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["Iteration", "Step", "ActorLoss", "CriticLoss",
