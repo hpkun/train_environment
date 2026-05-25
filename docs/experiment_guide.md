@@ -190,3 +190,34 @@ python train_attention_mappo.py --obs-adapter paper-placeholder --num-red 1 --nu
 - `scripts/smoke_paper_state_extractor_env.py` 会打印每个 entity 的物理字段，用于本地检查数值方向和量级。
 - Codex 不运行该脚本，用户本地运行。
 - 该模块尚未接入训练；后续需要先验证数值合理性，再决定是否让 `train_attention_mappo.py` 使用它。
+
+## 15. MAPPO-Attention 批量评估
+
+- 已新增 `evaluate_attention_mappo.py`。
+- 它评估 attention actor checkpoint，不生成 ACMI。
+- 支持 `--obs-adapter current` / `--obs-adapter paper-placeholder`。
+- checkpoint 的 `entity_dim` 必须和 `obs_adapter` 匹配。
+- 仍未实现 BRMA mask。
+
+current adapter 评估模板：
+
+```powershell
+conda activate brmamappo
+python evaluate_attention_mappo.py --checkpoint checkpoints_attention/attention_actor_best.pt --obs-adapter current --num-red 2 --num-blue 2 --episodes 20 --max-steps 1400 --device auto --output results/eval_attention_2v2.csv
+```
+
+paper-placeholder adapter 评估模板：
+
+```powershell
+conda activate brmamappo
+python evaluate_attention_mappo.py --checkpoint checkpoints_attention_paper_placeholder/attention_actor_best.pt --obs-adapter paper-placeholder --num-red 2 --num-blue 2 --episodes 20 --max-steps 1400 --device auto --output results/eval_attention_paper_placeholder_2v2.csv
+```
+
+随机 smoke 示例：
+
+```powershell
+conda activate brmamappo
+python evaluate_attention_mappo.py --random --obs-adapter current --num-red 1 --num-blue 1 --episodes 2 --max-steps 10 --device cpu --output results/smoke_eval_attention.csv
+```
+
+这条 smoke 命令会触发 JSBSim 环境 reset，Codex 不运行；由本地用户运行。
