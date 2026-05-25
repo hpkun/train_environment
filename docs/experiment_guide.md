@@ -178,7 +178,19 @@ python train_attention_mappo.py --obs-adapter paper-placeholder --num-red 1 --nu
 
 ## 14. Strict paper observation prototype
 
-- 已新增 `paper_state_extractor.py`。
+- `UavCombatEnv` 已暴露 `get_strict_entity_observation(agent_id)` 和
+  `get_strict_team_observations(team)`。
+- `reset()`/`step()` 默认 observation 仍是 11 维工程 Dict，不受影响。
+- strict API 后续可用于 `train_attention_mappo.py` 的 paper-strict adapter。
+
+smoke 命令（触发 JSBSim，Codex 不运行，用户本地运行）：
+
+```powershell
+conda activate brmamappo
+python scripts/smoke_strict_observation_env.py
+```
+
+- `paper_state_extractor.py` 仍在 `my_uav_env/alignment/state_extractor.py` 中。
 - 它尝试从 simulator/native state 构造论文 Table 1/Table 2 的 10 维观测。
 - 当前 `alpha/beta` 可能仍是 placeholder 0，除非 simulator 已提供对应属性。
 - pass13 后 extractor 会尝试从 JSBSim property 读取 `aero/alpha-rad`、`aero/alpha-deg`、`aero/beta-rad`、`aero/beta-deg`。

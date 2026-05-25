@@ -56,6 +56,7 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | q_LOS definition | Current choice is body-x LOS angle; velocity-q candidate exists in `situation_reward_candidates.py` | P1 — pending paper confirmation |
 | Observation space | Still 11-dim engineering Dict, not strict Table 1 / Table 2 10-dim | P1 |
 | Strict paper observation | `state_extractor.py` prototype exists but not wired into training | P1 |
+| Strict observation API | `UavCombatEnv.get_strict_entity_observation()` and `get_strict_team_observations()` exposed; `reset()`/`step()` still return 11-dim engineering Dict | P1 |
 | Critic global state | Still flattened red observations concat, not native paper global state | P1 |
 | Blue rule policy | Engineering implementation; not guaranteed identical to paper script | P2 |
 | `num_missiles_per_plane` | Default `999` (no limit); paper does not specify a fixed value | P2 |

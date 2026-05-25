@@ -1358,6 +1358,42 @@ class UavCombatEnv(gymnasium.Env):
         for aid, sim in self.red_planes.items():
             yield aid, sim
 
+    # ------------------------------------------------------------------
+    #  Strict paper observation API (optional, does not affect reset/step)
+    # ------------------------------------------------------------------
+
+    def get_strict_entity_observation(self, agent_id: str):
+        """Return strict 10-dim entity observation for one agent.
+
+        This is an optional paper-aligned observation API.  It does not affect
+        ``reset()`` / ``step()`` outputs or ``observation_space``.
+
+        Returns:
+            entities: np.ndarray, shape (N_entities, 10)
+            mask:     np.ndarray, shape (N_entities,)
+            meta:     dict
+        """
+        from my_uav_env.alignment.state_extractor import \
+            build_strict_paper_entity_observation
+        return build_strict_paper_entity_observation(self, agent_id)
+
+    def get_strict_team_observations(self, team: str = "red") -> dict:
+        """Return strict 10-dim observations for every agent on a team.
+
+        Args:
+            team: ``"red"`` or ``"blue"``.
+
+        Returns:
+            dict mapping agent_id → (entities, mask, meta).
+        """
+        if team not in ("red", "blue"):
+            raise ValueError(f"team must be 'red' or 'blue', got {team!r}")
+        agent_ids = self.red_ids if team == "red" else self.blue_ids
+        result = {}
+        for aid in agent_ids:
+            result[aid] = self.get_strict_entity_observation(aid)
+        return result
+
     def _make_init_state(self, color: str, index: int) -> dict:
         """Strict paper baseline (Table 4): head-on at exactly 10 km, altitude 20 000 ft.
 
