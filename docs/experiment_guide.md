@@ -224,13 +224,18 @@ python evaluate_attention_mappo.py --random --obs-adapter current --num-red 1 --
 
 ## 16. Reward version 标记
 
-pass19 后，当前 reward version 为 `fixed_ta_v1`。
+当前 reward version 为 `fixed_ta_alt_eq17_3dlos_v1`。
 
-`fixed_ta_v1` 表示 situation reward 中的 Ta 角度优势函数已经从旧的分段实现切换为连续、非负、归一化版本。旧实现会在 15 度附近产生负值和不连续跳变，因此 pass19 前后的训练日志不应直接混合比较。
+完整的环境对齐状态见 [docs/current_environment_alignment_status.md](current_environment_alignment_status.md)。
+
+`fixed_ta_alt_eq17_3dlos_v1` 表示：
+
+1. Ta 使用连续非负归一化版本；
+2. altitude reward 使用 pairwise eq.17-style（含 high-altitude 0.1 tail）；
+3. situation reward 已从 2D 水平面 AO/TA 切换为 3D body-x q_LOS + 3D distance。
 
 注意：
 
-- pass19 前生成的 `vanilla_training_log.csv`、`attention_training_log.csv` 或评估 CSV 应视为 legacy reward。
-- pass20 后，训练和批量评估 CSV 会追加 `RewardVersion` 字段。
-- 新实验建议使用带版本名的日志文件，例如 `vanilla_fixed_ta_v1.csv`、`attention_fixed_ta_v1.csv`。
-- 如果后续确认论文原始实验使用 10 倍 Ta 量级，应另开 reward-scale ablation，不要和 `fixed_ta_v1` baseline 混合。
+- 不要与 `fixed_ta_v1`、`fixed_ta_alt_eq17_v1`、或 legacy reward 日志混合比较。
+- 新实验建议使用带版本名的日志文件，例如 `vanilla_3dlos_v1.csv`。
+- 如果后续需要 paper Ta scale (10×) ablation，应另开 reward-scale 实验，不要与 `fixed_ta_alt_eq17_3dlos_v1` baseline 混合。

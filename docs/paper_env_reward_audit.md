@@ -1,14 +1,18 @@
 # Paper environment/reward audit
 
+> **Current status**: see [docs/current_environment_alignment_status.md](current_environment_alignment_status.md)
+> for the up-to-date alignment summary.  Earlier passes recorded in this audit are
+> historical context only.
+
 Detailed reward formula correction plan is in [docs/reward_formula_alignment_plan.md](reward_formula_alignment_plan.md).
 
 本文档用于 Paper alignment pass 17：对照论文 §2 的环境、观测、动作与奖励定义，审计当前项目实现状态。本文只记录差异与建议优先级，不修改环境、训练逻辑或 BRMA 相关代码。
 
 ## 结论摘要
 
-当前项目已经完成了一批低耦合对齐项：雷达最大探测距离的 RCS 四次方根关系、导弹锁定/发射间隔、导弹命中概率、roll/altitude/boundary reward 的一部分公式修正，以及训练/评估日志指标扩展。
+当前项目已经完成了一批低耦合对齐项：雷达最大探测距离的 RCS 四次方根关系、导弹锁定/发射间隔、导弹命中概率、roll/altitude/boundary reward 的公式修正，situation reward 已切换到 3D body-x q_LOS，以及训练/评估日志指标扩展。
 
-仍需重点处理的高优先级问题是 `_situation_reward()`。当前角度优势函数第一段为 `1.0`，而论文 eq.20 中应核对是否为 `10`；同时当前 4 到 15 度分段公式会出现负值，并在 15 度附近出现不连续跳变。该问题会直接影响态势奖励量级和训练信号，建议在下一轮优先修正。
+仍需重点关注的问题：Ta scale 仍为归一化 `[0,1]`（论文 eq.20 可能为 `10`）；strict Table 1/Table 2 observation 尚未接入训练；critic global state 尚未按论文设计。
 
 ## 审计优先级定义
 
