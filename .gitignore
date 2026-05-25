@@ -12,6 +12,10 @@ smoke_signed_ao_checkpoints/
 results/smoke_*.csv
 results
 logs/
+checkpoints/vanilla_actor_best_reward.pt
+checkpoints/centralized_critic_best_reward.pt
+checkpoints/vanilla_actor_best_winrate.pt
+checkpoints/centralized_critic_best_winrate.pt
 checkpoints/vanilla_1v1_smoke/
 checkpoints/vanilla_2v2_smoke/
 checkpoints/vanilla_2v2_main/

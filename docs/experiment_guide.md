@@ -35,6 +35,11 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe train_vanilla_mappo.py
 - `vanilla_training_log.csv`
 - `results/vanilla_mappo_results.csv`
 - `checkpoints/`
+  - `vanilla_actor_latest_*.pt` / `centralized_critic_latest_*.pt` — 每 10 iter 轮转 (保留最新 5 个)
+  - `vanilla_actor_best_reward.pt` / `centralized_critic_best_reward.pt` — 近期平均奖励最高
+  - `vanilla_actor_best_winrate.pt` / `centralized_critic_best_winrate.pt` — 近期胜率最高 (reward tie-breaker)
+  - `vanilla_actor_best.pt` / `centralized_critic_best.pt` — best_winrate 的兼容别名
+  - `vanilla_actor_final.pt` / `centralized_critic_final.pt` — 训练结束最终模型
 
 训练默认 `enable_blue_gcas=False`。
 
@@ -325,3 +330,19 @@ python train_attention_mappo.py --preset attention_1v1_strict_smoke
 ```
 
 This command triggers JSBSim/env reset and is for local user runs only; Codex does not run it.
+
+## 19. Blue no-target cruise boundary patrol
+
+Blue rule policy target pursuit is still based on its existing observation and
+target-selection logic. It has not been given radar-blind red-position tracking.
+
+When Blue has no valid target, the old cruise branch keeps the current heading.
+In Tacview this can look like Blue never turns back and eventually leaves the
+battlefield. `rule_based_agent.py` now has an optional boundary patrol helper
+for this no-target cruise case. The helper turns toward the battlefield center
+only when the caller supplies Blue ownship position and Blue is near the
+boundary.
+
+Current training and evaluation entry points do not pass `own_position` yet, so
+the new helper is available for a later integration pass without changing the
+existing training behavior.

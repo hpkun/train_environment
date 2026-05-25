@@ -101,3 +101,21 @@ Root compatibility shims (still retained):
    into `AttentionActor` or `train_attention_mappo.py`.
 7. **Only after paper mask formulas are verified** proceed to
    MaskVectorGenerator integration / BRMA-MAPPO.
+
+## 6. Blue no-target cruise boundary patrol
+
+The old blue no-target cruise behavior kept `heading_cmd = 0.0`, which means
+"keep current heading" in the rule-agent internal convention. If no red target
+was selected, Blue could therefore continue straight until it crossed the
+battlefield boundary.
+
+`rule_based_agent.py` now provides a boundary patrol helper for no-target
+cruise:
+
+- `_boundary_patrol_heading_command(own_position, current_heading, ...)`
+- `_blue_cruise_heading_command(obs, blue_id, own_position=None)`
+
+This helper only uses Blue ownship position and velocity-derived heading. It
+does not use enemy state and does not give Blue radar-blind target tracking.
+The default training/evaluation call sites do not pass `own_position` yet, so
+old behavior is preserved unless the caller explicitly supplies own positions.
