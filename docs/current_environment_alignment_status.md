@@ -59,7 +59,7 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | Strict observation API | `UavCombatEnv.get_strict_entity_observation()` and `get_strict_team_observations()` exposed; `reset()`/`step()` still return 11-dim engineering Dict | P1 |
 | Critic global state | `train_attention_mappo.py --critic-state strict-global` wires strict team global state into critic; `--critic-state engineering` keeps legacy flattened obs | P1 — needs training validation |
 | Global state candidate | `global_state.py` wired into attention training via `--critic-state strict-global` (2v2 dim=88 vs engineering 106) | P1 |
-| Blue rule policy | Engineering implementation; not guaranteed identical to paper script | P2 |
+| Blue rule policy | No-target cruise boundary patrol tuned: starts ~12km before boundary (was 18km), heading gain pressure-scaled (gentle early, strong near edge). Combat / target selection unchanged | P2 |
 | `num_missiles_per_plane` | Default `999` (no limit); paper does not specify a fixed value | P2 |
 | PID stabilisation | Engineering additions (deadband, heading LPF, velocity R_BI, anti-inversion) | P2 |
 

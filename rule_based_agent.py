@@ -74,13 +74,16 @@ def _boundary_patrol_heading_command(
     own_position: np.ndarray,
     current_heading: float,
     boundary_half_size: float = 40000.0,
-    boundary_margin: float = 18000.0,
+    boundary_margin: float = 12000.0,
 ) -> float:
     """Return no-target patrol heading command near the battlefield boundary.
 
     The return value is the rule-agent internal heading command in [-1, 1],
     where 1.0 corresponds to the existing +10 degree heading authority.  This
     helper only uses ownship position and heading; it does not use enemy state.
+
+    Heading strength is pressure-scaled: early patrol is gentle, near-boundary
+    patrol approaches full authority.
     """
 
     pressure = _boundary_patrol_pressure(
@@ -92,14 +95,16 @@ def _boundary_patrol_heading_command(
     x, y = float(pos[0]), float(pos[1])
     center_bearing = np.arctan2(-y, -x)
     heading_error = (center_bearing - current_heading + np.pi) % (2 * np.pi) - np.pi
-    heading_cmd = heading_error / np.deg2rad(10.0)
+    raw_cmd = heading_error / np.deg2rad(10.0)
+    gain = float(np.clip(0.3 + pressure, 0.3, 1.0))
+    heading_cmd = raw_cmd * gain
     return float(np.clip(heading_cmd, -1.0, 1.0))
 
 
 def _boundary_patrol_pressure(
     own_position: np.ndarray,
     boundary_half_size: float = 40000.0,
-    boundary_margin: float = 18000.0,
+    boundary_margin: float = 12000.0,
 ) -> float:
     """Return no-target boundary pressure for cruise patrol.
 

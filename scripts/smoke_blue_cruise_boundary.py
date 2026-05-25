@@ -31,9 +31,15 @@ def _fake_no_target_obs() -> dict:
 
 
 def main() -> None:
+    # center: no patrol
     assert _boundary_patrol_heading_command(
         np.array([0.0, 0.0, 6000.0]), 0.0) == 0.0
 
+    # mid area (25km): should not trigger patrol (inner_limit=28km)
+    assert _boundary_patrol_heading_command(
+        np.array([0.0, 25000.0, 6000.0]), np.pi / 2) == 0.0
+
+    # near edge (39km): strong patrol
     east_cmd = _boundary_patrol_heading_command(
         np.array([0.0, 39000.0, 6000.0]), np.pi / 2)
     assert abs(east_cmd) > 0.1
@@ -46,6 +52,14 @@ def main() -> None:
         np.array([39000.0, 39000.0, 6000.0]), 0.0)
     assert np.isfinite(corner_cmd)
     assert -1.0 <= corner_cmd <= 1.0
+
+    # heading gain is pressure-scaled: further out → stronger
+    near_30 = _boundary_patrol_heading_command(
+        np.array([0.0, 30000.0, 6000.0]), np.pi / 2)
+    near_39 = _boundary_patrol_heading_command(
+        np.array([0.0, 39000.0, 6000.0]), np.pi / 2)
+    assert abs(near_30) <= abs(near_39), \
+        f"near_30={near_30:.4f}, near_39={near_39:.4f} — further out should be stronger"
 
     action = blue_pursuit_action(_fake_no_target_obs(), 1, 1, 0)
     assert action.shape == (3,)
