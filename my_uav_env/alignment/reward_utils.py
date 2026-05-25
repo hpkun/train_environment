@@ -81,6 +81,43 @@ def td_distance_advantage(distance_m: float) -> float:
     return td_distance_advantage_current(distance_m)
 
 
+def pitch_penalty_current(theta_rad: float) -> float:
+    """Current pitch penalty copied from env._pitch_penalty()."""
+    theta = abs(theta_rad)
+    if theta > math.pi / 3.0:
+        return -1.0
+    if theta > math.pi / 4.0:
+        return -(theta / math.pi - 0.25) / 12.0
+    return 0.0
+
+
+def pitch_penalty_paper_candidate(theta_rad: float) -> float:
+    """Candidate paper eq.15 pitch penalty.
+
+    NEEDS PAPER TEXT VERIFICATION: this candidate currently mirrors the current
+    implementation because eq.15 slope/scale is not fully verified.
+    """
+    return pitch_penalty_current(theta_rad)
+
+
+def speed_penalty_current(mach: float) -> float:
+    """Current speed penalty copied from env._speed_penalty() Mach logic."""
+    if mach < 0.2:
+        return -1.0
+    if mach < 0.3:
+        return -(0.3 - mach) / 0.1
+    return 0.0
+
+
+def speed_penalty_paper_candidate(mach: float) -> float:
+    """Candidate paper eq.19 speed penalty.
+
+    NEEDS PAPER TEXT VERIFICATION: this candidate currently mirrors the current
+    implementation because eq.19 slope/scale is not fully verified.
+    """
+    return speed_penalty_current(mach)
+
+
 def altitude_reward_current(dz_m: float) -> float:
     """Current altitude reward curve copied from env._altitude_reward().
 
@@ -169,6 +206,22 @@ def sample_altitude_table(
     dz_values = [-1000.0, 0.0, 1000.0, 2000.0,
                  5000.0, 7500.0, 10000.0, 12000.0]
     return [(dz, float(func(dz))) for dz in dz_values]
+
+
+def sample_pitch_table(
+    func: Callable[[float], float],
+) -> list[tuple[float, float]]:
+    """Sample a pitch penalty function at fixed diagnostic degrees."""
+    degrees = [0.0, 30.0, 45.0, 50.0, 60.0, 70.0]
+    return [(deg, float(func(math.radians(deg)))) for deg in degrees]
+
+
+def sample_speed_table(
+    func: Callable[[float], float],
+) -> list[tuple[float, float]]:
+    """Sample a speed penalty function at fixed diagnostic Mach values."""
+    mach_values = [0.0, 0.1, 0.2, 0.25, 0.3, 0.5, 1.2]
+    return [(mach, float(func(mach))) for mach in mach_values]
 
 
 def sample_ta_table(func: Callable[[float], float]) -> list[tuple[float, float]]:

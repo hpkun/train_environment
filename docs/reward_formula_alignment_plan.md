@@ -210,6 +210,34 @@ Remaining verification:
 - Confirm exact paper constants for `H_min`, `H_att`, `H_adv`, `H_max`, `D_att,max`, `h1`, and `h2`.
 - If these constants differ from current `H_ATT=2000`, `H_ADV=5000`, `H_MAX=10000`, mark the next change with a new reward version.
 
-## 5. No-code-change statement
+## 6. Pitch/speed reward function audit
+
+This pass adds pure pitch and speed reward helpers to `my_uav_env/alignment/reward_utils.py` without wiring them into `UavCombatEnv`.
+
+New helper functions:
+
+- `pitch_penalty_current(theta_rad)`: exactly mirrors the current `_pitch_penalty()` behavior.
+- `pitch_penalty_paper_candidate(theta_rad)`: currently mirrors `pitch_penalty_current()`.
+- `speed_penalty_current(mach)`: exactly mirrors the current `_speed_penalty()` Mach logic.
+- `speed_penalty_paper_candidate(mach)`: currently mirrors `speed_penalty_current()`.
+- `sample_pitch_table(func)` and `sample_speed_table(func)`: diagnostic samplers for smoke tests and formula review.
+
+Formula verification status:
+
+- Eq.15 pitch reward: NEEDS PAPER TEXT VERIFICATION. The extracted PDF text appears consistent with current behavior, but the middle-segment slope/scale and exact else branch still need visual confirmation.
+- Eq.19 speed reward: NEEDS PAPER TEXT VERIFICATION. The extracted PDF text appears consistent with current behavior when `V` is interpreted as Mach, but the unit interpretation should be visually confirmed.
+
+Current environment status:
+
+- `UavCombatEnv._pitch_penalty()` is unchanged.
+- `UavCombatEnv._speed_penalty()` is unchanged.
+- `REWARD_VERSION` remains `fixed_ta_alt_eq17_v1`.
+
+Next decision:
+
+- If visual paper verification confirms candidate formulas differ from current behavior, update `env.py` in a separate pass and create a new reward version.
+- If visual verification confirms current behavior, keep environment unchanged and optionally add helper-based unit tests only.
+
+## 7. No-code-change statement
 
 This pass does not change any training or environment behavior. It only adds this correction plan document and links it from the existing audit document.

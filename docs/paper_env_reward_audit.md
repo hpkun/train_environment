@@ -138,6 +138,13 @@ Detailed reward formula correction plan is in [docs/reward_formula_alignment_pla
 
 优先级：P1。
 
+Pass note:
+
+- `my_uav_env/alignment/reward_utils.py` now contains `pitch_penalty_current()` and `pitch_penalty_paper_candidate()`.
+- The candidate currently mirrors current behavior and is not wired into the environment.
+- NEEDS PAPER TEXT VERIFICATION: confirm eq.15 middle-segment slope/scale before changing `_pitch_penalty()`.
+- Current environment behavior is unchanged; this split avoids mixing formula verification with behavior changes.
+
 ### 5.2 Roll reward eq.16
 
 当前 `_roll_penalty()`：
@@ -201,6 +208,13 @@ Pass22 / environment alignment note:
 状态：基本符合低速惩罚思路，但需核对 eq.19 的具体分段斜率。当前以 340 m/s 作为 Mach 换算常数。
 
 优先级：P1。
+
+Pass note:
+
+- `my_uav_env/alignment/reward_utils.py` now contains `speed_penalty_current()` and `speed_penalty_paper_candidate()`.
+- The candidate currently mirrors current behavior and is not wired into the environment.
+- NEEDS PAPER TEXT VERIFICATION: confirm eq.19 uses Mach as the formula input and confirm exact boundary behavior.
+- Current environment behavior is unchanged; this split avoids mixing formula verification with behavior changes.
 
 ### 5.6 Situation reward eq.20-22
 
