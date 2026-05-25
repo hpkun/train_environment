@@ -151,13 +151,13 @@ def parse_args_attention():
         from configs.experiment_presets import get_preset
         preset = get_preset(preset_name)
         _apply_preset_attention(args, preset, raw_argv)
-
-    if not _has_cli_option(clean_argv, "--log-file"):
-        args.log_file = "attention_training_log.csv"
-    if not _has_cli_option(clean_argv, "--results-file"):
-        args.results_file = "results/attention_mappo_results.csv"
-    if not _has_cli_option(clean_argv, "--checkpoint-dir"):
-        args.checkpoint_dir = "checkpoints_attention"
+    else:
+        if not _has_cli_option(clean_argv, "--log-file"):
+            args.log_file = "attention_training_log.csv"
+        if not _has_cli_option(clean_argv, "--results-file"):
+            args.results_file = "results/attention_mappo_results.csv"
+        if not _has_cli_option(clean_argv, "--checkpoint-dir"):
+            args.checkpoint_dir = "checkpoints_attention"
     return args
 
 

@@ -11,6 +11,13 @@ smoke_signed_ao_log.csv
 smoke_signed_ao_checkpoints/
 results/smoke_*.csv
 results
+logs/
+checkpoints/vanilla_1v1_smoke/
+checkpoints/vanilla_2v2_smoke/
+checkpoints/vanilla_2v2_main/
+checkpoints/attention_1v1_smoke/
+checkpoints/attention_2v2_current_smoke/
+checkpoints/attention_2v2_placeholder_smoke/
 runs
 *.npy
 *.acmi
