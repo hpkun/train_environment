@@ -271,7 +271,15 @@ python evaluate_attention_mappo.py --random --obs-adapter current --num-red 1 --
 
 这条 smoke 命令会触发 JSBSim 环境 reset，Codex 不运行；由本地用户运行。
 
-## 17. Reward version 标记
+## 17. Paper-style critic global state candidate
+
+`my_uav_env/alignment/global_state.py` 提供 strict team global state flatten 工具。
+当前 attention critic 仍使用 `obs_dim * num_red`（2v2 约 106 维）的 engineering flatten。
+strict candidate 2v2 维度为 88（4 entities × 10 dim + 4 mask = 44 per agent × 2）。
+
+本 pass 只做候选工具，不改变训练行为。后续将单独做 critic switch pass。
+
+## 18. Reward version 标记
 
 当前 reward version 为 `fixed_ta_alt_eq17_3dlos_v1`。
 

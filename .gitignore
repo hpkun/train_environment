@@ -18,6 +18,8 @@ checkpoints/vanilla_2v2_main/
 checkpoints/attention_1v1_smoke/
 checkpoints/attention_2v2_current_smoke/
 checkpoints/attention_2v2_placeholder_smoke/
+checkpoints/attention_1v1_strict_smoke/
+checkpoints/attention_2v2_strict_smoke/
 runs
 *.npy
 *.acmi
