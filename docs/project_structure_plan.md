@@ -135,3 +135,15 @@ from my_uav_env.alignment.reward_utils import *
 conda activate brmamappo
 python -m compileall reward_utils.py entity_obs_utils.py paper_obs_utils.py paper_state_extractor.py attention_models.py
 ```
+
+## 8. Migration notes
+
+### Pass A — reward_utils (completed)
+
+- `reward_utils.py` implementation moved to `my_uav_env/alignment/reward_utils.py`.
+- Root `reward_utils.py` is now a thin compatibility re-export:
+  `from my_uav_env.alignment.reward_utils import *`.
+- No behaviour changed; no imports in training scripts updated.
+- `my_uav_env/alignment/__init__.py` created as the sub-package entry point.
+- Next pass should move `entity_obs_utils.py` → `my_uav_env/alignment/entity_obs.py`
+  following the same pattern.
