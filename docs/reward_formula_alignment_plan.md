@@ -241,3 +241,41 @@ Next decision:
 ## 7. No-code-change statement
 
 This pass does not change any training or environment behavior. It only adds this correction plan document and links it from the existing audit document.
+
+## 8. AO/TA/q_LOS geometry diagnostic
+
+A pure geometry diagnostic module has been added at
+`my_uav_env/alignment/geometry_diagnostics.py`.  It does not import JSBSim
+or the environment.
+
+Key findings from the four canonical cases:
+
+| Case | 2D AO | 2D TA | body q_los_body_x | Note |
+|---|---|---|---|---|
+| Head-on same alt | 0° | 0° | 0° | AO ≈ q_los when ego is level and altitudes match |
+| Behind same alt | 0° | 180° | 180° | TA captures the tail aspect correctly |
+| Right side same alt | +90° | 0° | 90° | AO side-sign matches body y-axis sign |
+| Above ahead | 0° | 0° | 11.31° | **AO (2D) misses altitude difference** |
+
+Implications for paper eq.20:
+
+- `get2d_AO_TA_R` computes AO/TA purely in the horizontal (north/east)
+  plane.  It ignores the vertical component of the line-of-sight.
+- `compute_q_los_placeholder` returns the 3D angle between the LOS vector
+  and the body x-axis, which includes altitude differences.
+- When aircraft are at the same altitude and the ego is flying straight and
+  level, 2D AO ≈ body q_los.
+- When there is a vertical offset, the two values diverge.  In the
+  "above ahead" case, the 2D AO sees a pure head-on (0°) engagement while
+  the 3D body q_los shows an 11.3° elevation component.
+- If the paper's `q_Los` in eq.20 refers to a body-frame LOS angle (as
+  suggested by the Table 2 variable names), then switching from 2D AO/TA
+  to strict body-frame geometry would change the situation reward signal
+  whenever aircraft are at different altitudes.
+
+Current status:
+
+- `_situation_reward()` still uses 2D AO/TA via `get2d_AO_TA_R`.
+- No reward behaviour has been changed by this diagnostic pass.
+- Future geometry alignment should be treated as a separate pass from Ta
+  scale alignment (see §4 item 3).

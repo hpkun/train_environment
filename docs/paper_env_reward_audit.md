@@ -382,6 +382,8 @@ GCAS 状态：
 
 1. P0：修正 `_situation_reward()` 的 `Ta(q)` 分段，先做纯函数和边界点测试。
 2. P1：核对 AO/TA/q_LOS 几何定义，决定 situation reward 是否继续用 2D AO/TA，或切到 strict LOS geometry。
+   - `geometry_diagnostics.py` 已用于对比 current AO/TA 与 strict body-frame q_los。
+   - 当前仍未替换 `_situation_reward()`，2D AO/TA 是现状 baseline。
 3. P1：核对 pitch/speed reward 的精确斜率与权重量级。
 4. P1：验证 `paper_state_extractor.py` 的旋转矩阵、alpha/beta、q_LOS 数值方向。
 5. P1：设计真正的 paper global state critic 输入。
