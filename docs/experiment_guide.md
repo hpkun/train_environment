@@ -288,3 +288,21 @@ python evaluate_attention_mappo.py --random --obs-adapter current --num-red 1 --
 - 不要与 `fixed_ta_v1`、`fixed_ta_alt_eq17_v1`、或 legacy reward 日志混合比较。
 - 新实验建议使用带版本名的日志文件，例如 `vanilla_3dlos_v1.csv`。
 - 如果后续需要 paper Ta scale (10×) ablation，应另开 reward-scale 实验，不要与 `fixed_ta_alt_eq17_3dlos_v1` baseline 混合。
+## 18. Attention strict observation adapter
+
+`train_attention_mappo.py` now supports three actor observation adapters:
+
+- `--obs-adapter current`: default 11-dim engineering entity vector.
+- `--obs-adapter paper-placeholder`: 10-dim placeholder projection from current env obs.
+- `--obs-adapter strict`: 10-dim strict Table 1/Table 2 prototype observation from `UavCombatEnv.get_strict_team_observations("red")`.
+
+Strict mode only changes the attention actor input. It does not change `reset()` / `step()` default observation, does not change `UavCombatEnv.observation_space`, and does not change the centralized critic. The critic still uses flattened 11-dim red observations concat.
+
+Strict smoke preset:
+
+```powershell
+conda activate brmamappo
+python train_attention_mappo.py --preset attention_1v1_strict_smoke
+```
+
+This command triggers JSBSim/env reset and is for local user runs only; Codex does not run it.

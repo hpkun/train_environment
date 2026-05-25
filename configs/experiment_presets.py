@@ -87,6 +87,32 @@ EXPERIMENT_PRESETS = {
         "results_file": "results/attention_2v2_placeholder_smoke_results.csv",
         "checkpoint_dir": "checkpoints/attention_2v2_placeholder_smoke",
     },
+    "attention_1v1_strict_smoke": {
+        "num_red": 1,
+        "num_blue": 1,
+        "num_envs": 1,
+        "total_env_steps": 20,
+        "replay_buffer_size": 10,
+        "max_episode_length": 10,
+        "device": "cpu",
+        "obs_adapter": "strict",
+        "log_file": "logs/attention_1v1_strict_smoke.csv",
+        "results_file": "results/attention_1v1_strict_smoke_results.csv",
+        "checkpoint_dir": "checkpoints/attention_1v1_strict_smoke",
+    },
+    "attention_2v2_strict_smoke": {
+        "num_red": 2,
+        "num_blue": 2,
+        "num_envs": 2,
+        "total_env_steps": 10000,
+        "replay_buffer_size": 100,
+        "max_episode_length": 300,
+        "device": "cpu",
+        "obs_adapter": "strict",
+        "log_file": "logs/attention_2v2_strict_smoke.csv",
+        "results_file": "results/attention_2v2_strict_smoke_results.csv",
+        "checkpoint_dir": "checkpoints/attention_2v2_strict_smoke",
+    },
 }
 
 

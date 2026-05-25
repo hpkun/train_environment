@@ -29,6 +29,8 @@ def main() -> None:
     # attention preset has obs_adapter
     pa = get_preset("attention_1v1_smoke")
     assert pa["obs_adapter"] == "current"
+    ps = get_preset("attention_1v1_strict_smoke")
+    assert ps["obs_adapter"] == "strict"
 
     # unknown preset raises KeyError
     try:

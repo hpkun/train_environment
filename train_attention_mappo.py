@@ -103,7 +103,8 @@ def parse_args_attention():
         item = raw_argv[i]
         if item == "--obs-adapter":
             if i + 1 >= len(raw_argv):
-                raise SystemExit("--obs-adapter requires one of: current, paper-placeholder")
+                raise SystemExit(
+                    "--obs-adapter requires one of: current, paper-placeholder, strict")
             obs_adapter = raw_argv[i + 1]
             i += 2
             continue
@@ -135,8 +136,9 @@ def parse_args_attention():
             print(f"  {name}")
         raise SystemExit(0)
 
-    if obs_adapter not in ("current", "paper-placeholder"):
-        raise SystemExit("--obs-adapter must be one of: current, paper-placeholder")
+    if obs_adapter not in ("current", "paper-placeholder", "strict"):
+        raise SystemExit(
+            "--obs-adapter must be one of: current, paper-placeholder, strict")
 
     old_argv = sys.argv
     try:
@@ -151,6 +153,9 @@ def parse_args_attention():
         from configs.experiment_presets import get_preset
         preset = get_preset(preset_name)
         _apply_preset_attention(args, preset, raw_argv)
+        if args.obs_adapter not in ("current", "paper-placeholder", "strict"):
+            raise SystemExit(
+                "--obs-adapter must be one of: current, paper-placeholder, strict")
     else:
         if not _has_cli_option(clean_argv, "--log-file"):
             args.log_file = "attention_training_log.csv"
@@ -194,12 +199,39 @@ def _build_attention_entities(obs_np: dict, obs_adapter: str):
         return build_entity_observation(obs_np)
     if obs_adapter == "paper-placeholder":
         return build_paper_entity_observation_from_env_obs(obs_np)
+    if obs_adapter == "strict":
+        raise ValueError(
+            "strict adapter must use env.get_strict_team_observations, not obs_np")
     raise ValueError(f"Unknown obs_adapter: {obs_adapter}")
 
 
 def _zero_entity_like(obs_np: dict, obs_adapter: str) -> tuple[np.ndarray, np.ndarray]:
+    if obs_adapter == "strict":
+        ally_states = np.asarray(obs_np["ally_states"])
+        enemy_states = np.asarray(obs_np["enemy_states"])
+        n_entities = 1 + int(ally_states.shape[0]) + int(enemy_states.shape[0])
+        entities = np.zeros((n_entities, 10), dtype=np.float32)
+        mask = np.ones((n_entities,), dtype=np.int64)
+        return entities, mask
     entities, mask = _build_attention_entities(obs_np, obs_adapter)
     return np.zeros_like(entities, dtype=np.float32), np.ones_like(mask, dtype=np.int64)
+
+
+def _fetch_strict_red_team_obs(vec_env, config) -> list[dict]:
+    """Fetch strict red-team observations from each worker env."""
+    results = vec_env.env_method(
+        "get_strict_team_observations", "red", timeout=30.0)
+    cleaned = []
+    for item in results:
+        if item is None or isinstance(item, set) or not item:
+            cleaned.append({})
+        elif isinstance(item, dict):
+            cleaned.append(item)
+        else:
+            cleaned.append({})
+    while len(cleaned) < config.num_envs:
+        cleaned.append({})
+    return cleaned[:config.num_envs]
 
 
 def ppo_update_attention(actor, critic, actor_opt, critic_opt,
@@ -427,11 +459,14 @@ def main():
     print(f"  obs_adapter: {config.obs_adapter}")
     print(f"  entity_dim: {entity_dim}")
     print(f"  reward_version: {REWARD_VERSION}")
-    if (config.obs_adapter == "paper-placeholder"
-            and config.checkpoint_dir == "checkpoints_attention"):
-        print("[WARN] paper-placeholder uses entity_dim=10; use a separate "
-              "checkpoint_dir to avoid mixing with current adapter checkpoints.",
-              flush=True)
+    if config.checkpoint_dir == "checkpoints_attention":
+        if config.obs_adapter == "paper-placeholder":
+            print("[WARN] paper-placeholder uses entity_dim=10; use a separate "
+                  "checkpoint_dir to avoid mixing with current adapter checkpoints.",
+                  flush=True)
+        elif config.obs_adapter == "strict":
+            print("[WARN] strict uses entity_dim=10 and env-state observations; "
+                  "use a separate checkpoint_dir.", flush=True)
 
     min_episodes_to_eval = 50
     num_steps = config.replay_buffer_size // config.num_envs
@@ -475,6 +510,10 @@ def main():
     print(f"Resetting {config.num_envs} environments...", flush=True)
     t_reset = time.perf_counter()
     raw_obs_list = vec_env.reset(timeout=300.0)
+    if config.obs_adapter == "strict":
+        strict_obs_list = _fetch_strict_red_team_obs(vec_env, config)
+    else:
+        strict_obs_list = None
     print(f"Reset done ({time.perf_counter() - t_reset:.0f}s)", flush=True)
 
     total_steps = 0
@@ -556,8 +595,22 @@ def main():
                     red_obs_flat_all.append(obs_flat)
                     alive = not np.allclose(obs_np["ego_state"], 0.0)
                     if alive:
-                        entities_np, entity_mask_np = _build_attention_entities(
-                            obs_np, config.obs_adapter)
+                        if config.obs_adapter == "strict":
+                            strict_env_obs = (
+                                strict_obs_list[env_idx] if strict_obs_list else {})
+                            strict_tuple = strict_env_obs.get(rid)
+                            if strict_tuple is not None:
+                                entities_np, entity_mask_np, _meta = strict_tuple
+                                entities_np = np.asarray(
+                                    entities_np, dtype=np.float32)
+                                entity_mask_np = np.asarray(
+                                    entity_mask_np, dtype=np.int64)
+                            else:
+                                entities_np, entity_mask_np = _zero_entity_like(
+                                    obs_np, config.obs_adapter)
+                        else:
+                            entities_np, entity_mask_np = _build_attention_entities(
+                                obs_np, config.obs_adapter)
                         entity_batch.append(entities_np)
                         mask_batch.append(entity_mask_np)
                         alive_obs_flat.append(obs_flat)
@@ -673,6 +726,8 @@ def main():
                     current_ep_missiles_blue[env_idx] = 0.0
 
             raw_obs_list = next_obs_list
+            if config.obs_adapter == "strict":
+                strict_obs_list = _fetch_strict_red_team_obs(vec_env, config)
             total_steps += config.num_envs
 
         buffer.rnn_actor_final = rnn_hidden_actor.copy()

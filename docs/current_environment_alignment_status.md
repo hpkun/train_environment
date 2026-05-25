@@ -55,7 +55,7 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | Ta scale | Current `fixed_ta_v1` uses `[0, 1]` scale; paper eq.20 may use `10` first segment | P1 — needs ablation, not silent swap |
 | q_LOS definition | Current choice is body-x LOS angle; velocity-q candidate exists in `situation_reward_candidates.py` | P1 — pending paper confirmation |
 | Observation space | Still 11-dim engineering Dict, not strict Table 1 / Table 2 10-dim | P1 |
-| Strict paper observation | `state_extractor.py` prototype exists but not wired into training | P1 |
+| Strict paper observation | `train_attention_mappo.py --obs-adapter strict` can use strict 10-dim actor observations via env worker method calls | P1 |
 | Strict observation API | `UavCombatEnv.get_strict_entity_observation()` and `get_strict_team_observations()` exposed; `reset()`/`step()` still return 11-dim engineering Dict | P1 |
 | Critic global state | Still flattened red observations concat, not native paper global state | P1 |
 | Blue rule policy | Engineering implementation; not guaranteed identical to paper script | P2 |
@@ -91,7 +91,8 @@ Root compatibility shims (still retained):
    3D q_LOS switch does not destabilise training.
 3. **Evaluate the trained baseline** with `evaluate_vanilla_mappo.py` to get metrics under
    the new reward version.
-4. **Integrate strict Table 1/Table 2 observation** into attention training
-   (`train_attention_mappo.py`) using `state_extractor.py`.
+4. **Validate strict Table 1/Table 2 attention training locally** with
+   `train_attention_mappo.py --obs-adapter strict` or the
+   `attention_1v1_strict_smoke` preset.
 5. **Design native global state critic** input (paper-style, not just flat concat).
 6. **Only then** proceed to MaskVectorGenerator / BRMA-MAPPO.
