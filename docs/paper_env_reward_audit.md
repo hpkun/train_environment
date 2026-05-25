@@ -156,26 +156,28 @@ return 0.0
 
 ### 5.3 Altitude reward eq.17
 
-当前 `_altitude_reward()` 使用相对敌方平均高度 `dz = alt_ego - mean(enemy_alts)`，阈值：
+当前 `_altitude_reward()` 使用 pairwise relative altitude：对每个 alive enemy 分别计算 `dz = alt_ego - enemy_alt`，再对所有 enemy 的 altitude reward 取 mean。阈值：
 
 - `H_MIN = 0`
 - `H_ATT = 2000`
 - `H_ADV = 5000`
 - `H_MAX = 10000`
 
-并使用归一化二次曲线，最后 `np.clip(reward, 0.0, 1.0)`。
+并使用 eq.17-style 二次曲线，高高度尾段保留 `0.1`。
 
-状态：按论文二次分段形式做了近似，但论文未给出当前阈值/系数的完整数值依据。
+状态：已从 mean enemy altitude approximation 切换为 pairwise eq.17-style implementation；但论文阈值/系数仍需继续核对。
 
 优先级：P1。
 
-Pass22 note:
+Pass22 / environment alignment note:
 
 - `reward_utils.py` now contains `altitude_reward_current()` and paper-candidate altitude helpers.
 - `altitude_reward_current()` mirrors the current environment curve for pure testing.
-- `altitude_reward_paper_candidate()` adds the paper-like `0.1` high-altitude tail, but is not wired into the environment.
-- `altitude_reward_pairwise_mean_candidate()` expresses a possible pairwise relative-altitude interpretation.
-- Current `UavCombatEnv._altitude_reward()` behavior is unchanged; any future switch should use a new reward version, not `fixed_ta_v1`.
+- `altitude_reward_paper_eq17()` adds the paper-like `0.1` high-altitude tail.
+- `altitude_reward_pairwise_mean_eq17()` implements the pairwise relative-altitude interpretation.
+- Current `UavCombatEnv._altitude_reward()` now uses `altitude_reward_pairwise_mean_eq17()`.
+- Reward version is now `fixed_ta_alt_eq17_v1`; old `fixed_ta_v1` results should not be mixed with this version.
+- NEEDS PAPER TEXT VERIFICATION: confirm whether `H_ATT=2000`, `H_ADV=5000`, `H_MAX=10000`, `D_att,max`, `h1`, and `h2` match the paper's exact values.
 
 ### 5.4 Boundary reward eq.18
 
@@ -290,19 +292,19 @@ else:
 
 #### Pass20 reward version logging
 
-pass20 后，当前 reward version 明确标记为 `fixed_ta_v1`。
+pass20 后曾将 reward version 标记为 `fixed_ta_v1`；altitude eq.17 对齐后，当前 reward version 更新为 `fixed_ta_alt_eq17_v1`。
 
 含义：
 
-- `fixed_ta_v1` 表示 `_situation_reward()` 的 Ta 函数已经使用 pass19 的连续、非负、归一化版本。
+- `fixed_ta_alt_eq17_v1` 表示 `_situation_reward()` 的 Ta 函数使用 pass19 的连续、非负、归一化版本，同时 `_altitude_reward()` 使用 pairwise eq.17-style curve 和 high-altitude `0.1` tail。
 - 旧行为仍保留在 `reward_utils.ta_angle_advantage_current()` 中，仅用于审计和旧日志解释。
-- pass19 前生成的训练/评估日志应视为 legacy reward，不应与 `fixed_ta_v1` 实验直接混合比较。
+- pass19 前生成的训练/评估日志应视为 legacy reward；`fixed_ta_v1` 实验也不应与 `fixed_ta_alt_eq17_v1` 直接混合比较。
 - pass20 后，`train_vanilla_mappo.py`、`train_attention_mappo.py`、`evaluate_vanilla_mappo.py`、`evaluate_attention_mappo.py` 的 CSV 输出会追加 `RewardVersion` 字段。
 
 新实验建议使用显式文件名，例如：
 
-- `vanilla_fixed_ta_v1.csv`
-- `attention_fixed_ta_v1.csv`
+- `vanilla_fixed_ta_alt_eq17_v1.csv`
+- `attention_fixed_ta_alt_eq17_v1.csv`
 
 ### 5.7 Terminal reward eq.23
 

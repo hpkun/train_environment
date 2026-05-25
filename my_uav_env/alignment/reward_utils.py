@@ -9,13 +9,18 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-REWARD_VERSION = "fixed_ta_v1"
+REWARD_VERSION = "fixed_ta_alt_eq17_v1"
 """Reward version identifier for logs and evaluation outputs.
 
-``fixed_ta_v1`` means the situation reward Ta function has been changed from
-the historical current piecewise formula to a continuous, non-negative,
-normalized curve.  The legacy behavior remains available through
-``ta_angle_advantage_current()`` for audits only.
+``fixed_ta_alt_eq17_v1`` means:
+
+1. situation reward Ta uses the ``fixed_ta_v1`` continuous, non-negative,
+   normalized curve;
+2. altitude reward uses a pairwise eq.17-style curve with the high-altitude
+   0.1 tail.
+
+Pass19-before logs are legacy reward. ``fixed_ta_v1`` logs should not be mixed
+with ``fixed_ta_alt_eq17_v1`` results.
 """
 
 
@@ -102,12 +107,12 @@ def altitude_reward_current(dz_m: float) -> float:
     return max(0.0, min(1.0, reward))
 
 
-def altitude_reward_paper_candidate(dz_m: float) -> float:
-    """Candidate paper-style altitude curve with a high-altitude 0.1 tail.
+def altitude_reward_paper_eq17(dz_m: float) -> float:
+    """Paper eq.17-style altitude curve with a high-altitude 0.1 tail.
 
-    This is not wired into the environment.  It follows the pass21 reading of
-    paper eq.17 using the current project thresholds because exact h1/h2 and
-    altitude constants still need visual verification against the paper.
+    This follows the pass21 reading of paper eq.17 using the current project
+    thresholds because exact h1/h2 and altitude constants still need visual
+    verification against the paper.
     """
     h_min = 0.0
     h_att = 2000.0
@@ -130,18 +135,31 @@ def altitude_reward_paper_candidate(dz_m: float) -> float:
     return max(0.0, min(1.0, reward))
 
 
+def altitude_reward_paper_candidate(dz_m: float) -> float:
+    """Compatibility alias for the paper eq.17-style altitude curve."""
+    return altitude_reward_paper_eq17(dz_m)
+
+
+def altitude_reward_pairwise_mean_eq17(
+    ego_alt_m: float,
+    enemy_altitudes_m: list[float],
+) -> float:
+    """Mean paper eq.17-style altitude reward over pairwise enemy deltas."""
+    if not enemy_altitudes_m:
+        return 0.0
+    values = [
+        altitude_reward_paper_eq17(ego_alt_m - enemy_alt)
+        for enemy_alt in enemy_altitudes_m
+    ]
+    return float(sum(values) / len(values))
+
+
 def altitude_reward_pairwise_mean_candidate(
     ego_alt_m: float,
     enemy_altitudes_m: list[float],
 ) -> float:
-    """Mean of paper-candidate altitude rewards over pairwise enemy deltas."""
-    if not enemy_altitudes_m:
-        return 0.0
-    values = [
-        altitude_reward_paper_candidate(ego_alt_m - enemy_alt)
-        for enemy_alt in enemy_altitudes_m
-    ]
-    return float(sum(values) / len(values))
+    """Compatibility alias for pairwise mean paper eq.17-style altitude reward."""
+    return altitude_reward_pairwise_mean_eq17(ego_alt_m, enemy_altitudes_m)
 
 
 def sample_altitude_table(

@@ -18,10 +18,10 @@
 当前 reward version 为：
 
 ```text
-fixed_ta_v1
+fixed_ta_alt_eq17_v1
 ```
 
-含义：`_situation_reward()` 中的 Ta 角度优势函数已经从旧的负值/不连续分段切换为连续、非负、归一化 `[0,1]` 的工程修正版。旧行为仍保留在 `reward_utils.ta_angle_advantage_current()`，只用于审计。
+含义：`_situation_reward()` 中的 Ta 角度优势函数已经从旧的负值/不连续分段切换为连续、非负、归一化 `[0,1]` 的工程修正版；`_altitude_reward()` 已切换为 pairwise eq.17-style curve，并保留 high-altitude `0.1` tail。旧行为仍保留在 helper 函数中，只用于审计。`fixed_ta_v1` 结果不应与 `fixed_ta_alt_eq17_v1` 混合比较。
 
 ## 2. Paper reward formulas to verify
 
@@ -143,7 +143,7 @@ r_R = sum_i r_i + r_end
 | --- | --- | --- | --- | --- | --- |
 | Pitch eq.15 | `-1` above `pi/3`; middle penalty between `pi/4` and `pi/3`; else likely 0 | `_pitch_penalty()` matches this structure: `-1`, then `-(theta/pi - 0.25)/12`, else 0 | needs verification | Medium: slope/sign error would weaken stability penalty | Verify exact PDF formula visually; add pure function test if confirmed |
 | Roll eq.16 | `-(|phi|/pi - 1/4) * 4/3` if `|phi| > pi/4 & |theta| > pi/4` | `_roll_penalty()` uses same double condition and formula | aligned | Low | Keep; optionally add pure function tests later |
-| Altitude eq.17 | Relative height quadratic piecewise, includes `0.1` high-altitude tail before `D_att,max` | `_altitude_reward()` uses relative height to enemy mean; normalized quadratic `[0,1]`; returns 0 above `H_MAX` | approximate / mismatch | Medium: high-altitude behavior and enemy aggregation differ | Verify constants and whether pairwise `z_i-z_j` should be summed over enemies; consider separate `altitude_formula_v2` |
+| Altitude eq.17 | Relative height quadratic piecewise, includes `0.1` high-altitude tail before `D_att,max` | `_altitude_reward()` now uses pairwise relative altitude over alive enemies and `altitude_reward_pairwise_mean_eq17()`; high-altitude tail is `0.1` | approximate / closer alignment | Medium: thresholds and h1/h2 still need verification | Keep current eq.17-style implementation under `fixed_ta_alt_eq17_v1`; verify exact constants before further changes |
 | Boundary eq.18 | Fixed `-10` if either horizontal axis exceeds `4e4` | `_boundary_penalty()` fixed `-10` if `|x|` or `|y|` exceeds battlefield half-size | aligned | Low | Keep |
 | Speed eq.19 | Low-speed penalty below Mach 0.3, severe below Mach 0.2 | `_speed_penalty()` uses `v / 340.0`; same thresholds and slope | aligned / needs unit verification | Low-Medium: Mach conversion constant approximate | Keep for now; optionally use local speed of sound if needed |
 | Ta eq.20 | Paper appears to use `10` first segment and piecewise in `q_Los` radians | `fixed_ta_v1` uses normalized `[0,1]`, continuous non-negative curve over 4/15/35 deg | intentional mismatch | High: situation reward scale differs from paper | Do not silently replace; run reward-scale ablation: `fixed_ta_v1` vs paper-scale Ta |
@@ -160,7 +160,7 @@ r_R = sum_i r_i + r_end
    - Altitude eq.17: confirm constants and high-altitude `0.1` tail.
 
 2. Treat situation reward as an ablation, not a silent overwrite.
-   - Keep current `fixed_ta_v1` as engineering baseline.
+   - Treat `fixed_ta_alt_eq17_v1` as the current engineering baseline.
    - Add a separate paper-scale Ta implementation if eq.20 is visually confirmed.
    - Use explicit `RewardVersion`, for example `paper_ta_scale_v1`, before running new training.
    - Compare learning stability and reward component magnitudes before choosing default.
@@ -179,21 +179,23 @@ r_R = sum_i r_i + r_end
 
 ## 5. Pass22 altitude reward function audit
 
-Pass22 adds pure altitude reward helpers to `reward_utils.py` without wiring them into `UavCombatEnv._altitude_reward()`.
+Pass22 added pure altitude reward helpers to `reward_utils.py`. The later paper environment alignment pass wires the eq.17-style pairwise helper into `UavCombatEnv._altitude_reward()`.
 
 New helper functions:
 
 - `altitude_reward_current(dz_m)`: exactly mirrors the current environment's dz-only curve. In the environment, `dz_m` is currently `ego_altitude - mean(enemy_altitudes)`.
-- `altitude_reward_paper_candidate(dz_m)`: candidate paper-style curve using current thresholds but adding the high-altitude `0.1` tail indicated by the eq.17 PDF extraction.
-- `altitude_reward_pairwise_mean_candidate(ego_alt_m, enemy_altitudes_m)`: computes `altitude_reward_paper_candidate(ego_alt - enemy_alt)` for each enemy and returns the mean.
+- `altitude_reward_paper_eq17(dz_m)`: paper eq.17-style curve using current thresholds but adding the high-altitude `0.1` tail indicated by the eq.17 PDF extraction.
+- `altitude_reward_paper_candidate(dz_m)`: compatibility alias for `altitude_reward_paper_eq17()`.
+- `altitude_reward_pairwise_mean_eq17(ego_alt_m, enemy_altitudes_m)`: computes `altitude_reward_paper_eq17(ego_alt - enemy_alt)` for each enemy and returns the mean.
+- `altitude_reward_pairwise_mean_candidate(...)`: compatibility alias for `altitude_reward_pairwise_mean_eq17()`.
 - `sample_altitude_table(func)`: diagnostic sampling over fixed dz values.
 
 Current environment status:
 
-- Still uses `UavCombatEnv._altitude_reward()` unchanged.
-- Still compares ego altitude against the mean alive enemy altitude.
-- Still returns 0 above `H_MAX=10000`.
-- Still uses reward version `fixed_ta_v1`.
+- `UavCombatEnv._altitude_reward()` now uses pairwise relative altitude over each alive enemy.
+- It returns the mean of `altitude_reward_paper_eq17(ego_alt - enemy_alt)` values.
+- It preserves the high-altitude `0.1` tail instead of returning 0 above `H_MAX=10000`.
+- It uses reward version `fixed_ta_alt_eq17_v1`.
 
 Candidate behavior:
 
@@ -203,11 +205,10 @@ Candidate behavior:
 - `5000 < dz <= 10000`: quadratic fall from 1 to 0.1
 - `dz > 10000`: 0.1
 
-Next decision:
+Remaining verification:
 
-- Decide whether paper eq.17 should be implemented as pairwise relative altitude over each enemy, rather than current mean enemy altitude.
 - Confirm exact paper constants for `H_min`, `H_att`, `H_adv`, `H_max`, `D_att,max`, `h1`, and `h2`.
-- If the environment switches to the paper candidate, create a new reward version such as `fixed_ta_altitude_paper_v1`; do not keep calling it `fixed_ta_v1`.
+- If these constants differ from current `H_ATT=2000`, `H_ADV=5000`, `H_MAX=10000`, mark the next change with a new reward version.
 
 ## 5. No-code-change statement
 

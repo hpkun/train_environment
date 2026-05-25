@@ -9,7 +9,11 @@ import logging
 import numpy as np
 import gymnasium
 
-from my_uav_env.alignment.reward_utils import ta_angle_advantage_fixed, td_distance_advantage
+from my_uav_env.alignment.reward_utils import (
+    altitude_reward_pairwise_mean_eq17,
+    ta_angle_advantage_fixed,
+    td_distance_advantage,
+)
 
 from .simulator import AircraftSimulator, MissileSimulator
 from .pid_controller import PIDController
@@ -988,39 +992,14 @@ class UavCombatEnv(gymnasium.Env):
         return total
 
     def _altitude_reward(self, sim: AircraftSimulator) -> float:
-        """Paper eq.17 altitude reward using normalized quadratic segments.
-
-        The paper gives a quadratic piecewise form but does not provide concrete
-        h1/h2 coefficients. This implementation keeps the existing thresholds
-        and uses equivalent normalized quadratics: 0 at H_MIN/H_MAX and 1 at
-        the H_ATT..H_ADV plateau.
-        """
+        """Paper eq.17-style pairwise relative altitude reward."""
         alt_ego = sim.get_geodetic()[2]
         enemies = self.red_planes if sim.color == "Blue" else self.blue_planes
         enemy_alts = [s.get_geodetic()[2] for s in enemies.values() if s.is_alive]
         if not enemy_alts:
             return 0.0
 
-        dz = alt_ego - float(np.mean(enemy_alts))
-        H_MIN = 0.0
-        H_ATT = 2000.0
-        H_ADV = 5000.0
-        H_MAX = 10000.0
-
-        if dz <= H_MIN:
-            reward = 0.0
-        elif dz < H_ATT:
-            x = (dz - H_ATT) / (H_ATT - H_MIN)
-            reward = 1.0 - x * x
-        elif dz <= H_ADV:
-            reward = 1.0
-        elif dz <= H_MAX:
-            x = (dz - H_ADV) / (H_MAX - H_ADV)
-            reward = 1.0 - x * x
-        else:
-            reward = 0.0
-
-        return float(np.clip(reward, 0.0, 1.0))
+        return altitude_reward_pairwise_mean_eq17(alt_ego, enemy_alts)
 
     def _boundary_penalty(self, sim: AircraftSimulator) -> float:
         """Horizontal battlefield boundary penalty.
