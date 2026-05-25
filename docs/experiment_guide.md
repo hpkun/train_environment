@@ -346,3 +346,14 @@ boundary.
 This is rule-based battlefield keeping, not a learning observation and not
 radar-blind Red tracking. The helper receives only Blue ownship positions, not
 Red positions.
+
+## 20. ACMI battlefield boundary debug
+
+`eval_acmi.py` does not draw battlefield boundaries by default. For Tacview
+debugging only, enable optional boundary corner markers:
+
+```powershell
+python eval_acmi.py --checkpoint checkpoints/vanilla_actor_best.pt --num-red 2 --num-blue 2 --max-steps 1400 --output eval_battle.acmi --draw-boundary --boundary-half-size 40000
+```
+
+Normal replay commands should omit `--draw-boundary`.

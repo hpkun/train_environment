@@ -37,6 +37,11 @@ except Exception:
     pass
 
 from my_uav_env import UavCombatEnv
+from acmi_boundary_utils import (
+    battlefield_boundary_acmi_lines as _battlefield_boundary_acmi_lines,
+    maybe_write_battlefield_boundary_acmi as _maybe_write_battlefield_boundary_acmi,
+    write_battlefield_boundary_acmi as _write_battlefield_boundary_acmi,
+)
 
 # Diagnostic marker 3
 try:
@@ -163,7 +168,8 @@ class VisualMissileTracker:
 # ==============================================================================
 
 def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
-             num_red: int = 2, num_blue: int = 2, max_steps: int = 1400):
+             num_red: int = 2, num_blue: int = 2, max_steps: int = 1400,
+             draw_boundary: bool = False, boundary_half_size: float = 40000.0):
     """Load a model, run one episode with TacView recording, save .acmi."""
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -252,6 +258,10 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
     print("环境重置...", flush=True)
     try:
         obs, _ = env.reset()
+        if draw_boundary and env._tacview_recorder is not None:
+            env._tacview_recorder.append_lines(
+                _battlefield_boundary_acmi_lines(boundary_half_size))
+            print("  ACMI boundary debug markers enabled", flush=True)
         print("  重置完成", flush=True)
     except Exception:
         print("ERROR: env.reset() 失败:", flush=True)
@@ -495,6 +505,10 @@ if __name__ == "__main__":
         parser.add_argument("--num-red", type=int, default=2)
         parser.add_argument("--num-blue", type=int, default=2)
         parser.add_argument("--max-steps", type=int, default=1400)
+        parser.add_argument("--draw-boundary", action="store_true", default=False,
+                            help="Draw battlefield boundary in ACMI for debugging.")
+        parser.add_argument("--boundary-half-size", type=float, default=40000.0,
+                            help="Half-size of square battlefield boundary in meters.")
         args = parser.parse_args()
 
         ckpt = None
@@ -518,7 +532,9 @@ if __name__ == "__main__":
 
         run_acmi(checkpoint_path=ckpt, output_path=args.output,
                  num_red=args.num_red, num_blue=args.num_blue,
-                 max_steps=args.max_steps)
+                 max_steps=args.max_steps,
+                 draw_boundary=args.draw_boundary,
+                 boundary_half_size=args.boundary_half_size)
     except Exception:
         print("FATAL: 未捕获的异常:", flush=True)
         traceback.print_exc()

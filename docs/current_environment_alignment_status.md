@@ -121,3 +121,15 @@ does not use enemy state and does not give Blue radar-blind target tracking.
 positions and does not expose Red positions. Remaining Blue policy items still
 need separate audit: AWACS fallback, `DOOMED_ALT` body-frame z handling, and
 whether the full rule policy matches the paper baseline.
+
+## 7. ACMI battlefield boundary debug
+
+Tacview ACMI battlefield boundary visualization is available as an opt-in debug
+flag in `eval_acmi.py`:
+
+```powershell
+python eval_acmi.py ... --draw-boundary --boundary-half-size 40000
+```
+
+It is disabled by default. The current implementation writes four static corner
+markers rather than permanent map lines, so normal ACMI exports remain clean.
