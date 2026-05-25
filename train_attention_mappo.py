@@ -20,6 +20,11 @@ import torch.nn.functional as F
 
 from attention_models import AttentionActor
 from my_uav_env.alignment.entity_obs import build_entity_observation
+from my_uav_env.alignment.global_state import (
+    build_strict_team_global_state,
+    describe_strict_global_state_layout,
+    infer_strict_team_global_state_dim,
+)
 from my_uav_env.alignment.obs_adapter import build_paper_entity_observation_from_env_obs
 from my_uav_env.alignment.reward_utils import REWARD_VERSION
 from rule_based_agent import blue_coordinated_actions
@@ -48,7 +53,8 @@ class AttentionRolloutBuffer:
     """Rollout storage for attention actor + flattened centralized critic."""
 
     def __init__(self, num_steps: int, num_envs: int, num_red: int,
-                 action_dim: int, rnn_hidden_size: int):
+                 action_dim: int, rnn_hidden_size: int,
+                 global_obs_dim: int | None = None):
         self.num_steps = num_steps
         t_size, e_size, a_size = num_steps, num_envs, num_red
         h_size = rnn_hidden_size
@@ -76,6 +82,10 @@ class AttentionRolloutBuffer:
         self.rnn_actor_final = np.zeros((e_size, a_size, h_size), dtype=np.float32)
         self.bootstrap_values = np.zeros((e_size, a_size), dtype=np.float32)
 
+        _god = global_obs_dim or 1
+        self.global_obs = np.zeros((t_size, e_size, _god), dtype=np.float32)
+        self._global_obs_dim = _god
+
     def store_step(self, step: int, env_idx: int, agent_idx: int,
                    entities_np: np.ndarray, entity_mask_np: np.ndarray,
                    obs_flat: np.ndarray, action: np.ndarray, reward: float,
@@ -95,6 +105,7 @@ def parse_args_attention():
     raw_argv = sys.argv[1:]
     clean_argv = []
     obs_adapter = "current"
+    critic_state = "engineering"
     preset_name = None
     list_presets = False
 
@@ -110,6 +121,17 @@ def parse_args_attention():
             continue
         if item.startswith("--obs-adapter="):
             obs_adapter = item.split("=", 1)[1]
+            i += 1
+            continue
+        if item == "--critic-state":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit(
+                    "--critic-state requires one of: engineering, strict-global")
+            critic_state = raw_argv[i + 1]
+            i += 2
+            continue
+        if item.startswith("--critic-state="):
+            critic_state = item.split("=", 1)[1]
             i += 1
             continue
         if item == "--preset":
@@ -139,6 +161,9 @@ def parse_args_attention():
     if obs_adapter not in ("current", "paper-placeholder", "strict"):
         raise SystemExit(
             "--obs-adapter must be one of: current, paper-placeholder, strict")
+    if critic_state not in ("engineering", "strict-global"):
+        raise SystemExit(
+            "--critic-state must be one of: engineering, strict-global")
 
     old_argv = sys.argv
     try:
@@ -148,6 +173,7 @@ def parse_args_attention():
         sys.argv = old_argv
 
     args.obs_adapter = obs_adapter
+    args.critic_state = critic_state
 
     if preset_name is not None:
         from configs.experiment_presets import get_preset
@@ -156,6 +182,9 @@ def parse_args_attention():
         if args.obs_adapter not in ("current", "paper-placeholder", "strict"):
             raise SystemExit(
                 "--obs-adapter must be one of: current, paper-placeholder, strict")
+        if args.critic_state not in ("engineering", "strict-global"):
+            raise SystemExit(
+                "--critic-state must be one of: engineering, strict-global")
     else:
         if not _has_cli_option(clean_argv, "--log-file"):
             args.log_file = "attention_training_log.csv"
@@ -172,7 +201,7 @@ _ATTENTION_PRESET_CLI_FLAGS = {
     "actor_lr", "critic_lr", "entropy_coef",
     "enable_blue_gcas", "resume_from_best",
     "log_file", "results_file", "checkpoint_dir", "device",
-    "obs_adapter",
+    "obs_adapter", "critic_state",
 }
 
 
@@ -217,6 +246,56 @@ def _zero_entity_like(obs_np: dict, obs_adapter: str) -> tuple[np.ndarray, np.nd
     return np.zeros_like(entities, dtype=np.float32), np.ones_like(mask, dtype=np.int64)
 
 
+def _compute_attention_global_obs_dim(config, obs_dim: int) -> int:
+    """Return the critic global_obs_dim for the current config."""
+    if config.critic_state == "engineering":
+        return obs_dim * config.num_red
+    if config.critic_state == "strict-global":
+        if config.obs_adapter != "strict":
+            raise ValueError(
+                "--critic-state strict-global requires --obs-adapter strict, "
+                f"got obs_adapter={config.obs_adapter!r}")
+        return infer_strict_team_global_state_dim(
+            num_red=config.num_red,
+            num_blue=config.num_blue,
+            entity_dim=10,
+            include_masks=True,
+        )
+    raise ValueError(f"Unknown critic_state: {config.critic_state!r}")
+
+
+def _build_global_obs_for_env(
+    env_obs: dict,
+    strict_env_obs: dict | None,
+    red_ids: list[str],
+    obs_dim: int,
+    config,
+) -> np.ndarray:
+    """Build the per-timestep critic global observation."""
+    if config.critic_state == "engineering":
+        parts = []
+        for rid in red_ids:
+            if rid in (env_obs or {}):
+                parts.append(_flatten_obs(env_obs[rid]))
+            else:
+                parts.append(np.zeros(obs_dim, dtype=np.float32))
+        return np.concatenate(parts).astype(np.float32)
+
+    if config.critic_state == "strict-global":
+        if not strict_env_obs or len(strict_env_obs) < config.num_red:
+            god = _compute_attention_global_obs_dim(config, obs_dim)
+            return np.zeros(god, dtype=np.float32)
+        return build_strict_team_global_state(
+            strict_env_obs,
+            num_red=config.num_red,
+            num_blue=config.num_blue,
+            agent_prefix="red",
+            include_masks=True,
+        ).astype(np.float32)
+
+    raise ValueError(f"Unknown critic_state: {config.critic_state!r}")
+
+
 def _fetch_strict_red_team_obs(vec_env, config) -> list[dict]:
     """Fetch strict red-team observations from each worker env."""
     results = vec_env.env_method(
@@ -245,11 +324,8 @@ def ppo_update_attention(actor, critic, actor_opt, critic_opt,
     trajectories = []
 
     for env_idx in range(num_envs):
-        global_obs_seq = []
-        for step in range(num_steps):
-            parts = [buffer.obs[step][env_idx][i] for i in range(num_red)]
-            global_obs_seq.append(np.concatenate(parts))
-        global_obs_by_env.append(np.stack(global_obs_seq).astype(np.float32))
+        global_obs_by_env.append(
+            buffer.global_obs[:, env_idx, :].astype(np.float32))
 
         for agent_idx in range(num_red):
             t_entities = []
@@ -422,6 +498,7 @@ def main():
     args = parse_args_attention()
     config = make_config_from_args(args)
     config.obs_adapter = args.obs_adapter
+    config.critic_state = args.critic_state
     _set_main_process_seed(config.seed)
     device = _select_device(config.device)
 
@@ -482,12 +559,20 @@ def main():
     actor = AttentionActor(entity_dim=entity_dim, action_dim=config.action_dim,
                            hidden_size=config.mlp_hidden,
                            rnn_hidden=config.rnn_hidden_size).to(device)
-    global_obs_dim = obs_dim * config.num_red
+    global_obs_dim = _compute_attention_global_obs_dim(config, obs_dim)
     critic = CentralizedCritic(global_obs_dim=global_obs_dim,
                                hidden=config.mlp_hidden).to(device)
     print(f"Actor params:  {sum(p.numel() for p in actor.parameters()):,}")
     print(f"Critic params: {sum(p.numel() for p in critic.parameters()):,} "
-          f"(centralized, global_obs_dim={global_obs_dim})")
+          f"(centralized, global_obs_dim={global_obs_dim}, "
+          f"critic_state={config.critic_state})")
+    if config.critic_state == "strict-global":
+        layout = describe_strict_global_state_layout(config.num_red, config.num_blue)
+        print(f"Strict critic global state layout: {layout}")
+    if (config.critic_state == "strict-global"
+            and config.checkpoint_dir == "checkpoints_attention"):
+        print("[WARN] strict-global uses different critic input dimension; "
+              "use a separate checkpoint_dir.")
 
     actor_opt = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
     critic_opt = torch.optim.Adam(critic.parameters(), lr=config.critic_lr)
@@ -549,6 +634,7 @@ def main():
             num_steps=num_steps, num_envs=config.num_envs,
             num_red=config.num_red, action_dim=config.action_dim,
             rnn_hidden_size=config.rnn_hidden_size,
+            global_obs_dim=global_obs_dim,
         )
         buffer.rnn_actor_init = rnn_hidden_actor.copy()
         iter_episodes = 0
@@ -648,7 +734,12 @@ def main():
                             action[k].cpu().numpy(),
                             0.0, 0.0, log_prob[k].item(), 0.0, alive=True)
 
-                global_obs_np = np.concatenate(red_obs_flat_all)
+                global_obs_np = _build_global_obs_for_env(
+                    env_obs,
+                    strict_obs_list[env_idx] if strict_obs_list else None,
+                    red_ids, obs_dim, config,
+                )
+                buffer.global_obs[step, env_idx] = global_obs_np
                 global_obs_t = torch.as_tensor(
                     global_obs_np, dtype=torch.float32, device=device).unsqueeze(0)
                 with torch.no_grad():
@@ -736,13 +827,11 @@ def main():
             env_obs = raw_obs_list[env_idx]
             if not env_obs or len(env_obs) == 0:
                 continue
-            global_obs_parts = []
-            for rid in red_ids:
-                if rid in env_obs:
-                    global_obs_parts.append(_flatten_obs(env_obs[rid]))
-                else:
-                    global_obs_parts.append(np.zeros(obs_dim, dtype=np.float32))
-            global_obs_np = np.concatenate(global_obs_parts)
+            global_obs_np = _build_global_obs_for_env(
+                env_obs,
+                strict_obs_list[env_idx] if strict_obs_list else None,
+                red_ids, obs_dim, config,
+            )
             global_obs_t = torch.as_tensor(global_obs_np, dtype=torch.float32,
                                            device=device).unsqueeze(0)
             with torch.no_grad():

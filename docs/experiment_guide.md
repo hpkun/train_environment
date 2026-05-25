@@ -279,6 +279,17 @@ strict candidate 2v2 维度为 88（4 entities × 10 dim + 4 mask = 44 per agent
 
 本 pass 只做候选工具，不改变训练行为。后续将单独做 critic switch pass。
 
+`train_attention_mappo.py` 现已支持 `--critic-state`：
+- `--critic-state engineering`（默认）：critic 使用 flattened 11-dim obs concat。
+- `--critic-state strict-global`：critic 使用 strict team global state（需 `--obs-adapter strict`）。
+  2v2 strict-global dim = 88，engineering dim = 106。
+
+新 preset:
+
+```powershell
+python train_attention_mappo.py --preset attention_1v1_strict_critic_smoke
+```
+
 ## 18. Reward version 标记
 
 当前 reward version 为 `fixed_ta_alt_eq17_3dlos_v1`。
