@@ -167,3 +167,14 @@ python -m compileall reward_utils.py entity_obs_utils.py paper_obs_utils.py pape
 - No behaviour changed; no imports in training scripts updated.
 - Next pass should move `paper_state_extractor.py` → `my_uav_env/alignment/state_extractor.py`
   following the same pattern.
+
+### Pass D — paper_state_extractor → state_extractor (completed)
+
+- `paper_state_extractor.py` implementation moved to `my_uav_env/alignment/state_extractor.py`.
+- Root `paper_state_extractor.py` is now a thin compatibility re-export:
+  `from my_uav_env.alignment.state_extractor import *`.
+- File renamed to drop `paper_` prefix; internal function names preserved
+  to avoid breaking existing callers.
+- No behaviour changed; no imports in training scripts updated.
+- All four alignment modules now live in `my_uav_env/alignment/` alongside
+  their root-level compatibility shims.
