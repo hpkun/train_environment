@@ -211,6 +211,93 @@ def _flatten_obs(obs_np: dict) -> np.ndarray:
     ])
 
 
+LAUNCH_DIAG_BASE_KEYS = (
+    "range_ok_pairs",
+    "ao_ok_pairs",
+    "ta_ok_pairs",
+    "geometry_ok_pairs",
+    "lock_mature_pairs",
+    "cooldown_blocked",
+    "kill_cooldown_blocked",
+    "engaged_blocked",
+    "launches",
+)
+
+LAUNCH_DIAG_CSV_FIELDS = (
+    "LaunchDiagRedGeometryOk",
+    "LaunchDiagBlueGeometryOk",
+    "LaunchDiagRedLaunches",
+    "LaunchDiagBlueLaunches",
+    "LaunchDiagRedRangeOk",
+    "LaunchDiagRedAoOk",
+    "LaunchDiagRedTaOk",
+    "LaunchDiagBlueRangeOk",
+    "LaunchDiagBlueAoOk",
+    "LaunchDiagBlueTaOk",
+    "LaunchDiagRedEngagedBlocked",
+    "LaunchDiagBlueEngagedBlocked",
+    "LaunchDiagRedCooldownBlocked",
+    "LaunchDiagBlueCooldownBlocked",
+    "LaunchDiagRedKillCooldownBlocked",
+    "LaunchDiagBlueKillCooldownBlocked",
+    "LaunchDiagRedLockMature",
+    "LaunchDiagBlueLockMature",
+    "RedGeometryToLaunchRate",
+    "BlueGeometryToLaunchRate",
+    "RedRangeToGeometryRate",
+    "BlueRangeToGeometryRate",
+)
+
+
+def _empty_launch_diag_totals() -> dict:
+    return {team: {key: 0 for key in LAUNCH_DIAG_BASE_KEYS}
+            for team in ("red", "blue")}
+
+
+def _accumulate_launch_diag_totals(totals: dict, launch_diag: dict | None) -> None:
+    if not isinstance(launch_diag, dict):
+        return
+    for team in ("red", "blue"):
+        team_diag = launch_diag.get(team, {})
+        if not isinstance(team_diag, dict):
+            continue
+        for key in LAUNCH_DIAG_BASE_KEYS:
+            totals[team][key] += int(team_diag.get(key, 0))
+
+
+def _launch_diag_metrics(totals: dict) -> dict:
+    red = totals["red"]
+    blue = totals["blue"]
+    red_geometry = red["geometry_ok_pairs"]
+    blue_geometry = blue["geometry_ok_pairs"]
+    red_launches = red["launches"]
+    blue_launches = blue["launches"]
+    return {
+        "LaunchDiagRedGeometryOk": red_geometry,
+        "LaunchDiagBlueGeometryOk": blue_geometry,
+        "LaunchDiagRedLaunches": red_launches,
+        "LaunchDiagBlueLaunches": blue_launches,
+        "LaunchDiagRedRangeOk": red["range_ok_pairs"],
+        "LaunchDiagRedAoOk": red["ao_ok_pairs"],
+        "LaunchDiagRedTaOk": red["ta_ok_pairs"],
+        "LaunchDiagBlueRangeOk": blue["range_ok_pairs"],
+        "LaunchDiagBlueAoOk": blue["ao_ok_pairs"],
+        "LaunchDiagBlueTaOk": blue["ta_ok_pairs"],
+        "LaunchDiagRedEngagedBlocked": red["engaged_blocked"],
+        "LaunchDiagBlueEngagedBlocked": blue["engaged_blocked"],
+        "LaunchDiagRedCooldownBlocked": red["cooldown_blocked"],
+        "LaunchDiagBlueCooldownBlocked": blue["cooldown_blocked"],
+        "LaunchDiagRedKillCooldownBlocked": red["kill_cooldown_blocked"],
+        "LaunchDiagBlueKillCooldownBlocked": blue["kill_cooldown_blocked"],
+        "LaunchDiagRedLockMature": red["lock_mature_pairs"],
+        "LaunchDiagBlueLockMature": blue["lock_mature_pairs"],
+        "RedGeometryToLaunchRate": _safe_div(red_launches, red_geometry),
+        "BlueGeometryToLaunchRate": _safe_div(blue_launches, blue_geometry),
+        "RedRangeToGeometryRate": _safe_div(red_geometry, red["range_ok_pairs"]),
+        "BlueRangeToGeometryRate": _safe_div(blue_geometry, blue["range_ok_pairs"]),
+    }
+
+
 def _cleanup_rotating_checkpoints(directory: str, prefix: str, keep: int = 5):
     """删除超出保留数量的旧轮转 checkpoint 文件。
 
@@ -1251,7 +1338,8 @@ def main():
                           "RedMissileHitRate", "BlueMissileHitRate",
                           "KD_Red", "RWR", "RewardVersion",
                           "ActionStdMean", "ActionStdMin", "ActionStdMax",
-                          "ActionLogStdMean"])
+                          "ActionLogStdMean",
+                          *LAUNCH_DIAG_CSV_FIELDS])
     csv_file.flush()
 
     print(f"设备: {device}")
@@ -1374,6 +1462,7 @@ def main():
         # Per-iteration episode counters (for sliding-window win rate)
         iter_episodes = 0
         iter_red_wins = 0
+        iter_launch_diag = _empty_launch_diag_totals()
 
         # ---- Rollout ----
         for step in range(num_steps):
@@ -1464,6 +1553,8 @@ def main():
                 rew = rewards_list[env_idx]
                 don = dones_list[env_idx]
                 info = infos_list[env_idx]
+                _accumulate_launch_diag_totals(
+                    iter_launch_diag, info.get("__launch_diag__", {}))
 
                 # ---- accumulate step rewards FIRST (incl. terminal r_end for dead agents) ----
                 for i, rid in enumerate(red_ids):
@@ -1593,6 +1684,7 @@ def main():
         rwr = _safe_div(red_wins, total_episodes)
 
         std_stats = _actor_std_stats(actor)
+        launch_diag_metrics = _launch_diag_metrics(iter_launch_diag)
 
         # Average per-component breakdown across completed episodes
         if recent_ep_comps_red:
@@ -1634,7 +1726,12 @@ def main():
                              f"{std_stats['action_std_mean']:.6f}",
                              f"{std_stats['action_std_min']:.6f}",
                              f"{std_stats['action_std_max']:.6f}",
-                             f"{std_stats['action_log_std_mean']:.6f}"])
+                             f"{std_stats['action_log_std_mean']:.6f}",
+                             *[
+                                 (f"{launch_diag_metrics[field]:.6f}"
+                                  if "Rate" in field else launch_diag_metrics[field])
+                                 for field in LAUNCH_DIAG_CSV_FIELDS
+                             ]])
         csv_file.flush()
 
         # ---- 持久化：results/ 绘图数据 (累计 + 每 1M 步自动保存) ----
@@ -1680,6 +1777,7 @@ def main():
             "r_end":          avg_comps.get("r_end", 0.0),
             "r_death":        avg_comps.get("r_death", 0.0),
         })
+        results_log[-1].update(launch_diag_metrics)
         milestone_cur = total_steps // 1_000_000
         milestone_prev = (total_steps - config.num_envs * num_steps) // 1_000_000
         if milestone_cur > milestone_prev or total_steps >= config.total_env_steps:
@@ -1717,6 +1815,10 @@ def main():
               f"EntCoef={_current_entropy_coef(config, total_steps):.4f} "
               f"Entropy={stats['entropy']:.4f} "
               f"Std={std_stats['action_std_mean']:.4f} | "
+              f"LaunchDiag R={launch_diag_metrics['LaunchDiagRedGeometryOk']}/"
+              f"{launch_diag_metrics['LaunchDiagRedLaunches']} "
+              f"B={launch_diag_metrics['LaunchDiagBlueGeometryOk']}/"
+              f"{launch_diag_metrics['LaunchDiagBlueLaunches']} | "
               f"WinRate_red={red_win_rate:.3f} "
               f"(Ep={total_episodes} W={red_wins}/{blue_wins}/{draws}) | "
               f"Deaths: Red[{_fmt_death(death_stats['red'])}] "

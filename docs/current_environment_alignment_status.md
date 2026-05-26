@@ -167,3 +167,17 @@ python eval_acmi.py ... --draw-boundary --boundary-half-size 40000
 
 It is disabled by default. The current implementation writes four static corner
 markers rather than permanent map lines, so normal ACMI exports remain clean.
+
+## 8. Missile launch diagnostics
+
+Vanilla MAPPO training now receives per-step missile launch diagnostics through
+`info["__launch_diag__"]`. These counters record launch opportunities and
+blocking causes for Red and Blue separately, including range/AO/TA gates,
+geometry-valid pairs, mature locks, cooldown blocks, kill-cooldown blocks,
+engaged-target blocks, and actual launches.
+
+The diagnostics do not change missile launch conditions, radar detection,
+engaged-target deconfliction, rewards, observations, or PPO logic. They are
+intended to answer whether low missile counts come from lack of geometry,
+lock/cooldown blocking, target deconfliction, or actual launch suppression.
+Attention MAPPO can be wired to the same fields later if needed.

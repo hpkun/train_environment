@@ -23,6 +23,33 @@ from .render_tacview import TacviewLogger
 
 logger = logging.getLogger(__name__)
 
+LAUNCH_DIAG_TEAMS = ("red", "blue")
+LAUNCH_DIAG_KEYS = (
+    "scan_frames",
+    "alive_shooters",
+    "alive_enemy_pairs",
+    "unengaged_enemy_pairs",
+    "range_ok_pairs",
+    "ao_ok_pairs",
+    "ta_ok_pairs",
+    "geometry_ok_pairs",
+    "lock_started",
+    "lock_continued",
+    "lock_lost",
+    "lock_mature_pairs",
+    "cooldown_blocked",
+    "kill_cooldown_blocked",
+    "engaged_blocked",
+    "launches",
+)
+
+
+def make_empty_launch_diag() -> dict:
+    """Return a fresh per-step missile launch diagnostics counter."""
+
+    return {team: {key: 0 for key in LAUNCH_DIAG_KEYS}
+            for team in LAUNCH_DIAG_TEAMS}
+
 
 def _make_entity_vec(ego_pos, ego_vel, tgt_pos, tgt_vel, tgt_rpy, alive: bool):
     """Build an 11-dim entity feature vector for *tgt* as seen from *ego*.
@@ -251,6 +278,7 @@ class UavCombatEnv(gymnasium.Env):
 
         # Missile launch counters (per-episode, for debugging)
         self._missile_launch_counts: dict[str, int] = {}
+        self._launch_diag_step = make_empty_launch_diag()
         # Missile termination reason counters: {"red": Counter(), "blue": Counter()}
         self._missile_term_reasons: dict[str, dict[str, int]] = {
             "red": {}, "blue": {},
@@ -362,6 +390,7 @@ class UavCombatEnv(gymnasium.Env):
 
         # Reset missile launch counters
         self._missile_launch_counts = {aid: 0 for aid in self.agent_ids}
+        self._launch_diag_step = make_empty_launch_diag()
 
         # Reset death reasons
         self._death_reasons = {}
@@ -431,6 +460,7 @@ class UavCombatEnv(gymnasium.Env):
     def step(self, actions: dict):
         self.current_step += 1
         self._crashed_this_step.clear()
+        self._launch_diag_step = make_empty_launch_diag()
 
         # 0. Pre-compute kill-cooldown denial set (before physics loop).
         #    An agent that scored a kill within the last KILL_COOLDOWN_STEPS
@@ -657,11 +687,15 @@ class UavCombatEnv(gymnasium.Env):
         target — preventing same-frame double-launch.
         """
         for aid in self.agent_ids:
+            team = "red" if aid.startswith("red") else "blue"
+            diag = self._launch_diag_step[team]
+            diag["scan_frames"] += 1
             sim = self._get_sim(aid)
             if sim is None or not sim.is_alive:
                 self._lock_timer[aid] = 0
                 self._lock_target[aid] = None
                 continue
+            diag["alive_shooters"] += 1
             # Decrement cooldown every physics frame
             if self._missile_cooldown[aid] > 0:
                 self._missile_cooldown[aid] -= 1
@@ -680,9 +714,12 @@ class UavCombatEnv(gymnasium.Env):
             for enemy_sim in enemies.values():
                 if not enemy_sim.is_alive:
                     continue
+                diag["alive_enemy_pairs"] += 1
                 # --- Target-deconfliction: skip enemies already engaged ---
                 if enemy_sim.uid in self._engaged_targets:
+                    diag["engaged_blocked"] += 1
                     continue
+                diag["unengaged_enemy_pairs"] += 1
 
                 ego_pos = sim.get_position()
                 ego_vel = sim.get_velocity()
@@ -694,10 +731,19 @@ class UavCombatEnv(gymnasium.Env):
                 enm_feat = np.array([enm_pos[0], enm_pos[1], -enm_pos[2],
                                      enm_vel[0], enm_vel[1], -enm_vel[2]])
                 AO, TA, R = get2d_AO_TA_R(ego_feat, enm_feat)
+                range_ok = self.MISSILE_LAUNCH_MIN_RANGE < R < self.MISSILE_LAUNCH_RANGE_THRESH
+                ao_ok = AO < self.MISSILE_LAUNCH_AO_THRESH
+                ta_ok = TA > self.MISSILE_LAUNCH_TA_THRESH
+                if range_ok:
+                    diag["range_ok_pairs"] += 1
+                if ao_ok:
+                    diag["ao_ok_pairs"] += 1
+                if ta_ok:
+                    diag["ta_ok_pairs"] += 1
 
-                in_cone = (AO < self.MISSILE_LAUNCH_AO_THRESH
-                           and self.MISSILE_LAUNCH_MIN_RANGE < R < self.MISSILE_LAUNCH_RANGE_THRESH
-                           and TA > self.MISSILE_LAUNCH_TA_THRESH)
+                in_cone = (ao_ok and range_ok and ta_ok)
+                if in_cone:
+                    diag["geometry_ok_pairs"] += 1
 
                 if in_cone and R < best_distance:
                     best_distance = R
@@ -718,12 +764,16 @@ class UavCombatEnv(gymnasium.Env):
                 if self._lock_target.get(aid) == best_enemy.uid:
                     # Same target — accumulate lock
                     self._lock_timer[aid] += 1
+                    diag["lock_continued"] += 1
                 else:
                     # Target switched — reset lock
                     self._lock_target[aid] = best_enemy.uid
                     self._lock_timer[aid] = 1
+                    diag["lock_started"] += 1
             else:
                 # No eligible unengaged enemy — lose lock immediately
+                if self._lock_target.get(aid) is not None:
+                    diag["lock_lost"] += 1
                 self._lock_timer[aid] = 0
                 self._lock_target[aid] = None
 
@@ -731,11 +781,20 @@ class UavCombatEnv(gymnasium.Env):
             #      is not on kill cooldown ----
             # (best_enemy is already guaranteed unengaged by the filter above)
             on_kill_cooldown = aid in self._agents_deny_kill
+            lock_mature = (best_enemy is not None
+                           and self._lock_timer[aid] >= self.missile_lock_delay_frames)
+            if lock_mature:
+                diag["lock_mature_pairs"] += 1
+                if self._missile_cooldown[aid] != 0:
+                    diag["cooldown_blocked"] += 1
+                if on_kill_cooldown:
+                    diag["kill_cooldown_blocked"] += 1
             if (best_enemy is not None
                     and self._lock_timer[aid] >= self.missile_lock_delay_frames
                     and self._missile_cooldown[aid] == 0
                     and not on_kill_cooldown):
                 self._launch_missile(sim, best_enemy)
+                diag["launches"] += 1
                 # ---- HOT-UPDATE: immediately mark target as engaged ----
                 # Subsequent agents in the same physics frame will see this
                 # and skip the target, preventing same-frame double-launch.
@@ -1285,6 +1344,9 @@ class UavCombatEnv(gymnasium.Env):
         # Attach accumulated missile termination stats (read-only snapshot)
         info["__missile_term__"] = {
             team: dict(reasons) for team, reasons in self._missile_term_reasons.items()
+        }
+        info["__launch_diag__"] = {
+            team: dict(vals) for team, vals in self._launch_diag_step.items()
         }
         return info
 

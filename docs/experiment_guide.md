@@ -381,3 +381,36 @@ python eval_acmi.py --checkpoint checkpoints/vanilla_actor_best.pt --num-red 2 -
 ```
 
 Normal replay commands should omit `--draw-boundary`.
+
+## 21. Missile launch diagnostics
+
+`train_vanilla_mappo.py` logs additional missile launch diagnostic fields. They
+are counters only; they do not change automatic firing, missile dynamics,
+radar detection, reward, or PPO training.
+
+Key fields:
+
+- `LaunchDiagRedRangeOk` / `LaunchDiagBlueRangeOk`: physics-frame shooter-target
+  pairs inside the missile range window.
+- `LaunchDiagRedAoOk` / `LaunchDiagBlueAoOk`: pairs satisfying the AO gate.
+- `LaunchDiagRedTaOk` / `LaunchDiagBlueTaOk`: pairs satisfying the TA gate.
+- `LaunchDiagRedGeometryOk` / `LaunchDiagBlueGeometryOk`: pairs satisfying
+  range, AO, and TA together.
+- `LaunchDiagRedLockMature` / `LaunchDiagBlueLockMature`: geometry-selected
+  pairs whose lock timer has reached the launch delay.
+- `LaunchDiagRedCooldownBlocked` / `LaunchDiagBlueCooldownBlocked`: mature locks
+  blocked by launch cooldown.
+- `LaunchDiagRedKillCooldownBlocked` / `LaunchDiagBlueKillCooldownBlocked`:
+  mature locks blocked by kill cooldown.
+- `LaunchDiagRedEngagedBlocked` / `LaunchDiagBlueEngagedBlocked`: alive enemy
+  pairs skipped because the target is already engaged.
+- `LaunchDiagRedLaunches` / `LaunchDiagBlueLaunches`: launches recorded by the
+  same automatic launch path as the environment.
+
+Derived rates:
+
+- `RedGeometryToLaunchRate`, `BlueGeometryToLaunchRate`
+- `RedRangeToGeometryRate`, `BlueRangeToGeometryRate`
+
+Use these fields to distinguish "never entered launch geometry" from
+"geometry existed but lock/cooldown/deconfliction prevented firing."
