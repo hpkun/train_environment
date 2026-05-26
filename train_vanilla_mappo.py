@@ -768,6 +768,21 @@ def _episode_outcome(red_alive: int, blue_alive: int) -> str:
     return "draw"
 
 
+def _actor_std_stats(actor) -> dict:
+    """Return diagnostic std / log_std metrics for entropy monitoring.
+
+    Does not modify any parameter or alter training behaviour.
+    """
+    raw = actor.action_log_std.detach()
+    std = torch.exp(raw)
+    return {
+        "action_std_mean": float(std.mean().item()),
+        "action_std_min":  float(std.min().item()),
+        "action_std_max":  float(std.max().item()),
+        "action_log_std_mean": float(raw.mean().item()),
+    }
+
+
 def _ppo_update_legacy(actor, critic, actor_opt, critic_opt, buffer, config, device,
                        total_steps: int = 0):
     """MAPPO CTDE update: centralized critic sees global state (all red obs concat).
@@ -1234,7 +1249,9 @@ def main():
                           "BlueDeathsMissile", "BlueDeathsCrash",
                           "RedMissileHits", "BlueMissileHits",
                           "RedMissileHitRate", "BlueMissileHitRate",
-                          "KD_Red", "RWR", "RewardVersion"])
+                          "KD_Red", "RWR", "RewardVersion",
+                          "ActionStdMean", "ActionStdMin", "ActionStdMax",
+                          "ActionLogStdMean"])
     csv_file.flush()
 
     print(f"设备: {device}")
@@ -1575,6 +1592,8 @@ def main():
         kd_red = _safe_div(blue_total_deaths, red_total_deaths)
         rwr = _safe_div(red_wins, total_episodes)
 
+        std_stats = _actor_std_stats(actor)
+
         # Average per-component breakdown across completed episodes
         if recent_ep_comps_red:
             avg_comps = {k: float(np.mean([ep[k] for ep in recent_ep_comps_red]))
@@ -1611,7 +1630,11 @@ def main():
                              f"{blue_missile_hit_rate:.6f}",
                              f"{kd_red:.6f}",
                              f"{rwr:.6f}",
-                             REWARD_VERSION])
+                             REWARD_VERSION,
+                             f"{std_stats['action_std_mean']:.6f}",
+                             f"{std_stats['action_std_min']:.6f}",
+                             f"{std_stats['action_std_max']:.6f}",
+                             f"{std_stats['action_log_std_mean']:.6f}"])
         csv_file.flush()
 
         # ---- 持久化：results/ 绘图数据 (累计 + 每 1M 步自动保存) ----
@@ -1641,6 +1664,10 @@ def main():
             "KD_Red":         kd_red,
             "RWR":            rwr,
             "RewardVersion":  REWARD_VERSION,
+            "ActionStdMean":  std_stats["action_std_mean"],
+            "ActionStdMin":   std_stats["action_std_min"],
+            "ActionStdMax":   std_stats["action_std_max"],
+            "ActionLogStdMean": std_stats["action_log_std_mean"],
             "ActorLoss":      stats["actor_loss"],
             "CriticLoss":     stats["critic_loss"],
             "Entropy":        stats["entropy"],
@@ -1688,7 +1715,8 @@ def main():
               f"ActorLoss={stats['actor_loss']:+.4f} "
               f"CriticLoss={stats['critic_loss']:+.4f} "
               f"EntCoef={_current_entropy_coef(config, total_steps):.4f} "
-              f"Entropy={stats['entropy']:.4f} | "
+              f"Entropy={stats['entropy']:.4f} "
+              f"Std={std_stats['action_std_mean']:.4f} | "
               f"WinRate_red={red_win_rate:.3f} "
               f"(Ep={total_episodes} W={red_wins}/{blue_wins}/{draws}) | "
               f"Deaths: Red[{_fmt_death(death_stats['red'])}] "
