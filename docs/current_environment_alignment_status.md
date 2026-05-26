@@ -119,8 +119,7 @@ This helper only uses Blue ownship position and velocity-derived heading. It
 does not use enemy state and does not give Blue radar-blind target tracking.
 `UavCombatEnv.get_blue_own_positions()` returns only alive Blue ownship
 positions and does not expose Red positions. Remaining Blue policy items still
-need separate audit: AWACS fallback, `DOOMED_ALT` body-frame z handling, and
-whether the full rule policy matches the paper baseline.
+need separate audit for whether the full rule policy matches the paper baseline.
 
 The no-target patrol is pre-boundary and speed-aware: it starts applying
 center-turn pressure before the 40 km battlefield edge and reduces cruise
@@ -139,6 +138,23 @@ When available, Blue boundary logic now uses ownship yaw heading from
 only the fallback for legacy callers. This aligns rule-policy heading math with
 the aircraft nose direction shown in Tacview and with the environment PID's
 absolute target-heading control.
+
+Blue lost-target handling now keeps using the observation information already
+provided by the environment instead of dropping straight into cruise:
+
+- The old `DOOMED_ALT` filter based on `enemy_states[idx][2]` was removed from
+  target filtering because that value is a body-frame / pseudo-up component,
+  not reliable world altitude. Target alive/dead state comes from `death_mask`.
+- Blue distinguishes radar tracks from AWACS coarse tracks. Radar tracks keep
+  full confidence; AWACS tracks are pursuit-capable but scored with lower
+  confidence.
+- AWACS pursuit uses coarse body-frame bearing only and does not use masked
+  target heading/speed for lead pursuit.
+- A short lost-target bearing memory supports reacquisition without storing or
+  reading Red world position.
+
+Remaining gap: the exact paper Blue baseline is still approximate unless the
+paper or released code provides a precise rule-policy specification.
 
 ## 7. ACMI battlefield boundary debug
 

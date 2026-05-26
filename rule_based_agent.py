@@ -32,6 +32,9 @@ import numpy as np
 # ==============================================================================
 _prev_heading_cmd: dict[int, float] = {}     # blue_id → last heading_cmd (internal [−1,1])
 _prev_lead_bearing: dict[int, float] = {}    # blue_id → last lead_bearing (rad)
+_last_target_bearing: dict[int, float] = {}  # blue_id -> last radar/AWACS target bearing (rad)
+_lost_target_steps: dict[int, int] = {}       # blue_id -> short-horizon reacquisition age
+BLUE_POLICY_DEBUG = False
 
 # ==============================================================================
 #  State thresholds
@@ -40,7 +43,7 @@ _prev_lead_bearing: dict[int, float] = {}    # blue_id → last lead_bearing (ra
 # ---- Hard Deck: never fight below 4500 m ----
 HARD_DECK        = 4500.0   # < this → force climb, full throttle, no combat
 SAFE_COMBAT_ALT  = 6000.0   # below this → graduated dive restriction + full throttle
-DOOMED_ALT       = 3000.0   # ignore enemy targets below this altitude
+DOOMED_ALT       = 3000.0   # deprecated: env death_mask handles target validity
 
 # ---- Descent-rate safety ----
 MAX_DESCENT_RATE = 40.0     # m/s — if descending faster than this below 5500 m, force climb
@@ -229,6 +232,44 @@ def _should_override_for_boundary_safety(
     )
 
 
+def _target_track_quality(tgt_vec: np.ndarray) -> str:
+    """Return 'radar', 'awacs', or 'invalid' for an enemy entity vector.
+
+    In the current environment observation, radar tracks have TA > 0, while
+    AWACS coarse blind-zone tracks retain body-frame position/range but have
+    TA == 0 and masked target speed/attitude.  Speed must not be used to reject
+    AWACS tracks because V_tgt == 0 is expected for coarse observations.
+    """
+
+    vec = np.asarray(tgt_vec, dtype=np.float32)
+    if vec.ndim != 1 or vec.shape[0] < 6 or np.allclose(vec, 0.0):
+        return "invalid"
+    R = float(vec[5]) * 80000.0
+    if R < 1.0:
+        return "invalid"
+    TA = abs(float(vec[4]) * np.pi)
+    return "radar" if TA > 1e-4 else "awacs"
+
+
+def _target_selection_score(tgt_vec: np.ndarray) -> float:
+    """Score radar and AWACS-coarse target tracks for Blue assignment."""
+
+    quality = _target_track_quality(tgt_vec)
+    if quality == "invalid":
+        return 0.0
+    R = float(tgt_vec[5]) * 80000.0
+    AO = float(tgt_vec[3]) * np.pi
+    TA = abs(float(tgt_vec[4]) * np.pi)
+    if quality == "radar":
+        TA_eff = max(TA, np.deg2rad(5))
+        quality_weight = 1.0
+    else:
+        TA_eff = np.deg2rad(5)
+        quality_weight = 0.6
+    ao_weight = max(0.1, 1.0 - abs(AO) / np.pi)
+    return float(quality_weight * (1.0 / max(R, 300.0)) * ao_weight * (TA_eff / np.pi))
+
+
 # ==============================================================================
 #  blue_coordinated_actions —— 协同目标分配入口（推荐调用此函数）
 # ==============================================================================
@@ -299,16 +340,7 @@ def blue_coordinated_actions(
                 score[b_idx, r_idx] = -1.0
                 continue
             tgt_vec = enemy_states[r_idx]
-            R  = float(tgt_vec[5]) * 80000.0
-            AO = float(tgt_vec[3]) * np.pi
-            TA = float(tgt_vec[4]) * np.pi
-            # AWACS fallback: when radar can't see the target (TA=0), use a
-            # 5° floor so Blue still pursues based on AWACS position data.
-            TA_eff = max(TA, np.deg2rad(5))
-            # Merge fix: AO floor prevents score→0 when target passes behind
-            # (AO≈π), which would otherwise cause Blue to lose lock and cruise.
-            ao_weight = max(0.1, 1.0 - abs(AO) / np.pi)
-            score[b_idx, r_idx] = (1.0 / max(R, 300.0)) * ao_weight * (TA_eff / np.pi)
+            score[b_idx, r_idx] = _target_selection_score(tgt_vec)
 
     # ---- Greedy assignment ----
     # Sort blues by their best score (descending)
@@ -472,34 +504,24 @@ def _blue_pursuit_action_impl(
     enemy_states = obs["enemy_states"]
     death_mask   = obs["death_mask"]
 
-    # --- Doomed target filter ---
+    # --- Alive target list ---
     alive_reds_raw = [i for i in range(num_red)
                       if death_mask[num_blue + i] > 0.5]
+    # enemy_states[idx][2] is a body-frame / pseudo-up component, not reliable
+    # world altitude. True death / low-altitude status is represented by the
+    # environment death_mask, so Blue must not discard alive Reds using body z.
+    alive_reds = alive_reds_raw
 
-    alive_reds = []
-    for idx in alive_reds_raw:
-        tgt_vec = enemy_states[idx]
-        delta_alt = float(tgt_vec[2]) * 10000.0
-        tgt_alt = alt_m + delta_alt
-        if tgt_alt > DOOMED_ALT:
-            alive_reds.append(idx)
-
-    # --- Target selection (radar-detected reds only, TA > 0) ---
+    # --- Target selection (radar tracks and AWACS coarse tracks) ---
     target_idx: int | None = None
-    if forced_target_idx is not None and forced_target_idx in alive_reds:
+    if (forced_target_idx is not None and forced_target_idx in alive_reds
+            and _target_track_quality(enemy_states[forced_target_idx]) != "invalid"):
         target_idx = forced_target_idx
     elif alive_reds:
         best_score = 0.0
         for idx in alive_reds:
             tgt_vec = enemy_states[idx]
-            R  = float(tgt_vec[5]) * 80000.0
-            AO = float(tgt_vec[3]) * np.pi
-            TA = float(tgt_vec[4]) * np.pi
-            # AWACS fallback: TA floor prevents zero-score when radar blind
-            TA_eff = max(TA, np.deg2rad(5))
-            # Merge fix: AO floor prevents score→0 after head-on pass (AO≈π)
-            ao_weight = max(0.1, 1.0 - abs(AO) / np.pi)
-            score_ = (1.0 / max(R, 300.0)) * ao_weight * (TA_eff / np.pi)
+            score_ = _target_selection_score(tgt_vec)
             if score_ > best_score:
                 best_score = score_
                 target_idx = idx
@@ -508,6 +530,19 @@ def _blue_pursuit_action_impl(
     if target_idx is None:
         _prev_lead_bearing.pop(blue_id, None)
         _prev_heading_cmd.pop(blue_id, None)
+        if not alive_reds:
+            _last_target_bearing.pop(blue_id, None)
+            _lost_target_steps.pop(blue_id, None)
+        elif blue_id in _last_target_bearing and _lost_target_steps.get(blue_id, 0) < 50:
+            # Short-horizon reacquisition: keep turning toward the last
+            # radar/AWACS bearing for about 10 s at the 5 Hz policy rate. This
+            # stores bearing only, never Red world position.
+            heading_error = (_last_target_bearing[blue_id] - our_heading + np.pi) % (2 * np.pi) - np.pi
+            heading_cmd = np.clip(heading_error / np.deg2rad(10.0), -1.0, 1.0)
+            _lost_target_steps[blue_id] = _lost_target_steps.get(blue_id, 0) + 1
+            alt_error = SAFE_COMBAT_ALT - alt_m
+            reacquire_pitch = np.clip(alt_error / 2000.0, -0.10, 0.12) + _TRIM_BASELINE
+            return _rescale(float(reacquire_pitch), float(heading_cmd), 0.8)
         alt_error = SAFE_COMBAT_ALT - alt_m
         cruise_pitch = np.clip(alt_error / 2000.0, -0.10, 0.12) + _TRIM_BASELINE
         heading_cmd = _blue_cruise_heading_command(
@@ -525,6 +560,25 @@ def _blue_pursuit_action_impl(
     TA        = float(tgt[4]) * np.pi        # radians, unsigned
     R         = float(tgt[5]) * 80000.0
     V_tgt     = float(tgt[6]) * 600.0        # target speed, m/s
+    quality = _target_track_quality(tgt)
+
+    if quality == "awacs":
+        # AWACS coarse tracks provide body-frame bearing/range but not target
+        # heading or speed. Do not run velocity lead pursuit on masked data.
+        pitch_cmd = np.clip(delta_alt / max(R, 300.0) * 2.0, -0.20, 0.25)
+        if alt_m < _DIVE_FREEZE_ALT:
+            pitch_cmd = max(pitch_cmd, 0.0)
+        elif alt_m < SAFE_COMBAT_ALT:
+            pitch_cmd = max(pitch_cmd, -0.25)
+        pitch_cmd = float(np.clip(pitch_cmd + _TRIM_BASELINE,
+                                  -_COMBAT_PITCH_LIMIT, _COMBAT_PITCH_LIMIT))
+        heading_cmd = float(np.clip(AO / (np.pi / 3), -1.0, 1.0))
+        vel_cmd = 1.0 if R > 5000.0 else 0.6
+        _prev_lead_bearing.pop(blue_id, None)
+        _prev_heading_cmd.pop(blue_id, None)
+        _last_target_bearing[blue_id] = float((our_heading + AO + np.pi) % (2 * np.pi) - np.pi)
+        _lost_target_steps[blue_id] = 0
+        return _rescale(pitch_cmd, heading_cmd, float(vel_cmd))
 
     # =========================================================================
     #  Pitch — Pure Pursuit with graduated dive restriction
@@ -622,6 +676,8 @@ def _blue_pursuit_action_impl(
 
     # Bearing from us to the lead point
     lead_bearing = np.arctan2(lead_e, lead_n)
+    _last_target_bearing[blue_id] = float(lead_bearing)
+    _lost_target_steps[blue_id] = 0
     AO_lead = lead_bearing - our_heading
     AO_lead = (AO_lead + np.pi) % (2 * np.pi) - np.pi   # wrap to [−π, π]
 

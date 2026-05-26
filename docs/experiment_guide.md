@@ -364,6 +364,13 @@ Training and evaluation now pass that yaw into the Blue rule policy through
 instead of velocity-track heading. Velocity heading remains only a compatibility
 fallback.
 
+After a head-on merge, Blue should not immediately straight-cruise only because
+the radar track is temporarily lost. The rule policy now distinguishes radar
+tracks from AWACS coarse tracks in the existing observation, pursues AWACS
+coarse bearings with lower confidence, and keeps a short last-bearing memory
+for reacquisition. This uses only observation-space target bearing/range and
+Blue ownship state; it does not read Red global position.
+
 ## 20. ACMI battlefield boundary debug
 
 `eval_acmi.py` does not draw battlefield boundaries by default. For Tacview
