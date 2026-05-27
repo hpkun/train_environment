@@ -10,6 +10,7 @@ from .mask_generator import (
     MaskGeneratorConfig,
     MaskVectorGenerator,
 )
+from .collection import collect_brma_dry_run_step
 from .rollout_schema import BRMARolloutSchemaConfig, BRMARolloutStorage
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "BRMARolloutStorage",
     "MaskGeneratorConfig",
     "MaskVectorGenerator",
+    "collect_brma_dry_run_step",
 ]
