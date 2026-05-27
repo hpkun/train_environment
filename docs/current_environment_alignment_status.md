@@ -63,7 +63,8 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | `num_missiles_per_plane` | Default `999` (no limit); paper does not specify a fixed value | P2 |
 | MAPPO-Attention Eq.33 encoder | `attention_models.py` supports `encoder_mode="paper_eq33"`. Default `current` unchanged | P1 |
 | MAPPO-Attention critic | `CentralizedAttentionCritic` available via `--critic-state attention-entities`. Uses shared EntityObservationEncoder per red agent; no BRMA mask. `engineering`/`strict-global` flattened critic retained as legacy | P1 |
-| BRMA mask generator | Standalone API added: `BRMAMaskGenerator`, count-constrained random/biased masks, mask fusion, Gumbel-ST. **Not wired** into rollout/PPO; no behavior change | P1 — next: wire into attention training |
+| BRMA mask generator | Standalone API added: `BRMAMaskGenerator`, count-constrained random/biased masks, mask fusion, Gumbel-ST. **Not wired** into rollout/PPO; no behavior change | P1 |
+| BRMA rollout schema | `BRMARolloutStorage` available for per-timestep mask/p/dual-logprob/next-obs storage. Default disabled; `AttentionRolloutBuffer` accepts optional config but does not use it yet | P1 |
 | PID stabilisation | Engineering additions (deadband, heading LPF, velocity R_BI, anti-inversion) | P2 |
 
 ## 4. Current module layout

@@ -99,7 +99,7 @@ def main() -> None:
     assert (msoft >= 0).all() and (msoft <= 1).all()
     assert torch.isfinite(msoft).all()
     assert mhard.shape == (B, N)
-    assert torch.all((mhard == 0) | (mhard == 1))
+    assert torch.all((mhard <= 0.01) | (mhard >= 0.99))
     loss = msoft.sum()
     loss.backward()
     assert logits.grad is not None

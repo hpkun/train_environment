@@ -55,7 +55,8 @@ class AttentionRolloutBuffer:
 
     def __init__(self, num_steps: int, num_envs: int, num_red: int,
                  action_dim: int, rnn_hidden_size: int,
-                 global_obs_dim: int | None = None):
+                 global_obs_dim: int | None = None,
+                 brma_storage_config=None):
         self.num_steps = num_steps
         t_size, e_size, a_size = num_steps, num_envs, num_red
         h_size = rnn_hidden_size
@@ -91,6 +92,12 @@ class AttentionRolloutBuffer:
             [None for _ in range(e_size)] for _ in range(t_size)]
         self.critic_entity_masks: list[list[None | np.ndarray]] = [
             [None for _ in range(e_size)] for _ in range(t_size)]
+
+        if brma_storage_config is not None:
+            from brma.rollout_schema import BRMARolloutStorage
+            self.brma_storage = BRMARolloutStorage(brma_storage_config)
+        else:
+            self.brma_storage = None
 
     def store_step(self, step: int, env_idx: int, agent_idx: int,
                    entities_np: np.ndarray, entity_mask_np: np.ndarray,
