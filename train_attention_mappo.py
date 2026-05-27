@@ -107,6 +107,7 @@ def parse_args_attention():
     clean_argv = []
     obs_adapter = "current"
     critic_state = "engineering"
+    encoder_mode = "current"
     preset_name = None
     list_presets = False
 
@@ -133,6 +134,17 @@ def parse_args_attention():
             continue
         if item.startswith("--critic-state="):
             critic_state = item.split("=", 1)[1]
+            i += 1
+            continue
+        if item == "--encoder-mode":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit(
+                    "--encoder-mode requires one of: current, paper-eq33")
+            encoder_mode = raw_argv[i + 1]
+            i += 2
+            continue
+        if item.startswith("--encoder-mode="):
+            encoder_mode = item.split("=", 1)[1]
             i += 1
             continue
         if item == "--preset":
@@ -165,6 +177,9 @@ def parse_args_attention():
     if critic_state not in ("engineering", "strict-global"):
         raise SystemExit(
             "--critic-state must be one of: engineering, strict-global")
+    if encoder_mode not in ("current", "paper-eq33"):
+        raise SystemExit(
+            "--encoder-mode must be one of: current, paper-eq33")
 
     old_argv = sys.argv
     try:
@@ -175,6 +190,7 @@ def parse_args_attention():
 
     args.obs_adapter = obs_adapter
     args.critic_state = critic_state
+    args.encoder_mode = encoder_mode
 
     if preset_name is not None:
         from configs.experiment_presets import get_preset
@@ -186,6 +202,9 @@ def parse_args_attention():
         if args.critic_state not in ("engineering", "strict-global"):
             raise SystemExit(
                 "--critic-state must be one of: engineering, strict-global")
+        if args.encoder_mode not in ("current", "paper-eq33"):
+            raise SystemExit(
+                "--encoder-mode must be one of: current, paper-eq33")
     else:
         if not _has_cli_option(clean_argv, "--log-file"):
             args.log_file = "attention_training_log.csv"
@@ -202,7 +221,7 @@ _ATTENTION_PRESET_CLI_FLAGS = {
     "actor_lr", "critic_lr", "entropy_coef",
     "enable_blue_gcas", "resume_from_best",
     "log_file", "results_file", "checkpoint_dir", "device",
-    "obs_adapter", "critic_state",
+    "obs_adapter", "critic_state", "encoder_mode",
 }
 
 
@@ -532,6 +551,8 @@ def main():
     config = make_config_from_args(args)
     config.obs_adapter = args.obs_adapter
     config.critic_state = args.critic_state
+    config.encoder_mode = ("paper_eq33" if args.encoder_mode == "paper-eq33"
+                           else args.encoder_mode)
     _set_main_process_seed(config.seed)
     device = _select_device(config.device)
 
@@ -567,6 +588,7 @@ def main():
     print(f"  checkpoint_dir: {config.checkpoint_dir}")
     print(f"  seed: {config.seed}")
     print(f"  obs_adapter: {config.obs_adapter}")
+    print(f"  encoder_mode: {config.encoder_mode}")
     print(f"  entity_dim: {entity_dim}")
     print(f"  reward_version: {REWARD_VERSION}")
     if config.checkpoint_dir == "checkpoints_attention":
@@ -591,7 +613,8 @@ def main():
 
     actor = AttentionActor(entity_dim=entity_dim, action_dim=config.action_dim,
                            hidden_size=config.mlp_hidden,
-                           rnn_hidden=config.rnn_hidden_size).to(device)
+                           rnn_hidden=config.rnn_hidden_size,
+                           encoder_mode=config.encoder_mode).to(device)
     global_obs_dim = _compute_attention_global_obs_dim(config, obs_dim)
     critic = CentralizedCritic(global_obs_dim=global_obs_dim,
                                hidden=config.mlp_hidden).to(device)

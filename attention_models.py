@@ -12,11 +12,27 @@ import torch.nn.functional as F
 
 
 class EntityObservationEncoder(nn.Module):
-    """Encode entity-wise observations with shared MLP + self-attention."""
+    """Encode entity-wise observations with shared MLP + self-attention.
+
+    Paper eq.33 concatenates the attention output with the original entity
+    embedding.  Two modes are supported:
+
+    - ``current`` (default):  output = attention[:, 0, :], dim = hidden_size.
+      Backward-compatible with existing checkpoints and smoke tests.
+    - ``paper_eq33``:  output = concat([entity_embedding, attention_output],
+      dim=-1) at the ego entity index, dim = 2 * hidden_size.
+    """
 
     def __init__(self, entity_dim: int = 11, hidden_size: int = 128,
-                 num_heads: int = 4, dropout: float = 0.0):
+                 num_heads: int = 4, dropout: float = 0.0,
+                 encoder_mode: str = "current"):
         super().__init__()
+        if encoder_mode not in ("current", "paper_eq33"):
+            raise ValueError(
+                f"encoder_mode must be 'current' or 'paper_eq33', "
+                f"got {encoder_mode!r}")
+        self.encoder_mode = encoder_mode
+
         self.entity_mlp = nn.Sequential(
             nn.Linear(entity_dim, hidden_size),
             nn.ReLU(),
@@ -29,6 +45,8 @@ class EntityObservationEncoder(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
+        self.output_dim = (2 * hidden_size if encoder_mode == "paper_eq33"
+                           else hidden_size)
 
     def forward(self, entities: torch.Tensor,
                 entity_mask: torch.Tensor | None = None):
@@ -40,13 +58,8 @@ class EntityObservationEncoder(nn.Module):
                 masked/invalid/dead and 0 means valid.
 
         Returns:
-            encoded_first: Tensor with shape (B, hidden_size), using the first
-                entity as the ego entity representation.
+            encoded_first: Tensor with shape (B, output_dim).
             attn_weights: Tensor with shape (B, num_heads, N, N).
-
-        Paper eq.33 concatenates attention output and original entity embedding.
-        This initial implementation keeps the output at hidden_size so it can be
-        connected to future training code with minimal interface churn.
         """
         embedded = self.entity_mlp(entities)
         key_padding_mask = None
@@ -62,23 +75,31 @@ class EntityObservationEncoder(nn.Module):
             need_weights=True,
             average_attn_weights=False,
         )
-        encoded_first = encoded[:, 0, :]
+
+        if self.encoder_mode == "paper_eq33":
+            # Paper eq.33: concat(entity_embedding, attention_output) for each entity
+            concat = torch.cat([embedded, encoded], dim=-1)
+            encoded_first = concat[:, 0, :]
+        else:
+            encoded_first = encoded[:, 0, :]
         return encoded_first, attn_weights
 
 
 class AttentionActor(nn.Module):
-    """Attention actor for future MAPPO-Attention experiments."""
+    """Attention actor for MAPPO-Attention / BRMA-MAPPO experiments."""
 
     def __init__(self, entity_dim: int = 11, action_dim: int = 3,
                  hidden_size: int = 128, rnn_hidden: int = 128,
-                 num_heads: int = 4):
+                 num_heads: int = 4, encoder_mode: str = "current"):
         super().__init__()
         self.encoder = EntityObservationEncoder(
             entity_dim=entity_dim,
             hidden_size=hidden_size,
             num_heads=num_heads,
+            encoder_mode=encoder_mode,
         )
-        self.rnn = nn.GRUCell(hidden_size, rnn_hidden)
+        self.encoder_output_dim = self.encoder.output_dim
+        self.rnn = nn.GRUCell(self.encoder_output_dim, rnn_hidden)
         self.action_head = nn.Sequential(
             nn.Linear(rnn_hidden, 64),
             nn.ReLU(),
@@ -103,15 +124,16 @@ class AttentionCritic(nn.Module):
     """Simple attention critic reserved for future centralized MAPPO use."""
 
     def __init__(self, entity_dim: int = 11, hidden_size: int = 128,
-                 num_heads: int = 4):
+                 num_heads: int = 4, encoder_mode: str = "current"):
         super().__init__()
         self.encoder = EntityObservationEncoder(
             entity_dim=entity_dim,
             hidden_size=hidden_size,
             num_heads=num_heads,
+            encoder_mode=encoder_mode,
         )
         self.value_head = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(self.encoder.output_dim, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, 1),
         )

@@ -142,6 +142,21 @@ EXPERIMENT_PRESETS = {
         "results_file": "results/attention_2v2_strict_critic_smoke_results.csv",
         "checkpoint_dir": "checkpoints/attention_2v2_strict_critic_smoke",
     },
+    # ---- attention strict + paper eq.33 encoder ----
+    "attention_1v1_strict_eq33_smoke": {
+        "num_red": 1,
+        "num_blue": 1,
+        "num_envs": 1,
+        "total_env_steps": 20,
+        "replay_buffer_size": 10,
+        "max_episode_length": 10,
+        "device": "cpu",
+        "obs_adapter": "strict",
+        "encoder_mode": "paper-eq33",
+        "log_file": "logs/attention_1v1_strict_eq33_smoke.csv",
+        "results_file": "results/attention_1v1_strict_eq33_smoke_results.csv",
+        "checkpoint_dir": "checkpoints/attention_1v1_strict_eq33_smoke",
+    },
 }
 
 
