@@ -105,6 +105,22 @@ def main() -> None:
     assert logits.grad is not None
     assert torch.isfinite(logits.grad).all()
 
+    # 7b. reproducibility with same generator seed
+    g1 = torch.Generator(device="cpu").manual_seed(42)
+    g2 = torch.Generator(device="cpu").manual_seed(42)
+    g3 = torch.Generator(device="cpu").manual_seed(99)
+    logits2 = torch.randn(B, N, requires_grad=True)
+    msoft_a, mhard_a = gumbel_sigmoid_straight_through(
+        logits2, temperature=0.1, generator=g1)
+    msoft_b, mhard_b = gumbel_sigmoid_straight_through(
+        logits2, temperature=0.1, generator=g2)
+    msoft_c, mhard_c = gumbel_sigmoid_straight_through(
+        logits2, temperature=0.1, generator=g3)
+    assert torch.allclose(msoft_a, msoft_b) and torch.allclose(mhard_a, mhard_b), \
+        "same seed must produce identical outputs"
+    assert not torch.allclose(msoft_a, msoft_c), \
+        "different seeds should produce different Gumbel draws"
+
     # ---- 8. generate_brma_masks high-level API ----
     result = generate_brma_masks(
         gen, feats, emask, n_ego, n_ally, n_enemy,

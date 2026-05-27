@@ -379,10 +379,13 @@ def gumbel_sigmoid_straight_through(
     """Gumbel-Sigmoid with optional straight-through hard sample.
 
     Returns (msoft, mhard):
-    - msoft: differentiable soft sample in (0, 1).
+    - msoft: differentiable soft sample in (0, 1).  Candidate for mask loss;
+      the entropy term should be restricted to the paper-defined maskable
+      set S.  This pass does not implement the mask loss.
     - mhard: binary hard sample if hard=True, else None.
     """
-    u = torch.rand(logits.shape, dtype=logits.dtype, device=logits.device)
+    u = torch.rand(logits.shape, dtype=logits.dtype, device=logits.device,
+                   generator=generator)
     gumbel_noise = -torch.log(-torch.log(u.clamp(min=1e-8) + 1e-8))
     y = logits + gumbel_noise
     msoft = torch.sigmoid(y / temperature)
