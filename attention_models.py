@@ -108,8 +108,22 @@ class AttentionActor(nn.Module):
         )
         self.action_log_std = nn.Parameter(torch.full((action_dim,), -1.204))
 
-    def forward(self, entities: torch.Tensor, entity_mask: torch.Tensor,
-                rnn_hidden: torch.Tensor):
+    # ------------------------------------------------------------------
+    #  Internal policy helper — single forward pass through encoder + GRU
+    # ------------------------------------------------------------------
+
+    def _policy_from_entities(
+        self,
+        entities: torch.Tensor,
+        entity_mask: torch.Tensor,
+        rnn_hidden: torch.Tensor,
+    ) -> dict:
+        """Run encoder → GRU → action head and return all intermediates.
+
+        Entity mask convention: (B, N), 0 / False = visible, 1 / True = ignored.
+        The encoder internally forces the self entity (index 0) to be visible
+        regardless of the mask value.
+        """
         encoded_first, attn_weights = self.encoder(entities, entity_mask)
         new_rnn_hidden = self.rnn(encoded_first, rnn_hidden)
         mu = self.action_head(new_rnn_hidden)
@@ -117,7 +131,103 @@ class AttentionActor(nn.Module):
         mu = mu.clamp(-0.999, 0.999)
         sigma = torch.exp(self.action_log_std).clamp(min=1e-4)
         sigma = sigma.unsqueeze(0).expand_as(mu)
-        return torch.distributions.Normal(mu, sigma), new_rnn_hidden, attn_weights
+        return {
+            "dist": torch.distributions.Normal(mu, sigma),
+            "new_rnn_hidden": new_rnn_hidden,
+            "attn_weights": attn_weights,
+            "mu": mu,
+            "sigma": sigma,
+        }
+
+    def forward(self, entities: torch.Tensor, entity_mask: torch.Tensor,
+                rnn_hidden: torch.Tensor):
+        """Backward-compatible forward.  Returns (dist, new_rnn_hidden, attn_weights)."""
+        out = self._policy_from_entities(entities, entity_mask, rnn_hidden)
+        return out["dist"], out["new_rnn_hidden"], out["attn_weights"]
+
+    # ------------------------------------------------------------------
+    #  Action evaluation (single path)
+    # ------------------------------------------------------------------
+
+    def evaluate_actions(
+        self,
+        entities: torch.Tensor,
+        entity_mask: torch.Tensor,
+        rnn_hidden: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> dict:
+        """Compute log-prob, entropy, and diagnostics for given actions.
+
+        Useful for BRMA buffer collection and mask loss — not used by the
+        current PPO training loop.
+
+        Args:
+            entities:     (B, N, D)
+            entity_mask:  (B, N)  0=visible, 1=ignored
+            rnn_hidden:   (B, rnn_hidden)
+            actions:      (B, action_dim)
+
+        Returns dict with log_prob, entropy_mean, entropy_sum, mu, sigma,
+        new_rnn_hidden, attn_weights.
+        """
+        out = self._policy_from_entities(entities, entity_mask, rnn_hidden)
+        dist = out["dist"]
+        log_prob = dist.log_prob(actions).sum(dim=-1)    # (B,)
+        entropy_mean = dist.entropy().mean(dim=-1)        # (B,)
+        entropy_sum = dist.entropy().sum(dim=-1)          # (B,)
+        return {
+            "log_prob": log_prob,
+            "entropy_mean": entropy_mean,
+            "entropy_sum": entropy_sum,
+            "mu": out["mu"],
+            "sigma": out["sigma"],
+            "new_rnn_hidden": out["new_rnn_hidden"],
+            "attn_weights": out["attn_weights"],
+        }
+
+    # ------------------------------------------------------------------
+    #  Dual-action evaluation (masked / unkmasked)
+    # ------------------------------------------------------------------
+
+    def evaluate_dual_actions(
+        self,
+        entities: torch.Tensor,
+        unmasked_entity_mask: torch.Tensor,
+        masked_entity_mask: torch.Tensor,
+        rnn_hidden: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> dict:
+        """Evaluate the same actions under two entity masks.
+
+        ``unmasked_entity_mask`` produces p(a | e), i.e. the actor sees all
+        valid entities.  ``masked_entity_mask`` produces p(a | e_mask),
+        where some entities are dropped according to BRMA mask rules.
+
+        Both paths start from the **same** ``rnn_hidden`` — the hidden
+        state is not chained between the two evaluations.  The encoder
+        header forces self (index 0) visible regardless of mask value
+        (see ``EntityObservationEncoder.forward``).
+
+        Returns a nested dict with "unmasked" / "masked" sub-dicts plus
+        top-level convenience keys.
+        """
+        unmasked = self.evaluate_actions(
+            entities, unmasked_entity_mask, rnn_hidden, actions)
+        masked = self.evaluate_actions(
+            entities, masked_entity_mask, rnn_hidden, actions)
+        return {
+            "unmasked": unmasked,
+            "masked": masked,
+            "log_prob_unmasked": unmasked["log_prob"],
+            "log_prob_masked": masked["log_prob"],
+            "entropy_unmasked_mean": unmasked["entropy_mean"],
+            "entropy_masked_mean": masked["entropy_mean"],
+            "mu_unmasked": unmasked["mu"],
+            "mu_masked": masked["mu"],
+            "sigma_unmasked": unmasked["sigma"],
+            "sigma_masked": masked["sigma"],
+            "new_rnn_hidden": unmasked["new_rnn_hidden"],
+        }
 
 
 class AttentionCritic(nn.Module):

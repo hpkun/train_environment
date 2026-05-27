@@ -65,6 +65,7 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | MAPPO-Attention critic | `CentralizedAttentionCritic` available via `--critic-state attention-entities`. Uses shared EntityObservationEncoder per red agent; no BRMA mask. `engineering`/`strict-global` flattened critic retained as legacy | P1 |
 | BRMA mask generator | Standalone API added: `BRMAMaskGenerator`, count-constrained random/biased masks, mask fusion, Gumbel-ST. **Not wired** into rollout/PPO; no behavior change | P1 |
 | BRMA rollout schema | `BRMARolloutStorage` available for per-timestep mask/p/dual-logprob/next-obs storage. Default disabled; `AttentionRolloutBuffer` accepts optional config but does not use it yet | P1 |
+| BRMA dual actor API | `AttentionActor.evaluate_dual_actions` computes p(a\|e) and p(a\|emask) log-probs/entropy in one call. `forward()` unchanged. Not wired into rollout/PPO | P1 |
 | PID stabilisation | Engineering additions (deadband, heading LPF, velocity R_BI, anti-inversion) | P2 |
 
 ## 4. Current module layout
