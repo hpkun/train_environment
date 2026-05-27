@@ -126,6 +126,10 @@ def parse_args_attention():
     obs_adapter = "current"
     critic_state = "engineering"
     encoder_mode = "current"
+    brma_mode = "off"
+    brma_temperature = 0.1
+    brma_max_mask_allies = 2
+    brma_max_mask_enemies = 2
     preset_name = None
     list_presets = False
 
@@ -165,6 +169,47 @@ def parse_args_attention():
             encoder_mode = item.split("=", 1)[1]
             i += 1
             continue
+        if item == "--brma-mode":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit(
+                    "--brma-mode requires one of: off, dry-run")
+            brma_mode = raw_argv[i + 1]
+            i += 2
+            continue
+        if item.startswith("--brma-mode="):
+            brma_mode = item.split("=", 1)[1]
+            i += 1
+            continue
+        if item == "--brma-temperature":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit("--brma-temperature requires a float value")
+            brma_temperature = float(raw_argv[i + 1])
+            i += 2
+            continue
+        if item.startswith("--brma-temperature="):
+            brma_temperature = float(item.split("=", 1)[1])
+            i += 1
+            continue
+        if item == "--brma-max-mask-allies":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit("--brma-max-mask-allies requires an int value")
+            brma_max_mask_allies = int(raw_argv[i + 1])
+            i += 2
+            continue
+        if item.startswith("--brma-max-mask-allies="):
+            brma_max_mask_allies = int(item.split("=", 1)[1])
+            i += 1
+            continue
+        if item == "--brma-max-mask-enemies":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit("--brma-max-mask-enemies requires an int value")
+            brma_max_mask_enemies = int(raw_argv[i + 1])
+            i += 2
+            continue
+        if item.startswith("--brma-max-mask-enemies="):
+            brma_max_mask_enemies = int(item.split("=", 1)[1])
+            i += 1
+            continue
         if item == "--preset":
             if i + 1 >= len(raw_argv):
                 raise SystemExit("--preset requires a preset name")
@@ -198,6 +243,15 @@ def parse_args_attention():
     if encoder_mode not in ("current", "paper-eq33"):
         raise SystemExit(
             "--encoder-mode must be one of: current, paper-eq33")
+    if brma_mode not in ("off", "dry-run"):
+        raise SystemExit(
+            "--brma-mode must be one of: off, dry-run")
+    if brma_temperature <= 0:
+        raise SystemExit("--brma-temperature must be > 0")
+    if brma_max_mask_allies < 0:
+        raise SystemExit("--brma-max-mask-allies must be >= 0")
+    if brma_max_mask_enemies < 0:
+        raise SystemExit("--brma-max-mask-enemies must be >= 0")
 
     old_argv = sys.argv
     try:
@@ -209,6 +263,10 @@ def parse_args_attention():
     args.obs_adapter = obs_adapter
     args.critic_state = critic_state
     args.encoder_mode = encoder_mode
+    args.brma_mode = brma_mode
+    args.brma_temperature = brma_temperature
+    args.brma_max_mask_allies = brma_max_mask_allies
+    args.brma_max_mask_enemies = brma_max_mask_enemies
 
     if preset_name is not None:
         from configs.experiment_presets import get_preset
@@ -223,6 +281,9 @@ def parse_args_attention():
         if args.encoder_mode not in ("current", "paper-eq33"):
             raise SystemExit(
                 "--encoder-mode must be one of: current, paper-eq33")
+        if args.brma_mode not in ("off", "dry-run"):
+            raise SystemExit(
+                "--brma-mode must be one of: off, dry-run")
     else:
         if not _has_cli_option(clean_argv, "--log-file"):
             args.log_file = "attention_training_log.csv"
@@ -240,6 +301,8 @@ _ATTENTION_PRESET_CLI_FLAGS = {
     "enable_blue_gcas", "resume_from_best",
     "log_file", "results_file", "checkpoint_dir", "device",
     "obs_adapter", "critic_state", "encoder_mode",
+    "brma_mode", "brma_temperature", "brma_max_mask_allies",
+    "brma_max_mask_enemies",
 }
 
 
@@ -615,6 +678,10 @@ def main():
     config.critic_state = args.critic_state
     config.encoder_mode = ("paper_eq33" if args.encoder_mode == "paper-eq33"
                            else args.encoder_mode)
+    config.brma_mode = args.brma_mode
+    config.brma_temperature = args.brma_temperature
+    config.brma_max_mask_allies = args.brma_max_mask_allies
+    config.brma_max_mask_enemies = args.brma_max_mask_enemies
     _set_main_process_seed(config.seed)
     device = _select_device(config.device)
 
@@ -633,6 +700,8 @@ def main():
         "RedDeathsCrash", "BlueDeathsMissile", "BlueDeathsCrash",
         "RedMissileHits", "BlueMissileHits", "RedMissileHitRate",
         "BlueMissileHitRate", "KD_Red", "RWR", "RewardVersion",
+        "BRMAValidCount", "BRMAMeanMR", "BRMAMeanMB",
+        "BRMAMeanEnemyDrop", "BRMAMeanFriendlyDrop",
     ])
     csv_file.flush()
 
@@ -656,6 +725,7 @@ def main():
     print(f"  seed: {config.seed}")
     print(f"  obs_adapter: {config.obs_adapter}")
     print(f"  encoder_mode: {config.encoder_mode}")
+    print(f"  brma_mode: {config.brma_mode}")
     print(f"  entity_dim: {entity_dim}")
     print(f"  reward_version: {REWARD_VERSION}")
     if config.checkpoint_dir == "checkpoints_attention":
@@ -709,6 +779,34 @@ def main():
               "use a separate checkpoint_dir.")
     if config.obs_adapter == "strict" or config.critic_state == "strict-global":
         print("Strict observation normalization: enabled")
+
+    # ---- BRMA dry-run scaffold ----
+    brma_mask_generator = None
+    brma_storage_config = None
+    if config.brma_mode == "dry-run":
+        if config.obs_adapter != "strict":
+            raise SystemExit(
+                "--brma-mode dry-run requires --obs-adapter strict")
+        print("BRMA dry-run collection: enabled")
+        print("BRMA dry-run does not affect actions or PPO loss")
+        from brma.mask_generator import BRMAMaskGenerator, BRMAMaskGeneratorConfig
+        n_entities_per_agent = config.num_red + config.num_blue
+        brma_mg_cfg = BRMAMaskGeneratorConfig(
+            entity_feature_dim=10,
+            temperature=config.brma_temperature,
+            max_mask_allies=config.brma_max_mask_allies,
+            max_mask_enemies=config.brma_max_mask_enemies,
+        )
+        brma_mask_generator = BRMAMaskGenerator(brma_mg_cfg).to(device)
+        from brma.rollout_schema import BRMARolloutSchemaConfig
+        brma_storage_config = BRMARolloutSchemaConfig(
+            num_steps=num_steps,
+            num_envs=config.num_envs,
+            num_agents=config.num_red,
+            n_entities=n_entities_per_agent,
+            entity_dim=10,
+            enabled=True,
+        )
 
     actor_opt = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
     critic_opt = torch.optim.Adam(critic.parameters(), lr=config.critic_lr)
@@ -773,6 +871,7 @@ def main():
             num_red=config.num_red, action_dim=config.action_dim,
             rnn_hidden_size=config.rnn_hidden_size,
             global_obs_dim=global_obs_dim,
+            brma_storage_config=brma_storage_config,
         )
         buffer.rnn_actor_init = rnn_hidden_actor.copy()
         iter_episodes = 0
@@ -877,6 +976,25 @@ def main():
                             entity_batch[k], mask_batch[k], alive_obs_flat[k],
                             action[k].cpu().numpy(),
                             0.0, 0.0, log_prob[k].item(), 0.0, alive=True)
+
+                    if (config.brma_mode == "dry-run"
+                            and brma_mask_generator is not None
+                            and buffer.brma_storage is not None):
+                        from brma.collection import collect_brma_dry_run_step
+                        for k, i in enumerate(alive_red_indices):
+                            collect_brma_dry_run_step(
+                                actor=actor,
+                                mask_generator=brma_mask_generator,
+                                storage=buffer.brma_storage,
+                                step=step, env_idx=env_idx, agent_idx=i,
+                                entities=entity_batch[k],
+                                entity_mask=mask_batch[k],
+                                rnn_hidden=rnn_t[k].cpu().numpy(),
+                                action=action[k].cpu().numpy(),
+                                n_ego=1,
+                                n_allies=config.num_red - 1,
+                                n_enemies=config.num_blue,
+                            )
 
                 if config.critic_state == "attention-entities":
                     team_ent, team_msk = _build_attention_critic_entities_for_env(
@@ -1017,6 +1135,21 @@ def main():
                                      buffer, config, device,
                                      total_steps=total_steps)
 
+        # ---- BRMA dry-run summary ----
+        brma_sm = {"valid_count": 0, "mean_mR": 0.0, "mean_mB": 0.0,
+                   "mean_enemy": 0.0, "mean_friendly": 0.0}
+        if (config.brma_mode == "dry-run"
+                and buffer.brma_storage is not None
+                and buffer.brma_storage.has_storage):
+            sm = buffer.brma_storage.summary()
+            brma_sm = {
+                "valid_count": sm["valid_count"],
+                "mean_mR": sm["mean_mR_count"],
+                "mean_mB": sm["mean_mB_count"],
+                "mean_enemy": sm["mean_enemy_drop_count"],
+                "mean_friendly": sm["mean_friendly_drop_count"],
+            }
+
         t_elapsed = time.perf_counter() - t_start
         avg_r_red = np.mean(recent_ep_rewards_red) if recent_ep_rewards_red else 0.0
         avg_m_red = np.mean(recent_ep_missiles_red) if recent_ep_missiles_red else 0.0
@@ -1068,6 +1201,11 @@ def main():
             red_missile_hits, blue_missile_hits,
             f"{red_missile_hit_rate:.6f}", f"{blue_missile_hit_rate:.6f}",
             f"{kd_red:.6f}", f"{rwr:.6f}", REWARD_VERSION,
+            f"{brma_sm['valid_count']}",
+            f"{brma_sm['mean_mR']:.4f}",
+            f"{brma_sm['mean_mB']:.4f}",
+            f"{brma_sm['mean_enemy']:.4f}",
+            f"{brma_sm['mean_friendly']:.4f}",
         ])
         csv_file.flush()
 
@@ -1109,13 +1247,19 @@ def main():
             print(f"  [Results saved] {config.results_file} "
                   f"({len(results_log)} rows)", flush=True)
 
+        brma_str = ""
+        if config.brma_mode == "dry-run":
+            brma_str = (f" BRMA[v={brma_sm['valid_count']} "
+                        f"mR={brma_sm['mean_mR']:.1f} mB={brma_sm['mean_mB']:.1f} "
+                        f"Edrop={brma_sm['mean_enemy']:.1f} Fdrop={brma_sm['mean_friendly']:.1f}] |")
+
         print(f"Iter {iteration:5d} | total_steps={total_steps:9d} | "
               f"t={t_elapsed:5.1f}s | R_red={avg_r_red:+8.1f} [{comp_str}] | "
               f"M_red={avg_m_red:.0f} M_blue={avg_m_blue:.0f} | "
               f"ActorLoss={stats['actor_loss']:+.4f} "
               f"CriticLoss={stats['critic_loss']:+.4f} "
               f"EntCoef={_current_entropy_coef(config, total_steps):.4f} "
-              f"Entropy={stats['entropy']:.4f} | "
+              f"Entropy={stats['entropy']:.4f} |{brma_str}"
               f"WinRate_red={red_win_rate:.3f} "
               f"(Ep={total_episodes} W={red_wins}/{blue_wins}/{draws})")
 
