@@ -20,14 +20,29 @@ def _to_torch(x, dtype, device):
     return x.to(dtype=dtype, device=device)
 
 
-def _ensure_batch_1(t: torch.Tensor, name: str) -> torch.Tensor:
-    if t.dim() == 1:
-        return t.unsqueeze(0)
-    if t.dim() == 2 and t.shape[0] != 1:
+def _normalize_entities(t: torch.Tensor) -> torch.Tensor:
+    """Accept (N,D) or (1,N,D); reject (B,N,D) with B != 1."""
+    if t.dim() == 2:
         return t.unsqueeze(0)
     if t.dim() == 3 and t.shape[0] != 1:
         raise ValueError(
+            f"entities batch size must be 1, got shape {t.shape}")
+    if t.dim() != 3:
+        raise ValueError(
+            f"entities must be (N,D) or (1,N,D), got shape {t.shape}")
+    return t
+
+
+def _normalize_vector_or_batch(t: torch.Tensor, name: str) -> torch.Tensor:
+    """Accept (D,) or (1,D); reject (B,D) with B != 1."""
+    if t.dim() == 1:
+        return t.unsqueeze(0)
+    if t.dim() == 2 and t.shape[0] != 1:
+        raise ValueError(
             f"{name} batch size must be 1, got shape {t.shape}")
+    if t.dim() != 2:
+        raise ValueError(
+            f"{name} must be (D,) or (1,D), got shape {t.shape}")
     return t
 
 
@@ -78,10 +93,10 @@ def collect_brma_dry_run_step(
     rnn_h = _to_torch(rnn_hidden, torch.float32, device)
     act = _to_torch(action, torch.float32, device)
 
-    ents = _ensure_batch_1(ents, "entities")
-    emask = _ensure_batch_1(emask, "entity_mask")
-    rnn_h = _ensure_batch_1(rnn_h, "rnn_hidden")
-    act = _ensure_batch_1(act, "action")
+    ents = _normalize_entities(ents)
+    emask = _normalize_vector_or_batch(emask, "entity_mask")
+    rnn_h = _normalize_vector_or_batch(rnn_h, "rnn_hidden")
+    act = _normalize_vector_or_batch(act, "action")
 
     if ents.shape[1] != N:
         raise ValueError(

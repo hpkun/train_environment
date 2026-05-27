@@ -110,18 +110,46 @@ def main() -> None:
     except ValueError:
         pass
 
-    try:
-        collect_brma_dry_run_step(
-            actor=actor, mask_generator=mask_gen, storage=storage,
-            step=0, env_idx=0, agent_idx=0,
-            entities=np.random.randn(2, N, D).astype(np.float32),  # batch>1
-            entity_mask=np.zeros((2, N), dtype=np.int64),
-            rnn_hidden=rnn_np, action=action_np,
-            n_ego=n_ego, n_allies=n_ally, n_enemies=n_enemy,
-        )
-        assert False, "should have raised ValueError for batch>1"
-    except ValueError:
-        pass
+    for bad_inputs, desc in [
+        (dict(entities=np.random.randn(2, N, D).astype(np.float32),
+              entity_mask=np.zeros((2, N), dtype=np.int64),
+              rnn_hidden=np.stack([rnn_np, rnn_np]),
+              action=np.stack([action_np, action_np])),
+         "entities batch=2"),
+        (dict(entities=entities_np,
+              entity_mask=np.zeros((2, N), dtype=np.int64),
+              rnn_hidden=rnn_np, action=action_np),
+         "entity_mask batch=2"),
+        (dict(entities=entities_np, entity_mask=emask_np,
+              rnn_hidden=np.stack([rnn_np, rnn_np]),
+              action=action_np),
+         "rnn_hidden batch=2"),
+        (dict(entities=entities_np, entity_mask=emask_np,
+              rnn_hidden=rnn_np,
+              action=np.stack([action_np, action_np])),
+         "action batch=2"),
+    ]:
+        try:
+            collect_brma_dry_run_step(
+                actor=actor, mask_generator=mask_gen, storage=storage,
+                step=0, env_idx=0, agent_idx=0,
+                n_ego=n_ego, n_allies=n_ally, n_enemies=n_enemy,
+                **bad_inputs,
+            )
+            assert False, f"should have raised ValueError for {desc}"
+        except ValueError:
+            pass
+
+    # ---- 5b. valid (1,…) inputs pass ----
+    collect_brma_dry_run_step(
+        actor=actor, mask_generator=mask_gen, storage=storage,
+        step=0, env_idx=0, agent_idx=1,
+        entities=entities_np.reshape(1, N, D),
+        entity_mask=emask_np.reshape(1, N),
+        rnn_hidden=rnn_np.reshape(1, -1),
+        action=action_np.reshape(1, -1),
+        n_ego=n_ego, n_allies=n_ally, n_enemies=n_enemy,
+    )
 
     # ---- 6. no parameter mutation ----
     params_before = {n: p.clone() for n, p in actor.named_parameters()}
