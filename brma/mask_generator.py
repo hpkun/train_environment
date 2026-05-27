@@ -1,10 +1,14 @@
-"""Mask-vector utilities for future BRMA-MAPPO work.
+"""Mask-vector utilities for BRMA-MAPPO.
 
-The paper motivates biased random entity masking for zero-shot scale
-generalization, but the exact bias formula was not reliably extracted from the
-local PDF in this pass.  This module therefore implements only deterministic
-type-aware masking and uniform random masking infrastructure.  Paper-specific
-bias rules should be added only after the original formula is verified.
+Two generations of mask tools are provided:
+
+- ``MaskGeneratorConfig`` / ``MaskVectorGenerator`` — legacy deterministic
+  type-aware and uniform random masking (numpy).  Retained for earlier
+  smoke tests and as a simple baseline.
+- ``BRMAMaskGeneratorConfig`` / ``BRMAMaskGenerator`` — paper-candidate
+  learned mask generator (torch) with count-constrained random/biased
+  masks, mask fusion, and Gumbel-Softmax / straight-through utilities.
+  **Not wired into training or rollout.**
 """
 
 from __future__ import annotations
@@ -12,6 +16,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 @dataclass
@@ -179,3 +186,314 @@ class MaskVectorGenerator:
 
         raise NotImplementedError(
             "NEEDS PAPER TEXT VERIFICATION before implementing biased random mask")
+
+
+# ============================================================================
+#  BRMA learned mask generator (candidate API — not wired into training)
+# ============================================================================
+
+@dataclass
+class BRMAMaskGeneratorConfig:
+    """Configuration for the learned BRMA mask generator."""
+
+    entity_feature_dim: int
+    hidden_size: int = 128
+    temperature: float = 0.1
+    max_mask_allies: int = 2
+    max_mask_enemies: int = 2
+    keep_self: bool = True
+    eps: float = 1e-8
+
+    def __post_init__(self) -> None:
+        if self.temperature <= 0:
+            raise ValueError("temperature must be > 0")
+        if self.max_mask_allies < 0:
+            raise ValueError("max_mask_allies must be >= 0")
+        if self.max_mask_enemies < 0:
+            raise ValueError("max_mask_enemies must be >= 0")
+        if self.entity_feature_dim <= 0:
+            raise ValueError("entity_feature_dim must be > 0")
+
+
+class BRMAMaskGenerator(nn.Module):
+    """Candidate learned mask generator for BRMA-MAPPO.
+
+    Maps per-entity features to a retention probability ``p`` via a
+    two-layer MLP.  Lower ``p`` means the entity is more likely to be
+    masked.  This module is **not** wired into training — it provides
+    ``logits`` and ``p`` only; mask sampling is done by external helpers.
+    """
+
+    def __init__(self, config: BRMAMaskGeneratorConfig):
+        super().__init__()
+        self.cfg = config
+        self.mlp = nn.Sequential(
+            nn.Linear(config.entity_feature_dim, config.hidden_size),
+            nn.ReLU(),
+            nn.Linear(config.hidden_size, 1),
+        )
+
+    def forward(self, entity_features: torch.Tensor,
+                entity_mask: torch.Tensor | None = None) -> dict:
+        """Compute retention probabilities.
+
+        Args:
+            entity_features: (B, N, F) per-entity features.
+            entity_mask:     (B, N), 0 = valid, 1 = invalid.  Optional.
+
+        Returns dict with logits, p (retention probability), valid_mask.
+        """
+        logits = self.mlp(entity_features).squeeze(-1)  # (B, N)
+        p = torch.sigmoid(logits)
+        valid_mask = torch.ones_like(logits, dtype=torch.bool)
+        if entity_mask is not None:
+            valid_mask = entity_mask == 0
+        return {"logits": logits, "p": p, "valid_mask": valid_mask}
+
+
+# ---------------------------------------------------------------------------
+#  Count sampling (paper MR,train / MB,train from Uniform(0, max_*_mask))
+# ---------------------------------------------------------------------------
+
+def sample_train_mask_counts(
+    batch_size: int,
+    max_mask_allies: int = 2,
+    max_mask_enemies: int = 2,
+    device: torch.device | None = None,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample mR_count and mB_count per batch element.
+
+    Returns (mR_count, mB_count), each (B,) int64, uniformly sampled
+    from [0, max_mask_*] inclusive.
+    """
+    mR = torch.randint(0, max_mask_allies + 1, (batch_size,),
+                       device=device, generator=generator, dtype=torch.int64)
+    mB = torch.randint(0, max_mask_enemies + 1, (batch_size,),
+                       device=device, generator=generator, dtype=torch.int64)
+    return mR, mB
+
+
+# ---------------------------------------------------------------------------
+#  Type masks (torch)
+# ---------------------------------------------------------------------------
+
+def make_type_masks_torch(
+    batch_size: int,
+    n_ego: int,
+    n_allies: int,
+    n_enemies: int,
+    device: torch.device | None = None,
+) -> dict[str, torch.Tensor]:
+    """Return bool type masks of shape (B, N).
+
+    Entity order: self, allies, enemies.
+    """
+    n_total = n_ego + n_allies + n_enemies
+    self_msk = torch.zeros(batch_size, n_total, dtype=torch.bool, device=device)
+    ally_msk = torch.zeros(batch_size, n_total, dtype=torch.bool, device=device)
+    enmy_msk = torch.zeros(batch_size, n_total, dtype=torch.bool, device=device)
+    self_msk[:, :n_ego] = True
+    ally_msk[:, n_ego:n_ego + n_allies] = True
+    enmy_msk[:, n_ego + n_allies:] = True
+    return {"self": self_msk, "ally": ally_msk, "enemy": enmy_msk}
+
+
+# ---------------------------------------------------------------------------
+#  Count-constrained random friendly drop mask (mR)
+# ---------------------------------------------------------------------------
+
+def sample_random_friendly_drop_mask(
+    valid_mask: torch.Tensor,
+    ally_mask: torch.Tensor,
+    mR_count: torch.Tensor,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Sample a random friendly drop mask.
+
+    Returns bool (B, N), True = dropped / masked.
+    Only drops from valid allies; never drops self or enemy.
+    At most ``mR_count[b]`` allies are dropped per batch element.
+    """
+    B, N = valid_mask.shape
+    # eligible candidates: valid AND ally
+    eligible = valid_mask & ally_mask  # (B, N)
+    # Each row: randomly pick up to mR_count[b] entries
+    drop = torch.zeros(B, N, dtype=torch.bool, device=valid_mask.device)
+    for b in range(B):
+        idx = torch.where(eligible[b])[0]
+        if idx.numel() == 0:
+            continue
+        k = min(mR_count[b].item(), int(idx.numel()))
+        if k > 0:
+            perm = torch.randperm(int(idx.numel()), device=valid_mask.device,
+                                  generator=generator)[:k]
+            drop[b, idx[perm]] = True
+    return drop
+
+
+# ---------------------------------------------------------------------------
+#  Biased enemy drop mask (mB) — select lowest retention-probability enemies
+# ---------------------------------------------------------------------------
+
+def select_biased_enemy_drop_mask(
+    p: torch.Tensor,
+    valid_mask: torch.Tensor,
+    enemy_mask: torch.Tensor,
+    mB_count: torch.Tensor,
+) -> torch.Tensor:
+    """Select enemies with lowest retention probability for dropping.
+
+    Returns bool (B, N), True = dropped / masked.
+
+    This follows the current paper-audit interpretation that **lower**
+    retention probability means a more mask-worthy entity.  If visual PDF
+    verification later shows the opposite Top-M convention, this function
+    must be adjusted.
+    """
+    B, N = p.shape
+    eligible = valid_mask & enemy_mask  # (B, N)
+    drop = torch.zeros(B, N, dtype=torch.bool, device=p.device)
+    for b in range(B):
+        idx = torch.where(eligible[b])[0]
+        if idx.numel() == 0:
+            continue
+        k = min(mB_count[b].item(), int(idx.numel()))
+        if k > 0:
+            # lowest p → highest priority to drop
+            _, topk_idx = torch.topk(-p[b, idx], k)
+            drop[b, idx[topk_idx]] = True
+    return drop
+
+
+# ---------------------------------------------------------------------------
+#  Gumbel-Sigmoid straight-through (msoft)
+# ---------------------------------------------------------------------------
+
+def gumbel_sigmoid_straight_through(
+    logits: torch.Tensor,
+    temperature: float = 0.1,
+    hard: bool = True,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gumbel-Sigmoid with optional straight-through hard sample.
+
+    Returns (msoft, mhard):
+    - msoft: differentiable soft sample in (0, 1).
+    - mhard: binary hard sample if hard=True, else None.
+    """
+    u = torch.rand(logits.shape, dtype=logits.dtype, device=logits.device)
+    gumbel_noise = -torch.log(-torch.log(u.clamp(min=1e-8) + 1e-8))
+    y = logits + gumbel_noise
+    msoft = torch.sigmoid(y / temperature)
+    if hard:
+        mhard = (msoft > 0.5).float()
+        mhard = mhard + msoft - msoft.detach()  # straight-through
+        return msoft, mhard
+    return msoft, None
+
+
+# ---------------------------------------------------------------------------
+#  Mask fusion (death mask + random/biased BRMA masks)
+# ---------------------------------------------------------------------------
+
+def fuse_brma_masks(
+    entity_mask: torch.Tensor,
+    self_mask: torch.Tensor,
+    friendly_drop_mask: torch.Tensor,
+    enemy_drop_mask: torch.Tensor,
+    keep_self: bool = True,
+) -> dict:
+    """Fuse death/padding mask with BRMA random/biased drop masks.
+
+    Args:
+        entity_mask:        (B, N) 0=valid, 1=invalid.
+        self_mask:          (B, N) bool for self entity positions.
+        friendly_drop_mask: (B, N) bool, True = drop this friendly.
+        enemy_drop_mask:    (B, N) bool, True = drop this enemy.
+        keep_self:          always keep the self entity if valid.
+
+    Returns dict:
+        drop_mask, key_padding_mask, keep_mask, death_or_padding_mask.
+    """
+    invalid = entity_mask != 0  # True = dead / padded
+    drop = invalid | friendly_drop_mask | enemy_drop_mask
+    if keep_self:
+        drop[self_mask] = False
+        drop[invalid & self_mask] = True  # self is still invalid if dead
+    keep = ~drop
+
+    return {
+        "drop_mask": drop,
+        "key_padding_mask": drop,
+        "keep_mask": keep,
+        "death_or_padding_mask": invalid,
+    }
+
+
+# ---------------------------------------------------------------------------
+#  High-level BRMA mask generation API
+# ---------------------------------------------------------------------------
+
+def generate_brma_masks(
+    generator_model: BRMAMaskGenerator,
+    entity_features: torch.Tensor,
+    entity_mask: torch.Tensor,
+    n_ego: int,
+    n_allies: int,
+    n_enemies: int,
+    mR_count: torch.Tensor | None = None,
+    mB_count: torch.Tensor | None = None,
+    torch_generator: torch.Generator | None = None,
+) -> dict:
+    """Generate a full BRMA mask set for one timestep.
+
+    This is a candidate API; it is **not** called by any training script.
+    """
+    B = entity_features.shape[0]
+    forward_out = generator_model(entity_features, entity_mask)
+    type_masks = make_type_masks_torch(B, n_ego, n_allies, n_enemies,
+                                       device=entity_features.device)
+
+    if mR_count is None or mB_count is None:
+        mR_count, mB_count = sample_train_mask_counts(
+            B, generator_model.cfg.max_mask_allies,
+            generator_model.cfg.max_mask_enemies,
+            device=entity_features.device, generator=torch_generator)
+
+    friendly_drop = sample_random_friendly_drop_mask(
+        forward_out["valid_mask"], type_masks["ally"], mR_count,
+        generator=torch_generator)
+
+    enemy_drop = select_biased_enemy_drop_mask(
+        forward_out["p"], forward_out["valid_mask"],
+        type_masks["enemy"], mB_count)
+
+    fused = fuse_brma_masks(
+        entity_mask, type_masks["self"],
+        friendly_drop, enemy_drop,
+        keep_self=generator_model.cfg.keep_self)
+
+    msoft, mhard = gumbel_sigmoid_straight_through(
+        forward_out["logits"],
+        temperature=generator_model.cfg.temperature,
+        hard=True, generator=torch_generator)
+
+    return {
+        "logits": forward_out["logits"],
+        "p": forward_out["p"],
+        "msoft": msoft,
+        "mhard": mhard,
+        "mR_count": mR_count,
+        "mB_count": mB_count,
+        "friendly_drop_mask": friendly_drop,
+        "enemy_drop_mask": enemy_drop,
+        **fused,
+        "meta": {
+            "n_ego": n_ego,
+            "n_allies": n_allies,
+            "n_enemies": n_enemies,
+            "temperature": generator_model.cfg.temperature,
+            "mask_type": "brma_candidate_no_verification",
+        },
+    }
