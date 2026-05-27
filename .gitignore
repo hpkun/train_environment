@@ -27,6 +27,7 @@ checkpoints/attention_2v2_strict_smoke/
 checkpoints/attention_1v1_strict_critic_smoke/
 checkpoints/attention_2v2_strict_critic_smoke/
 checkpoints/attention_1v1_strict_eq33_smoke/
+checkpoints/attention_1v1_strict_eq33_attncritic_smoke/
 runs
 *.npy
 *.acmi

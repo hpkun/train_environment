@@ -142,3 +142,55 @@ class AttentionCritic(nn.Module):
                 entity_mask: torch.Tensor) -> torch.Tensor:
         encoded_first, _attn_weights = self.encoder(entities, entity_mask)
         return self.value_head(encoded_first)
+
+
+class CentralizedAttentionCritic(nn.Module):
+    """Paper-style centralized critic using per-agent entity attention.
+
+    Each red agent has a strict entity table.  The critic encodes every
+    agent's table with a *shared* ``EntityObservationEncoder``, then
+    concatenates the per-agent features and passes them through an MLP
+    value head to produce one value per red agent.
+
+    This critic does NOT use a biased random mask (BRMA).  Entity masks
+    only mark dead / padded entities.
+    """
+
+    def __init__(self, entity_dim: int = 10, hidden_size: int = 128,
+                 num_heads: int = 4, num_agents: int = 2,
+                 encoder_mode: str = "current"):
+        super().__init__()
+        self.encoder = EntityObservationEncoder(
+            entity_dim=entity_dim,
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            encoder_mode=encoder_mode,
+        )
+        self.num_agents = num_agents
+        self.encoder_output_dim = self.encoder.output_dim
+        concat_dim = num_agents * self.encoder_output_dim
+        self.value_head = nn.Sequential(
+            nn.Linear(concat_dim, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, num_agents),
+        )
+
+    def forward(self, team_entities: torch.Tensor,
+                team_masks: torch.Tensor) -> torch.Tensor:
+        """Encode each red agent's entity table and predict per-agent values.
+
+        Args:
+            team_entities: (B, A, N, D) for A agents, N entities each.
+            team_masks:    (B, A, N) entity masks.
+
+        Returns:
+            values: (B, A) per-agent value estimates.
+        """
+        B, A, N, D = team_entities.shape
+        # Flatten agent dimension into batch for shared encoder
+        flat_entities = team_entities.reshape(B * A, N, D)
+        flat_masks = team_masks.reshape(B * A, N)
+        encoded, _attn = self.encoder(flat_entities, flat_masks)
+        # encoded: (B*A, encoder_output_dim)
+        concat = encoded.reshape(B, A * self.encoder_output_dim)
+        return self.value_head(concat)

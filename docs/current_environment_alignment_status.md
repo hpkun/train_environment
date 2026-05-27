@@ -61,7 +61,8 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | Global state candidate | `global_state.py` wired into attention training via `--critic-state strict-global` (2v2 dim=88 vs engineering 106) | P1 |
 | Blue rule policy | No-target cruise boundary patrol tuned: starts ~12km before boundary (was 18km), heading gain pressure-scaled (gentle early, strong near edge). Combat / target selection unchanged | P2 |
 | `num_missiles_per_plane` | Default `999` (no limit); paper does not specify a fixed value | P2 |
-| MAPPO-Attention Eq.33 encoder | `attention_models.py` supports `encoder_mode="paper_eq33"` (concat embedding + attention output, 2×hidden dim). Default `current` unchanged. Not yet wired to critic/BRMA | P1 |
+| MAPPO-Attention Eq.33 encoder | `attention_models.py` supports `encoder_mode="paper_eq33"`. Default `current` unchanged | P1 |
+| MAPPO-Attention critic | `CentralizedAttentionCritic` available via `--critic-state attention-entities`. Uses shared EntityObservationEncoder per red agent; no BRMA mask. `engineering`/`strict-global` flattened critic retained as legacy | P1 |
 | PID stabilisation | Engineering additions (deadband, heading LPF, velocity R_BI, anti-inversion) | P2 |
 
 ## 4. Current module layout

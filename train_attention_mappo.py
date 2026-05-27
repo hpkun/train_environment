@@ -18,7 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from attention_models import AttentionActor
+from attention_models import AttentionActor, CentralizedAttentionCritic
 from my_uav_env.alignment.entity_obs import build_entity_observation
 from my_uav_env.alignment.global_state import (
     build_strict_team_global_state,
@@ -87,6 +87,11 @@ class AttentionRolloutBuffer:
         self.global_obs = np.zeros((t_size, e_size, _god), dtype=np.float32)
         self._global_obs_dim = _god
 
+        self.critic_entities: list[list[None | np.ndarray]] = [
+            [None for _ in range(e_size)] for _ in range(t_size)]
+        self.critic_entity_masks: list[list[None | np.ndarray]] = [
+            [None for _ in range(e_size)] for _ in range(t_size)]
+
     def store_step(self, step: int, env_idx: int, agent_idx: int,
                    entities_np: np.ndarray, entity_mask_np: np.ndarray,
                    obs_flat: np.ndarray, action: np.ndarray, reward: float,
@@ -100,6 +105,12 @@ class AttentionRolloutBuffer:
         self.log_probs[step, env_idx, agent_idx] = log_prob
         self.dones[step, env_idx, agent_idx] = done
         self.alive[step, env_idx, agent_idx] = alive
+
+    def store_critic_entities(self, step: int, env_idx: int,
+                              team_entities: np.ndarray,
+                              team_masks: np.ndarray):
+        self.critic_entities[step][env_idx] = team_entities
+        self.critic_entity_masks[step][env_idx] = team_masks
 
 
 def parse_args_attention():
@@ -128,7 +139,7 @@ def parse_args_attention():
         if item == "--critic-state":
             if i + 1 >= len(raw_argv):
                 raise SystemExit(
-                    "--critic-state requires one of: engineering, strict-global")
+                    "--critic-state requires one of: engineering, strict-global, attention-entities")
             critic_state = raw_argv[i + 1]
             i += 2
             continue
@@ -174,9 +185,9 @@ def parse_args_attention():
     if obs_adapter not in ("current", "paper-placeholder", "strict"):
         raise SystemExit(
             "--obs-adapter must be one of: current, paper-placeholder, strict")
-    if critic_state not in ("engineering", "strict-global"):
+    if critic_state not in ("engineering", "strict-global", "attention-entities"):
         raise SystemExit(
-            "--critic-state must be one of: engineering, strict-global")
+            "--critic-state must be one of: engineering, strict-global, attention-entities")
     if encoder_mode not in ("current", "paper-eq33"):
         raise SystemExit(
             "--encoder-mode must be one of: current, paper-eq33")
@@ -199,7 +210,7 @@ def parse_args_attention():
         if args.obs_adapter not in ("current", "paper-placeholder", "strict"):
             raise SystemExit(
                 "--obs-adapter must be one of: current, paper-placeholder, strict")
-        if args.critic_state not in ("engineering", "strict-global"):
+        if args.critic_state not in ("engineering", "strict-global", "attention-entities"):
             raise SystemExit(
                 "--critic-state must be one of: engineering, strict-global")
         if args.encoder_mode not in ("current", "paper-eq33"):
@@ -315,6 +326,38 @@ def _build_global_obs_for_env(
         ).astype(np.float32)
 
     raise ValueError(f"Unknown critic_state: {config.critic_state!r}")
+
+
+def _build_attention_critic_entities_for_env(
+    strict_env_obs: dict | None,
+    config,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build team entities/masks for CentralizedAttentionCritic.
+
+    Returns (team_entities, team_masks) with shapes:
+        (num_red, n_entities_per_agent, 10) and (num_red, n_entities_per_agent).
+    Missing / dead agents get zeros + all-ones mask.
+    """
+    n_entities = config.num_red + config.num_blue
+    team_entities = np.zeros((config.num_red, n_entities, 10), dtype=np.float32)
+    team_masks = np.ones((config.num_red, n_entities), dtype=np.int64)
+
+    if not strict_env_obs or len(strict_env_obs) < config.num_red:
+        return team_entities, team_masks
+
+    for i in range(config.num_red):
+        rid = f"red_{i}"
+        tup = strict_env_obs.get(rid)
+        if tup is None:
+            continue
+        entities, mask, _meta = tup
+        entities = normalize_strict_entities(
+            np.asarray(entities, dtype=np.float32),
+            np.asarray(mask, dtype=np.int64),
+        )
+        team_entities[i] = entities
+        team_masks[i] = np.asarray(mask, dtype=np.int64)
+    return team_entities, team_masks
 
 
 def _fetch_strict_red_team_obs(vec_env, config) -> list[dict]:
@@ -491,10 +534,22 @@ def ppo_update_attention(actor, critic, actor_opt, critic_opt,
                 actor_losses.append(policy_loss - entropy_coef * entropy_mean)
                 entropies.append(entropy_mean.detach())
 
-                global_obs = torch.as_tensor(
-                    global_obs_by_env[env_idx][traj["alive_steps"]],
-                    dtype=torch.float32, device=device)
-                values = critic(global_obs).squeeze(-1)
+                if config.critic_state == "attention-entities":
+                    crit_ents = [buffer.critic_entities[s][env_idx]
+                                 for s in traj["alive_steps"]]
+                    crit_msks = [buffer.critic_entity_masks[s][env_idx]
+                                 for s in traj["alive_steps"]]
+                    ent_t = torch.as_tensor(np.stack(crit_ents),
+                                            dtype=torch.float32, device=device)
+                    msk_t = torch.as_tensor(np.stack(crit_msks),
+                                            dtype=torch.long, device=device)
+                    all_values = critic(ent_t, msk_t)  # (T, num_red)
+                    values = all_values[:, agent_idx]
+                else:
+                    global_obs = torch.as_tensor(
+                        global_obs_by_env[env_idx][traj["alive_steps"]],
+                        dtype=torch.float32, device=device)
+                    values = critic(global_obs).squeeze(-1)
                 critic_losses.append(F.mse_loss(values, returns))
 
             actor_loss = torch.stack(actor_losses).mean()
@@ -615,9 +670,20 @@ def main():
                            hidden_size=config.mlp_hidden,
                            rnn_hidden=config.rnn_hidden_size,
                            encoder_mode=config.encoder_mode).to(device)
-    global_obs_dim = _compute_attention_global_obs_dim(config, obs_dim)
-    critic = CentralizedCritic(global_obs_dim=global_obs_dim,
-                               hidden=config.mlp_hidden).to(device)
+    if config.critic_state == "attention-entities":
+        if config.obs_adapter != "strict":
+            raise SystemExit(
+                "--critic-state attention-entities requires --obs-adapter strict")
+        global_obs_dim = 1  # placeholder, not used
+        critic = CentralizedAttentionCritic(
+            entity_dim=10, hidden_size=config.mlp_hidden,
+            num_heads=4, num_agents=config.num_red,
+            encoder_mode=config.encoder_mode,
+        ).to(device)
+    else:
+        global_obs_dim = _compute_attention_global_obs_dim(config, obs_dim)
+        critic = CentralizedCritic(global_obs_dim=global_obs_dim,
+                                   hidden=config.mlp_hidden).to(device)
     print(f"Actor params:  {sum(p.numel() for p in actor.parameters()):,}")
     print(f"Critic params: {sum(p.numel() for p in critic.parameters()):,} "
           f"(centralized, global_obs_dim={global_obs_dim}, "
@@ -800,19 +866,35 @@ def main():
                             action[k].cpu().numpy(),
                             0.0, 0.0, log_prob[k].item(), 0.0, alive=True)
 
-                global_obs_np = _build_global_obs_for_env(
-                    env_obs,
-                    strict_obs_list[env_idx] if strict_obs_list else None,
-                    red_ids, obs_dim, config,
-                )
-                buffer.global_obs[step, env_idx] = global_obs_np
-                global_obs_t = torch.as_tensor(
-                    global_obs_np, dtype=torch.float32, device=device).unsqueeze(0)
-                with torch.no_grad():
-                    v_global = critic(global_obs_t).item()
-                for i in range(config.num_red):
-                    if buffer.alive[step, env_idx, i]:
-                        buffer.values[step, env_idx, i] = v_global
+                if config.critic_state == "attention-entities":
+                    team_ent, team_msk = _build_attention_critic_entities_for_env(
+                        strict_obs_list[env_idx] if strict_obs_list else None,
+                        config,
+                    )
+                    buffer.store_critic_entities(step, env_idx, team_ent, team_msk)
+                    ent_t = torch.as_tensor(team_ent, dtype=torch.float32,
+                                            device=device).unsqueeze(0)
+                    msk_t = torch.as_tensor(team_msk, dtype=torch.long,
+                                            device=device).unsqueeze(0)
+                    with torch.no_grad():
+                        v_per_agent = critic(ent_t, msk_t).squeeze(0)
+                    for i in range(config.num_red):
+                        if buffer.alive[step, env_idx, i]:
+                            buffer.values[step, env_idx, i] = float(v_per_agent[i].item())
+                else:
+                    global_obs_np = _build_global_obs_for_env(
+                        env_obs,
+                        strict_obs_list[env_idx] if strict_obs_list else None,
+                        red_ids, obs_dim, config,
+                    )
+                    buffer.global_obs[step, env_idx] = global_obs_np
+                    global_obs_t = torch.as_tensor(
+                        global_obs_np, dtype=torch.float32, device=device).unsqueeze(0)
+                    with torch.no_grad():
+                        v_global = critic(global_obs_t).item()
+                    for i in range(config.num_red):
+                        if buffer.alive[step, env_idx, i]:
+                            buffer.values[step, env_idx, i] = v_global
 
                 actions_list.append(env_actions)
 
@@ -893,17 +975,31 @@ def main():
             env_obs = raw_obs_list[env_idx]
             if not env_obs or len(env_obs) == 0:
                 continue
-            global_obs_np = _build_global_obs_for_env(
-                env_obs,
-                strict_obs_list[env_idx] if strict_obs_list else None,
-                red_ids, obs_dim, config,
-            )
-            global_obs_t = torch.as_tensor(global_obs_np, dtype=torch.float32,
-                                           device=device).unsqueeze(0)
-            with torch.no_grad():
-                v_bootstrap = critic(global_obs_t).item()
-            for i in range(config.num_red):
-                buffer.bootstrap_values[env_idx, i] = v_bootstrap
+            if config.critic_state == "attention-entities":
+                team_ent, team_msk = _build_attention_critic_entities_for_env(
+                    strict_obs_list[env_idx] if strict_obs_list else None,
+                    config,
+                )
+                ent_t = torch.as_tensor(team_ent, dtype=torch.float32,
+                                        device=device).unsqueeze(0)
+                msk_t = torch.as_tensor(team_msk, dtype=torch.long,
+                                        device=device).unsqueeze(0)
+                with torch.no_grad():
+                    v_per_agent = critic(ent_t, msk_t).squeeze(0)
+                for i in range(config.num_red):
+                    buffer.bootstrap_values[env_idx, i] = float(v_per_agent[i].item())
+            else:
+                global_obs_np = _build_global_obs_for_env(
+                    env_obs,
+                    strict_obs_list[env_idx] if strict_obs_list else None,
+                    red_ids, obs_dim, config,
+                )
+                global_obs_t = torch.as_tensor(global_obs_np, dtype=torch.float32,
+                                               device=device).unsqueeze(0)
+                with torch.no_grad():
+                    v_bootstrap = critic(global_obs_t).item()
+                for i in range(config.num_red):
+                    buffer.bootstrap_values[env_idx, i] = v_bootstrap
 
         stats = ppo_update_attention(actor, critic, actor_opt, critic_opt,
                                      buffer, config, device,
