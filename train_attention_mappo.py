@@ -212,7 +212,7 @@ def parse_args_attention():
                 "--obs-adapter must be one of: current, paper-placeholder, strict")
         if args.critic_state not in ("engineering", "strict-global", "attention-entities"):
             raise SystemExit(
-                "--critic-state must be one of: engineering, strict-global")
+                "--critic-state must be one of: engineering, strict-global, attention-entities")
         if args.encoder_mode not in ("current", "paper-eq33"):
             raise SystemExit(
                 "--encoder-mode must be one of: current, paper-eq33")
@@ -630,7 +630,12 @@ def main():
     csv_file.flush()
 
     print(f"Device: {device}")
-    print("Architecture: MAPPO-Attention Actor + Vanilla CentralizedCritic")
+    if config.critic_state == "attention-entities":
+        print("Architecture: MAPPO-Attention Actor + CentralizedAttentionCritic")
+        print("Critic input: strict per-agent entity tables")
+        print(f"Critic encoder_mode: {config.encoder_mode}")
+    else:
+        print("Architecture: MAPPO-Attention Actor + Vanilla CentralizedCritic")
     print("Current mask status: no biased random mask / no mask generator")
     print("Final config:")
     print(f"  num_red / num_blue: {config.num_red} / {config.num_blue}")
