@@ -712,7 +712,11 @@ def main():
         print(f"Critic encoder_mode: {config.encoder_mode}")
     else:
         print("Architecture: MAPPO-Attention Actor + Vanilla CentralizedCritic")
-    print("Current mask status: no biased random mask / no mask generator")
+    if config.brma_mode == "dry-run":
+        print("Current mask status: BRMA dry-run mask generator enabled; "
+              "no action masking / no BRMA loss")
+    else:
+        print("Current mask status: no biased random mask / no mask generator")
     print("Final config:")
     print(f"  num_red / num_blue: {config.num_red} / {config.num_blue}")
     print(f"  num_envs: {config.num_envs}")
@@ -982,7 +986,8 @@ def main():
                             and buffer.brma_storage is not None):
                         from brma.collection import collect_brma_dry_run_step
                         for k, i in enumerate(alive_red_indices):
-                            collect_brma_dry_run_step(
+                            with torch.no_grad():
+                                collect_brma_dry_run_step(
                                 actor=actor,
                                 mask_generator=brma_mask_generator,
                                 storage=buffer.brma_storage,
@@ -1235,6 +1240,11 @@ def main():
             "KD_Red": kd_red,
             "RWR": rwr,
             "RewardVersion": REWARD_VERSION,
+            "BRMAValidCount": brma_sm["valid_count"],
+            "BRMAMeanMR": brma_sm["mean_mR"],
+            "BRMAMeanMB": brma_sm["mean_mB"],
+            "BRMAMeanEnemyDrop": brma_sm["mean_enemy"],
+            "BRMAMeanFriendlyDrop": brma_sm["mean_friendly"],
             "ActorLoss": stats["actor_loss"],
             "CriticLoss": stats["critic_loss"],
             "Entropy": stats["entropy"],
