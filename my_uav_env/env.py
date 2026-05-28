@@ -10,6 +10,11 @@ import numpy as np
 import gymnasium
 
 from my_uav_env.alignment.los_geometry import compute_3d_range, compute_body_x_q_los
+from my_uav_env.alignment.launch_quality import (
+    LAUNCH_QUALITY_FIELDS,
+    make_launch_quality_record,
+    nan_float as _nan_float,
+)
 from my_uav_env.alignment.reward_utils import (
     altitude_reward_pairwise_mean_eq17,
     ta_angle_advantage_fixed,
@@ -279,6 +284,10 @@ class UavCombatEnv(gymnasium.Env):
         # Missile launch counters (per-episode, for debugging)
         self._missile_launch_counts: dict[str, int] = {}
         self._launch_diag_step = make_empty_launch_diag()
+        self._launch_quality_records: dict[str, dict] = {}
+        self._launch_quality_step_records: list[dict] = []
+        self._launch_quality_done_step_records: list[dict] = []
+        self._physics_frame = 0
         # Missile termination reason counters: {"red": Counter(), "blue": Counter()}
         self._missile_term_reasons: dict[str, dict[str, int]] = {
             "red": {}, "blue": {},
@@ -320,9 +329,13 @@ class UavCombatEnv(gymnasium.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = 0
+        self._physics_frame = 0
         self._sim_time = 0.0
         self._missile_id_counter = 0
         self._missiles_in_flight.clear()
+        self._launch_quality_records.clear()
+        self._launch_quality_step_records = []
+        self._launch_quality_done_step_records = []
         self._missile_acmi_id.clear()
         self._missile_term_reasons = {"red": {}, "blue": {}}
         self._next_missile_acmi_id = 1001
@@ -391,6 +404,8 @@ class UavCombatEnv(gymnasium.Env):
         # Reset missile launch counters
         self._missile_launch_counts = {aid: 0 for aid in self.agent_ids}
         self._launch_diag_step = make_empty_launch_diag()
+        self._launch_quality_step_records = []
+        self._launch_quality_done_step_records = []
 
         # Reset death reasons
         self._death_reasons = {}
@@ -461,6 +476,8 @@ class UavCombatEnv(gymnasium.Env):
         self.current_step += 1
         self._crashed_this_step.clear()
         self._launch_diag_step = make_empty_launch_diag()
+        self._launch_quality_step_records = []
+        self._launch_quality_done_step_records = []
 
         # 0. Pre-compute kill-cooldown denial set (before physics loop).
         #    An agent that scored a kill within the last KILL_COOLDOWN_STEPS
@@ -479,6 +496,7 @@ class UavCombatEnv(gymnasium.Env):
         for _ in range(self.agent_interaction_steps):
             self._apply_pid_controls(targets)
             self._run_one_physics_frame()
+            self._physics_frame += 1
             self._check_missile_launch()
             self._update_missiles()
             self._update_overload_timers()
@@ -793,7 +811,9 @@ class UavCombatEnv(gymnasium.Env):
                     and self._lock_timer[aid] >= self.missile_lock_delay_frames
                     and self._missile_cooldown[aid] == 0
                     and not on_kill_cooldown):
-                self._launch_missile(sim, best_enemy)
+                launch_quality = self._build_launch_quality_record(
+                    sim, best_enemy, best_distance)
+                self._launch_missile(sim, best_enemy, launch_quality)
                 diag["launches"] += 1
                 # ---- HOT-UPDATE: immediately mark target as engaged ----
                 # Subsequent agents in the same physics frame will see this
@@ -804,15 +824,101 @@ class UavCombatEnv(gymnasium.Env):
                 self._lock_target[aid] = None
                 # Cooldown is set inside _launch_missile
 
-    def _launch_missile(self, parent: AircraftSimulator, target: AircraftSimulator):
+    def _build_launch_quality_record(
+        self,
+        shooter: AircraftSimulator,
+        target: AircraftSimulator,
+        range_m: float | None = None,
+    ) -> dict:
+        """Build a launch-quality snapshot without affecting launch decisions."""
+
+        team = "red" if shooter.uid.startswith("red") else "blue"
+        try:
+            shooter_pos = shooter.get_position()
+            shooter_vel = shooter.get_velocity()
+            target_pos = target.get_position()
+            target_vel = target.get_velocity()
+            shooter_feat = np.array([shooter_pos[0], shooter_pos[1], -shooter_pos[2],
+                                     shooter_vel[0], shooter_vel[1], -shooter_vel[2]])
+            target_feat = np.array([target_pos[0], target_pos[1], -target_pos[2],
+                                    target_vel[0], target_vel[1], -target_vel[2]])
+            ao, ta, r = get2d_AO_TA_R(shooter_feat, target_feat)
+        except Exception:
+            shooter_pos = np.array([np.nan, np.nan, np.nan], dtype=np.float64)
+            shooter_vel = np.array([np.nan, np.nan, np.nan], dtype=np.float64)
+            target_pos = np.array([np.nan, np.nan, np.nan], dtype=np.float64)
+            target_vel = np.array([np.nan, np.nan, np.nan], dtype=np.float64)
+            ao, ta = _nan_float(), _nan_float()
+            r = _nan_float() if range_m is None else float(range_m)
+
+        if range_m is not None:
+            r = float(range_m)
+
+        return make_launch_quality_record(
+            team=team,
+            shooter_id=shooter.uid,
+            target_id=target.uid,
+            current_step=self.current_step,
+            physics_frame=self._physics_frame,
+            range_m=r,
+            AO_rad=ao,
+            TA_rad=ta,
+            shooter_pos=shooter_pos,
+            shooter_vel=shooter_vel,
+            target_pos=target_pos,
+            target_vel=target_vel,
+            target_alive_at_launch=bool(target.is_alive),
+        )
+
+    def _launch_missile(
+        self,
+        parent: AircraftSimulator,
+        target: AircraftSimulator,
+        launch_quality: dict | None = None,
+    ):
         missile = MissileSimulator.create(parent, target, f"m{self._missile_id_counter}")
         self._missile_id_counter += 1
         self._missiles_in_flight[missile.uid] = missile
+        if launch_quality is not None:
+            launch_quality["missile_id"] = missile.uid
+            self._launch_quality_records[missile.uid] = launch_quality
+            self._launch_quality_step_records.append(dict(launch_quality))
         self._missile_acmi_id[missile.uid] = self._next_missile_acmi_id
         self._next_missile_acmi_id += 1
         self._missile_cooldown[parent.uid] = self.missile_cooldown_frames
         parent.num_left_missiles = max(0, parent.num_left_missiles - 1)  # fire-for-effect tracking (capacity 999)
         self._missile_launch_counts[parent.uid] += 1
+
+    def _finalize_launch_quality_record(self, missile: MissileSimulator) -> None:
+        """Attach missile termination diagnostics to its launch snapshot."""
+
+        record = self._launch_quality_records.get(missile.uid)
+        if record is None or record.get("termination_reason"):
+            return
+        raw_reason = missile._termination_reason or ("hit" if missile.is_success else "unknown")
+        if raw_reason in ("hit", "timeout", "kill_cooldown_blocked", "multi_kill_blocked"):
+            reason = raw_reason
+        elif raw_reason in ("p_hit_fail", "low_speed", "overshoot", "target_dead"):
+            reason = "miss"
+        else:
+            reason = "unknown"
+        target_alive = ""
+        if missile.target_aircraft is not None:
+            target_alive = bool(missile.target_aircraft.is_alive)
+        launch_step = record.get("launch_step", record.get("current_step", self.current_step))
+        try:
+            step_delta = int(self.current_step) - int(launch_step)
+        except Exception:
+            step_delta = ""
+        record.update({
+            "termination_reason": reason,
+            "is_success": bool(missile.is_success),
+            "flight_time_sec": float(getattr(missile, "_t", _nan_float())),
+            "termination_step": int(self.current_step),
+            "step_delta": step_delta,
+            "target_alive_at_termination": target_alive,
+        })
+        self._launch_quality_done_step_records.append(dict(record))
 
     def _update_missiles(self):
         """Advance all in-flight missiles and process hit/miss events.
@@ -845,6 +951,7 @@ class UavCombatEnv(gymnasium.Env):
                     # Reverse the shotdown that missile.run() applied
                     if missile.target_aircraft is not None:
                         missile.target_aircraft._status = AircraftSimulator.ALIVE
+                    self._finalize_launch_quality_record(missile)
                     continue
 
                 # ---- Single-target gate (AOE prevention) ----
@@ -856,6 +963,7 @@ class UavCombatEnv(gymnasium.Env):
                     missile._termination_reason = "multi_kill_blocked"
                     if missile.target_aircraft is not None:
                         missile.target_aircraft._status = AircraftSimulator.ALIVE
+                    self._finalize_launch_quality_record(missile)
                     continue
 
                 # ---- Kill accepted ----
@@ -866,6 +974,8 @@ class UavCombatEnv(gymnasium.Env):
                 target_id = missile._target_id
                 if target_id not in self._death_reasons:
                     self._death_reasons[target_id] = "Missile_Kill"
+            if missile.is_done and not was_done_before:
+                self._finalize_launch_quality_record(missile)
 
     def _update_overload_timers(self):
         """Track how long each aircraft has been above the G-limit."""
@@ -1348,6 +1458,12 @@ class UavCombatEnv(gymnasium.Env):
         info["__launch_diag__"] = {
             team: dict(vals) for team, vals in self._launch_diag_step.items()
         }
+        info["__launch_quality_step__"] = [
+            dict(record) for record in self._launch_quality_step_records
+        ]
+        info["__launch_quality_done__"] = [
+            dict(record) for record in self._launch_quality_done_step_records
+        ]
         return info
 
     # ------------------------------------------------------------------

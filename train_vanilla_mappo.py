@@ -114,6 +114,7 @@ class Config:
     # ---- Runtime / persistence ----
     log_file: str = "vanilla_training_log.csv"
     results_file: str = "results/vanilla_mappo_results.csv"
+    launch_quality_file: str | None = None
     checkpoint_dir: str = "checkpoints"
     seed = None
     device: str = "auto"
@@ -248,6 +249,70 @@ LAUNCH_DIAG_CSV_FIELDS = (
     "BlueRangeToGeometryRate",
 )
 
+LAUNCH_QUALITY_DETAIL_FIELDS = (
+    "team",
+    "shooter_id",
+    "target_id",
+    "missile_id",
+    "current_step",
+    "physics_frame",
+    "range_m",
+    "AO_rad",
+    "AO_deg",
+    "TA_rad",
+    "TA_deg",
+    "relative_distance_3d_m",
+    "horizontal_range_m",
+    "altitude_diff_m",
+    "shooter_speed_mps",
+    "target_speed_mps",
+    "closing_speed_mps",
+    "shooter_alt_m",
+    "target_alt_m",
+    "target_alive_at_launch",
+    "termination_reason",
+    "is_success",
+    "flight_time_sec",
+    "launch_step",
+    "termination_step",
+    "step_delta",
+    "target_alive_at_termination",
+)
+
+LAUNCH_QUALITY_AGG_CSV_FIELDS = (
+    "RedLaunchRangeMean",
+    "RedLaunchRangeP25",
+    "RedLaunchRangeP50",
+    "RedLaunchRangeP75",
+    "RedLaunchAoDegMean",
+    "RedLaunchAoDegP50",
+    "RedLaunchTaDegMean",
+    "RedLaunchTaDegP50",
+    "RedLaunchClosingSpeedMean",
+    "RedLaunchAltitudeDiffAbsMean",
+    "RedLaunchHitRateFromQualityRecords",
+    "BlueLaunchRangeMean",
+    "BlueLaunchRangeP25",
+    "BlueLaunchRangeP50",
+    "BlueLaunchRangeP75",
+    "BlueLaunchAoDegMean",
+    "BlueLaunchAoDegP50",
+    "BlueLaunchTaDegMean",
+    "BlueLaunchTaDegP50",
+    "BlueLaunchClosingSpeedMean",
+    "BlueLaunchAltitudeDiffAbsMean",
+    "BlueLaunchHitRateFromQualityRecords",
+)
+
+ACTION_CLIP_CSV_FIELDS = (
+    "RedActionRawAbsMean",
+    "RedActionRawClipFrac",
+    "RedActionClampedFrac",
+    "RedActionRawClipFracPitch",
+    "RedActionRawClipFracHeading",
+    "RedActionRawClipFracVelocity",
+)
+
 
 def _empty_launch_diag_totals() -> dict:
     return {team: {key: 0 for key in LAUNCH_DIAG_BASE_KEYS}
@@ -295,6 +360,106 @@ def _launch_diag_metrics(totals: dict) -> dict:
         "BlueGeometryToLaunchRate": _safe_div(blue_launches, blue_geometry),
         "RedRangeToGeometryRate": _safe_div(red_geometry, red["range_ok_pairs"]),
         "BlueRangeToGeometryRate": _safe_div(blue_geometry, blue["range_ok_pairs"]),
+    }
+
+
+def _numeric_values(records: list[dict], key: str, abs_value: bool = False) -> list[float]:
+    vals = []
+    for record in records:
+        try:
+            value = float(record.get(key, np.nan))
+        except (TypeError, ValueError):
+            continue
+        if np.isnan(value):
+            continue
+        vals.append(abs(value) if abs_value else value)
+    return vals
+
+
+def _mean_or_zero(vals: list[float]) -> float:
+    return float(np.mean(vals)) if vals else 0.0
+
+
+def _percentile_or_zero(vals: list[float], pct: float) -> float:
+    return float(np.percentile(vals, pct)) if vals else 0.0
+
+
+def _launch_quality_metrics(
+    launch_records: list[dict],
+    done_records: list[dict],
+) -> dict:
+    metrics = {}
+    for team, prefix in (("red", "Red"), ("blue", "Blue")):
+        launches = [r for r in launch_records if r.get("team") == team]
+        dones = [r for r in done_records if r.get("team") == team]
+        ranges = _numeric_values(launches, "range_m")
+        ao_deg = _numeric_values(launches, "AO_deg")
+        ta_deg = _numeric_values(launches, "TA_deg")
+        closing = _numeric_values(launches, "closing_speed_mps")
+        alt_abs = _numeric_values(launches, "altitude_diff_m", abs_value=True)
+        hit_count = sum(1 for r in dones if str(r.get("is_success")).lower() == "true"
+                        or r.get("is_success") is True)
+        metrics.update({
+            f"{prefix}LaunchRangeMean": _mean_or_zero(ranges),
+            f"{prefix}LaunchRangeP25": _percentile_or_zero(ranges, 25),
+            f"{prefix}LaunchRangeP50": _percentile_or_zero(ranges, 50),
+            f"{prefix}LaunchRangeP75": _percentile_or_zero(ranges, 75),
+            f"{prefix}LaunchAoDegMean": _mean_or_zero(ao_deg),
+            f"{prefix}LaunchAoDegP50": _percentile_or_zero(ao_deg, 50),
+            f"{prefix}LaunchTaDegMean": _mean_or_zero(ta_deg),
+            f"{prefix}LaunchTaDegP50": _percentile_or_zero(ta_deg, 50),
+            f"{prefix}LaunchClosingSpeedMean": _mean_or_zero(closing),
+            f"{prefix}LaunchAltitudeDiffAbsMean": _mean_or_zero(alt_abs),
+            f"{prefix}LaunchHitRateFromQualityRecords": _safe_div(hit_count, len(dones)),
+        })
+    return metrics
+
+
+def _empty_action_clip_totals() -> dict:
+    return {
+        "raw_abs_sum": 0.0,
+        "element_count": 0,
+        "clip_count": 0,
+        "clamped_count": 0,
+        "dim_clip_count": np.zeros(3, dtype=np.int64),
+        "dim_count": np.zeros(3, dtype=np.int64),
+    }
+
+
+def _accumulate_action_clip_totals(
+    totals: dict,
+    action_raw,
+    action_clamped,
+    threshold: float = 0.999,
+) -> None:
+    raw = np.asarray(action_raw, dtype=np.float64)
+    clamped = np.asarray(action_clamped, dtype=np.float64)
+    if raw.size == 0:
+        return
+    raw = raw.reshape(-1, raw.shape[-1])
+    clamped = clamped.reshape(raw.shape)
+    clipped = np.abs(raw) > threshold
+    totals["raw_abs_sum"] += float(np.abs(raw).sum())
+    totals["element_count"] += int(raw.size)
+    totals["clip_count"] += int(clipped.sum())
+    totals["clamped_count"] += int(np.abs(raw - clamped).sum() > 0) if raw.ndim == 1 else int(
+        np.abs(raw - clamped).reshape(-1).astype(bool).sum())
+    dims = min(3, raw.shape[-1])
+    totals["dim_clip_count"][:dims] += clipped[:, :dims].sum(axis=0).astype(np.int64)
+    totals["dim_count"][:dims] += raw.shape[0]
+
+
+def _action_clip_metrics(totals: dict) -> dict:
+    elem_count = int(totals["element_count"])
+    dim_count = totals["dim_count"]
+    dim_clip = totals["dim_clip_count"]
+    return {
+        "RedActionRawAbsMean": _safe_div(totals["raw_abs_sum"], elem_count),
+        "RedActionRawClipFrac": _safe_div(totals["clip_count"], elem_count),
+        "RedActionClampedFrac": _safe_div(totals["clamped_count"], elem_count),
+        "RedActionRawClipFracPitch": _safe_div(int(dim_clip[0]), int(dim_count[0])),
+        "RedActionRawClipFracHeading": _safe_div(int(dim_clip[1]), int(dim_count[1])),
+        "RedActionRawClipFracVelocity": _safe_div(int(dim_clip[2]), int(dim_count[2])),
     }
 
 
@@ -1212,6 +1377,8 @@ def parse_args():
     parser.add_argument("--log-file", type=str, default=defaults.log_file)
     parser.add_argument("--results-file", type=str,
                         default=defaults.results_file)
+    parser.add_argument("--launch-quality-file", type=str,
+                        default=defaults.launch_quality_file)
     parser.add_argument("--checkpoint-dir", type=str,
                         default=defaults.checkpoint_dir)
     parser.add_argument("--seed", type=int, default=None)
@@ -1225,7 +1392,8 @@ _VANILLA_PRESET_CLI_FLAGS = {
     "max_episode_length", "replay_buffer_size", "n_minibatches",
     "actor_lr", "critic_lr", "entropy_coef",
     "enable_blue_gcas", "resume_from_best",
-    "log_file", "results_file", "checkpoint_dir", "device",
+    "log_file", "results_file", "launch_quality_file",
+    "checkpoint_dir", "device",
 }
 
 
@@ -1263,6 +1431,7 @@ def make_config_from_args(args) -> Config:
     config.resume_from_best = args.resume_from_best
     config.log_file = args.log_file
     config.results_file = args.results_file
+    config.launch_quality_file = args.launch_quality_file
     config.checkpoint_dir = args.checkpoint_dir
     config.seed = args.seed
     config.device = args.device
@@ -1297,6 +1466,12 @@ def _ensure_parent_dir(path: str):
         os.makedirs(parent, exist_ok=True)
 
 
+def _default_launch_quality_file(results_file: str) -> str:
+    results_dir = os.path.dirname(results_file) or "results"
+    stem = os.path.splitext(os.path.basename(results_file))[0]
+    return os.path.join(results_dir, f"{stem}_launch_quality.csv")
+
+
 def main():
     args = parse_args()
 
@@ -1313,6 +1488,8 @@ def main():
         _apply_preset_vanilla(args, preset)
 
     config = make_config_from_args(args)
+    if config.launch_quality_file is None:
+        config.launch_quality_file = _default_launch_quality_file(config.results_file)
     _set_main_process_seed(config.seed)
     device = _select_device(config.device)
 
@@ -1339,8 +1516,21 @@ def main():
                           "KD_Red", "RWR", "RewardVersion",
                           "ActionStdMean", "ActionStdMin", "ActionStdMax",
                           "ActionLogStdMean",
-                          *LAUNCH_DIAG_CSV_FIELDS])
+                          *LAUNCH_DIAG_CSV_FIELDS,
+                          *LAUNCH_QUALITY_AGG_CSV_FIELDS,
+                          *ACTION_CLIP_CSV_FIELDS])
     csv_file.flush()
+
+    launch_quality_file = config.launch_quality_file
+    launch_quality_csv_file = None
+    launch_quality_writer = None
+    if launch_quality_file and str(launch_quality_file).lower() not in ("none", "off", "false"):
+        _ensure_parent_dir(launch_quality_file)
+        launch_quality_csv_file = open(launch_quality_file, "w", newline="")
+        launch_quality_writer = csv.DictWriter(
+            launch_quality_csv_file, fieldnames=LAUNCH_QUALITY_DETAIL_FIELDS)
+        launch_quality_writer.writeheader()
+        launch_quality_csv_file.flush()
 
     print(f"设备: {device}")
     print("Final config:")
@@ -1351,6 +1541,7 @@ def main():
     print(f"  replay_buffer_size: {config.replay_buffer_size}")
     print(f"  log_file: {config.log_file}")
     print(f"  results_file: {config.results_file}")
+    print(f"  launch_quality_file: {launch_quality_file}")
     print(f"  checkpoint_dir: {config.checkpoint_dir}")
     print(f"  seed: {config.seed}")
     print(f"  device: {device}")
@@ -1463,6 +1654,9 @@ def main():
         iter_episodes = 0
         iter_red_wins = 0
         iter_launch_diag = _empty_launch_diag_totals()
+        iter_launch_quality_records: list[dict] = []
+        iter_launch_quality_done_records: list[dict] = []
+        iter_action_clip = _empty_action_clip_totals()
 
         # ---- Rollout ----
         for step in range(num_steps):
@@ -1521,6 +1715,11 @@ def main():
                         # Clamp to [-1, 1] before env / log_prob (Gaussian tail guard)
                         action = action_raw.clamp(-0.999, 0.999)
                         log_prob = action_dist.log_prob(action).sum(dim=-1)
+                    _accumulate_action_clip_totals(
+                        iter_action_clip,
+                        action_raw.cpu().numpy(),
+                        action.cpu().numpy(),
+                    )
 
                     for k, i in enumerate(alive_red_indices):
                         rid = red_ids[i]
@@ -1555,6 +1754,21 @@ def main():
                 info = infos_list[env_idx]
                 _accumulate_launch_diag_totals(
                     iter_launch_diag, info.get("__launch_diag__", {}))
+                launch_quality_step = info.get("__launch_quality_step__", [])
+                if isinstance(launch_quality_step, list):
+                    iter_launch_quality_records.extend(
+                        r for r in launch_quality_step if isinstance(r, dict))
+                launch_quality_done = info.get("__launch_quality_done__", [])
+                if isinstance(launch_quality_done, list):
+                    done_records = [r for r in launch_quality_done if isinstance(r, dict)]
+                    iter_launch_quality_done_records.extend(done_records)
+                    if launch_quality_writer is not None:
+                        for record in done_records:
+                            launch_quality_writer.writerow({
+                                field: record.get(field, "")
+                                for field in LAUNCH_QUALITY_DETAIL_FIELDS
+                            })
+                        launch_quality_csv_file.flush()
 
                 # ---- accumulate step rewards FIRST (incl. terminal r_end for dead agents) ----
                 for i, rid in enumerate(red_ids):
@@ -1685,6 +1899,11 @@ def main():
 
         std_stats = _actor_std_stats(actor)
         launch_diag_metrics = _launch_diag_metrics(iter_launch_diag)
+        launch_quality_metrics = _launch_quality_metrics(
+            iter_launch_quality_records,
+            iter_launch_quality_done_records,
+        )
+        action_clip_metrics = _action_clip_metrics(iter_action_clip)
 
         # Average per-component breakdown across completed episodes
         if recent_ep_comps_red:
@@ -1731,6 +1950,14 @@ def main():
                                  (f"{launch_diag_metrics[field]:.6f}"
                                   if "Rate" in field else launch_diag_metrics[field])
                                  for field in LAUNCH_DIAG_CSV_FIELDS
+                             ],
+                             *[
+                                 f"{launch_quality_metrics[field]:.6f}"
+                                 for field in LAUNCH_QUALITY_AGG_CSV_FIELDS
+                             ],
+                             *[
+                                 f"{action_clip_metrics[field]:.6f}"
+                                 for field in ACTION_CLIP_CSV_FIELDS
                              ]])
         csv_file.flush()
 
@@ -1778,6 +2005,8 @@ def main():
             "r_death":        avg_comps.get("r_death", 0.0),
         })
         results_log[-1].update(launch_diag_metrics)
+        results_log[-1].update(launch_quality_metrics)
+        results_log[-1].update(action_clip_metrics)
         milestone_cur = total_steps // 1_000_000
         milestone_prev = (total_steps - config.num_envs * num_steps) // 1_000_000
         if milestone_cur > milestone_prev or total_steps >= config.total_env_steps:
@@ -1899,6 +2128,8 @@ def main():
           f"红方胜: {red_wins}  蓝方胜: {blue_wins}  平局: {draws}  "
           f"红方胜率: {red_win_rate:.4f}")
     csv_file.close()
+    if launch_quality_csv_file is not None:
+        launch_quality_csv_file.close()
 
     # ---- 清理 ----
     vec_env.close()
