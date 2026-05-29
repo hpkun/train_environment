@@ -106,6 +106,23 @@ environment, reward, launch, missile, radar, blue policy, or vanilla training.
   needs a differentiable masked encoder path so mask-generator parameters can
   receive gradients through `mu_masked` / `sigma_masked`.
 
+## Update: differentiable soft-mask actor API
+
+- `EntityObservationEncoder.forward(..., soft_keep_mask=None)` now supports
+  optional float keep weights where 1 means visible and 0 means softly
+  suppressed. The default `None` path is unchanged.
+- `AttentionActor.evaluate_actions(..., soft_keep_mask=None)` and
+  `evaluate_dual_actions(..., masked_soft_keep_mask=None)` can route `msoft`
+  into the masked policy path without converting it to a hard bool mask.
+- This is a project-interpretation differentiable suppression path: keep weights
+  multiply entity embeddings before attention, while hard `entity_mask` still
+  handles invalid/dead/padded entities and self is forced visible.
+- Exact Gaussian KL is implemented, but full mask-generator training still needs
+  PPO/rollout integration and an optimizer. This pass only makes the future
+  masked policy path differentiable with respect to soft keep weights.
+- Eq.35's exact attention-mask matrix row/column convention still needs visual
+  PDF verification before claiming paper-complete masked attention behavior.
+
 ## Standalone API Added
 
 - `brma.losses.BRMALossConfig`

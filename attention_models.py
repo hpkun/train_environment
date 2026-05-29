@@ -49,19 +49,32 @@ class EntityObservationEncoder(nn.Module):
                            else hidden_size)
 
     def forward(self, entities: torch.Tensor,
-                entity_mask: torch.Tensor | None = None):
+                entity_mask: torch.Tensor | None = None,
+                soft_keep_mask: torch.Tensor | None = None):
         """Encode entities.
 
         Args:
             entities: Tensor with shape (B, N, entity_dim).
             entity_mask: Optional tensor with shape (B, N), where 1 means
                 masked/invalid/dead and 0 means valid.
+            soft_keep_mask: Optional float tensor with shape (B, N), where
+                1 means fully visible and 0 means softly suppressed.  Hard
+                entity_mask still controls invalid/dead/padded entities.
 
         Returns:
             encoded_first: Tensor with shape (B, output_dim).
             attn_weights: Tensor with shape (B, num_heads, N, N).
         """
         embedded = self.entity_mlp(entities)
+        if soft_keep_mask is not None:
+            if soft_keep_mask.shape != entities.shape[:2]:
+                raise ValueError(
+                    "soft_keep_mask must have shape matching entities[:2]")
+            keep = soft_keep_mask.to(dtype=embedded.dtype, device=embedded.device)
+            keep = keep.clamp(0.0, 1.0)
+            keep = torch.cat([torch.ones_like(keep[:, :1]), keep[:, 1:]], dim=1)
+            embedded = embedded * keep.unsqueeze(-1)
+
         key_padding_mask = None
         if entity_mask is not None:
             key_padding_mask = entity_mask.bool().clone()
@@ -117,6 +130,7 @@ class AttentionActor(nn.Module):
         entities: torch.Tensor,
         entity_mask: torch.Tensor,
         rnn_hidden: torch.Tensor,
+        soft_keep_mask: torch.Tensor | None = None,
     ) -> dict:
         """Run encoder → GRU → action head and return all intermediates.
 
@@ -124,7 +138,8 @@ class AttentionActor(nn.Module):
         The encoder internally forces the self entity (index 0) to be visible
         regardless of the mask value.
         """
-        encoded_first, attn_weights = self.encoder(entities, entity_mask)
+        encoded_first, attn_weights = self.encoder(
+            entities, entity_mask, soft_keep_mask=soft_keep_mask)
         new_rnn_hidden = self.rnn(encoded_first, rnn_hidden)
         mu = self.action_head(new_rnn_hidden)
         mu = torch.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
@@ -155,6 +170,7 @@ class AttentionActor(nn.Module):
         entity_mask: torch.Tensor,
         rnn_hidden: torch.Tensor,
         actions: torch.Tensor,
+        soft_keep_mask: torch.Tensor | None = None,
     ) -> dict:
         """Compute log-prob, entropy, and diagnostics for given actions.
 
@@ -166,11 +182,14 @@ class AttentionActor(nn.Module):
             entity_mask:  (B, N)  0=visible, 1=ignored
             rnn_hidden:   (B, rnn_hidden)
             actions:      (B, action_dim)
+            soft_keep_mask: optional (B, N) differentiable keep weights for
+                BRMA masked policy evaluation.
 
         Returns dict with log_prob, entropy_mean, entropy_sum, mu, sigma,
         new_rnn_hidden, attn_weights.
         """
-        out = self._policy_from_entities(entities, entity_mask, rnn_hidden)
+        out = self._policy_from_entities(
+            entities, entity_mask, rnn_hidden, soft_keep_mask=soft_keep_mask)
         dist = out["dist"]
         log_prob = dist.log_prob(actions).sum(dim=-1)    # (B,)
         entropy_mean = dist.entropy().mean(dim=-1)        # (B,)
@@ -196,12 +215,15 @@ class AttentionActor(nn.Module):
         masked_entity_mask: torch.Tensor,
         rnn_hidden: torch.Tensor,
         actions: torch.Tensor,
+        masked_soft_keep_mask: torch.Tensor | None = None,
     ) -> dict:
         """Evaluate the same actions under two entity masks.
 
         ``unmasked_entity_mask`` produces p(a | e), i.e. the actor sees all
         valid entities.  ``masked_entity_mask`` produces p(a | e_mask),
         where some entities are dropped according to BRMA mask rules.
+        ``masked_soft_keep_mask`` optionally adds differentiable keep weights
+        to the masked path only.
 
         Both paths start from the **same** ``rnn_hidden`` — the hidden
         state is not chained between the two evaluations.  The encoder
@@ -214,7 +236,12 @@ class AttentionActor(nn.Module):
         unmasked = self.evaluate_actions(
             entities, unmasked_entity_mask, rnn_hidden, actions)
         masked = self.evaluate_actions(
-            entities, masked_entity_mask, rnn_hidden, actions)
+            entities,
+            masked_entity_mask,
+            rnn_hidden,
+            actions,
+            soft_keep_mask=masked_soft_keep_mask,
+        )
         return {
             "unmasked": unmasked,
             "masked": masked,

@@ -80,8 +80,8 @@ implementation.
 | Max masked friendly/enemy UAVs during training = 2 | MISSING | No count-constrained BRMA masking path. | |
 | Mask generator outputs `mB`, `msoft`, `p` | MISSING | `brma/mask_generator.py` has random keep-mask utilities and a `generate_biased_random_mask` placeholder. | It is not a learned two-layer MLP plus Gumbel-Softmax. |
 | Random friend mask `mR` | PARTIAL | `MaskVectorGenerator.generate_random_keep_mask` can randomly drop candidates by probability. | It is not count-constrained `Uniform(Omega_1^NR,MR)` and is not wired into actor training. |
-| Fusion with death mask and Eq.35 | MISSING | Attention actor uses `entity_mask` as PyTorch key padding mask. | No `mR`, `mB`, `mf` fusion path. |
-| Mask applied to attention matrix | PARTIAL | `nn.MultiheadAttention` uses `key_padding_mask` for invalid/dead entities. | This masks keys/columns. Paper row/column semantics from OCR should be visually verified before a custom BRMA attention mask. |
+| Fusion with death mask and Eq.35 | PARTIAL | Attention actor keeps hard `entity_mask` for invalid/dead entities and has an optional differentiable `soft_keep_mask` path for BRMA-style suppression. | Full `mR`, `mB`, `mf` fusion is not wired into rollout/PPO. |
+| Mask applied to attention matrix | PARTIAL | `nn.MultiheadAttention` uses `key_padding_mask` for invalid/dead entities; optional `soft_keep_mask` multiplies entity embeddings before attention. | Soft embedding suppression is a project interpretation. Paper row/column semantics from OCR should be visually verified before claiming exact Eq.35 behavior. |
 | Buffer stores BRMA fields | MISSING | `AttentionRolloutBuffer` stores entities, entity masks, action, reward, value, log prob, done, alive, global obs, RNN states. | It does not store `mB`, dual policy distributions/log-probs, `p`, `msoft`, next observations, or next state. |
 | Actor loss Eq.27 | MATCH | PPO clipped loss plus entropy coefficient in `ppo_update_attention`. | This is the current MAPPO-Attention update path. |
 | Critic loss Eq.28 | MATCH | MSE loss against GAE returns in `ppo_update_attention`. | The loss form matches; critic architecture does not. |
@@ -186,6 +186,8 @@ Pass H: BRMA loss formula audit and standalone loss API
   creation.
 - Use exact diagonal-Gaussian KL where dual actor distribution parameters are
   available; keep any log-prob proxy loss marked as a project interpretation.
+- Add a differentiable soft-mask actor API so future masked policy outputs can
+  depend on `msoft` without changing default actor behavior.
 
 Pass I: 8v8/10v10 zero-shot evaluation
 
@@ -212,6 +214,8 @@ Pure tests first:
 - Static standalone BRMA loss smoke test for `brma.losses` config validation,
   maskable-set selection, entropy safety, log-prob proxy loss, and detached
   actor terms.
+- Static soft-mask actor API test for `soft_keep_mask` gradients, self keep
+  protection, hard mask compatibility, dual evaluation, and `paper_eq33`.
 - Static metric tests for paper RWR definition, KD, AE, KEAR, and PMR.
 - Static preset test that paper-labeled presets use 6v6 training and 8v8/10v10
   evaluation scales.
