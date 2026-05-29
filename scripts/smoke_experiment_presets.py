@@ -35,6 +35,18 @@ def main() -> None:
     assert pb["brma_mode"] == "train"
     assert pb["critic_state"] == "attention-entities"
 
+    paper = get_preset("attention_2v2_brma_paper_main")
+    assert paper["num_red"] == 2
+    assert paper["num_blue"] == 2
+    assert paper["total_env_steps"] == 10_000_000
+    assert paper["brma_mode"] == "train"
+    assert paper["obs_adapter"] == "strict"
+    assert paper["critic_state"] == "attention-entities"
+    assert paper["encoder_mode"] == "paper-eq33"
+    assert get_preset("attention_2v2_attn_nobrma_paper_baseline")["brma_mode"] == "off"
+    assert get_preset("attention_2v2_brma_paper_500k_probe")["total_env_steps"] == 500_000
+    assert get_preset("attention_2v2_attn_nobrma_paper_500k_probe")["total_env_steps"] == 500_000
+
     # unknown preset raises KeyError
     try:
         get_preset("no_such_preset")

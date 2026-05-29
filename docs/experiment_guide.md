@@ -432,3 +432,22 @@ environment:
 ```powershell
 python train_attention_mappo.py --preset attention_1v1_strict_eq33_attncritic_brma_train_smoke
 ```
+
+## 23. BRMA paper reproduction presets
+
+Smoke presets only validate that the code path starts and logs correctly. They
+are not paper results.
+
+The formal 2v2 reproduction candidates are:
+
+```powershell
+python train_attention_mappo.py --preset attention_2v2_brma_paper_main
+python train_attention_mappo.py --preset attention_2v2_attn_nobrma_paper_baseline
+```
+
+The 500k probes are early health checks only:
+
+```powershell
+python train_attention_mappo.py --preset attention_2v2_brma_paper_500k_probe
+python train_attention_mappo.py --preset attention_2v2_attn_nobrma_paper_500k_probe
+```
