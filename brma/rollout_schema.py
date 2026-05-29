@@ -68,6 +68,7 @@ class BRMARolloutStorage:
             "enemy_drop_mask":    np.zeros((T, E, A, N), dtype=bool),
             "key_padding_mask":   np.zeros((T, E, A, N), dtype=bool),
             "keep_mask":          np.zeros((T, E, A, N), dtype=bool),
+            "soft_keep_mask":     np.zeros((T, E, A, N), dtype=np.float32),
             # dual log-prob placeholders
             "log_prob_unmasked":  np.zeros((T, E, A), dtype=np.float32),
             "log_prob_masked":    np.zeros((T, E, A), dtype=np.float32),
@@ -103,6 +104,7 @@ class BRMARolloutStorage:
         enemy_drop_mask: np.ndarray,
         key_padding_mask: np.ndarray,
         keep_mask: np.ndarray,
+        soft_keep_mask: np.ndarray | None = None,
         log_prob_unmasked: float = 0.0,
         log_prob_masked: float = 0.0,
         entropy_unmasked: float = 0.0,
@@ -144,6 +146,11 @@ class BRMARolloutStorage:
         self._arrays["enemy_drop_mask"][step, env_idx, agent_idx] = enemy_drop_mask
         self._arrays["key_padding_mask"][step, env_idx, agent_idx] = key_padding_mask
         self._arrays["keep_mask"][step, env_idx, agent_idx] = keep_mask
+        if soft_keep_mask is not None:
+            if soft_keep_mask.shape != (N,):
+                raise ValueError(
+                    f"soft_keep_mask must have shape ({N},), got {soft_keep_mask.shape}")
+            self._arrays["soft_keep_mask"][step, env_idx, agent_idx] = soft_keep_mask
         self._arrays["log_prob_unmasked"][step, env_idx, agent_idx] = log_prob_unmasked
         self._arrays["log_prob_masked"][step, env_idx, agent_idx] = log_prob_masked
         self._arrays["entropy_unmasked"][step, env_idx, agent_idx] = entropy_unmasked

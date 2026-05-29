@@ -46,6 +46,42 @@ def _normalize_vector_or_batch(t: torch.Tensor, name: str) -> torch.Tensor:
     return t
 
 
+def build_selected_soft_keep_mask(
+    *,
+    msoft: torch.Tensor,
+    entity_mask: torch.Tensor,
+    friendly_drop_mask: torch.Tensor,
+    enemy_drop_mask: torch.Tensor,
+    n_ego: int = 1,
+) -> torch.Tensor:
+    """Build differentiable keep weights for only the selected BRMA mask set.
+
+    ``msoft`` is interpreted as retention / soft keep value.  Invalid entities
+    may remain 1 here because the hard ``entity_mask`` still handles
+    invalid/dead/padded suppression.
+    """
+
+    for name, tensor in [
+        ("entity_mask", entity_mask),
+        ("friendly_drop_mask", friendly_drop_mask),
+        ("enemy_drop_mask", enemy_drop_mask),
+    ]:
+        if tensor.shape != msoft.shape:
+            raise ValueError(
+                f"{name} shape {tensor.shape} must match msoft shape {msoft.shape}")
+    if msoft.dim() != 2:
+        raise ValueError("msoft and masks must have shape (B, N)")
+    if n_ego < 0 or n_ego > msoft.shape[1]:
+        raise ValueError("n_ego must be in [0, N]")
+
+    valid = ~entity_mask.bool()
+    selected = (friendly_drop_mask.bool() | enemy_drop_mask.bool()) & valid
+    if n_ego > 0:
+        selected[:, :n_ego] = False
+    ones = torch.ones_like(msoft)
+    return torch.where(selected, msoft, ones)
+
+
 def collect_brma_dry_run_step(
     *,
     actor,
@@ -128,13 +164,20 @@ def collect_brma_dry_run_step(
     soft_keep_mask = None
     hard_masked_entity_mask = brma_out["key_padding_mask"]
     if use_soft_mask_path:
-        soft_keep_mask = torch.ones_like(brma_out["msoft"])
-        valid = ~emask.bool()
-        maskable = valid.clone()
-        maskable[:, :n_ego] = False
-        soft_keep_mask = torch.where(maskable, brma_out["msoft"], soft_keep_mask)
-        soft_keep_mask[:, :n_ego] = 1.0
+        soft_keep_mask = build_selected_soft_keep_mask(
+            msoft=brma_out["msoft"],
+            entity_mask=emask,
+            friendly_drop_mask=brma_out["friendly_drop_mask"],
+            enemy_drop_mask=brma_out["enemy_drop_mask"],
+            n_ego=n_ego,
+        )
         hard_masked_entity_mask = emask
+    selected_mask = (
+        (brma_out["friendly_drop_mask"].bool() | brma_out["enemy_drop_mask"].bool())
+        & (~emask.bool())
+    )
+    if n_ego > 0:
+        selected_mask[:, :n_ego] = False
 
     dual = actor.evaluate_dual_actions(
         ents,
@@ -170,6 +213,11 @@ def collect_brma_dry_run_step(
         mu_masked=_to_np(dual["mu_masked"]),
         sigma_unmasked=_to_np(dual["sigma_unmasked"]),
         sigma_masked=_to_np(dual["sigma_masked"]),
+        soft_keep_mask=(
+            _to_np(soft_keep_mask)
+            if soft_keep_mask is not None
+            else _to_np(brma_out["keep_mask"].float())
+        ),
     )
     if next_entities is not None:
         ne = np.asarray(next_entities, dtype=np.float32)
@@ -201,9 +249,16 @@ def collect_brma_dry_run_step(
         "friendly_drop_count": int(store_kwargs["friendly_drop_mask"].sum()),
         "key_padding_count": int(store_kwargs["key_padding_mask"].sum()),
         "use_soft_mask_path": bool(use_soft_mask_path),
+        "use_selected_soft_mask": bool(use_soft_mask_path),
         "soft_keep_mean": (
             float(soft_keep_mask.detach().mean().item())
             if soft_keep_mask is not None else 0.0
+        ),
+        "selected_soft_count": int(selected_mask.sum().item()),
+        "selected_soft_keep_mean": (
+            float(soft_keep_mask[selected_mask].detach().mean().item())
+            if soft_keep_mask is not None and int(selected_mask.sum().item()) > 0
+            else 0.0
         ),
         "hard_key_padding_count": int(store_kwargs["key_padding_mask"].sum()),
         "storage_summary": storage.summary(),

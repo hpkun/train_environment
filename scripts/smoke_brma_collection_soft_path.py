@@ -12,7 +12,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from attention_models import AttentionActor  # noqa: E402
-from brma.collection import collect_brma_dry_run_step  # noqa: E402
+from brma.collection import (  # noqa: E402
+    build_selected_soft_keep_mask,
+    collect_brma_dry_run_step,
+)
 from brma.losses import diagonal_gaussian_kl  # noqa: E402
 from brma.mask_generator import (  # noqa: E402
     BRMAMaskGenerator,
@@ -20,6 +23,71 @@ from brma.mask_generator import (  # noqa: E402
     generate_brma_masks,
 )
 from brma.rollout_schema import BRMARolloutSchemaConfig, BRMARolloutStorage  # noqa: E402
+
+
+def test_selected_only_soft_mask() -> None:
+    msoft = torch.tensor([[0.1, 0.2, 0.3, 0.4, 0.5]], requires_grad=True)
+    entity_mask = torch.zeros(1, 5, dtype=torch.long)
+    friendly_drop = torch.tensor([[False, True, False, False, False]])
+    enemy_drop = torch.tensor([[False, False, False, True, False]])
+    soft_keep = build_selected_soft_keep_mask(
+        msoft=msoft,
+        entity_mask=entity_mask,
+        friendly_drop_mask=friendly_drop,
+        enemy_drop_mask=enemy_drop,
+        n_ego=1,
+    )
+    expected = torch.tensor([[1.0, 0.2, 1.0, 0.4, 1.0]])
+    assert torch.allclose(soft_keep, expected)
+    loss = soft_keep.sum()
+    loss.backward()
+    expected_grad = torch.tensor([[0.0, 1.0, 0.0, 1.0, 0.0]])
+    assert torch.equal(msoft.grad, expected_grad)
+
+
+def test_count_zero_all_ones() -> None:
+    msoft = torch.tensor([[0.1, 0.2, 0.3, 0.4, 0.5]])
+    entity_mask = torch.zeros(1, 5, dtype=torch.long)
+    no_drop = torch.zeros(1, 5, dtype=torch.bool)
+    soft_keep = build_selected_soft_keep_mask(
+        msoft=msoft,
+        entity_mask=entity_mask,
+        friendly_drop_mask=no_drop,
+        enemy_drop_mask=no_drop,
+        n_ego=1,
+    )
+    assert torch.allclose(soft_keep, torch.ones_like(msoft))
+
+    actor = AttentionActor(entity_dim=10, action_dim=3, hidden_size=128,
+                           rnn_hidden=128, encoder_mode="paper_eq33")
+    entities = torch.randn(1, 5, 10)
+    rnn_hidden = torch.zeros(1, 128)
+    actions = torch.zeros(1, 3)
+    dual = actor.evaluate_dual_actions(
+        entities,
+        unmasked_entity_mask=entity_mask,
+        masked_entity_mask=entity_mask,
+        rnn_hidden=rnn_hidden,
+        actions=actions,
+        masked_soft_keep_mask=soft_keep,
+    )
+    assert torch.allclose(dual["mu_unmasked"], dual["mu_masked"], atol=1e-6)
+
+
+def test_invalid_selected_remains_hard_masked() -> None:
+    msoft = torch.tensor([[0.1, 0.2, 0.3, 0.4, 0.5]])
+    entity_mask = torch.zeros(1, 5, dtype=torch.long)
+    entity_mask[:, 3] = 1
+    friendly_drop = torch.zeros(1, 5, dtype=torch.bool)
+    enemy_drop = torch.tensor([[False, False, False, True, False]])
+    soft_keep = build_selected_soft_keep_mask(
+        msoft=msoft,
+        entity_mask=entity_mask,
+        friendly_drop_mask=friendly_drop,
+        enemy_drop_mask=enemy_drop,
+        n_ego=1,
+    )
+    assert soft_keep[0, 3].item() == 1.0
 
 
 def _setup():
@@ -73,10 +141,15 @@ def test_soft_path_basic() -> None:
     assert summary["use_soft_mask_path"] is True
     assert summary["storage_summary"]["valid_count"] == 1
     assert summary["soft_keep_mean"] > 0.0
+    assert summary["use_selected_soft_mask"] is True
+    assert summary["selected_soft_count"] == (
+        summary["enemy_drop_count"] + summary["friendly_drop_count"]
+    )
     stored = storage.get_step(0, 0, 0)
     for key in ("mu_unmasked", "mu_masked", "sigma_unmasked", "sigma_masked"):
         assert stored[key].shape == (3,)
         assert np.isfinite(stored[key]).all()
+    assert stored["soft_keep_mask"].shape == (5,)
 
 
 def test_hard_fallback() -> None:
@@ -122,8 +195,13 @@ def test_soft_path_gradient() -> None:
         mB_count=torch.tensor([2]),
     )
     msoft = brma_out["msoft"].detach().clone().requires_grad_(True)
-    soft_keep = torch.ones_like(msoft)
-    soft_keep[:, 1:] = msoft[:, 1:]
+    soft_keep = build_selected_soft_keep_mask(
+        msoft=msoft,
+        entity_mask=entity_mask,
+        friendly_drop_mask=brma_out["friendly_drop_mask"],
+        enemy_drop_mask=brma_out["enemy_drop_mask"],
+        n_ego=1,
+    )
     dual = actor.evaluate_dual_actions(
         entities,
         unmasked_entity_mask=entity_mask,
@@ -194,6 +272,9 @@ def test_storage_shape_validation() -> None:
 
 
 def main() -> None:
+    test_selected_only_soft_mask()
+    test_count_zero_all_ones()
+    test_invalid_selected_remains_hard_masked()
     test_soft_path_basic()
     test_hard_fallback()
     test_soft_path_gradient()

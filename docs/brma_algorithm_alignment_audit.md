@@ -80,7 +80,7 @@ implementation.
 | Max masked friendly/enemy UAVs during training = 2 | MISSING | No count-constrained BRMA masking path. | |
 | Mask generator outputs `mB`, `msoft`, `p` | MISSING | `brma/mask_generator.py` has random keep-mask utilities and a `generate_biased_random_mask` placeholder. | It is not a learned two-layer MLP plus Gumbel-Softmax. |
 | Random friend mask `mR` | PARTIAL | `MaskVectorGenerator.generate_random_keep_mask` can randomly drop candidates by probability. | It is not count-constrained `Uniform(Omega_1^NR,MR)` and is not wired into actor training. |
-| Fusion with death mask and Eq.35 | PARTIAL | Attention actor keeps hard `entity_mask` for invalid/dead entities and has an optional differentiable `soft_keep_mask` path for BRMA-style suppression. | Full `mR`, `mB`, `mf` fusion is not wired into rollout/PPO. |
+| Fusion with death mask and Eq.35 | PARTIAL | Dry-run collection builds `soft_keep_mask` from the selected `mR`/`mB` set and keeps hard `entity_mask` for invalid/dead entities. | Full PPO rollout/minibatch integration is not wired. |
 | Mask applied to attention matrix | PARTIAL | `nn.MultiheadAttention` uses `key_padding_mask` for invalid/dead entities; optional `soft_keep_mask` multiplies entity embeddings before attention. | Soft embedding suppression is a project interpretation. Paper row/column semantics from OCR should be visually verified before claiming exact Eq.35 behavior. |
 | Buffer stores BRMA fields | PARTIAL | `BRMARolloutStorage` stores masks, counts, dual log-probs, entropy, next observations, and Gaussian `mu`/`sigma` params for exact KL. | Not wired into PPO minibatches or optimizer updates. |
 | Actor loss Eq.27 | MATCH | PPO clipped loss plus entropy coefficient in `ppo_update_attention`. | This is the current MAPPO-Attention update path. |
@@ -190,6 +190,8 @@ Pass H: BRMA loss formula audit and standalone loss API
   depend on `msoft` without changing default actor behavior.
 - Extend BRMA dry-run collection to use the soft masked policy path and store
   Gaussian policy parameters for exact KL.
+- Ensure the soft path applies `msoft` only to the selected `mR`/`mB` set, not
+  all valid non-self entities.
 
 Pass I: 8v8/10v10 zero-shot evaluation
 
