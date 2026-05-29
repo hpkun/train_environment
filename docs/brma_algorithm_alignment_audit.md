@@ -201,6 +201,15 @@ Pass K: standalone mask-generator train step
 - Verify KL-only gradients update `BRMAMaskGenerator` without wiring PPO or
   creating training-loop behavior.
 
+Pass L: train-mode minimal integration
+
+- Add default-off `--brma-mode train` to `train_attention_mappo.py`.
+- Create a mask-generator optimizer only in train mode and update it after PPO
+  actor/critic updates.
+- Keep rollout actions sampled from the unmasked actor policy.
+- Keep mask loss out of actor/critic optimizers and PPO losses.
+- Still needs a live JSBSim smoke and longer paper-aligned BRMA validation.
+
 Pass I: 8v8/10v10 zero-shot evaluation
 
 - Add evaluation presets that load a 6v6-trained policy and set mask counts from
@@ -232,6 +241,8 @@ Pure tests first:
   params, msoft gradient reachability, and storage shape validation.
 - Static mask-generator train-step test for KL-only gradient reachability,
   actor freeze, optimizer step, diagnostic detach mode, and shape validation.
+- Static train-mode integration test for parser/preset support, fake-buffer
+  mask-generator update, zero-sample behavior, and actor parameter stability.
 - Static metric tests for paper RWR definition, KD, AE, KEAR, and PMR.
 - Static preset test that paper-labeled presets use 6v6 training and 8v8/10v10
   evaluation scales.

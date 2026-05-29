@@ -130,6 +130,10 @@ def parse_args_attention():
     brma_temperature = 0.1
     brma_max_mask_allies = 2
     brma_max_mask_enemies = 2
+    brma_lr = 3e-4
+    brma_entropy_coef = 0.05
+    brma_max_grad_norm = 0.5
+    brma_update_minibatch_size = 256
     preset_name = None
     list_presets = False
 
@@ -172,7 +176,7 @@ def parse_args_attention():
         if item == "--brma-mode":
             if i + 1 >= len(raw_argv):
                 raise SystemExit(
-                    "--brma-mode requires one of: off, dry-run")
+                    "--brma-mode requires one of: off, dry-run, train")
             brma_mode = raw_argv[i + 1]
             i += 2
             continue
@@ -210,6 +214,46 @@ def parse_args_attention():
             brma_max_mask_enemies = int(item.split("=", 1)[1])
             i += 1
             continue
+        if item == "--brma-lr":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit("--brma-lr requires a float value")
+            brma_lr = float(raw_argv[i + 1])
+            i += 2
+            continue
+        if item.startswith("--brma-lr="):
+            brma_lr = float(item.split("=", 1)[1])
+            i += 1
+            continue
+        if item == "--brma-entropy-coef":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit("--brma-entropy-coef requires a float value")
+            brma_entropy_coef = float(raw_argv[i + 1])
+            i += 2
+            continue
+        if item.startswith("--brma-entropy-coef="):
+            brma_entropy_coef = float(item.split("=", 1)[1])
+            i += 1
+            continue
+        if item == "--brma-max-grad-norm":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit("--brma-max-grad-norm requires a float value")
+            brma_max_grad_norm = float(raw_argv[i + 1])
+            i += 2
+            continue
+        if item.startswith("--brma-max-grad-norm="):
+            brma_max_grad_norm = float(item.split("=", 1)[1])
+            i += 1
+            continue
+        if item == "--brma-update-minibatch-size":
+            if i + 1 >= len(raw_argv):
+                raise SystemExit("--brma-update-minibatch-size requires an int value")
+            brma_update_minibatch_size = int(raw_argv[i + 1])
+            i += 2
+            continue
+        if item.startswith("--brma-update-minibatch-size="):
+            brma_update_minibatch_size = int(item.split("=", 1)[1])
+            i += 1
+            continue
         if item == "--preset":
             if i + 1 >= len(raw_argv):
                 raise SystemExit("--preset requires a preset name")
@@ -243,15 +287,23 @@ def parse_args_attention():
     if encoder_mode not in ("current", "paper-eq33"):
         raise SystemExit(
             "--encoder-mode must be one of: current, paper-eq33")
-    if brma_mode not in ("off", "dry-run"):
+    if brma_mode not in ("off", "dry-run", "train"):
         raise SystemExit(
-            "--brma-mode must be one of: off, dry-run")
+            "--brma-mode must be one of: off, dry-run, train")
     if brma_temperature <= 0:
         raise SystemExit("--brma-temperature must be > 0")
     if brma_max_mask_allies < 0:
         raise SystemExit("--brma-max-mask-allies must be >= 0")
     if brma_max_mask_enemies < 0:
         raise SystemExit("--brma-max-mask-enemies must be >= 0")
+    if brma_lr <= 0:
+        raise SystemExit("--brma-lr must be > 0")
+    if brma_entropy_coef < 0:
+        raise SystemExit("--brma-entropy-coef must be >= 0")
+    if brma_max_grad_norm <= 0:
+        raise SystemExit("--brma-max-grad-norm must be > 0")
+    if brma_update_minibatch_size <= 0:
+        raise SystemExit("--brma-update-minibatch-size must be > 0")
 
     old_argv = sys.argv
     try:
@@ -267,6 +319,10 @@ def parse_args_attention():
     args.brma_temperature = brma_temperature
     args.brma_max_mask_allies = brma_max_mask_allies
     args.brma_max_mask_enemies = brma_max_mask_enemies
+    args.brma_lr = brma_lr
+    args.brma_entropy_coef = brma_entropy_coef
+    args.brma_max_grad_norm = brma_max_grad_norm
+    args.brma_update_minibatch_size = brma_update_minibatch_size
 
     if preset_name is not None:
         from configs.experiment_presets import get_preset
@@ -281,9 +337,9 @@ def parse_args_attention():
         if args.encoder_mode not in ("current", "paper-eq33"):
             raise SystemExit(
                 "--encoder-mode must be one of: current, paper-eq33")
-        if args.brma_mode not in ("off", "dry-run"):
+        if args.brma_mode not in ("off", "dry-run", "train"):
             raise SystemExit(
-                "--brma-mode must be one of: off, dry-run")
+                "--brma-mode must be one of: off, dry-run, train")
     else:
         if not _has_cli_option(clean_argv, "--log-file"):
             args.log_file = "attention_training_log.csv"
@@ -302,7 +358,8 @@ _ATTENTION_PRESET_CLI_FLAGS = {
     "log_file", "results_file", "checkpoint_dir", "device",
     "obs_adapter", "critic_state", "encoder_mode",
     "brma_mode", "brma_temperature", "brma_max_mask_allies",
-    "brma_max_mask_enemies",
+    "brma_max_mask_enemies", "brma_lr", "brma_entropy_coef",
+    "brma_max_grad_norm", "brma_update_minibatch_size",
 }
 
 
@@ -654,6 +711,126 @@ def ppo_update_attention(actor, critic, actor_opt, critic_opt,
     }
 
 
+def brma_update_attention_mask_generator(
+    *,
+    actor,
+    mask_generator,
+    optimizer,
+    buffer: AttentionRolloutBuffer,
+    config: Config,
+    device: torch.device,
+    loss_config,
+) -> dict:
+    """Update BRMA mask generator after PPO using rollout buffer samples.
+
+    This does not alter PPO actor/critic losses or rollout actions.
+    """
+
+    zero_stats = {
+        "brma_loss": 0.0,
+        "brma_kl": 0.0,
+        "brma_entropy": 0.0,
+        "brma_grad_norm": 0.0,
+        "brma_params_changed_rate": 0.0,
+        "brma_num_samples": 0,
+        "brma_num_updates": 0,
+    }
+    if mask_generator is None or optimizer is None:
+        return zero_stats
+
+    num_steps = buffer.num_steps
+    num_envs = buffer.rnn_actor_init.shape[0]
+    num_red = buffer.rnn_actor_init.shape[1]
+    samples = []
+
+    actor.zero_grad(set_to_none=True)
+    for env_idx in range(num_envs):
+        for agent_idx in range(num_red):
+            rnn_h = torch.as_tensor(
+                buffer.rnn_actor_init[env_idx, agent_idx],
+                dtype=torch.float32,
+                device=device,
+            ).unsqueeze(0)
+            for step in range(num_steps):
+                if not buffer.alive[step, env_idx, agent_idx]:
+                    continue
+                ent_np = buffer.entities[step][env_idx][agent_idx]
+                mask_np = buffer.entity_masks[step][env_idx][agent_idx]
+                if ent_np is None or mask_np is None:
+                    continue
+                ent_t = torch.as_tensor(ent_np, dtype=torch.float32,
+                                        device=device).unsqueeze(0)
+                mask_t = torch.as_tensor(mask_np, dtype=torch.long,
+                                         device=device).unsqueeze(0)
+                samples.append({
+                    "entities": ent_np.astype(np.float32),
+                    "entity_mask": mask_np.astype(np.int64),
+                    "rnn_hidden": rnn_h.detach().squeeze(0).cpu().numpy().astype(np.float32),
+                    "action": buffer.actions[step, env_idx, agent_idx].astype(np.float32),
+                })
+                with torch.no_grad():
+                    _dist, rnn_h, _attn = actor(ent_t, mask_t, rnn_h)
+
+    if not samples:
+        return zero_stats
+
+    from brma.train_step import brma_mask_generator_train_step
+
+    mb_size = int(getattr(config, "brma_update_minibatch_size", 256))
+    stats_rows = []
+    order = np.arange(len(samples))
+    for start in range(0, len(order), mb_size):
+        batch_ids = order[start:start + mb_size]
+        entities = torch.as_tensor(
+            np.stack([samples[i]["entities"] for i in batch_ids]),
+            dtype=torch.float32,
+            device=device,
+        )
+        entity_mask = torch.as_tensor(
+            np.stack([samples[i]["entity_mask"] for i in batch_ids]),
+            dtype=torch.long,
+            device=device,
+        )
+        rnn_hidden = torch.as_tensor(
+            np.stack([samples[i]["rnn_hidden"] for i in batch_ids]),
+            dtype=torch.float32,
+            device=device,
+        )
+        actions = torch.as_tensor(
+            np.stack([samples[i]["action"] for i in batch_ids]),
+            dtype=torch.float32,
+            device=device,
+        )
+        row = brma_mask_generator_train_step(
+            actor=actor,
+            mask_generator=mask_generator,
+            optimizer=optimizer,
+            entities=entities,
+            entity_mask=entity_mask,
+            rnn_hidden=rnn_hidden,
+            actions=actions,
+            n_ego=1,
+            n_allies=config.num_red - 1,
+            n_enemies=config.num_blue,
+            loss_config=loss_config,
+            max_grad_norm=getattr(config, "brma_max_grad_norm", 0.5),
+        )
+        stats_rows.append(row)
+        actor.zero_grad(set_to_none=True)
+
+    if not stats_rows:
+        return zero_stats
+    return {
+        "brma_loss": float(np.mean([r["loss"] for r in stats_rows])),
+        "brma_kl": float(np.mean([r["kl"] for r in stats_rows])),
+        "brma_entropy": float(np.mean([r["entropy"] for r in stats_rows])),
+        "brma_grad_norm": float(np.mean([r["mask_generator_grad_norm"] for r in stats_rows])),
+        "brma_params_changed_rate": float(np.mean([1.0 if r["params_changed"] else 0.0 for r in stats_rows])),
+        "brma_num_samples": int(len(samples)),
+        "brma_num_updates": int(len(stats_rows)),
+    }
+
+
 def _write_results(results_log: list[dict], results_file: str):
     results_dir = os.path.dirname(results_file)
     if results_dir:
@@ -682,6 +859,10 @@ def main():
     config.brma_temperature = args.brma_temperature
     config.brma_max_mask_allies = args.brma_max_mask_allies
     config.brma_max_mask_enemies = args.brma_max_mask_enemies
+    config.brma_lr = args.brma_lr
+    config.brma_entropy_coef = args.brma_entropy_coef
+    config.brma_max_grad_norm = args.brma_max_grad_norm
+    config.brma_update_minibatch_size = args.brma_update_minibatch_size
     _set_main_process_seed(config.seed)
     device = _select_device(config.device)
 
@@ -702,6 +883,8 @@ def main():
         "BlueMissileHitRate", "KD_Red", "RWR", "RewardVersion",
         "BRMAValidCount", "BRMAMeanMR", "BRMAMeanMB",
         "BRMAMeanEnemyDrop", "BRMAMeanFriendlyDrop",
+        "BRMATrainLoss", "BRMATrainKL", "BRMATrainEntropy",
+        "BRMATrainGradNorm", "BRMATrainSamples", "BRMATrainUpdates",
     ])
     csv_file.flush()
 
@@ -715,6 +898,11 @@ def main():
     if config.brma_mode == "dry-run":
         print("Current mask status: BRMA dry-run mask generator enabled; "
               "no action masking / no BRMA loss")
+    elif config.brma_mode == "train":
+        print("Current mask status: BRMA train mode enabled")
+        print("BRMA train mode: enabled")
+        print("BRMA updates mask generator only; actor/critic PPO losses unchanged")
+        print("Rollout actions are sampled from unmasked actor policy")
     else:
         print("Current mask status: no biased random mask / no mask generator")
     print("Final config:")
@@ -730,6 +918,8 @@ def main():
     print(f"  obs_adapter: {config.obs_adapter}")
     print(f"  encoder_mode: {config.encoder_mode}")
     print(f"  brma_mode: {config.brma_mode}")
+    print(f"  brma_lr: {config.brma_lr}")
+    print(f"  brma_entropy_coef: {config.brma_entropy_coef}")
     print(f"  entity_dim: {entity_dim}")
     print(f"  reward_version: {REWARD_VERSION}")
     if config.checkpoint_dir == "checkpoints_attention":
@@ -787,12 +977,15 @@ def main():
     # ---- BRMA dry-run scaffold ----
     brma_mask_generator = None
     brma_storage_config = None
-    if config.brma_mode == "dry-run":
+    brma_optimizer = None
+    brma_loss_config = None
+    if config.brma_mode in ("dry-run", "train"):
         if config.obs_adapter != "strict":
             raise SystemExit(
-                "--brma-mode dry-run requires --obs-adapter strict")
-        print("BRMA dry-run collection: enabled")
-        print("BRMA dry-run does not affect actions or PPO loss")
+                "--brma-mode dry-run/train requires --obs-adapter strict")
+        if config.brma_mode == "dry-run":
+            print("BRMA dry-run collection: enabled")
+            print("BRMA dry-run does not affect actions or PPO loss")
         from brma.mask_generator import BRMAMaskGenerator, BRMAMaskGeneratorConfig
         n_entities_per_agent = config.num_red + config.num_blue
         brma_mg_cfg = BRMAMaskGeneratorConfig(
@@ -809,8 +1002,20 @@ def main():
             num_agents=config.num_red,
             n_entities=n_entities_per_agent,
             entity_dim=10,
+            action_dim=config.action_dim,
             enabled=True,
         )
+        if config.brma_mode == "train":
+            from brma.losses import BRMALossConfig
+            brma_optimizer = torch.optim.Adam(
+                brma_mask_generator.parameters(), lr=config.brma_lr)
+            brma_loss_config = BRMALossConfig(
+                entropy_coef=config.brma_entropy_coef,
+                kl_mode="gaussian",
+                detach_unmasked_policy=True,
+                detach_masked_policy=False,
+                detach_actor_terms=None,
+            )
 
     actor_opt = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
     critic_opt = torch.optim.Adam(critic.parameters(), lr=config.critic_lr)
@@ -981,7 +1186,7 @@ def main():
                             action[k].cpu().numpy(),
                             0.0, 0.0, log_prob[k].item(), 0.0, alive=True)
 
-                    if (config.brma_mode == "dry-run"
+                    if (config.brma_mode in ("dry-run", "train")
                             and brma_mask_generator is not None
                             and buffer.brma_storage is not None):
                         from brma.collection import collect_brma_dry_run_step
@@ -1140,10 +1345,30 @@ def main():
                                      buffer, config, device,
                                      total_steps=total_steps)
 
+        brma_train_stats = {
+            "brma_loss": 0.0,
+            "brma_kl": 0.0,
+            "brma_entropy": 0.0,
+            "brma_grad_norm": 0.0,
+            "brma_params_changed_rate": 0.0,
+            "brma_num_samples": 0,
+            "brma_num_updates": 0,
+        }
+        if config.brma_mode == "train":
+            brma_train_stats = brma_update_attention_mask_generator(
+                actor=actor,
+                mask_generator=brma_mask_generator,
+                optimizer=brma_optimizer,
+                buffer=buffer,
+                config=config,
+                device=device,
+                loss_config=brma_loss_config,
+            )
+
         # ---- BRMA dry-run summary ----
         brma_sm = {"valid_count": 0, "mean_mR": 0.0, "mean_mB": 0.0,
                    "mean_enemy": 0.0, "mean_friendly": 0.0}
-        if (config.brma_mode == "dry-run"
+        if (config.brma_mode in ("dry-run", "train")
                 and buffer.brma_storage is not None
                 and buffer.brma_storage.has_storage):
             sm = buffer.brma_storage.summary()
@@ -1211,6 +1436,12 @@ def main():
             f"{brma_sm['mean_mB']:.4f}",
             f"{brma_sm['mean_enemy']:.4f}",
             f"{brma_sm['mean_friendly']:.4f}",
+            f"{brma_train_stats['brma_loss']:.6f}",
+            f"{brma_train_stats['brma_kl']:.6f}",
+            f"{brma_train_stats['brma_entropy']:.6f}",
+            f"{brma_train_stats['brma_grad_norm']:.6f}",
+            f"{brma_train_stats['brma_num_samples']}",
+            f"{brma_train_stats['brma_num_updates']}",
         ])
         csv_file.flush()
 
@@ -1245,6 +1476,12 @@ def main():
             "BRMAMeanMB": brma_sm["mean_mB"],
             "BRMAMeanEnemyDrop": brma_sm["mean_enemy"],
             "BRMAMeanFriendlyDrop": brma_sm["mean_friendly"],
+            "BRMATrainLoss": brma_train_stats["brma_loss"],
+            "BRMATrainKL": brma_train_stats["brma_kl"],
+            "BRMATrainEntropy": brma_train_stats["brma_entropy"],
+            "BRMATrainGradNorm": brma_train_stats["brma_grad_norm"],
+            "BRMATrainSamples": brma_train_stats["brma_num_samples"],
+            "BRMATrainUpdates": brma_train_stats["brma_num_updates"],
             "ActorLoss": stats["actor_loss"],
             "CriticLoss": stats["critic_loss"],
             "Entropy": stats["entropy"],
@@ -1262,6 +1499,14 @@ def main():
             brma_str = (f" BRMA[v={brma_sm['valid_count']} "
                         f"mR={brma_sm['mean_mR']:.1f} mB={brma_sm['mean_mB']:.1f} "
                         f"Edrop={brma_sm['mean_enemy']:.1f} Fdrop={brma_sm['mean_friendly']:.1f}] |")
+        elif config.brma_mode == "train":
+            brma_str = (
+                f" BRMATrain[loss={brma_train_stats['brma_loss']:+.4f} "
+                f"kl={brma_train_stats['brma_kl']:.4f} "
+                f"ent={brma_train_stats['brma_entropy']:.4f} "
+                f"grad={brma_train_stats['brma_grad_norm']:.4f} "
+                f"n={brma_train_stats['brma_num_samples']}] |"
+            )
 
         print(f"Iter {iteration:5d} | total_steps={total_steps:9d} | "
               f"t={t_elapsed:5.1f}s | R_red={avg_r_red:+8.1f} [{comp_str}] | "
@@ -1299,6 +1544,10 @@ def main():
                 torch.save(critic.state_dict(),
                            os.path.join(config.checkpoint_dir,
                                         "centralized_critic_best_reward.pt"))
+                if config.brma_mode == "train" and brma_mask_generator is not None:
+                    torch.save(brma_mask_generator.state_dict(),
+                               os.path.join(config.checkpoint_dir,
+                                            "brma_mask_generator_best_reward.pt"))
                 print(f"  *** New Best Reward Model Saved! "
                       f"(Reward={best_reward_value:+.2f}, "
                       f"RecentWinRate={iter_win_rate:.4f}, "
@@ -1320,6 +1569,13 @@ def main():
                                         "centralized_critic_best_winrate.pt"))
                 torch.save(actor.state_dict(), actor_best_path)
                 torch.save(critic.state_dict(), critic_best_path)
+                if config.brma_mode == "train" and brma_mask_generator is not None:
+                    torch.save(brma_mask_generator.state_dict(),
+                               os.path.join(config.checkpoint_dir,
+                                            "brma_mask_generator_best_winrate.pt"))
+                    torch.save(brma_mask_generator.state_dict(),
+                               os.path.join(config.checkpoint_dir,
+                                            "brma_mask_generator_best.pt"))
                 print(f"  *** New Best WinRate Model Saved! "
                       f"(RecentWinRate={best_winrate_value:.4f}, "
                       f"Reward={best_winrate_reward:+.2f}, "
@@ -1331,6 +1587,10 @@ def main():
                os.path.join(config.checkpoint_dir, "attention_actor_final.pt"))
     torch.save(critic.state_dict(),
                os.path.join(config.checkpoint_dir, "centralized_critic_final.pt"))
+    if config.brma_mode == "train" and brma_mask_generator is not None:
+        torch.save(brma_mask_generator.state_dict(),
+                   os.path.join(config.checkpoint_dir,
+                                "brma_mask_generator_final.pt"))
     print("=" * 70)
     print(f"Final models saved to {config.checkpoint_dir}/")
     print(f"Results saved to {config.results_file} ({len(results_log)} rows)")

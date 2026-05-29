@@ -31,6 +31,9 @@ def main() -> None:
     assert pa["obs_adapter"] == "current"
     ps = get_preset("attention_1v1_strict_smoke")
     assert ps["obs_adapter"] == "strict"
+    pb = get_preset("attention_1v1_strict_eq33_attncritic_brma_train_smoke")
+    assert pb["brma_mode"] == "train"
+    assert pb["critic_state"] == "attention-entities"
 
     # unknown preset raises KeyError
     try:

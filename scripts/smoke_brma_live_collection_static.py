@@ -39,9 +39,18 @@ def main() -> None:
     finally:
         sys.argv = old_argv
 
-    # ---- 3. invalid brma mode ----
+    # ---- 3. parse_args_attention train ----
     try:
         sys.argv = ["train_attention_mappo.py", "--brma-mode", "train"]
+        from train_attention_mappo import parse_args_attention
+        args = parse_args_attention()
+        assert args.brma_mode == "train"
+    finally:
+        sys.argv = old_argv
+
+    # ---- 4. invalid brma mode ----
+    try:
+        sys.argv = ["train_attention_mappo.py", "--brma-mode", "bad"]
         from train_attention_mappo import parse_args_attention
         args = parse_args_attention()
         assert False, "should have raised SystemExit"
@@ -50,17 +59,18 @@ def main() -> None:
     finally:
         sys.argv = old_argv
 
-    # ---- 4. preset list ----
+    # ---- 5. preset list ----
     from configs.experiment_presets import list_presets
     names = list_presets()
     assert "attention_1v1_strict_eq33_attncritic_brma_dryrun_smoke" in names
+    assert "attention_1v1_strict_eq33_attncritic_brma_train_smoke" in names
 
-    # ---- 5. default buffer has no brma_storage ----
+    # ---- 6. default buffer has no brma_storage ----
     buf_default = AttentionRolloutBuffer(
         num_steps=3, num_envs=2, num_red=1, action_dim=3, rnn_hidden_size=128)
     assert buf_default.brma_storage is None
 
-    # ---- 6. buffer with BRMA storage enabled ----
+    # ---- 7. buffer with BRMA storage enabled ----
     sc_cfg = BRMARolloutSchemaConfig(
         num_steps=4, num_envs=2, num_agents=2,
         n_entities=5, entity_dim=10, enabled=True)
@@ -71,7 +81,7 @@ def main() -> None:
     assert buf_brma.brma_storage.has_storage
     assert buf_brma.brma_storage.summary()["enabled"] == True
 
-    # ---- 7. integrated dry-run collector shape smoke ----
+    # ---- 8. integrated dry-run collector shape smoke ----
     actor = AttentionActor(entity_dim=10, action_dim=3, encoder_mode="paper_eq33")
     mg_cfg = BRMAMaskGeneratorConfig(entity_feature_dim=10)
     mask_gen = BRMAMaskGenerator(mg_cfg)

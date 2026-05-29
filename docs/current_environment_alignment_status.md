@@ -73,6 +73,7 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | BRMA soft collection path | `collect_brma_dry_run_step` uses `msoft` only on the selected `mR`/`mB` set as differentiable soft keep weights, while retaining the hard key-padding BRMA mask for diagnostics/fallback. Not wired into PPO/training | P1 |
 | BRMA Gaussian params storage | `BRMARolloutStorage` stores `mu_unmasked`, `mu_masked`, `sigma_unmasked`, and `sigma_masked` for future exact KL mask loss. Not consumed by PPO yet | P1 |
 | BRMA standalone mask-generator train step | `brma.train_step` computes KL-minus-entropy mask-generator loss through the selected soft mask path and can step an externally supplied optimizer in static tests. Actor parameters are frozen; not wired into PPO/training | P1 |
+| BRMA train mode minimal integration | `train_attention_mappo.py --brma-mode train` is available and disabled by default. It updates only the mask generator after PPO; actor/critic PPO losses and rollout actions remain unchanged | P1 |
 | PID stabilisation | Engineering additions (deadband, heading LPF, velocity R_BI, anti-inversion) | P2 |
 
 ## 4. Current module layout
@@ -124,7 +125,11 @@ Root compatibility shims (still retained):
 10. **BRMA standalone mask-generator train step** verifies KL-only gradients can
     reach `BRMAMaskGenerator` through the selected soft mask path while actor
     parameters remain frozen. It remains outside PPO.
-11. **Only after paper mask formulas are verified and exact KL inputs are
+11. **BRMA train mode minimal integration** adds default-off
+    `--brma-mode train`, which updates only the mask generator after PPO while
+    leaving rollout actions and actor/critic losses unchanged. It still needs a
+    local JSBSim smoke before any real run.
+12. **Only after paper mask formulas are verified and exact KL inputs are
    available** proceed to MaskVectorGenerator optimizer integration /
    BRMA-MAPPO.
 

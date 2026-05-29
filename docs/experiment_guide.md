@@ -423,4 +423,12 @@ This command does not create the environment, reset JSBSim, train, or evaluate:
 python scripts/smoke_brma_losses_static.py
 python scripts/smoke_brma_collection_soft_path.py
 python scripts/smoke_brma_train_step_static.py
+python scripts/smoke_brma_train_mode_static.py
+```
+
+Local BRMA train-mode smoke command, not run by Codex because it starts the
+environment:
+
+```powershell
+python train_attention_mappo.py --preset attention_1v1_strict_eq33_attncritic_brma_train_smoke
 ```

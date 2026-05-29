@@ -188,6 +188,26 @@ EXPERIMENT_PRESETS = {
         "results_file": "results/attention_1v1_strict_eq33_attncritic_brma_dryrun_smoke_results.csv",
         "checkpoint_dir": "checkpoints/attention_1v1_strict_eq33_attncritic_brma_dryrun_smoke",
     },
+    "attention_1v1_strict_eq33_attncritic_brma_train_smoke": {
+        "num_red": 1,
+        "num_blue": 1,
+        "num_envs": 1,
+        "total_env_steps": 20,
+        "replay_buffer_size": 10,
+        "max_episode_length": 10,
+        "device": "cpu",
+        "obs_adapter": "strict",
+        "encoder_mode": "paper-eq33",
+        "critic_state": "attention-entities",
+        "brma_mode": "train",
+        "brma_lr": 3e-4,
+        "brma_entropy_coef": 0.05,
+        "brma_max_grad_norm": 0.5,
+        "brma_update_minibatch_size": 256,
+        "log_file": "logs/attention_1v1_strict_eq33_attncritic_brma_train_smoke.csv",
+        "results_file": "results/attention_1v1_strict_eq33_attncritic_brma_train_smoke_results.csv",
+        "checkpoint_dir": "checkpoints/attention_1v1_strict_eq33_attncritic_brma_train_smoke",
+    },
 }
 
 
