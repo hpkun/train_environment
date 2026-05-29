@@ -44,19 +44,17 @@ environment, reward, launch, missile, radar, blue policy, or vanilla training.
   should still be kept explicit in integration.
 - `BRMALossConfig.detach_actor_terms=True` is the default because Algorithm 1
   updates the actor with PPO first, then updates the mask vector generator with
-  the mask loss. The standalone helper therefore treats actor log-prob terms as
-  fixed inputs unless explicitly configured otherwise.
-- `compute_brma_mask_loss()` implements a sampled log-prob proxy for the paper
-  KL term:
-  `log_prob_unmasked - log_prob_masked`.
-  This is not a full Gaussian KL. It is a safe standalone candidate because the
-  current dry-run storage exposes dual action log-probs rather than full
-  distribution parameters.
-- The standalone candidate minimizes
-  `proxy_discrepancy - entropy_coef * masked_entropy`.
-  This mirrors the confirmed paper sign `KL - beta * entropy`, but should be
-  replaced by exact diagonal-Gaussian KL once the actor distribution parameters
-  are stored.
+  the mask loss. The standalone helper therefore treats actor distribution terms
+  as fixed inputs unless explicitly configured otherwise.
+- `compute_brma_mask_loss()` now defaults to `kl_mode="gaussian"` and uses the
+  exact diagonal-Gaussian closed-form KL for the paper divergence term.
+- `kl_mode="sample_logprob_proxy"` preserves the earlier static candidate:
+  `log_prob_unmasked - log_prob_masked`. This remains a project interpretation
+  and should not be treated as the final paper loss.
+- The standalone Gaussian candidate minimizes
+  `diagonal_gaussian_kl - entropy_coef * masked_entropy`.
+  This aligns the KL part with Eq.41 / Eq.46 while keeping training integration
+  disabled.
 - `masked_entropy_loss()` implements Bernoulli entropy over the maskable set to
   satisfy the standalone API requested in this pass. The paper OCR appears
   closer to `-msoft log(msoft)` over the Top-M set, so the exact entropy form
@@ -77,9 +75,6 @@ environment, reward, launch, missile, radar, blue policy, or vanilla training.
   unmasked observations needs a dedicated integration audit. Algorithm 1 text
   indicates `oi` and `mi` are put into the encoder before action output, while
   the loss also requires both `p(a|e)` and `p(a|emask)`.
-- The paper objective is a KL between full policies. The standalone log-prob
-  difference proxy is useful for API shape and gradient checks, but it is not
-  visually confirmed as the final training formula.
 - The exact entropy formula should be checked visually because the requested
   standalone API uses Bernoulli entropy while extracted Eq.45 appears to omit
   the `(1 - msoft) log(1 - msoft)` term.
@@ -89,14 +84,32 @@ environment, reward, launch, missile, radar, blue policy, or vanilla training.
 - No PPO update path was changed.
 - No BRMA mask-generator optimizer was created.
 - No actor rollout action source was changed.
-- No exact diagonal-Gaussian KL loss was implemented.
+- The exact diagonal-Gaussian KL loss is standalone only and is not wired into
+  PPO or mask-generator updates.
 - No `train_attention_mappo.py` default behavior was changed.
 - No environment, reward, missile, radar, launch, blue policy, training,
   evaluation, reset, or JSBSim path was run or modified.
 
+## Update: exact diagonal-Gaussian KL API
+
+- `diagonal_gaussian_kl(mu_p, sigma_p, mu_q, sigma_q)` implements
+  `KL(N_p || N_q)` for diagonal Gaussian action distributions and returns one
+  KL value per batch item.
+- `compute_brma_mask_loss(..., kl_mode="gaussian")` uses
+  `KL(p(a|e) || p(a|emask)) - beta * H(mask)` with `entropy_coef=0.05` by
+  default, matching the paper's reported beta selection.
+- The KL term is now paper-aligned for distribution divergence. The entropy form
+  still needs visual PDF verification: the current helper uses Bernoulli entropy
+  over the maskable set, while extracted Eq.45 appears closer to
+  `-msoft log(msoft)`.
+- This is still not a complete BRMA training implementation. Future integration
+  needs a differentiable masked encoder path so mask-generator parameters can
+  receive gradients through `mu_masked` / `sigma_masked`.
+
 ## Standalone API Added
 
 - `brma.losses.BRMALossConfig`
+- `brma.losses.diagonal_gaussian_kl`
 - `brma.losses.compute_maskable_set`
 - `brma.losses.masked_entropy_loss`
 - `brma.losses.compute_brma_mask_loss`

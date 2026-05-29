@@ -15,6 +15,7 @@ from .losses import (
     BRMALossConfig,
     compute_brma_mask_loss,
     compute_maskable_set,
+    diagonal_gaussian_kl,
     masked_entropy_loss,
 )
 from .rollout_schema import BRMARolloutSchemaConfig, BRMARolloutStorage
@@ -30,5 +31,6 @@ __all__ = [
     "collect_brma_dry_run_step",
     "compute_brma_mask_loss",
     "compute_maskable_set",
+    "diagonal_gaussian_kl",
     "masked_entropy_loss",
 ]

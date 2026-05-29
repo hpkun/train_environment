@@ -85,7 +85,7 @@ implementation.
 | Buffer stores BRMA fields | MISSING | `AttentionRolloutBuffer` stores entities, entity masks, action, reward, value, log prob, done, alive, global obs, RNN states. | It does not store `mB`, dual policy distributions/log-probs, `p`, `msoft`, next observations, or next state. |
 | Actor loss Eq.27 | MATCH | PPO clipped loss plus entropy coefficient in `ppo_update_attention`. | This is the current MAPPO-Attention update path. |
 | Critic loss Eq.28 | MATCH | MSE loss against GAE returns in `ppo_update_attention`. | The loss form matches; critic architecture does not. |
-| Mask generator loss Eq.41 / Eq.46 | PARTIAL | `brma.losses` provides a standalone KL-minus-entropy candidate using a sampled log-prob proxy and maskable-set entropy. | No exact Gaussian KL, optimizer, or PPO integration yet. See `docs/brma_loss_formula_audit.md`. |
+| Mask generator loss Eq.41 / Eq.46 | PARTIAL | `brma.losses` provides standalone exact diagonal-Gaussian KL minus maskable-set entropy, plus retained sampled log-prob proxy mode. | No optimizer or PPO integration yet; entropy form still needs visual verification. See `docs/brma_loss_formula_audit.md`. |
 | Gumbel-Softmax and entropy term | MISSING | Not implemented. | |
 | Inference mask count from `Neval - Ntrain` | MISSING | No BRMA inference logic. | |
 | RWR and KD metrics | PARTIAL | `train_attention_mappo.py` logs `RWR` and `KD_Red`. | Current `RWR` is red wins divided by total episodes, while the paper defines RWR as red win rate divided by blue win rate. |
@@ -184,8 +184,8 @@ Pass H: BRMA loss formula audit and standalone loss API
   direction, entropy set, and PPO relationship.
 - Add a pure PyTorch standalone loss API without PPO wiring or optimizer
   creation.
-- Mark any log-prob proxy loss as a project interpretation until exact
-  distribution KL inputs are stored.
+- Use exact diagonal-Gaussian KL where dual actor distribution parameters are
+  available; keep any log-prob proxy loss marked as a project interpretation.
 
 Pass I: 8v8/10v10 zero-shot evaluation
 

@@ -2,9 +2,8 @@
 
 This module is intentionally not wired into PPO or training.  The paper states
 the mask-generator objective as KL[p(a|e) || p(a|emask)] - beta * H(mask).  The
-API below implements a sampled-log-prob proxy for the KL term because the
-current dry-run storage exposes dual action log-probs, not full Gaussian
-parameters.
+default API below implements the paper's diagonal-Gaussian closed-form KL term.
+The older sampled-log-prob proxy remains available for static compatibility.
 """
 from __future__ import annotations
 
@@ -15,16 +14,20 @@ import torch
 
 @dataclass
 class BRMALossConfig:
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.05
     eps: float = 1e-8
     detach_actor_terms: bool = True
     maskable_entropy_only: bool = True
+    kl_mode: str = "gaussian"
 
     def __post_init__(self) -> None:
         if self.entropy_coef < 0:
             raise ValueError("entropy_coef must be >= 0")
         if self.eps <= 0:
             raise ValueError("eps must be > 0")
+        if self.kl_mode not in {"gaussian", "sample_logprob_proxy"}:
+            raise ValueError(
+                "kl_mode must be one of {'gaussian', 'sample_logprob_proxy'}")
 
 
 def _require_same_shape(name: str, *tensors: torch.Tensor) -> None:
@@ -106,6 +109,34 @@ def masked_entropy_loss(
     return per_batch.mean()
 
 
+def diagonal_gaussian_kl(
+    mu_p: torch.Tensor,
+    sigma_p: torch.Tensor,
+    mu_q: torch.Tensor,
+    sigma_q: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Return per-batch KL(N_p || N_q) for diagonal Gaussian policies.
+
+    Inputs must have shape (B, A).  The result has shape (B,).
+    Sigma values are clamped to `eps` for numerical stability.
+    """
+
+    if eps <= 0:
+        raise ValueError("eps must be > 0")
+    _require_same_shape("diagonal_gaussian_kl", mu_p, sigma_p, mu_q, sigma_q)
+    if mu_p.ndim != 2:
+        raise ValueError("Gaussian parameters must have shape (B, A)")
+
+    sp = sigma_p.clamp_min(eps)
+    sq = sigma_q.clamp_min(eps)
+    mean_delta = mu_p - mu_q
+    kl_each = torch.log(sq / sp) + (sp.square() + mean_delta.square()) / (
+        2.0 * sq.square()
+    ) - 0.5
+    return kl_each.sum(dim=1)
+
+
 def compute_brma_mask_loss(
     *,
     log_prob_unmasked: torch.Tensor,
@@ -113,35 +144,83 @@ def compute_brma_mask_loss(
     msoft: torch.Tensor,
     maskable_set: torch.Tensor,
     config: BRMALossConfig,
+    mu_unmasked: torch.Tensor | None = None,
+    sigma_unmasked: torch.Tensor | None = None,
+    mu_masked: torch.Tensor | None = None,
+    sigma_masked: torch.Tensor | None = None,
 ) -> dict:
     """Compute a standalone BRMA mask loss candidate.
 
     Formula status:
     - Paper-confirmed objective: minimize KL[p(a|e) || p(a|emask)] - beta H.
-    - Current standalone implementation: sampled log-prob proxy
-      `log_prob_unmasked - log_prob_masked` for the KL term.
-    - With `detach_actor_terms=True`, actor log-prob tensors are detached so
-      this helper cannot update actor parameters through the proxy term.
+    - `kl_mode="gaussian"` uses the exact closed-form KL for diagonal Gaussian
+      policies.
+    - `kl_mode="sample_logprob_proxy"` preserves the earlier sampled proxy
+      `log_prob_unmasked - log_prob_masked`.
+    - With `detach_actor_terms=True`, actor distribution tensors are detached so
+      this helper cannot update actor parameters through the KL/proxy term.
+
+    Exact Gaussian KL is paper-aligned for distribution divergence, but future
+    BRMA integration still needs a differentiable masked encoder path for mask
+    generator gradients.
     """
 
-    if log_prob_unmasked.shape != log_prob_masked.shape:
-        raise ValueError(
-            "log_prob_unmasked and log_prob_masked must have the same shape")
-    if log_prob_unmasked.ndim != 1:
-        raise ValueError("log_prob tensors must have shape (B,)")
     if msoft.ndim != 2:
         raise ValueError("msoft must have shape (B, N)")
-    if msoft.shape[0] != log_prob_unmasked.shape[0]:
-        raise ValueError("msoft batch size must match log_prob batch size")
     _require_same_shape("compute_brma_mask_loss", msoft, maskable_set)
 
-    lp_unmasked = log_prob_unmasked
-    lp_masked = log_prob_masked
-    if config.detach_actor_terms:
-        lp_unmasked = lp_unmasked.detach()
-        lp_masked = lp_masked.detach()
+    if config.kl_mode == "gaussian":
+        if (
+            mu_unmasked is None
+            or sigma_unmasked is None
+            or mu_masked is None
+            or sigma_masked is None
+        ):
+            raise ValueError("gaussian kl_mode requires mu/sigma tensors")
+        if mu_unmasked.ndim != 2:
+            raise ValueError("mu/sigma tensors must have shape (B, A)")
+        if msoft.shape[0] != mu_unmasked.shape[0]:
+            raise ValueError("msoft batch size must match Gaussian batch size")
 
-    discrepancy = lp_unmasked - lp_masked
+        mu_p = mu_unmasked
+        sigma_p = sigma_unmasked
+        mu_q = mu_masked
+        sigma_q = sigma_masked
+        if config.detach_actor_terms:
+            mu_p = mu_p.detach()
+            sigma_p = sigma_p.detach()
+            mu_q = mu_q.detach()
+            sigma_q = sigma_q.detach()
+        discrepancy = diagonal_gaussian_kl(
+            mu_p,
+            sigma_p,
+            mu_q,
+            sigma_q,
+            eps=config.eps,
+        )
+        formula_status = (
+            "PAPER_ALIGNED_DIAGONAL_GAUSSIAN_KL_MINUS_ENTROPY_CANDIDATE"
+        )
+    else:
+        if log_prob_unmasked.shape != log_prob_masked.shape:
+            raise ValueError(
+                "log_prob_unmasked and log_prob_masked must have the same shape")
+        if log_prob_unmasked.ndim != 1:
+            raise ValueError("log_prob tensors must have shape (B,)")
+        if msoft.shape[0] != log_prob_unmasked.shape[0]:
+            raise ValueError("msoft batch size must match log_prob batch size")
+
+        lp_unmasked = log_prob_unmasked
+        lp_masked = log_prob_masked
+        if config.detach_actor_terms:
+            lp_unmasked = lp_unmasked.detach()
+            lp_masked = lp_masked.detach()
+        discrepancy = lp_unmasked - lp_masked
+        formula_status = (
+            "PROJECT_INTERPRETATION_SAMPLE_LOGPROB_PROXY_AND_BERNOULLI_ENTROPY_FOR_"
+            "CONFIRMED_KL_MINUS_ENTROPY_OBJECTIVE"
+        )
+
     entropy = masked_entropy_loss(
         msoft,
         maskable_set if config.maskable_entropy_only else torch.ones_like(maskable_set),
@@ -152,10 +231,9 @@ def compute_brma_mask_loss(
     return {
         "loss": loss,
         "discrepancy_mean": discrepancy.mean(),
+        "kl_mode": config.kl_mode,
+        "kl_per_batch_mean": discrepancy.mean(),
         "entropy": entropy,
-        "formula_status": (
-            "PROJECT_INTERPRETATION_LOGPROB_KL_PROXY_AND_BERNOULLI_ENTROPY_FOR_"
-            "CONFIRMED_KL_MINUS_ENTROPY_OBJECTIVE"
-        ),
+        "formula_status": formula_status,
         "maskable_count_mean": maskable_count_mean,
     }
