@@ -68,6 +68,7 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | BRMA dual actor API | `AttentionActor.evaluate_dual_actions` computes p(a\|e) and p(a\|emask) log-probs/entropy in one call. `forward()` unchanged. Not wired into rollout/PPO | P1 |
 | BRMA collection dry-run | `collect_brma_dry_run_step` links mask generator → dual actor eval → rollout storage offline. Validates full pipeline shape/type; no training impact | P1 |
 | BRMA live dry-run scaffold | `--brma-mode dry-run` available in `train_attention_mappo.py`. Collects BRMA diagnostics only; does not affect action/PPO/mask generator training. Default `off` | P1 |
+| BRMA standalone loss API | `brma.losses` provides `BRMALossConfig`, maskable-set entropy, and a log-prob KL-proxy mask loss. Not wired into PPO or a mask-generator optimizer; formula direction is documented in `docs/brma_loss_formula_audit.md` | P1 |
 | PID stabilisation | Engineering additions (deadband, heading LPF, velocity R_BI, anti-inversion) | P2 |
 
 ## 4. Current module layout
@@ -106,8 +107,12 @@ Root compatibility shims (still retained):
 6. **BRMA preparation pass 1** adds standalone `brma.mask_generator`
    infrastructure for type-aware / uniform random masks. It is still not wired
    into `AttentionActor` or `train_attention_mappo.py`.
-7. **Only after paper mask formulas are verified** proceed to
-   MaskVectorGenerator integration / BRMA-MAPPO.
+7. **BRMA loss formula audit** documents the confirmed KL-minus-entropy mask
+   objective and adds a standalone `brma.losses` API. It remains disconnected
+   from PPO and the mask-generator optimizer.
+8. **Only after paper mask formulas are verified and exact KL inputs are
+   available** proceed to MaskVectorGenerator optimizer integration /
+   BRMA-MAPPO.
 
 ## 6. Blue no-target cruise boundary patrol
 

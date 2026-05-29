@@ -414,3 +414,11 @@ Derived rates:
 
 Use these fields to distinguish "never entered launch geometry" from
 "geometry existed but lock/cooldown/deconfliction prevented firing."
+
+## 22. BRMA standalone loss static smoke
+
+This command does not create the environment, reset JSBSim, train, or evaluate:
+
+```powershell
+python scripts/smoke_brma_losses_static.py
+```

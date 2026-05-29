@@ -85,7 +85,7 @@ implementation.
 | Buffer stores BRMA fields | MISSING | `AttentionRolloutBuffer` stores entities, entity masks, action, reward, value, log prob, done, alive, global obs, RNN states. | It does not store `mB`, dual policy distributions/log-probs, `p`, `msoft`, next observations, or next state. |
 | Actor loss Eq.27 | MATCH | PPO clipped loss plus entropy coefficient in `ppo_update_attention`. | This is the current MAPPO-Attention update path. |
 | Critic loss Eq.28 | MATCH | MSE loss against GAE returns in `ppo_update_attention`. | The loss form matches; critic architecture does not. |
-| Mask generator loss Eq.41 / Eq.46 | MISSING | No mask generator optimizer, KL term, entropy term, or update step. | |
+| Mask generator loss Eq.41 / Eq.46 | PARTIAL | `brma.losses` provides a standalone KL-minus-entropy candidate using a sampled log-prob proxy and maskable-set entropy. | No exact Gaussian KL, optimizer, or PPO integration yet. See `docs/brma_loss_formula_audit.md`. |
 | Gumbel-Softmax and entropy term | MISSING | Not implemented. | |
 | Inference mask count from `Neval - Ntrain` | MISSING | No BRMA inference logic. | |
 | RWR and KD metrics | PARTIAL | `train_attention_mappo.py` logs `RWR` and `KD_Red`. | Current `RWR` is red wins divided by total episodes, while the paper defines RWR as red win rate divided by blue win rate. |
@@ -178,7 +178,16 @@ Pass G: 6v6 preset
 - Add paper-labeled 6v6 MAPPO-Attention and BRMA presets only after the static
   architecture and buffer paths are in place.
 
-Pass H: 8v8/10v10 zero-shot evaluation
+Pass H: BRMA loss formula audit and standalone loss API
+
+- Audit Eq.41 / Eq.46, Algorithm 1, mask-generator inputs/outputs, Top-M
+  direction, entropy set, and PPO relationship.
+- Add a pure PyTorch standalone loss API without PPO wiring or optimizer
+  creation.
+- Mark any log-prob proxy loss as a project interpretation until exact
+  distribution KL inputs are stored.
+
+Pass I: 8v8/10v10 zero-shot evaluation
 
 - Add evaluation presets that load a 6v6-trained policy and set mask counts from
   `Neval - Ntrain`.
@@ -200,6 +209,9 @@ Pure tests first:
 - Static buffer schema test that BRMA fields are stored and minibatched with the
   same time/env/agent indexing as actions and values.
 - Static loss test for diagonal-Gaussian KL and mask entropy with known tensors.
+- Static standalone BRMA loss smoke test for `brma.losses` config validation,
+  maskable-set selection, entropy safety, log-prob proxy loss, and detached
+  actor terms.
 - Static metric tests for paper RWR definition, KD, AE, KEAR, and PMR.
 - Static preset test that paper-labeled presets use 6v6 training and 8v8/10v10
   evaluation scales.
