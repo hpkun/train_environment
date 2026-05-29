@@ -88,6 +88,9 @@ def main() -> None:
     )
     sm = buf_brma.brma_storage.summary()
     assert sm["valid_count"] == 1
+    stored = buf_brma.brma_storage.get_step(0, 0, 0)
+    assert stored["mu_unmasked"].shape == (3,)
+    assert stored["sigma_masked"].shape == (3,)
 
     print("brma live collection static smoke test passed")
 

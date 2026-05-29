@@ -123,6 +123,20 @@ environment, reward, launch, missile, radar, blue policy, or vanilla training.
 - Eq.35's exact attention-mask matrix row/column convention still needs visual
   PDF verification before claiming paper-complete masked attention behavior.
 
+## Update: soft collection and Gaussian parameter storage
+
+- `collect_brma_dry_run_step(..., use_soft_mask_path=True)` now evaluates the
+  masked policy with original hard entity validity masks plus `msoft`-derived
+  soft keep weights. The hard BRMA key-padding mask is retained for diagnostics
+  and `use_soft_mask_path=False` fallback.
+- `BRMARolloutStorage` now stores `mu_unmasked`, `mu_masked`,
+  `sigma_unmasked`, and `sigma_masked`, so future BRMA mask loss code can use
+  the exact diagonal-Gaussian KL API without reconstructing policy parameters.
+- This still does not wire mask loss into PPO, does not create a mask-generator
+  optimizer, and does not change default `brma_mode=off` training behavior.
+- Eq.35's exact row/column convention and the exact entropy form remain visual
+  PDF verification items before a paper-complete BRMA training claim.
+
 ## Standalone API Added
 
 - `brma.losses.BRMALossConfig`

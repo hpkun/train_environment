@@ -22,6 +22,7 @@ class BRMARolloutSchemaConfig:
     num_agents: int
     n_entities: int = 4
     entity_dim: int = 10
+    action_dim: int = 3
     enabled: bool = False
 
     def __post_init__(self) -> None:
@@ -35,6 +36,8 @@ class BRMARolloutSchemaConfig:
             raise ValueError("n_entities must be > 0")
         if self.entity_dim <= 0:
             raise ValueError("entity_dim must be > 0")
+        if self.action_dim <= 0:
+            raise ValueError("action_dim must be > 0")
 
 
 class BRMARolloutStorage:
@@ -46,9 +49,9 @@ class BRMARolloutStorage:
     def __init__(self, config: BRMARolloutSchemaConfig):
         self._cfg = config
         self._enabled = config.enabled
-        T, E, A, N, D = (config.num_steps, config.num_envs,
-                         config.num_agents, config.n_entities,
-                         config.entity_dim)
+        T, E, A, N, D, U = (config.num_steps, config.num_envs,
+                            config.num_agents, config.n_entities,
+                            config.entity_dim, config.action_dim)
         if not self._enabled:
             self._arrays: dict[str, np.ndarray] = {}
             self._valid = None
@@ -70,6 +73,11 @@ class BRMARolloutStorage:
             "log_prob_masked":    np.zeros((T, E, A), dtype=np.float32),
             "entropy_unmasked":   np.zeros((T, E, A), dtype=np.float32),
             "entropy_masked":     np.zeros((T, E, A), dtype=np.float32),
+            # Gaussian policy parameters for exact BRMA KL
+            "mu_unmasked":        np.zeros((T, E, A, U), dtype=np.float32),
+            "mu_masked":          np.zeros((T, E, A, U), dtype=np.float32),
+            "sigma_unmasked":     np.zeros((T, E, A, U), dtype=np.float32),
+            "sigma_masked":       np.zeros((T, E, A, U), dtype=np.float32),
             # next observation placeholders
             "next_entities":       np.zeros((T, E, A, N, D), dtype=np.float32),
             "next_entity_masks":   np.ones((T, E, A, N), dtype=np.int64),
@@ -99,6 +107,10 @@ class BRMARolloutStorage:
         log_prob_masked: float = 0.0,
         entropy_unmasked: float = 0.0,
         entropy_masked: float = 0.0,
+        mu_unmasked: np.ndarray | None = None,
+        mu_masked: np.ndarray | None = None,
+        sigma_unmasked: np.ndarray | None = None,
+        sigma_masked: np.ndarray | None = None,
         next_entities: np.ndarray | None = None,
         next_entity_masks: np.ndarray | None = None,
     ) -> None:
@@ -107,7 +119,7 @@ class BRMARolloutStorage:
             raise RuntimeError("BRMA rollout storage is disabled")
 
         T, E, A = self._cfg.num_steps, self._cfg.num_envs, self._cfg.num_agents
-        N, D = self._cfg.n_entities, self._cfg.entity_dim
+        N, D, U = self._cfg.n_entities, self._cfg.entity_dim, self._cfg.action_dim
 
         if not (0 <= step < T and 0 <= env_idx < E and 0 <= agent_idx < A):
             raise IndexError(
@@ -136,6 +148,17 @@ class BRMARolloutStorage:
         self._arrays["log_prob_masked"][step, env_idx, agent_idx] = log_prob_masked
         self._arrays["entropy_unmasked"][step, env_idx, agent_idx] = entropy_unmasked
         self._arrays["entropy_masked"][step, env_idx, agent_idx] = entropy_masked
+        for name, arr in [
+            ("mu_unmasked", mu_unmasked),
+            ("mu_masked", mu_masked),
+            ("sigma_unmasked", sigma_unmasked),
+            ("sigma_masked", sigma_masked),
+        ]:
+            if arr is not None:
+                if arr.shape != (U,):
+                    raise ValueError(
+                        f"{name} must have shape ({U},), got {arr.shape}")
+                self._arrays[name][step, env_idx, agent_idx] = arr
         if next_entities is not None:
             if next_entities.shape != (N, D):
                 raise ValueError(

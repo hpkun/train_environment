@@ -38,7 +38,7 @@ def main() -> None:
     # ---- 2. enabled storage shape ----
     cfg_on = BRMARolloutSchemaConfig(
         num_steps=4, num_envs=2, num_agents=3,
-        n_entities=6, entity_dim=10, enabled=True)
+        n_entities=6, entity_dim=10, action_dim=3, enabled=True)
     store = BRMARolloutStorage(cfg_on)
     assert store.has_storage
     # valid all False
@@ -58,12 +58,18 @@ def main() -> None:
         keep_mask=np.array([1, 1, 1, 0, 0, 1], dtype=bool),
         log_prob_unmasked=-1.5, log_prob_masked=-2.0,
         entropy_unmasked=0.5, entropy_masked=0.3,
+        mu_unmasked=np.array([0.1, 0.2, 0.3], dtype=np.float32),
+        mu_masked=np.array([0.0, 0.1, 0.2], dtype=np.float32),
+        sigma_unmasked=np.array([1.0, 1.1, 1.2], dtype=np.float32),
+        sigma_masked=np.array([0.9, 1.0, 1.1], dtype=np.float32),
     )
     step_data = store.get_step(1, 0, 2)
     assert step_data["mR_count"] == 1
     assert step_data["mB_count"] == 2
     assert step_data["log_prob_unmasked"] == -1.5
     assert step_data["p"][0] == 0.5
+    assert step_data["mu_unmasked"].shape == (3,)
+    assert np.allclose(step_data["sigma_masked"], [0.9, 1.0, 1.1])
 
     # ---- 4. get_step returns copy ----
     original = step_data["p"][0]
@@ -85,6 +91,23 @@ def main() -> None:
             keep_mask=np.ones(6, dtype=bool),
         )
         assert False, "should have raised ValueError for wrong shape"
+    except ValueError:
+        pass
+
+    try:
+        store.store_step(
+            0, 0, 0,
+            p=np.zeros(6, dtype=np.float32),
+            msoft=np.zeros(6, dtype=np.float32),
+            mhard=np.zeros(6, dtype=np.float32),
+            mR_count=0, mB_count=0,
+            friendly_drop_mask=np.zeros(6, dtype=bool),
+            enemy_drop_mask=np.zeros(6, dtype=bool),
+            key_padding_mask=np.zeros(6, dtype=bool),
+            keep_mask=np.ones(6, dtype=bool),
+            mu_unmasked=np.zeros(2, dtype=np.float32),  # wrong action dim
+        )
+        assert False
     except ValueError:
         pass
 

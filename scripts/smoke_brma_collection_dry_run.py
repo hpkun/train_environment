@@ -49,6 +49,8 @@ def main() -> None:
     assert np.isfinite(summary["log_prob_masked"])
     assert summary["enemy_drop_count"] <= 2
     assert summary["friendly_drop_count"] <= 1
+    assert summary["use_soft_mask_path"] is True
+    assert summary["soft_keep_mean"] > 0.0
 
     # ---- 2. same mask count 0 (keys identical) ----
     storage2 = BRMARolloutStorage(sc_cfg)
@@ -59,6 +61,7 @@ def main() -> None:
         rnn_hidden=rnn_np, action=action_np,
         n_ego=n_ego, n_allies=n_ally, n_enemies=n_enemy,
         mR_count=torch.tensor([0]), mB_count=torch.tensor([0]),
+        use_soft_mask_path=False,
     )
     assert summary2["enemy_drop_count"] == 0
     assert summary2["friendly_drop_count"] == 0
@@ -168,6 +171,8 @@ def main() -> None:
     step_data = storage3.get_step(0, 1, 1)
     assert step_data["p"].shape == (N,)
     assert step_data["key_padding_mask"].shape == (N,)
+    assert step_data["mu_unmasked"].shape == (3,)
+    assert step_data["sigma_masked"].shape == (3,)
     orig_p = step_data["p"][0]
     step_data["p"][0] = 999.0
     step_data2 = storage3.get_step(0, 1, 1)

@@ -67,6 +67,7 @@ def collect_brma_dry_run_step(
     mB_count=None,
     torch_generator=None,
     device=None,
+    use_soft_mask_path: bool = True,
 ) -> dict:
     """Dry-run one BRMA collection step (offline, no env, no training).
 
@@ -124,12 +125,24 @@ def collect_brma_dry_run_step(
     )
 
     # ---- dual actor evaluation ----
+    soft_keep_mask = None
+    hard_masked_entity_mask = brma_out["key_padding_mask"]
+    if use_soft_mask_path:
+        soft_keep_mask = torch.ones_like(brma_out["msoft"])
+        valid = ~emask.bool()
+        maskable = valid.clone()
+        maskable[:, :n_ego] = False
+        soft_keep_mask = torch.where(maskable, brma_out["msoft"], soft_keep_mask)
+        soft_keep_mask[:, :n_ego] = 1.0
+        hard_masked_entity_mask = emask
+
     dual = actor.evaluate_dual_actions(
         ents,
         unmasked_entity_mask=emask,
-        masked_entity_mask=brma_out["key_padding_mask"],
+        masked_entity_mask=hard_masked_entity_mask,
         rnn_hidden=rnn_h,
         actions=act,
+        masked_soft_keep_mask=soft_keep_mask,
     )
 
     # ---- store into rollout storage ----
@@ -153,6 +166,10 @@ def collect_brma_dry_run_step(
         log_prob_masked=float(dual["log_prob_masked"].item()),
         entropy_unmasked=float(dual["entropy_unmasked_mean"].item()),
         entropy_masked=float(dual["entropy_masked_mean"].item()),
+        mu_unmasked=_to_np(dual["mu_unmasked"]),
+        mu_masked=_to_np(dual["mu_masked"]),
+        sigma_unmasked=_to_np(dual["sigma_unmasked"]),
+        sigma_masked=_to_np(dual["sigma_masked"]),
     )
     if next_entities is not None:
         ne = np.asarray(next_entities, dtype=np.float32)
@@ -183,5 +200,11 @@ def collect_brma_dry_run_step(
         "enemy_drop_count": int(store_kwargs["enemy_drop_mask"].sum()),
         "friendly_drop_count": int(store_kwargs["friendly_drop_mask"].sum()),
         "key_padding_count": int(store_kwargs["key_padding_mask"].sum()),
+        "use_soft_mask_path": bool(use_soft_mask_path),
+        "soft_keep_mean": (
+            float(soft_keep_mask.detach().mean().item())
+            if soft_keep_mask is not None else 0.0
+        ),
+        "hard_key_padding_count": int(store_kwargs["key_padding_mask"].sum()),
         "storage_summary": storage.summary(),
     }
