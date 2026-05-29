@@ -42,10 +42,13 @@ environment, reward, launch, missile, radar, blue policy, or vanilla training.
   enemies, and excludes invalid/dead/padded entities. This matches the paper's
   intent that self is not randomly removed, but the exact self-index convention
   should still be kept explicit in integration.
-- `BRMALossConfig.detach_actor_terms=True` is the default because Algorithm 1
-  updates the actor with PPO first, then updates the mask vector generator with
-  the mask loss. The standalone helper therefore treats actor distribution terms
-  as fixed inputs unless explicitly configured otherwise.
+- `BRMALossConfig` now separates reference and masked-policy detach semantics.
+  `detach_unmasked_policy=True` treats `p(a|e)` as the fixed reference, while
+  `detach_masked_policy=False` preserves the KL gradient through
+  `p(a|emask)` into the selected soft keep mask and mask generator.
+- Legacy `detach_actor_terms=True` is retained only as a conservative diagnostic
+  mode. It detaches both policy sides and therefore cuts the KL gradient to the
+  mask generator.
 - `compute_brma_mask_loss()` now defaults to `kl_mode="gaussian"` and uses the
   exact diagonal-Gaussian closed-form KL for the paper divergence term.
 - `kl_mode="sample_logprob_proxy"` preserves the earlier static candidate:
@@ -140,6 +143,20 @@ environment, reward, launch, missile, radar, blue policy, or vanilla training.
 - Eq.35's exact row/column convention and the exact entropy form remain visual
   PDF verification items before a paper-complete BRMA training claim.
 
+## Update: standalone mask-generator train step
+
+- `brma.train_step.compute_brma_mask_generator_loss_batch()` computes the BRMA
+  mask loss without calling backward or stepping an optimizer.
+- `temporary_freeze_module(actor)` freezes actor parameters during this mask
+  loss computation, but the masked policy output is not detached by default, so
+  KL gradients can flow through `mu_masked` to `soft_keep_mask`, `msoft`, and
+  `BRMAMaskGenerator`.
+- `brma_mask_generator_train_step()` is a standalone helper for static testing
+  and future integration. It accepts an externally created optimizer and updates
+  only the mask generator; it is not wired into PPO.
+- Static tests verify that KL-only loss (`entropy_coef=0`) still produces
+  nonzero mask-generator gradients through the selected soft mask path.
+
 ## Standalone API Added
 
 - `brma.losses.BRMALossConfig`
@@ -147,6 +164,9 @@ environment, reward, launch, missile, radar, blue policy, or vanilla training.
 - `brma.losses.compute_maskable_set`
 - `brma.losses.masked_entropy_loss`
 - `brma.losses.compute_brma_mask_loss`
+- `brma.train_step.temporary_freeze_module`
+- `brma.train_step.compute_brma_mask_generator_loss_batch`
+- `brma.train_step.brma_mask_generator_train_step`
 
 The API is pure PyTorch and intended for static tests and future BRMA PPO
 integration only.

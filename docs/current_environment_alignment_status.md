@@ -72,6 +72,7 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | BRMA differentiable soft-mask actor API | `EntityObservationEncoder` accepts optional `soft_keep_mask` keep weights and applies them to entity embeddings before attention. Default off; Eq.35 attention matrix row/column convention still needs visual verification | P1 |
 | BRMA soft collection path | `collect_brma_dry_run_step` uses `msoft` only on the selected `mR`/`mB` set as differentiable soft keep weights, while retaining the hard key-padding BRMA mask for diagnostics/fallback. Not wired into PPO/training | P1 |
 | BRMA Gaussian params storage | `BRMARolloutStorage` stores `mu_unmasked`, `mu_masked`, `sigma_unmasked`, and `sigma_masked` for future exact KL mask loss. Not consumed by PPO yet | P1 |
+| BRMA standalone mask-generator train step | `brma.train_step` computes KL-minus-entropy mask-generator loss through the selected soft mask path and can step an externally supplied optimizer in static tests. Actor parameters are frozen; not wired into PPO/training | P1 |
 | PID stabilisation | Engineering additions (deadband, heading LPF, velocity R_BI, anti-inversion) | P2 |
 
 ## 4. Current module layout
@@ -120,7 +121,10 @@ Root compatibility shims (still retained):
 9. **BRMA soft collection/storage pass** makes dry-run collection use the
    selected-set soft masked policy path by default and stores Gaussian policy
    parameters for exact KL. It remains outside PPO and optimizer updates.
-10. **Only after paper mask formulas are verified and exact KL inputs are
+10. **BRMA standalone mask-generator train step** verifies KL-only gradients can
+    reach `BRMAMaskGenerator` through the selected soft mask path while actor
+    parameters remain frozen. It remains outside PPO.
+11. **Only after paper mask formulas are verified and exact KL inputs are
    available** proceed to MaskVectorGenerator optimizer integration /
    BRMA-MAPPO.
 

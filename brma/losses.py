@@ -16,7 +16,9 @@ import torch
 class BRMALossConfig:
     entropy_coef: float = 0.05
     eps: float = 1e-8
-    detach_actor_terms: bool = True
+    detach_actor_terms: bool | None = None
+    detach_unmasked_policy: bool = True
+    detach_masked_policy: bool = False
     maskable_entropy_only: bool = True
     kl_mode: str = "gaussian"
 
@@ -96,7 +98,9 @@ def masked_entropy_loss(
     if msoft.ndim != 2:
         raise ValueError("msoft and maskable_set must have shape (B, N)")
 
-    p = msoft.clamp(min=eps, max=1.0 - eps)
+    dtype_eps = torch.finfo(msoft.dtype).eps if msoft.is_floating_point() else eps
+    clamp_eps = max(float(eps), float(dtype_eps))
+    p = msoft.clamp(min=clamp_eps, max=1.0 - clamp_eps)
     entropy_each = -(p * torch.log(p) + (1.0 - p) * torch.log(1.0 - p))
     mask = maskable_set.bool()
     masked = entropy_each * mask.to(dtype=entropy_each.dtype)
@@ -157,8 +161,12 @@ def compute_brma_mask_loss(
       policies.
     - `kl_mode="sample_logprob_proxy"` preserves the earlier sampled proxy
       `log_prob_unmasked - log_prob_masked`.
-    - With `detach_actor_terms=True`, actor distribution tensors are detached so
-      this helper cannot update actor parameters through the KL/proxy term.
+    - `detach_unmasked_policy=True` treats p(a|e) as the fixed reference.
+    - `detach_masked_policy=False` preserves gradients from KL into the masked
+      policy path, allowing future gradients into msoft / mask generator.
+    - Legacy `detach_actor_terms=True` overrides the split policy and detaches
+      both sides.  That mode is conservative diagnostics only because it cuts
+      KL gradients to the mask generator.
 
     Exact Gaussian KL is paper-aligned for distribution divergence, but future
     BRMA integration still needs a differentiable masked encoder path for mask
@@ -186,11 +194,18 @@ def compute_brma_mask_loss(
         sigma_p = sigma_unmasked
         mu_q = mu_masked
         sigma_q = sigma_masked
-        if config.detach_actor_terms:
+        if config.detach_actor_terms is True:
             mu_p = mu_p.detach()
             sigma_p = sigma_p.detach()
             mu_q = mu_q.detach()
             sigma_q = sigma_q.detach()
+        elif config.detach_actor_terms is None:
+            if config.detach_unmasked_policy:
+                mu_p = mu_p.detach()
+                sigma_p = sigma_p.detach()
+            if config.detach_masked_policy:
+                mu_q = mu_q.detach()
+                sigma_q = sigma_q.detach()
         discrepancy = diagonal_gaussian_kl(
             mu_p,
             sigma_p,
@@ -212,9 +227,14 @@ def compute_brma_mask_loss(
 
         lp_unmasked = log_prob_unmasked
         lp_masked = log_prob_masked
-        if config.detach_actor_terms:
+        if config.detach_actor_terms is True:
             lp_unmasked = lp_unmasked.detach()
             lp_masked = lp_masked.detach()
+        elif config.detach_actor_terms is None:
+            if config.detach_unmasked_policy:
+                lp_unmasked = lp_unmasked.detach()
+            if config.detach_masked_policy:
+                lp_masked = lp_masked.detach()
         discrepancy = lp_unmasked - lp_masked
         formula_status = (
             "PROJECT_INTERPRETATION_SAMPLE_LOGPROB_PROXY_AND_BERNOULLI_ENTROPY_FOR_"

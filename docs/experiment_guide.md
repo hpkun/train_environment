@@ -422,4 +422,5 @@ This command does not create the environment, reset JSBSim, train, or evaluate:
 ```powershell
 python scripts/smoke_brma_losses_static.py
 python scripts/smoke_brma_collection_soft_path.py
+python scripts/smoke_brma_train_step_static.py
 ```

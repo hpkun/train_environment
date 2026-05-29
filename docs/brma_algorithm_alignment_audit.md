@@ -193,6 +193,14 @@ Pass H: BRMA loss formula audit and standalone loss API
 - Ensure the soft path applies `msoft` only to the selected `mR`/`mB` set, not
   all valid non-self entities.
 
+Pass K: standalone mask-generator train step
+
+- Split unmasked-reference detach from masked-policy detach so KL can train the
+  mask generator through the selected soft mask path.
+- Freeze actor parameters during the standalone mask-generator loss computation.
+- Verify KL-only gradients update `BRMAMaskGenerator` without wiring PPO or
+  creating training-loop behavior.
+
 Pass I: 8v8/10v10 zero-shot evaluation
 
 - Add evaluation presets that load a 6v6-trained policy and set mask counts from
@@ -222,6 +230,8 @@ Pure tests first:
   protection, hard mask compatibility, dual evaluation, and `paper_eq33`.
 - Static soft collection/storage test for soft path, hard fallback, Gaussian
   params, msoft gradient reachability, and storage shape validation.
+- Static mask-generator train-step test for KL-only gradient reachability,
+  actor freeze, optimizer step, diagnostic detach mode, and shape validation.
 - Static metric tests for paper RWR definition, KD, AE, KEAR, and PMR.
 - Static preset test that paper-labeled presets use 6v6 training and 8v8/10v10
   evaluation scales.

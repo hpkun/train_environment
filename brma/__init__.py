@@ -19,6 +19,11 @@ from .losses import (
     masked_entropy_loss,
 )
 from .rollout_schema import BRMARolloutSchemaConfig, BRMARolloutStorage
+from .train_step import (
+    brma_mask_generator_train_step,
+    compute_brma_mask_generator_loss_batch,
+    temporary_freeze_module,
+)
 
 __all__ = [
     "BRMAMaskGenerator",
@@ -33,4 +38,7 @@ __all__ = [
     "compute_maskable_set",
     "diagonal_gaussian_kl",
     "masked_entropy_loss",
+    "brma_mask_generator_train_step",
+    "compute_brma_mask_generator_loss_batch",
+    "temporary_freeze_module",
 ]
