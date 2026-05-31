@@ -29,6 +29,10 @@ checkpoints/attention_2v2_strict_critic_smoke/
 checkpoints/attention_1v1_strict_eq33_smoke/
 checkpoints/attention_1v1_strict_eq33_attncritic_smoke/
 checkpoints/attention_1v1_strict_eq33_attncritic_brma_dryrun_smoke/
+checkpoints/bench_brma_paper_env6_mb1024/
+checkpoints/bench_brma_paper_env4_mb1024/
+checkpoints/attention_2v2_brma_paper_500k_probe_env6_mb1024/
+checkpoints/attention_2v2_brma_paper_500k_probe_env4_mb1024/
 runs
 *.npy
 *.acmi
