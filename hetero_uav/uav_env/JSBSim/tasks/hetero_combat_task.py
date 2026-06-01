@@ -37,13 +37,16 @@ class HeteroCombatTask:
         self.last_termination_reason: str | None = None
 
     def reset(self, rng: np.random.Generator) -> tuple[dict, dict]:
+        self.missiles.reset()
         self.agents = self.scenario.build(rng)
+        self._link_agents()
         self.step_count = 0
         self.last_win_flag = None
         self.last_termination_reason = None
         self.episode_return = {a.agent_id: 0.0 for a in self.agents}
         obs = self.observation.build_obs(self.agents)
-        info = self.info.build(self.agents, self.step_count, self.episode_return, None, None, [])
+        info = self.info.build(self.agents, self.step_count, self.episode_return, None, None,
+                               [], self.missiles)
         return obs, info
 
     def step(self, actions) -> tuple[dict, dict[str, float], dict[str, bool], dict[str, bool], dict]:
@@ -55,7 +58,6 @@ class HeteroCombatTask:
                        self.decision_dt, self.speed_range)
         self._apply_boundary_and_crash()
         events = self._resolve_missiles()
-        self._apply_missile_hits(events)
         terminated_env, truncated_env, win_flag, termination_reason = self.termination.check(
             self.agents, self.step_count)
         done_env = terminated_env or truncated_env
@@ -71,7 +73,7 @@ class HeteroCombatTask:
         truncated = {a.agent_id: bool(truncated_env) for a in self.agents}
         info = self.info.build(
             self.agents, self.step_count, self.episode_return, win_flag,
-            termination_reason, events)
+            termination_reason, events, self.missiles)
         return obs, rewards, terminated, truncated, info
 
     def get_state(self) -> np.ndarray:
@@ -112,6 +114,7 @@ class HeteroCombatTask:
 
     def _resolve_missiles(self):
         events = []
+        launch_requests = []
         for shooter in self.agents:
             if not shooter.alive:
                 continue
@@ -119,21 +122,16 @@ class HeteroCombatTask:
             if not enemies:
                 continue
             target = min(enemies, key=lambda e: np.linalg.norm(e.position - shooter.position))
-            event = self.missiles.try_launch(shooter, target, self.sensor)
+            event = self.missiles.evaluate_launch(shooter, target, self.sensor)
             if event is not None:
                 events.append(event)
+                if event.fired:
+                    launch_requests.append((shooter, target, event))
+        for shooter, target, event in launch_requests:
+            if shooter.alive and target.alive and shooter.missile_left > 0:
+                self.missiles.create_missile(shooter, target, event, self.decision_dt)
+        events.extend(self.missiles.step_active(self.decision_dt))
         return events
-
-    def _apply_missile_hits(self, events) -> None:
-        by_id = {agent.agent_id: agent for agent in self.agents}
-        killed_targets: set[str] = set()
-        for event in events:
-            if not event.hit or event.target_id is None or event.target_id in killed_targets:
-                continue
-            target = by_id.get(event.target_id)
-            if target is not None and target.alive:
-                target.kill("killed")
-                killed_targets.add(event.target_id)
 
     def _apply_boundary_and_crash(self) -> None:
         xlim = self.map_boundary.get("x", [-50000.0, 50000.0])
@@ -147,3 +145,8 @@ class HeteroCombatTask:
                 agent.kill("crash")
             elif z > zlim[1] or x < xlim[0] or x > xlim[1] or y < ylim[0] or y > ylim[1]:
                 agent.kill("boundary")
+
+    def _link_agents(self) -> None:
+        for agent in self.agents:
+            agent.partners = [a for a in self.agents if a.side == agent.side and a.agent_id != agent.agent_id]
+            agent.enemies = [a for a in self.agents if a.side != agent.side]

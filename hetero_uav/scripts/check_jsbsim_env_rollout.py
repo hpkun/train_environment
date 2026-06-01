@@ -72,10 +72,17 @@ def main() -> None:
         nan_detected = False
         crashed_agents = []
         alive_agents = []
+        launched = hit = miss = incoming_warning_count = 0
         for _ in range(args.steps):
             actions = _actions(env, args.policy, rng)
             _obs, _rewards, terminated, truncated, info = env.step(actions)
             steps_executed += 1
+            summary = info.get("missile_summary", {})
+            launched += int(summary.get("launched", summary.get("launches", 0)))
+            hit += int(summary.get("hit", summary.get("hits", 0)))
+            miss += int(summary.get("miss", summary.get("misses", 0)))
+            incoming_warning_count += sum(
+                1 for agent in env.task.agents if agent.check_missile_warning() is not None)
             altitudes, has_nan, crashed_agents, alive_agents = _scan_agents(env)
             nan_detected = nan_detected or has_nan
             min_altitude = min(min_altitude, min(altitudes))
@@ -90,6 +97,11 @@ def main() -> None:
         print(f"step_success: {step_success}")
         print(f"crashed_agents: {crashed_agents}")
         print(f"alive_agents: {alive_agents}")
+        print(f"active_missile_count: {info.get('active_missile_count', 0)}")
+        print(f"launched: {launched}")
+        print(f"hit: {hit}")
+        print(f"miss: {miss}")
+        print(f"incoming_missile_warning_count: {incoming_warning_count}")
         print(f"min_altitude: {min_altitude:.3f}")
         print(f"max_altitude: {max_altitude:.3f}")
         print(f"nan_detected: {nan_detected}")

@@ -8,7 +8,7 @@ from .aircraft import AircraftPlatform
 from .sensor import SensorSuite
 from .utils import heading_to_unit, los_angle, safe_norm
 
-EGO_DIM = 15
+EGO_DIM = 19
 ENTITY_DIM = 16
 STATE_ENTITY_DIM = 12
 
@@ -87,6 +87,17 @@ class ObservationBuilder:
     def _ego(self, agent: AircraftPlatform) -> np.ndarray:
         if not agent.alive:
             return np.zeros(EGO_DIM, dtype=np.float32)
+        incoming = [m for m in getattr(agent, "under_missiles", []) if getattr(m, "is_alive", False)]
+        warning = 1.0 if incoming else 0.0
+        nearest_distance = 0.0
+        rel_bearing = 0.0
+        incoming_alive = 0.0
+        if incoming:
+            nearest = min(incoming, key=lambda m: safe_norm(m.get_position() - agent.position))
+            rel = nearest.get_position() - agent.position
+            nearest_distance = safe_norm(rel) / 100000.0
+            rel_bearing = np.arctan2(rel[1], rel[0]) / np.pi
+            incoming_alive = 1.0
         return np.array([
             agent.position[0] / 50000.0,
             agent.position[1] / 50000.0,
@@ -103,6 +114,10 @@ class ObservationBuilder:
             float(agent.type_id),
             0.0 if agent.side == "red" else 1.0,
             agent.aircraft_type.radar_range / 150000.0,
+            warning,
+            nearest_distance,
+            rel_bearing,
+            incoming_alive,
         ], dtype=np.float32)
 
     def _padded_entities(self, ego: AircraftPlatform, entities: list[AircraftPlatform],

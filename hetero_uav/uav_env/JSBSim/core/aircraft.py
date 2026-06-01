@@ -29,12 +29,21 @@ class SimpleKinematicAircraftPlatform:
     missile_left: int = 0
     missile_cooldown: int = 0
 
+    def __post_init__(self) -> None:
+        self.partners = []
+        self.enemies = []
+        self.launch_missiles = []
+        self.under_missiles = []
+        self._geodetic = np.zeros(3, dtype=np.float32)
+
     def reset_runtime(self) -> None:
         self.alive = True
         self.crashed = False
         self.out_of_boundary = False
         self.missile_left = self.aircraft_type.missile_num
         self.missile_cooldown = 0
+        self.launch_missiles.clear()
+        self.under_missiles.clear()
 
     @property
     def type_id(self) -> int:
@@ -84,6 +93,42 @@ class SimpleKinematicAircraftPlatform:
             self.crashed = True
         if reason == "boundary":
             self.out_of_boundary = True
+
+    @property
+    def is_alive(self) -> bool:
+        return self.alive
+
+    @property
+    def is_crash(self) -> bool:
+        return self.crashed
+
+    @property
+    def is_shotdown(self) -> bool:
+        return (not self.alive) and (not self.crashed) and (not self.out_of_boundary)
+
+    def get_position(self) -> np.ndarray:
+        return self.position
+
+    def get_velocity(self) -> np.ndarray:
+        return self.velocity
+
+    def get_rpy(self) -> np.ndarray:
+        return np.array([self.roll, self.pitch, self.heading], dtype=np.float32)
+
+    def get_geodetic(self) -> np.ndarray:
+        return self._geodetic
+
+    def shotdown(self) -> None:
+        self.kill("killed")
+
+    def crash(self) -> None:
+        self.kill("crash")
+
+    def check_missile_warning(self):
+        for missile in self.under_missiles:
+            if getattr(missile, "is_alive", False):
+                return missile
+        return None
 
 
 class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
@@ -210,6 +255,7 @@ class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
         alt_m = self._get_property("position/h-sl-ft") * self.FT2M
         self.position = lla_to_local(
             lon, lat, alt_m, self.reference_lat, self.reference_lon, self.reference_alt)
+        self._geodetic = np.array([lon, lat, alt_m], dtype=np.float32)
         vn = self._get_property("velocities/v-north-fps") * self.FT2M
         ve = self._get_property("velocities/v-east-fps") * self.FT2M
         vd = self._get_property("velocities/v-down-fps") * self.FT2M

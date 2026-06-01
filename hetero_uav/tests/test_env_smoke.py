@@ -167,7 +167,7 @@ def test_missile_fires_inside_launch_range():
     _obs, _rewards, _terminated, _truncated, info = env.step(actions)
     assert by_id["red_1"].missile_left == before - 1
     assert info["missile_summary"]["launches"] >= 1
-    assert info["missile_summary"]["hits"] >= 1
+    assert info["active_missile_count"] >= 1
     env.close()
 
 
@@ -185,9 +185,7 @@ def test_two_phase_resolution_allows_same_step_return_fire():
     fired = {(e.shooter_id, e.target_id) for e in events if e.fired}
     assert ("red_1", "blue_0") in fired
     assert ("blue_0", "red_1") in fired
-    env.task._apply_missile_hits(events)
-    assert not by_id["red_1"].alive
-    assert not by_id["blue_0"].alive
+    assert env.task.missiles.active_missile_count >= 2
     env.close()
 
 

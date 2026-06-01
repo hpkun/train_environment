@@ -10,13 +10,15 @@ from .aircraft import AircraftPlatform
 class InfoBuilder:
     def build(self, agents: list[AircraftPlatform], step_count: int,
               episode_return: dict[str, float], win_flag: str | None,
-              termination_reason: str | None = None, events: list | None = None) -> dict:
+              termination_reason: str | None = None, events: list | None = None,
+              missile_manager=None) -> dict:
         events = events or []
         red = [a for a in agents if a.side == "red"]
         blue = [a for a in agents if a.side == "blue"]
         fired_events = [e for e in events if getattr(e, "fired", False)]
-        hit_events = [e for e in fired_events if getattr(e, "hit", False)]
+        hit_events = [e for e in events if getattr(e, "hit", False)]
         reason_counts = Counter(getattr(e, "reason", "unknown") for e in events)
+        active_missiles = list(getattr(missile_manager, "active_missiles", [])) if missile_manager else []
         winner = None
         if win_flag == "red_win":
             winner = "red"
@@ -51,18 +53,33 @@ class InfoBuilder:
                     "reason": e.reason,
                     "distance": e.distance,
                     "missile_left_after": e.missile_left_after,
+                    "missile_id": getattr(e, "missile_id", None),
                 }
                 for e in events
             ],
+            "active_missiles": [m.uid for m in active_missiles],
+            "active_missile_count": len(active_missiles),
             "missile_summary": {
+                "launched": len(fired_events),
                 "launches": len(fired_events),
+                "hit": len(hit_events),
                 "hits": len(hit_events),
-                "misses": sum(1 for e in fired_events if not e.hit),
+                "miss": reason_counts.get("miss", 0),
+                "misses": reason_counts.get("miss", 0),
+                "active": len(active_missiles),
+                "timeout": reason_counts.get("timeout", 0),
+                "target_dead": reason_counts.get("target_dead", 0),
+                "cooldown": reason_counts.get("cooldown", 0),
                 "cooldown_blocks": reason_counts.get("cooldown", 0),
+                "no_missile": reason_counts.get("no_missile", 0),
                 "no_missile_blocks": reason_counts.get("no_missile", 0),
+                "not_visible": reason_counts.get("not_visible", 0),
                 "not_visible_blocks": reason_counts.get("not_visible", 0),
+                "out_of_launch_range": reason_counts.get("out_of_launch_range", 0),
                 "out_of_launch_range_blocks": reason_counts.get("out_of_launch_range", 0),
+                "out_of_range": reason_counts.get("out_of_range", 0),
                 "out_of_range_blocks": reason_counts.get("out_of_range", 0),
+                "los_blocked": reason_counts.get("los_blocked", 0),
                 "los_blocks": reason_counts.get("los_blocked", 0),
                 "reason_counts": dict(reason_counts),
             },

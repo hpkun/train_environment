@@ -18,4 +18,4 @@ class SensorSuite:
         return safe_norm(target.position - observer.position) <= radar_range
 
     def missile_warning(self, _agent: AircraftPlatform) -> float:
-        return 0.0
+        return 1.0 if _agent.check_missile_warning() is not None else 0.0
