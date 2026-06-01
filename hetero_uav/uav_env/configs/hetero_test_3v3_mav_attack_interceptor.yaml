@@ -1,4 +1,4 @@
-seed: 11
+seed: 203
 controlled_side: "red"
 opponent_policy: "rule_nearest"
 action_shape: 3
@@ -38,11 +38,11 @@ red_agents:
     speed: 250.0
     heading_deg: 0.0
   - id: red_2
-    type: attack_uav
+    type: interceptor_uav
     x: -8500.0
     y: 800.0
     altitude: 6000.0
-    speed: 250.0
+    speed: 270.0
     heading_deg: 0.0
 blue_agents:
   - id: blue_0

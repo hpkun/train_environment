@@ -1,8 +1,8 @@
-seed: 11
+seed: 101
 controlled_side: "red"
 opponent_policy: "rule_nearest"
 action_shape: 3
-episode_limit: 250
+episode_limit: 200
 decision_frequency: 5
 simulation_frequency: 60
 terminate_on_mav_loss: true
@@ -13,56 +13,42 @@ map_boundary:
   altitude: [750.0, 10000.0]
 initial_position_range:
   red:
-    x: [-10000.0, -7000.0]
-    y: [-1500.0, 1500.0]
+    x: [-9000.0, -7000.0]
+    y: [-1000.0, 1000.0]
   blue:
-    x: [7000.0, 10000.0]
-    y: [-1500.0, 1500.0]
+    x: [7000.0, 9000.0]
+    y: [-1000.0, 1000.0]
 initial_altitude_range: [5800.0, 6200.0]
 initial_velocity_range: [230.0, 270.0]
-max_red_agents: 3
-max_blue_agents: 3
+max_red_agents: 2
+max_blue_agents: 2
 red_agents:
   - id: red_0
     type: mav
-    x: -9500.0
-    y: 0.0
-    altitude: 6100.0
+    x: -8500.0
+    y: -400.0
+    altitude: 6000.0
     speed: 250.0
     heading_deg: 0.0
   - id: red_1
     type: attack_uav
-    x: -8500.0
-    y: -800.0
-    altitude: 6000.0
-    speed: 250.0
-    heading_deg: 0.0
-  - id: red_2
-    type: attack_uav
-    x: -8500.0
-    y: 800.0
+    x: -8000.0
+    y: 400.0
     altitude: 6000.0
     speed: 250.0
     heading_deg: 0.0
 blue_agents:
   - id: blue_0
     type: attack_uav
-    x: 9500.0
-    y: 0.0
+    x: 8500.0
+    y: -400.0
     altitude: 6000.0
     speed: 250.0
     heading_deg: 180.0
   - id: blue_1
     type: attack_uav
-    x: 8500.0
-    y: -800.0
-    altitude: 6000.0
-    speed: 250.0
-    heading_deg: 180.0
-  - id: blue_2
-    type: attack_uav
-    x: 8500.0
-    y: 800.0
+    x: 8000.0
+    y: 400.0
     altitude: 6000.0
     speed: 250.0
     heading_deg: 180.0

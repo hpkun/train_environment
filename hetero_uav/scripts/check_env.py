@@ -22,12 +22,14 @@ def main() -> None:
     obs, info = env.reset(seed=0)
     print(f"config: {Path(args.config)}")
     print(f"controlled_side: {env.controlled_side}")
+    print(f"opponent_policy: {env.config.get('opponent_policy')}")
     print(f"controlled_agents: {env.num_agents}")
     print(f"num_agents: {env.num_agents}")
+    print(f"controlled_agent_ids: {env.agent_ids}")
+    print(f"all_agent_types: {info['agent_types']}")
     print(f"obs_shape: {env.obs_shape}")
     print(f"state_shape: {env.state_shape}")
     print(f"action_shape: {env.action_shape}")
-    print(f"controlled_agent_ids: {env.agent_ids}")
     print(f"initial info keys: {sorted(info.keys())}")
 
     for step in range(10):

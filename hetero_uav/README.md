@@ -173,6 +173,34 @@ The debug configs support:
 UAVs. `hetero_3v3_debug.yaml` uses 1 red MAV, 2 red attack UAVs, and 3 blue
 attack UAVs.
 
+## Environment Design Choice
+
+The first version of this environment intentionally uses the high-level action
+format `[pitch, heading, speed]`, keeping the training-facing action interface
+close to the current BRMA-MAPPO style. This keeps the environment useful for
+early MAPPO integration while avoiding premature coupling to low-level actuator
+commands.
+
+The current flight dynamics model is a simplified kinematic skeleton, not a
+complete JSBSim six-degree-of-freedom model. The code is organized under
+`uav_env/JSBSim/` so that the proxy aircraft, missile, and control components
+can later be replaced by real JSBSim aircraft models, PID control, and
+proportional-navigation missile dynamics without changing the public environment
+API.
+
+Heterogeneity is represented through `aircraft type`, `radar_range`,
+`missile_num`, `max_speed_scale`, `max_g`, and `reward_role`. MAV platforms use
+the `leader_survival` reward role, while UAV platforms use attack-oriented or
+specialized roles such as `attack`, `scout`, and `intercept`.
+
+By default, blue-side agents are controlled by the `rule_nearest` script policy.
+Each blue agent steers toward the nearest alive red target while the red side is
+exposed as the controlled training side. This setup is meant to validate the
+heterogeneous composition zero-shot generalization problem first: train on a
+small MAV + attack-UAV composition, then evaluate on larger or compositionally
+different MAV/UAV teams. Higher-fidelity JSBSim/PID/PN missile implementation is
+left as the next environment fidelity step.
+
 ## Parent Project Dependency
 
 There is no runtime dependency on the parent `train_environment` project. The

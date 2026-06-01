@@ -1,4 +1,4 @@
-seed: 11
+seed: 202
 controlled_side: "red"
 opponent_policy: "rule_nearest"
 action_shape: 3
@@ -38,10 +38,10 @@ red_agents:
     speed: 250.0
     heading_deg: 0.0
   - id: red_2
-    type: attack_uav
+    type: scout_uav
     x: -8500.0
     y: 800.0
-    altitude: 6000.0
+    altitude: 6200.0
     speed: 250.0
     heading_deg: 0.0
 blue_agents:

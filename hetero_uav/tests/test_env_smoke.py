@@ -5,6 +5,13 @@ import numpy as np
 from uav_env import make_env
 from uav_env.wrappers import MAPPOEnvWrapper
 
+ZERO_SHOT_CONFIGS = [
+    "uav_env/configs/hetero_train_2v2_mav_attack.yaml",
+    "uav_env/configs/hetero_test_3v3_mav_2attack.yaml",
+    "uav_env/configs/hetero_test_3v3_mav_attack_scout.yaml",
+    "uav_env/configs/hetero_test_3v3_mav_attack_interceptor.yaml",
+]
+
 
 def test_env_smoke():
     env = make_env("uav_env/configs/hetero_2v2_debug.yaml")
@@ -62,3 +69,26 @@ def test_mappo_wrapper_red_only_arrays():
     assert rewards.shape == (2,)
     assert dones.shape == (2,)
     assert "blue_alive" in info
+
+
+def test_zero_shot_configs_smoke():
+    for config_path in ZERO_SHOT_CONFIGS:
+        env = make_env(config_path)
+        obs, info = env.reset(seed=123)
+        assert env.controlled_side == "red"
+        assert env.config["opponent_policy"] == "rule_nearest"
+        assert env.action_shape == 3
+        assert set(obs) == set(env.agent_ids)
+        assert info["blue_alive"] >= 2
+        assert "mav" in info["agent_types"].values()
+        for _ in range(3):
+            actions = {
+                aid: np.random.uniform(-1.0, 1.0, env.action_shape).astype(np.float32)
+                for aid in env.agent_ids
+            }
+            obs, rewards, terminated, truncated, info = env.step(actions)
+            assert set(obs) == set(env.agent_ids)
+            assert set(rewards) == set(env.agent_ids)
+            assert "blue_alive" in info
+            assert "agent_types" in info
+        env.close()

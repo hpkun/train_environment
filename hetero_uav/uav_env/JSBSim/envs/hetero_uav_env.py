@@ -31,7 +31,7 @@ class HeteroUAVEnv:
         self.agent_ids = self.task.controlled_agent_ids_from_config()
         self.num_agents = len(self.agent_ids)
         self.n_agents = self.num_agents
-        self.action_shape = 3
+        self.action_shape = int(self.config.get("action_shape", 3))
         self.obs_shape = self.task.observation.obs_dim
         self.state_shape = self.task.observation.state_dim
         self.action_space = make_dict_space({

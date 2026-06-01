@@ -1,4 +1,4 @@
-seed: 11
+seed: 201
 controlled_side: "red"
 opponent_policy: "rule_nearest"
 action_shape: 3
