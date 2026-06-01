@@ -182,12 +182,38 @@ close to the current BRMA-MAPPO style. This keeps the environment useful for
 early MAPPO integration while avoiding premature coupling to low-level actuator
 commands.
 
-The current flight dynamics model is a simplified kinematic skeleton, not a
-complete JSBSim six-degree-of-freedom model. The code is organized under
-`uav_env/JSBSim/` so that the proxy aircraft, missile, and control components
-can later be replaced by real JSBSim aircraft models, PID control, and
-proportional-navigation missile dynamics without changing the public environment
-API.
+The default flight dynamics model is a simplified kinematic skeleton. An
+optional JSBSim backend now exists behind the same public aircraft interface,
+but the YAML configs still default to `dynamics_backend: "simple"` so the
+environment remains runnable without the Python `jsbsim` package.
+
+Set `dynamics_backend: "jsbsim"` or pass `dynamics_backend="jsbsim"` to
+`make_env` to construct `JSBSimAircraftPlatform` instances. In that mode,
+high-level `[pitch, heading, speed]` actions are converted to JSBSim control
+commands by a small PID controller. The current JSBSim integration is a minimal
+single-aircraft and environment backend check; it is not yet a tuned
+research-grade flight controller.
+
+Local JSBSim assets are stored under `uav_env/JSBSim/models/`:
+
+- `aircraft/A-4/A-4.xml` from the JSBSim upstream A4 model provided for this
+  project;
+- `aircraft/F-16/F-16.xml` copied from the parent project's existing local
+  aircraft data;
+- `engine/J52.xml`, `engine/F100-PW-229.xml`, and `engine/direct.xml` for the
+  aircraft engines/thruster references.
+
+Use the JSBSim diagnostics without running training:
+
+```bash
+python scripts/check_jsbsim_models.py
+python scripts/run_jsbsim_single_aircraft.py --model A-4
+python scripts/run_jsbsim_single_aircraft.py --model F-16
+pytest tests/test_jsbsim_backend.py
+```
+
+If `jsbsim` is not installed, model-file checks still run and backend execution
+tests are skipped with an explicit dependency message.
 
 Even with the simplified FDM, the environment now implements a minimal credible
 combat layer:
@@ -235,10 +261,11 @@ There is no runtime dependency on the parent `train_environment` project. The
 code does not import `my_uav_env`, `envs.JSBSim`, or modify `sys.path` to reach
 the parent directory.
 
-The current limitation is fidelity, not independence: JSBSim aircraft XML files,
-PID control, Tacview export, and full proportional-navigation missile dynamics
-are not migrated yet. They can be added later inside `uav_env/JSBSim/` by
-replacing the proxy classes in `core/aircraft.py` and `core/missile.py`.
+The current limitation is fidelity, not independence: the JSBSim backend is
+available for local model loading and stepping, while Tacview export and full
+proportional-navigation missile dynamics are not migrated yet. They can be
+added later inside `uav_env/JSBSim/` by extending the backend classes in
+`core/aircraft.py` and `core/missile.py`.
 
 ## Tests
 

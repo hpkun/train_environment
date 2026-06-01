@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import numpy as np
+from pathlib import Path
 
-from .aircraft import AircraftPlatform
+from .aircraft import JSBSimAircraftPlatform, SimpleKinematicAircraftPlatform
 from .aircraft_types import build_aircraft_types
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class ScenarioBuilder:
     def __init__(self, config: dict):
         self.config = config
         self.aircraft_types = build_aircraft_types(config)
+        self.dynamics_backend = str(config.get("dynamics_backend", "simple"))
+        self.model_root = Path(config.get("jsbsim_model_root", "uav_env/JSBSim/models"))
+        if not self.model_root.is_absolute():
+            self.model_root = PROJECT_ROOT / self.model_root
+        self.reference_lat = float(config.get("reference_lat", 60.0))
+        self.reference_lon = float(config.get("reference_lon", 120.0))
+        self.reference_alt = float(config.get("reference_alt", 0.0))
+        self.simulation_frequency = int(config.get("simulation_frequency", 60))
 
     def build(self, rng: np.random.Generator) -> list[AircraftPlatform]:
         agents: list[AircraftPlatform] = []
@@ -43,7 +54,21 @@ class ScenarioBuilder:
             heading = np.deg2rad(float(entry.get("heading_deg", heading_default)))
             velocity = np.array([np.cos(heading) * speed, np.sin(heading) * speed, 0.0],
                                 dtype=np.float32)
-            platform = AircraftPlatform(agent_id, side, type_spec, position, velocity, heading)
+            if self.dynamics_backend == "jsbsim":
+                platform = JSBSimAircraftPlatform(
+                    agent_id, side, type_spec, position, velocity, heading,
+                    model_root=self.model_root,
+                    model_name=type_spec.aircraft_model,
+                    reference_lat=self.reference_lat,
+                    reference_lon=self.reference_lon,
+                    reference_alt=self.reference_alt,
+                    simulation_frequency=self.simulation_frequency,
+                )
+            elif self.dynamics_backend == "simple":
+                platform = SimpleKinematicAircraftPlatform(
+                    agent_id, side, type_spec, position, velocity, heading)
+            else:
+                raise ValueError(f"unknown dynamics_backend {self.dynamics_backend!r}")
             platform.reset_runtime()
             result.append(platform)
         return result

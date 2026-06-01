@@ -5,6 +5,12 @@ action_shape: 3
 episode_limit: 250
 decision_frequency: 5
 simulation_frequency: 60
+dynamics_backend: "simple"
+jsbsim_model_root: "uav_env/JSBSim/models"
+control_mode: "high_level_pid"
+reference_lat: 60.0
+reference_lon: 120.0
+reference_alt: 0.0
 terminate_on_mav_loss: true
 speed_range: [102.0, 408.0]
 map_boundary:
@@ -69,6 +75,7 @@ blue_agents:
 aircraft_type_params:
   mav:
     aircraft_model: "A-4"
+    model_path: "uav_env/JSBSim/models/aircraft/A-4/A-4.xml"
     role: "mav"
     radar_range: 120000
     missile_num: 2
@@ -77,6 +84,7 @@ aircraft_type_params:
     reward_role: "leader_survival"
   attack_uav:
     aircraft_model: "F-16"
+    model_path: "uav_env/JSBSim/models/aircraft/F-16/F-16.xml"
     role: "attack_uav"
     radar_range: 90000
     missile_num: 2
@@ -85,6 +93,7 @@ aircraft_type_params:
     reward_role: "attack"
   scout_uav:
     aircraft_model: "F-16"
+    model_path: "uav_env/JSBSim/models/aircraft/F-16/F-16.xml"
     role: "scout_uav"
     radar_range: 140000
     missile_num: 0
@@ -93,6 +102,7 @@ aircraft_type_params:
     reward_role: "scout"
   interceptor_uav:
     aircraft_model: "F-16"
+    model_path: "uav_env/JSBSim/models/aircraft/F-16/F-16.xml"
     role: "interceptor_uav"
     radar_range: 100000
     missile_num: 2

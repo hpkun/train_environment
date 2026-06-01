@@ -17,6 +17,7 @@ TYPE_IDS = {
 class AircraftType:
     name: str
     aircraft_model: str
+    model_path: str
     role: str
     radar_range: float
     missile_num: int
@@ -36,6 +37,7 @@ def build_aircraft_types(config: dict) -> dict[str, AircraftType]:
         result[name] = AircraftType(
             name=name,
             aircraft_model=str(raw.get("aircraft_model", "F-16")),
+            model_path=str(raw.get("model_path", "")),
             role=str(raw.get("role", name)),
             radar_range=float(raw.get("radar_range", 90000.0)),
             missile_num=int(raw.get("missile_num", 2)),

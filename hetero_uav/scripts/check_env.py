@@ -23,6 +23,8 @@ def main() -> None:
     print(f"config: {Path(args.config)}")
     print(f"controlled_side: {env.controlled_side}")
     print(f"opponent_policy: {env.config.get('opponent_policy')}")
+    print(f"dynamics_backend: {env.config.get('dynamics_backend', 'simple')}")
+    print(f"control_mode: {env.config.get('control_mode', 'high_level')}")
     print(f"controlled_agents: {env.num_agents}")
     print(f"num_agents: {env.num_agents}")
     print(f"controlled_agent_ids: {env.agent_ids}")
