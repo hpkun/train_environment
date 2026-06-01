@@ -1,0 +1,100 @@
+seed: 7
+episode_limit: 200
+decision_frequency: 5
+simulation_frequency: 60
+terminate_on_mav_loss: true
+speed_range: [102.0, 408.0]
+map_boundary:
+  x: [-50000.0, 50000.0]
+  y: [-50000.0, 50000.0]
+  altitude: [750.0, 10000.0]
+initial_position_range:
+  red:
+    x: [-9000.0, -7000.0]
+    y: [-1000.0, 1000.0]
+  blue:
+    x: [7000.0, 9000.0]
+    y: [-1000.0, 1000.0]
+initial_altitude_range: [5800.0, 6200.0]
+initial_velocity_range: [230.0, 270.0]
+max_red_agents: 2
+max_blue_agents: 2
+red_agents:
+  - id: red_0
+    type: mav
+    x: -8500.0
+    y: -400.0
+    altitude: 6000.0
+    speed: 250.0
+    heading_deg: 0.0
+  - id: red_1
+    type: attack_uav
+    x: -8000.0
+    y: 400.0
+    altitude: 6000.0
+    speed: 250.0
+    heading_deg: 0.0
+blue_agents:
+  - id: blue_0
+    type: attack_uav
+    x: 8500.0
+    y: -400.0
+    altitude: 6000.0
+    speed: 250.0
+    heading_deg: 180.0
+  - id: blue_1
+    type: attack_uav
+    x: 8000.0
+    y: 400.0
+    altitude: 6000.0
+    speed: 250.0
+    heading_deg: 180.0
+aircraft_type_params:
+  mav:
+    aircraft_model: "A-4"
+    role: "mav"
+    radar_range: 120000
+    missile_num: 2
+    max_speed_scale: 1.0
+    max_g: 9.0
+    reward_role: "leader_survival"
+  attack_uav:
+    aircraft_model: "F-16"
+    role: "attack_uav"
+    radar_range: 90000
+    missile_num: 2
+    max_speed_scale: 0.9
+    max_g: 7.0
+    reward_role: "attack"
+  scout_uav:
+    aircraft_model: "F-16"
+    role: "scout_uav"
+    radar_range: 140000
+    missile_num: 0
+    max_speed_scale: 0.85
+    max_g: 6.0
+    reward_role: "scout"
+  interceptor_uav:
+    aircraft_model: "F-16"
+    role: "interceptor_uav"
+    radar_range: 100000
+    missile_num: 2
+    max_speed_scale: 1.1
+    max_g: 9.0
+    reward_role: "intercept"
+missile_params:
+  attack_range: 14000
+  hit_range: 6000
+  cooldown_steps: 25
+  max_los_angle_rad: 1.57079632679
+sensor_params:
+  default_radar_range: 90000
+reward_weights:
+  kill_reward: 20
+  death_penalty: -20
+  mav_death_penalty: -50
+  boundary_penalty: -5
+  crash_penalty: -10
+  win_reward: 30
+  lose_penalty: -30
+  survival_reward: 0.02
