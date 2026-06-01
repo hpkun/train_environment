@@ -21,11 +21,13 @@ def main() -> None:
     env = make_env(args.config)
     obs, info = env.reset(seed=0)
     print(f"config: {Path(args.config)}")
+    print(f"controlled_side: {env.controlled_side}")
+    print(f"controlled_agents: {env.num_agents}")
     print(f"num_agents: {env.num_agents}")
     print(f"obs_shape: {env.obs_shape}")
     print(f"state_shape: {env.state_shape}")
     print(f"action_shape: {env.action_shape}")
-    print(f"agent_ids: {env.agent_ids}")
+    print(f"controlled_agent_ids: {env.agent_ids}")
     print(f"initial info keys: {sorted(info.keys())}")
 
     for step in range(10):

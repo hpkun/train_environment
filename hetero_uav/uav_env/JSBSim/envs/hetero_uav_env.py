@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 
 from ..core.utils import make_box, make_dict_space
@@ -25,11 +23,12 @@ class HeteroUAVEnv:
         self.config = dict(config)
         self.config_path = str(config_path) if config_path is not None else None
         self.task = HeteroCombatTask(self.config)
+        self.controlled_side = self.task.controlled_side
         self.rng = np.random.default_rng(self.config.get("seed", None))
         self._obs: dict | None = None
         self._info: dict | None = None
 
-        self.agent_ids = self._agent_ids_from_config()
+        self.agent_ids = self.task.controlled_agent_ids_from_config()
         self.num_agents = len(self.agent_ids)
         self.n_agents = self.num_agents
         self.action_shape = 3
@@ -46,14 +45,20 @@ class HeteroUAVEnv:
         if seed is not None:
             self.rng = np.random.default_rng(seed)
         self._obs, self._info = self.task.reset(self.rng)
-        self.agent_ids = [a.agent_id for a in self.task.agents]
+        self.agent_ids = [a.agent_id for a in self.task.controlled_agents()]
         self.num_agents = len(self.agent_ids)
         self.n_agents = self.num_agents
-        return self._obs, self._info
+        return self.get_obs(), self._info
 
     def step(self, actions):
         self._obs, rewards, terminated, truncated, self._info = self.task.step(actions)
-        return self._obs, rewards, terminated, truncated, self._info
+        return (
+            self.get_obs(),
+            self._filter_controlled(rewards),
+            self._filter_controlled(terminated),
+            self._filter_controlled(truncated),
+            self._info,
+        )
 
     def close(self):
         return None
@@ -74,7 +79,7 @@ class HeteroUAVEnv:
     def get_obs(self):
         if self._obs is None:
             self.reset()
-        return self._obs
+        return self._filter_controlled(self._obs)
 
     def get_state(self):
         return self.task.get_state()
@@ -85,10 +90,5 @@ class HeteroUAVEnv:
     def sample_actions(self):
         return {aid: self.action_space[aid].sample() for aid in self.agent_ids}
 
-    def _agent_ids_from_config(self) -> list[str]:
-        ids = []
-        for side in ("red", "blue"):
-            key = f"{side}_agents"
-            for idx, entry in enumerate(self.config.get(key, [])):
-                ids.append(str(entry.get("id", f"{side}_{idx}")))
-        return ids
+    def _filter_controlled(self, data: dict) -> dict:
+        return {aid: data[aid] for aid in self.agent_ids if aid in data}

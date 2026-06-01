@@ -118,6 +118,17 @@ The native environment follows the current `train_environment` worker style:
 - `reset(seed=None, options=None) -> (obs, info)`
 - `step(actions) -> (obs, rewards, terminated, truncated, info)`
 
+By default, debug configs set `controlled_side: "red"` and
+`opponent_policy: "rule_nearest"`. In this mode, `agent_ids`,
+`num_agents`, `action_space`, `observation_space`, returned observations,
+rewards, and dones only expose red agents for training. Blue agents remain
+inside the environment and are controlled by a nearest-target rule policy, so
+they still affect observations, global state, missile logic, rewards,
+termination, and `info` statistics.
+
+Set `controlled_side: "all"` to expose both red and blue agents as controllable
+agents, matching the original all-agent debug behavior.
+
 For MAPPO runners that expect stacked arrays and centralized state, use:
 
 ```python

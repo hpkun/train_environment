@@ -1,4 +1,6 @@
 seed: 11
+controlled_side: "red"
+opponent_policy: "rule_nearest"
 episode_limit: 250
 decision_frequency: 5
 simulation_frequency: 60

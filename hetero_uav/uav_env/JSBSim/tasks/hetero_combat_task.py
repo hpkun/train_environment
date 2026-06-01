@@ -8,6 +8,7 @@ from ..core.aircraft import AircraftPlatform
 from ..core.info import InfoBuilder
 from ..core.missile import MissileManager
 from ..core.observation import ObservationBuilder
+from ..core.opponent_policy import make_opponent_policy
 from ..core.reward import RewardBuilder
 from ..core.scenario import ScenarioBuilder
 from ..core.sensor import SensorSuite
@@ -20,6 +21,7 @@ class HeteroCombatTask:
         self.decision_dt = 1.0 / float(config.get("decision_frequency", 5.0))
         self.speed_range = tuple(config.get("speed_range", [102.0, 408.0]))
         self.map_boundary = config.get("map_boundary", {})
+        self.controlled_side = str(config.get("controlled_side", "red"))
         self.scenario = ScenarioBuilder(config)
         self.sensor = SensorSuite(config)
         self.missiles = MissileManager(config)
@@ -27,6 +29,7 @@ class HeteroCombatTask:
         self.reward = RewardBuilder(config)
         self.termination = TerminationChecker(config)
         self.info = InfoBuilder()
+        self.opponent_policy = make_opponent_policy(str(config.get("opponent_policy", "rule_nearest")))
         self.agents: list[AircraftPlatform] = []
         self.step_count = 0
         self.episode_return: dict[str, float] = {}
@@ -44,6 +47,7 @@ class HeteroCombatTask:
     def step(self, actions) -> tuple[dict, dict[str, float], dict[str, bool], dict[str, bool], dict]:
         self.step_count += 1
         action_map = self._normalize_actions(actions)
+        action_map.update(self._opponent_actions(action_map))
         for agent in self.agents:
             agent.step(action_map.get(agent.agent_id, np.zeros(3, dtype=np.float32)),
                        self.decision_dt, self.speed_range)
@@ -68,7 +72,34 @@ class HeteroCombatTask:
         if isinstance(actions, dict):
             return {str(k): np.asarray(v, dtype=np.float32) for k, v in actions.items()}
         arr = np.asarray(actions, dtype=np.float32)
-        return {agent.agent_id: arr[i] for i, agent in enumerate(self.agents[: len(arr)])}
+        controlled = self.controlled_agents()
+        return {agent.agent_id: arr[i] for i, agent in enumerate(controlled[: len(arr)])}
+
+    def controlled_agents(self) -> list[AircraftPlatform]:
+        if self.controlled_side == "all":
+            return list(self.agents)
+        return [a for a in self.agents if a.side == self.controlled_side]
+
+    def controlled_agent_ids_from_config(self) -> list[str]:
+        if self.controlled_side == "all":
+            sides = ("red", "blue")
+        else:
+            sides = (self.controlled_side,)
+        ids = []
+        for side in sides:
+            for idx, entry in enumerate(self.config.get(f"{side}_agents", [])):
+                ids.append(str(entry.get("id", f"{side}_{idx}")))
+        return ids
+
+    def _opponent_actions(self, action_map: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        if self.controlled_side == "all":
+            return {}
+        result = {}
+        for agent in self.agents:
+            if agent.side == self.controlled_side or agent.agent_id in action_map:
+                continue
+            result[agent.agent_id] = self.opponent_policy.act(agent, self.agents)
+        return result
 
     def _resolve_missiles(self):
         events = []

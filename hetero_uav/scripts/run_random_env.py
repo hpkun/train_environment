@@ -21,6 +21,7 @@ def main() -> None:
 
     env = make_env(args.config)
     obs, info = env.reset(seed=0)
+    print(f"controlled_side={env.controlled_side} controlled_agents={env.num_agents}")
     done = False
     step = 0
     total_reward = {aid: 0.0 for aid in env.agent_ids}
