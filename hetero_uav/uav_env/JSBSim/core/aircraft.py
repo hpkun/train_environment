@@ -187,7 +187,7 @@ class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
         for _ in range(n_substeps):
             controls = self.controller.compute(
                 self.pitch, self.heading, self.speed, target_pitch, target_heading,
-                target_speed, self.physics_dt)
+                target_speed, self.physics_dt, self.roll)
             for prop, value in controls.items():
                 self._set_property(prop, value)
             if not self.jsbsim_exec.run():

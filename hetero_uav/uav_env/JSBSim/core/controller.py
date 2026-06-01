@@ -35,8 +35,8 @@ class PitchHeadingSpeedController:
     """Small PID controller for the high-level [pitch, heading, speed] action."""
 
     def __init__(self):
-        self.pitch_pid = PID(2.0, 0.05, 0.05, -1.0, 1.0)
-        self.heading_pid = PID(1.5, 0.02, 0.03, -1.0, 1.0)
+        self.pitch_pid = PID(3.0, 0.08, 0.08, -1.0, 1.0)
+        self.heading_pid = PID(0.35, 0.0, 0.02, -0.25, 0.25)
         self.speed_pid = PID(0.015, 0.001, 0.0, 0.0, 1.0)
 
     def reset(self) -> None:
@@ -46,12 +46,15 @@ class PitchHeadingSpeedController:
 
     def compute(self, current_pitch: float, current_heading: float,
                 current_speed: float, target_pitch: float,
-                target_heading: float, target_speed: float, dt: float) -> dict[str, float]:
+                target_heading: float, target_speed: float, dt: float,
+                current_roll: float = 0.0) -> dict[str, float]:
         pitch_error = target_pitch - current_pitch
         heading_error = wrap_pi(target_heading - current_heading)
         elevator = -self.pitch_pid.step(pitch_error, dt)
-        aileron = self.heading_pid.step(heading_error, dt)
-        rudder = float(np.clip(0.25 * heading_error, -1.0, 1.0))
+        roll_damping = 0.65 * current_roll
+        aileron = float(np.clip(self.heading_pid.step(heading_error, dt) - roll_damping,
+                                -0.35, 0.35))
+        rudder = float(np.clip(0.05 * heading_error, -0.20, 0.20))
         throttle = self.speed_pid.step(target_speed - current_speed, dt)
         return {
             "fcs/throttle-cmd-norm": throttle,
