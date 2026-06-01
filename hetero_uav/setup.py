@@ -10,6 +10,7 @@ setup(
     install_requires=[
         "numpy>=1.23",
         "PyYAML>=6.0",
+        "torch>=2.0",
     ],
     extras_require={
         "dev": ["pytest>=7.0"],

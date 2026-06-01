@@ -20,8 +20,8 @@ initial_position_range:
     y: [-1000.0, 1000.0]
 initial_altitude_range: [5800.0, 6200.0]
 initial_velocity_range: [230.0, 270.0]
-max_red_agents: 2
-max_blue_agents: 2
+max_red_agents: 3
+max_blue_agents: 3
 red_agents:
   - id: red_0
     type: mav

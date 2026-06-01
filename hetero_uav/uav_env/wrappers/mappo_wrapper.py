@@ -14,8 +14,8 @@ class MAPPOEnvWrapper:
         self.state_shape = env.state_shape
         self.action_shape = env.action_shape
 
-    def reset(self):
-        obs, info = self.env.reset()
+    def reset(self, *args, **kwargs):
+        obs, info = self.env.reset(*args, **kwargs)
         return self._stack_obs(obs), self.env.get_state(), info
 
     def step(self, actions):

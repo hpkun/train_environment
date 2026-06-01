@@ -8,9 +8,9 @@ from .aircraft import AircraftPlatform
 from .sensor import SensorSuite
 from .utils import heading_to_unit, los_angle, safe_norm
 
-EGO_DIM = 12
-ENTITY_DIM = 12
-STATE_ENTITY_DIM = 10
+EGO_DIM = 15
+ENTITY_DIM = 16
+STATE_ENTITY_DIM = 12
 
 
 class ObservationBuilder:
@@ -43,16 +43,23 @@ class ObservationBuilder:
             raw_flat = np.concatenate([ego_state, flat_contacts])
             flat[: raw_flat.size] = raw_flat
             death_mask = np.array([1.0 if a.alive else 0.0 for a in agents], dtype=np.float32)
+            visible_mask = np.array([
+                1.0 if (a.agent_id == agent.agent_id or a.side == agent.side
+                        or self.sensor.can_detect(agent, a)) else 0.0
+                for a in agents
+            ], dtype=np.float32)
             obs[agent.agent_id] = {
                 "flat": flat.astype(np.float32),
                 "ego_state": ego_state.astype(np.float32),
                 "ally_states": ally_states.astype(np.float32),
                 "enemy_states": enemy_states.astype(np.float32),
                 "death_mask": death_mask,
+                "visible_mask": visible_mask,
                 "missile_warning": np.array([self.sensor.missile_warning(agent)], dtype=np.float32),
                 "altitude": np.array([agent.position[2] if agent.alive else 0.0], dtype=np.float32),
                 "velocity": agent.velocity.astype(np.float32) if agent.alive else np.zeros(3, dtype=np.float32),
                 "type_id": np.array([agent.type_id], dtype=np.float32),
+                "side_id": np.array([0.0 if agent.side == "red" else 1.0], dtype=np.float32),
             }
         return obs
 
@@ -72,6 +79,8 @@ class ObservationBuilder:
                 1.0 if agent.alive else 0.0,
                 agent.missile_left / 4.0,
                 float(agent.type_id),
+                0.0 if agent.side == "red" else 1.0,
+                1.0,
             ], dtype=np.float32)
         return rows.reshape(-1)
 
@@ -89,8 +98,11 @@ class ObservationBuilder:
             agent.pitch / (np.pi / 2.0),
             agent.roll / np.pi,
             1.0,
+            1.0,
             agent.missile_left / 4.0,
             float(agent.type_id),
+            0.0 if agent.side == "red" else 1.0,
+            agent.aircraft_type.radar_range / 150000.0,
         ], dtype=np.float32)
 
     def _padded_entities(self, ego: AircraftPlatform, entities: list[AircraftPlatform],
@@ -102,11 +114,17 @@ class ObservationBuilder:
 
     def _relative_entity(self, ego: AircraftPlatform, target: AircraftPlatform,
                          side_id: int) -> np.ndarray:
-        if not ego.alive or not target.alive:
+        if not ego.alive:
             return np.zeros(ENTITY_DIM, dtype=np.float32)
-        observable = target.side == ego.side or self.sensor.can_detect(ego, target)
+        alive = 1.0 if target.alive else 0.0
+        observable = target.alive and (target.side == ego.side or self.sensor.can_detect(ego, target))
         if not observable:
-            return np.zeros(ENTITY_DIM, dtype=np.float32)
+            return np.array([
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                float(side_id), float(target.type_id), alive, 0.0,
+                float(target.missile_left), target.aircraft_type.radar_range / 150000.0,
+                target.aircraft_type.max_speed_scale,
+            ], dtype=np.float32)
         rel_pos = target.position - ego.position
         rel_vel = target.velocity - ego.velocity
         distance = safe_norm(rel_pos)
@@ -125,5 +143,9 @@ class ObservationBuilder:
             angle / np.pi,
             float(side_id),
             float(target.type_id),
+            alive,
+            1.0,
             float(target.missile_left),
+            target.aircraft_type.radar_range / 150000.0,
+            target.aircraft_type.max_speed_scale,
         ], dtype=np.float32)

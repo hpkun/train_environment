@@ -34,14 +34,16 @@ class HeteroCombatTask:
         self.step_count = 0
         self.episode_return: dict[str, float] = {}
         self.last_win_flag: str | None = None
+        self.last_termination_reason: str | None = None
 
     def reset(self, rng: np.random.Generator) -> tuple[dict, dict]:
         self.agents = self.scenario.build(rng)
         self.step_count = 0
         self.last_win_flag = None
+        self.last_termination_reason = None
         self.episode_return = {a.agent_id: 0.0 for a in self.agents}
         obs = self.observation.build_obs(self.agents)
-        info = self.info.build(self.agents, self.step_count, self.episode_return, None)
+        info = self.info.build(self.agents, self.step_count, self.episode_return, None, None, [])
         return obs, info
 
     def step(self, actions) -> tuple[dict, dict[str, float], dict[str, bool], dict[str, bool], dict]:
@@ -53,16 +55,22 @@ class HeteroCombatTask:
                        self.decision_dt, self.speed_range)
         self._apply_boundary_and_crash()
         events = self._resolve_missiles()
-        terminated_env, truncated_env, win_flag = self.termination.check(self.agents, self.step_count)
+        terminated_env, truncated_env, win_flag, termination_reason = self.termination.check(
+            self.agents, self.step_count)
         done_env = terminated_env or truncated_env
-        rewards = self.reward.compute(self.agents, events, done_env, win_flag)
+        rewards = self.reward.compute(
+            self.agents, events, done_env, win_flag, self.sensor,
+            self.missiles.attack_range, self.missiles.max_los_angle)
         for aid, value in rewards.items():
             self.episode_return[aid] = self.episode_return.get(aid, 0.0) + float(value)
         self.last_win_flag = win_flag
+        self.last_termination_reason = termination_reason
         obs = self.observation.build_obs(self.agents)
         terminated = {a.agent_id: bool(terminated_env or not a.alive) for a in self.agents}
         truncated = {a.agent_id: bool(truncated_env) for a in self.agents}
-        info = self.info.build(self.agents, self.step_count, self.episode_return, win_flag)
+        info = self.info.build(
+            self.agents, self.step_count, self.episode_return, win_flag,
+            termination_reason, events)
         return obs, rewards, terminated, truncated, info
 
     def get_state(self) -> np.ndarray:

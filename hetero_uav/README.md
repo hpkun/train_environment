@@ -9,9 +9,10 @@ autonomous agents, heterogeneity is expressed through platform type, sensing
 range, missile load, maneuver limits, and reward role, and the environment
 exposes per-agent observations plus a centralized global state for CTDE methods.
 
-This first version is an environment skeleton and debug implementation only. It
-does not implement type-aware attention, a mask generator, HAPPO, MAPPO, BRMA-
-MAPPO changes, or paper experiments.
+This first version is an environment skeleton and debug implementation with a
+minimal ordinary MAPPO baseline for trainability checks. It does not implement
+type-aware attention, a mask generator, HAPPO, BRMA-MAPPO changes, or paper
+experiments.
 
 ## Project Structure
 
@@ -188,6 +189,24 @@ can later be replaced by real JSBSim aircraft models, PID control, and
 proportional-navigation missile dynamics without changing the public environment
 API.
 
+Even with the simplified FDM, the environment now implements a minimal credible
+combat layer:
+
+- `radar_range` affects whether enemy entities are visible in each agent's
+  observation;
+- observations include entity type, side, alive, visible, and missile-left
+  fields, while invisible enemy kinematic fields are masked;
+- fire-control checks alive status, missile inventory, cooldown, sensor
+  visibility, attack range, and LOS angle before automatic launch;
+- missile events record launches, hits, misses, blocked launches, cooldown, and
+  remaining missiles into `info`;
+- reward shaping uses `reward_role` so MAVs emphasize survival, attack UAVs
+  emphasize attack windows and kills, scouts receive detection/survival reward,
+  and interceptors receive pressure/attack-window reward;
+- termination reports `win_flag`, `winner`, and `termination_reason` for blue
+  elimination, red elimination, MAV loss, episode-limit alive/kills advantage,
+  or draw.
+
 Heterogeneity is represented through `aircraft type`, `radar_range`,
 `missile_num`, `max_speed_scale`, `max_g`, and `reward_role`. MAV platforms use
 the `leader_survival` reward role, while UAV platforms use attack-oriented or
@@ -200,6 +219,11 @@ heterogeneous composition zero-shot generalization problem first: train on a
 small MAV + attack-UAV composition, then evaluate on larger or compositionally
 different MAV/UAV teams. Higher-fidelity JSBSim/PID/PN missile implementation is
 left as the next environment fidelity step.
+
+For serious learning experiments, the next validation step is to run an ordinary
+MAPPO trainability baseline against this environment layer, then replace the
+kinematic FDM with real JSBSim/PID/PN components once the task semantics are
+stable.
 
 ## Parent Project Dependency
 
@@ -220,3 +244,40 @@ pytest tests/test_env_smoke.py
 
 The smoke test checks import, config loading, reset, one step, observation/state
 shape, and required `info` fields.
+
+## MAPPO Baseline
+
+The project includes a minimal ordinary MAPPO baseline under
+`algorithms/mappo/`. It is intentionally small and only validates that
+`HeteroUAVEnv` can be used in a CTDE training loop:
+
+- shared continuous-action actor, `action_dim=3`;
+- per-red-agent actor input from local observation;
+- centralized critic input from global state;
+- GAE;
+- PPO clipped objective;
+- CPU/GPU device selection;
+- model save/load.
+
+Train on the padded 2v2 MAV + attack-UAV setup:
+
+```bash
+python scripts/train_mappo.py --config configs/train_mappo_hetero_2v2.yaml
+```
+
+Fast smoke run:
+
+```bash
+python scripts/train_mappo.py --config configs/train_mappo_hetero_2v2.yaml --debug
+```
+
+Evaluate a saved model on a zero-shot composition config:
+
+```bash
+python scripts/eval_mappo.py --model outputs/mappo_hetero_2v2/<run>/model.pt --env-config uav_env/configs/hetero_test_3v3_mav_attack_scout.yaml --episodes 100
+```
+
+The ordinary MLP MAPPO baseline requires compatible padded observation/state
+dimensions between train and eval configs. For that reason,
+`hetero_train_2v2_mav_attack.yaml` keeps the actual scenario at 2v2 but pads
+`max_red_agents` and `max_blue_agents` to 3.
