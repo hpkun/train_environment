@@ -96,6 +96,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.ruff_cache/
 
 # Translations
 *.mo
@@ -170,6 +171,11 @@ venv.bak/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Editor backup / temporary files
+*.tmp
+*.bak
+*~
 
 # Pyre type checker
 .pyre/
