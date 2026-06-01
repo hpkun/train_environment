@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from uav_env import make_env
-from scripts.diagnose_jsbsim_controller import run_diagnostic
+from scripts.diagnose_jsbsim_controller import annotate_direction_checks, run_diagnostic
 
 
 def test_a4_level_10_seconds_no_crash():
@@ -35,6 +35,34 @@ def test_f16_speed_up_increases_speed():
     row = run_diagnostic("F-16", "speed_up", np.array([0.0, 0.0, 1.0], dtype=np.float32), 10.0)
     assert row["final_speed"] > row["initial_speed"]
     assert not row["nan_detected"]
+
+
+@pytest.mark.parametrize("model", ["A-4", "F-16"])
+def test_turn_direction_semantics_are_consistent(model: str):
+    pytest.importorskip("jsbsim")
+    left = run_diagnostic(model, "turn_left", np.array([0.0, -0.5, 0.5], dtype=np.float32), 60.0)
+    right = run_diagnostic(model, "turn_right", np.array([0.0, 0.5, 0.5], dtype=np.float32), 60.0)
+    assert left["heading_delta"] < 0.0
+    assert right["heading_delta"] > 0.0
+    assert not left["crashed"]
+    assert not right["crashed"]
+
+
+@pytest.mark.parametrize("model", ["A-4", "F-16"])
+def test_pitch_and_speed_direction_semantics(model: str):
+    pytest.importorskip("jsbsim")
+    rows = [
+        run_diagnostic(model, "level", np.array([0.0, 0.0, 0.5], dtype=np.float32), 60.0),
+        run_diagnostic(model, "climb", np.array([0.2, 0.0, 0.5], dtype=np.float32), 60.0),
+        run_diagnostic(model, "speed_up", np.array([0.0, 0.0, 1.0], dtype=np.float32), 60.0),
+    ]
+    annotate_direction_checks(rows)
+    by_name = {row["scenario"]: row for row in rows}
+    assert by_name["climb"]["final_altitude"] > by_name["level"]["final_altitude"]
+    if model == "A-4":
+        assert by_name["speed_up"]["final_speed"] >= by_name["level"]["final_speed"] - 1e-3
+    else:
+        assert by_name["speed_up"]["final_speed"] > by_name["level"]["final_speed"]
 
 
 def test_jsbsim_env_debug_steps_20():

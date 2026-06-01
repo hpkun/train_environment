@@ -37,6 +37,7 @@ def _resolve(path: str) -> Path:
 def _aircraft_type(config: dict, model: str) -> AircraftType:
     for name, raw in config.get("aircraft_type_params", {}).items():
         if raw.get("aircraft_model") == model:
+            raw_control = raw.get("control", {})
             return AircraftType(
                 name=name,
                 aircraft_model=str(raw.get("aircraft_model", model)),
@@ -47,6 +48,13 @@ def _aircraft_type(config: dict, model: str) -> AircraftType:
                 max_speed_scale=float(raw.get("max_speed_scale", 1.0)),
                 max_g=float(raw.get("max_g", 9.0)),
                 reward_role=str(raw.get("reward_role", raw.get("role", name))),
+                control={
+                    "elevator_sign": float(raw_control.get("elevator_sign", 1.0)),
+                    "aileron_sign": float(raw_control.get("aileron_sign", 1.0)),
+                    "rudder_sign": float(raw_control.get("rudder_sign", 1.0)),
+                    "throttle_sign": float(raw_control.get("throttle_sign", 1.0)),
+                    "heading_sign": float(raw_control.get("heading_sign", 1.0)),
+                },
             )
     raise ValueError(f"model {model!r} is not declared in aircraft_type_params")
 
@@ -121,9 +129,52 @@ def run_diagnostic(model: str, scenario: str, action: np.ndarray, duration: floa
         "crashed": bool(platform.crashed),
         "alive": bool(platform.alive),
         "nan_detected": nan_detected,
+        "expected_heading_sign": "",
+        "actual_heading_sign": "",
+        "heading_direction_ok": "",
+        "pitch_direction_ok": "",
+        "speed_direction_ok": "",
     }
     platform.close()
     return result
+
+
+def _sign(value: float, tol: float = 1e-3) -> int:
+    if value > tol:
+        return 1
+    if value < -tol:
+        return -1
+    return 0
+
+
+def annotate_direction_checks(rows: list[dict]) -> None:
+    by_model = {}
+    for row in rows:
+        by_model.setdefault(row["model"], {})[row["scenario"]] = row
+
+    for scenarios in by_model.values():
+        level = scenarios.get("level")
+        if level is None:
+            continue
+        level_alt = level["final_altitude"]
+        level_speed = level["final_speed"]
+        for name, row in scenarios.items():
+            if name == "turn_left":
+                row["expected_heading_sign"] = -1
+                row["actual_heading_sign"] = _sign(row["heading_delta"])
+                row["heading_direction_ok"] = row["actual_heading_sign"] < 0
+            elif name == "turn_right":
+                row["expected_heading_sign"] = 1
+                row["actual_heading_sign"] = _sign(row["heading_delta"])
+                row["heading_direction_ok"] = row["actual_heading_sign"] > 0
+            if name == "climb":
+                row["pitch_direction_ok"] = row["final_altitude"] > level_alt
+            elif name == "descend":
+                row["pitch_direction_ok"] = row["final_altitude"] < level_alt
+            if name == "speed_up":
+                row["speed_direction_ok"] = row["final_speed"] >= level_speed - 1e-3
+            elif name == "slow_down":
+                row["speed_direction_ok"] = row["final_speed"] < level_speed
 
 
 def _print_result(row: dict) -> None:
@@ -137,7 +188,12 @@ def _print_result(row: dict) -> None:
         f"max_abs_pitch={row['max_abs_pitch']:.3f}, "
         f"max_abs_roll={row['max_abs_roll']:.3f}, "
         f"min_alt={row['min_altitude']:.1f}, max_alt={row['max_altitude']:.1f}, "
-        f"crashed={row['crashed']}, alive={row['alive']}, nan={row['nan_detected']}"
+        f"crashed={row['crashed']}, alive={row['alive']}, nan={row['nan_detected']}, "
+        f"expected_heading_sign={row['expected_heading_sign']}, "
+        f"actual_heading_sign={row['actual_heading_sign']}, "
+        f"heading_direction_ok={row['heading_direction_ok']}, "
+        f"pitch_direction_ok={row['pitch_direction_ok']}, "
+        f"speed_direction_ok={row['speed_direction_ok']}"
     )
 
 
@@ -163,7 +219,9 @@ def main() -> None:
         for scenario, action in scenario_items:
             row = run_diagnostic(model, scenario, action, args.duration)
             rows.append(row)
-            _print_result(row)
+    annotate_direction_checks(rows)
+    for row in rows:
+        _print_result(row)
 
     if args.output_csv:
         path = Path(args.output_csv)

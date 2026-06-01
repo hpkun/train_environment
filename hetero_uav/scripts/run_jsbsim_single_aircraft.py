@@ -26,6 +26,7 @@ def _resolve(path: str) -> Path:
 def _type_for_model(config: dict, model: str) -> AircraftType:
     for name, raw in config.get("aircraft_type_params", {}).items():
         if raw.get("aircraft_model") == model:
+            raw_control = raw.get("control", {})
             return AircraftType(
                 name=name,
                 aircraft_model=str(raw.get("aircraft_model", model)),
@@ -36,6 +37,13 @@ def _type_for_model(config: dict, model: str) -> AircraftType:
                 max_speed_scale=float(raw.get("max_speed_scale", 1.0)),
                 max_g=float(raw.get("max_g", 9.0)),
                 reward_role=str(raw.get("reward_role", raw.get("role", name))),
+                control={
+                    "elevator_sign": float(raw_control.get("elevator_sign", 1.0)),
+                    "aileron_sign": float(raw_control.get("aileron_sign", 1.0)),
+                    "rudder_sign": float(raw_control.get("rudder_sign", 1.0)),
+                    "throttle_sign": float(raw_control.get("throttle_sign", 1.0)),
+                    "heading_sign": float(raw_control.get("heading_sign", 1.0)),
+                },
             )
     raise ValueError(f"model {model!r} is not declared in aircraft_type_params")
 

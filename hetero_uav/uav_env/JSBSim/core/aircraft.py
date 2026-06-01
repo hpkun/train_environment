@@ -53,7 +53,8 @@ class SimpleKinematicAircraftPlatform:
             padded[: action.size] = action
             action = padded
         target_pitch = float(action[0]) * (np.pi / 2.0)
-        target_heading = float(action[1]) * np.pi
+        signs = self.aircraft_type.control
+        target_heading = float(action[1]) * np.pi * signs.get("heading_sign", 1.0)
         speed_min, speed_max = speed_range
         speed_hi = speed_max * self.aircraft_type.max_speed_scale
         target_speed = speed_min + (float(action[2]) + 1.0) * 0.5 * (speed_hi - speed_min)
@@ -178,8 +179,9 @@ class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
         action = np.asarray(action, dtype=np.float32).reshape(-1)
         if action.size < 3:
             action = np.pad(action, (0, 3 - action.size))
+        signs = self.aircraft_type.control
         target_pitch = float(action[0]) * (np.pi / 2.0)
-        target_heading = float(action[1]) * np.pi
+        target_heading = float(action[1]) * np.pi * signs.get("heading_sign", 1.0)
         speed_min, speed_max = speed_range
         target_speed = speed_min + (float(action[2]) + 1.0) * 0.5 * (
             speed_max * self.aircraft_type.max_speed_scale - speed_min)
@@ -188,6 +190,10 @@ class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
             controls = self.controller.compute(
                 self.pitch, self.heading, self.speed, target_pitch, target_heading,
                 target_speed, self.physics_dt, self.roll)
+            controls["fcs/elevator-cmd-norm"] *= signs.get("elevator_sign", 1.0)
+            controls["fcs/aileron-cmd-norm"] *= signs.get("aileron_sign", 1.0)
+            controls["fcs/rudder-cmd-norm"] *= signs.get("rudder_sign", 1.0)
+            controls["fcs/throttle-cmd-norm"] *= signs.get("throttle_sign", 1.0)
             for prop, value in controls.items():
                 self._set_property(prop, value)
             if not self.jsbsim_exec.run():
