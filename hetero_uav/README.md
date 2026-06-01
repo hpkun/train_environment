@@ -192,7 +192,8 @@ Set `dynamics_backend: "jsbsim"` or pass `dynamics_backend="jsbsim"` to
 high-level `[pitch, heading, speed]` actions are converted to JSBSim control
 commands by a small PID controller. The current JSBSim integration is a minimal
 single-aircraft and environment backend check; it is not yet a tuned
-research-grade flight controller.
+research-grade flight controller, and the project is not entering training at
+this stage.
 
 Local JSBSim assets are stored under `uav_env/JSBSim/models/`:
 
@@ -206,14 +207,27 @@ Local JSBSim assets are stored under `uav_env/JSBSim/models/`:
 Use the JSBSim diagnostics without running training:
 
 ```bash
+pip install -r requirements.txt
+# or:
+pip install jsbsim==1.1.6
+
 python scripts/check_jsbsim_models.py
-python scripts/run_jsbsim_single_aircraft.py --model A-4
-python scripts/run_jsbsim_single_aircraft.py --model F-16
+python scripts/run_jsbsim_single_aircraft.py --model A-4 --duration 10
+python scripts/run_jsbsim_single_aircraft.py --model F-16 --duration 10
+python scripts/check_env.py --config uav_env/configs/hetero_2v2_jsbsim_debug.yaml
 pytest tests/test_jsbsim_backend.py
 ```
 
-If `jsbsim` is not installed, model-file checks still run and backend execution
-tests are skipped with an explicit dependency message.
+`scripts/check_jsbsim_models.py` checks the local model tree, aircraft XML,
+engine/thruster XML, `load_model`, and `run_ic`. 
+`scripts/run_jsbsim_single_aircraft.py` runs one aircraft for a short duration
+and prints time, local position, altitude, speed, attitude, and crash status.
+`uav_env/configs/hetero_2v2_jsbsim_debug.yaml` is the environment-level JSBSim
+smoke-test config.
+
+If `jsbsim` is not installed, model-file checks still run, command-line scripts
+print install hints, and backend execution tests are skipped with an explicit
+dependency message.
 
 Even with the simplified FDM, the environment now implements a minimal credible
 combat layer:

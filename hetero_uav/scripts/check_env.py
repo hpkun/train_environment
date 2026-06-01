@@ -18,8 +18,18 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
 
-    env = make_env(args.config)
-    obs, info = env.reset(seed=0)
+    try:
+        env = make_env(args.config)
+        obs, info = env.reset(seed=0)
+    except ImportError as exc:
+        print(f"check_env: FAILED {type(exc).__name__}: {exc}")
+        if "jsbsim" in str(exc).lower():
+            print("install hint: pip install -r requirements.txt")
+            print("install hint: pip install jsbsim==1.1.6")
+        raise SystemExit(1) from exc
+    except Exception as exc:
+        print(f"check_env: FAILED {type(exc).__name__}: {exc}")
+        raise
     print(f"config: {Path(args.config)}")
     print(f"controlled_side: {env.controlled_side}")
     print(f"opponent_policy: {env.config.get('opponent_policy')}")

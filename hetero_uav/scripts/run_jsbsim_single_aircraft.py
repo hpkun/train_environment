@@ -43,12 +43,17 @@ def _type_for_model(config: dict, model: str) -> AircraftType:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=["A-4", "F-16"], required=True)
-    parser.add_argument("--seconds", type=float, default=10.0)
+    parser.add_argument("--duration", "--seconds", dest="duration", type=float, default=10.0)
+    parser.add_argument("--action", nargs=3, type=float, default=[0.0, 0.0, 0.5],
+                        metavar=("PITCH", "HEADING", "SPEED"))
+    parser.add_argument("--print-interval", type=float, default=1.0)
     parser.add_argument("--config", default="uav_env/configs/hetero_train_2v2_mav_attack.yaml")
     args = parser.parse_args()
 
     if importlib.util.find_spec("jsbsim") is None:
         print("JSBSim single-aircraft run skipped: Python package 'jsbsim' is not installed.")
+        print("install hint: pip install -r requirements.txt")
+        print("install hint: pip install jsbsim==1.1.6")
         return
 
     config = load_yaml(str(_resolve(args.config)))
@@ -72,13 +77,31 @@ def main() -> None:
     )
 
     dt = 1.0 / 5.0
-    steps = int(round(args.seconds / dt))
-    action = np.array([0.0, 0.0, 0.2], dtype=np.float32)
-    for _ in range(steps):
+    steps = int(round(args.duration / dt))
+    print_every = max(1, int(round(args.print_interval / dt)))
+    action = np.array(args.action, dtype=np.float32)
+    print(
+        "time, local_position_m, altitude_m, speed_mps, heading_rad, "
+        "pitch_rad, roll_rad, alive, crashed"
+    )
+    for step in range(steps + 1):
+        sim_time = step * dt
+        if step % print_every == 0 or step == steps:
+            print(
+                f"{sim_time:.1f}, {aircraft.position.tolist()}, {aircraft.position[2]:.3f}, "
+                f"{aircraft.speed:.3f}, {aircraft.heading:.6f}, {aircraft.pitch:.6f}, "
+                f"{aircraft.roll:.6f}, {aircraft.alive}, {aircraft.crashed}"
+            )
+        if step == steps:
+            break
         aircraft.step(action, dt, tuple(config.get("speed_range", [102.0, 408.0])))
 
+    print("summary:")
     print(f"model: {args.model}")
+    print(f"duration: {args.duration}")
+    print(f"action: {action.tolist()}")
     print(f"alive: {aircraft.alive}")
+    print(f"crashed: {aircraft.crashed}")
     print(f"position_m: {aircraft.position.tolist()}")
     print(f"velocity_mps: {aircraft.velocity.tolist()}")
     print(f"speed_mps: {aircraft.speed:.3f}")
