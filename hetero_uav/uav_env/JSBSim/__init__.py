@@ -1,5 +1,9 @@
-"""JSBSim-oriented environment package.
+"""BRMA-style JSBSim UAV combat environments.
 
-The first debug version uses a lightweight self-contained kinematic proxy while
-keeping the module boundaries needed to replace the proxy with real JSBSim FDMs.
+This package is the formal environment implementation path for hetero_uav.
+The code was ported from the package-local BRMA backup and is self-contained.
 """
+
+from .env import UavCombatEnv
+
+__all__ = ["UavCombatEnv"]
