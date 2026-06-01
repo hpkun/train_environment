@@ -9,31 +9,10 @@ smoke_attention_paper_log.csv
 smoke_attention_paper_checkpoints/
 smoke_signed_ao_log.csv
 smoke_signed_ao_checkpoints/
-results/smoke_*.csv
-results
+results/
 logs/
-checkpoints/vanilla_actor_best_reward.pt
-checkpoints/centralized_critic_best_reward.pt
-checkpoints/vanilla_actor_best_winrate.pt
-checkpoints/centralized_critic_best_winrate.pt
-checkpoints/vanilla_1v1_smoke/
-checkpoints/vanilla_2v2_smoke/
-checkpoints/vanilla_2v2_main/
-checkpoints/attention_1v1_smoke/
-checkpoints/attention_2v2_current_smoke/
-checkpoints/attention_2v2_placeholder_smoke/
-checkpoints/attention_1v1_strict_smoke/
-checkpoints/attention_2v2_strict_smoke/
-checkpoints/attention_1v1_strict_critic_smoke/
-checkpoints/attention_2v2_strict_critic_smoke/
-checkpoints/attention_1v1_strict_eq33_smoke/
-checkpoints/attention_1v1_strict_eq33_attncritic_smoke/
-checkpoints/attention_1v1_strict_eq33_attncritic_brma_dryrun_smoke/
-checkpoints/bench_brma_paper_env6_mb1024/
-checkpoints/bench_brma_paper_env4_mb1024/
-checkpoints/attention_2v2_brma_paper_500k_probe_env6_mb1024/
-checkpoints/attention_2v2_brma_paper_500k_probe_env4_mb1024/
-runs
+checkpoints/
+runs/
 *.npy
 *.acmi
 
@@ -156,6 +135,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+venv_aircombat/
+.venv_aircombat/
 
 # Spyder project settings
 .spyderproject

@@ -1,6 +1,0 @@
-#!/Users/yuanyuan/Desktop/github-RL/CloseAirCombat-master/CloseAirCombat-master/venv_aircombat/bin/python3.9
-import sys
-from fontTools.merge import main
-if __name__ == '__main__':
-    sys.argv[0] = sys.argv[0].removesuffix('.exe')
-    sys.exit(main())
