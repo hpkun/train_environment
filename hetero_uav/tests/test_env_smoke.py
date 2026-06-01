@@ -140,6 +140,57 @@ def test_missile_left_decreases_on_launch():
     env.close()
 
 
+def test_missile_does_not_fire_outside_launch_range():
+    env = make_env("uav_env/configs/hetero_train_2v2_mav_attack.yaml")
+    _obs, _info = env.reset(seed=123)
+    by_id = {a.agent_id: a for a in env.task.agents}
+    by_id["red_1"].position = np.array([0.0, 0.0, 6000.0], dtype=np.float32)
+    by_id["red_1"].heading = 0.0
+    by_id["blue_0"].position = np.array([10000.0, 0.0, 6000.0], dtype=np.float32)
+    before = by_id["red_1"].missile_left
+    actions = {aid: np.zeros(env.action_shape, dtype=np.float32) for aid in env.agent_ids}
+    _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+    assert by_id["red_1"].missile_left == before
+    assert info["missile_summary"]["out_of_launch_range_blocks"] >= 1
+    env.close()
+
+
+def test_missile_fires_inside_launch_range():
+    env = make_env("uav_env/configs/hetero_train_2v2_mav_attack.yaml")
+    _obs, _info = env.reset(seed=123)
+    by_id = {a.agent_id: a for a in env.task.agents}
+    by_id["red_1"].position = np.array([0.0, 0.0, 6000.0], dtype=np.float32)
+    by_id["red_1"].heading = 0.0
+    by_id["blue_0"].position = np.array([5000.0, 0.0, 6000.0], dtype=np.float32)
+    before = by_id["red_1"].missile_left
+    actions = {aid: np.zeros(env.action_shape, dtype=np.float32) for aid in env.agent_ids}
+    _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+    assert by_id["red_1"].missile_left == before - 1
+    assert info["missile_summary"]["launches"] >= 1
+    assert info["missile_summary"]["hits"] >= 1
+    env.close()
+
+
+def test_two_phase_resolution_allows_same_step_return_fire():
+    env = make_env("uav_env/configs/hetero_train_2v2_mav_attack.yaml")
+    _obs, _info = env.reset(seed=123)
+    by_id = {a.agent_id: a for a in env.task.agents}
+    by_id["red_1"].position = np.array([0.0, 0.0, 6000.0], dtype=np.float32)
+    by_id["red_1"].heading = 0.0
+    by_id["blue_0"].position = np.array([5000.0, 0.0, 6000.0], dtype=np.float32)
+    by_id["blue_0"].heading = np.pi
+    by_id["red_0"].position = np.array([-30000.0, 0.0, 6000.0], dtype=np.float32)
+    by_id["blue_1"].position = np.array([30000.0, 0.0, 6000.0], dtype=np.float32)
+    events = env.task._resolve_missiles()
+    fired = {(e.shooter_id, e.target_id) for e in events if e.fired}
+    assert ("red_1", "blue_0") in fired
+    assert ("blue_0", "red_1") in fired
+    env.task._apply_missile_hits(events)
+    assert not by_id["red_1"].alive
+    assert not by_id["blue_0"].alive
+    env.close()
+
+
 def test_mav_death_penalty_reward_component():
     env = make_env("uav_env/configs/hetero_train_2v2_mav_attack.yaml")
     _obs, _info = env.reset(seed=123)

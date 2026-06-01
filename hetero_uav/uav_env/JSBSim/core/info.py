@@ -61,6 +61,7 @@ class InfoBuilder:
                 "cooldown_blocks": reason_counts.get("cooldown", 0),
                 "no_missile_blocks": reason_counts.get("no_missile", 0),
                 "not_visible_blocks": reason_counts.get("not_visible", 0),
+                "out_of_launch_range_blocks": reason_counts.get("out_of_launch_range", 0),
                 "out_of_range_blocks": reason_counts.get("out_of_range", 0),
                 "los_blocks": reason_counts.get("los_blocked", 0),
                 "reason_counts": dict(reason_counts),

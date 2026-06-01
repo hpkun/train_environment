@@ -197,7 +197,11 @@ combat layer:
 - observations include entity type, side, alive, visible, and missile-left
   fields, while invisible enemy kinematic fields are masked;
 - fire-control checks alive status, missile inventory, cooldown, sensor
-  visibility, attack range, and LOS angle before automatic launch;
+  visibility, attack range, launch range, and LOS angle before automatic
+  launch;
+- `attack_range` is retained for shaping/future extensions, while
+  `launch_range` controls whether a missile is actually consumed in the current
+  deterministic hit-zone model;
 - missile events record launches, hits, misses, blocked launches, cooldown, and
   remaining missiles into `info`;
 - reward shaping uses `reward_role` so MAVs emphasize survival, attack UAVs

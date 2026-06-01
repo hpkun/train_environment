@@ -55,6 +55,7 @@ class HeteroCombatTask:
                        self.decision_dt, self.speed_range)
         self._apply_boundary_and_crash()
         events = self._resolve_missiles()
+        self._apply_missile_hits(events)
         terminated_env, truncated_env, win_flag, termination_reason = self.termination.check(
             self.agents, self.step_count)
         done_env = terminated_env or truncated_env
@@ -122,6 +123,17 @@ class HeteroCombatTask:
             if event is not None:
                 events.append(event)
         return events
+
+    def _apply_missile_hits(self, events) -> None:
+        by_id = {agent.agent_id: agent for agent in self.agents}
+        killed_targets: set[str] = set()
+        for event in events:
+            if not event.hit or event.target_id is None or event.target_id in killed_targets:
+                continue
+            target = by_id.get(event.target_id)
+            if target is not None and target.alive:
+                target.kill("killed")
+                killed_targets.add(event.target_id)
 
     def _apply_boundary_and_crash(self) -> None:
         xlim = self.map_boundary.get("x", [-50000.0, 50000.0])

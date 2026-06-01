@@ -12,10 +12,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from uav_env import make_env
+from uav_env.JSBSim.core.opponent_policy import RuleNearestOpponentPolicy
 
 
-def run_episode(env, rng: np.random.Generator) -> dict:
+def run_episode(env, rng: np.random.Generator, controlled_policy: str) -> dict:
     obs, info = env.reset()
+    rule_policy = RuleNearestOpponentPolicy()
     done = False
     episode_return = 0.0
     missile_used = 0
@@ -23,10 +25,19 @@ def run_episode(env, rng: np.random.Generator) -> dict:
     reason_counts = Counter()
     while not done:
         before = dict(info.get("missile_left", {}))
-        actions = {
-            aid: rng.uniform(-1.0, 1.0, env.action_shape).astype(np.float32)
-            for aid in env.agent_ids
-        }
+        if controlled_policy == "random":
+            actions = {
+                aid: rng.uniform(-1.0, 1.0, env.action_shape).astype(np.float32)
+                for aid in env.agent_ids
+            }
+        elif controlled_policy == "rule_nearest":
+            by_id = {agent.agent_id: agent for agent in env.task.agents}
+            actions = {
+                aid: rule_policy.act(by_id[aid], env.task.agents)
+                for aid in env.agent_ids
+            }
+        else:
+            raise ValueError(f"unknown controlled_policy {controlled_policy!r}")
         obs, rewards, terminated, truncated, info = env.step(actions)
         after = info.get("missile_left", {})
         missile_used += sum(max(0, before.get(aid, 0) - after.get(aid, 0)) for aid in after)
@@ -54,17 +65,20 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--controlled-policy", choices=["random", "rule_nearest"],
+                        default="random")
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
     env = make_env(args.config)
-    results = [run_episode(env, rng) for _ in range(args.episodes)]
+    results = [run_episode(env, rng, args.controlled_policy) for _ in range(args.episodes)]
     term_counts = Counter(r["termination_reason"] for r in results)
     missile_reasons = Counter()
     for result in results:
         missile_reasons.update(result["missile_reason_counts"])
 
     print(f"episodes: {args.episodes}")
+    print(f"controlled_policy: {args.controlled_policy}")
     print(f"win_rate: {np.mean([r['red_win'] for r in results]):.3f}")
     print(f"mav_survival_rate: {np.mean([r['mav_survival'] for r in results]):.3f}")
     print(f"avg_red_alive: {np.mean([r['red_alive'] for r in results]):.3f}")

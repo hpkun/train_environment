@@ -25,9 +25,11 @@ class MissileManager:
     def __init__(self, config: dict):
         params = config.get("missile_params", {})
         self.attack_range = float(params.get("attack_range", 14000.0))
-        self.hit_range = float(params.get("hit_range", 6000.0))
+        self.launch_range = float(params.get("launch_range", params.get("hit_range", 6500.0)))
+        self.hit_range = float(params.get("hit_range", 6500.0))
         self.cooldown_steps = int(params.get("cooldown_steps", 25))
         self.max_los_angle = float(params.get("max_los_angle_rad", 1.57079632679))
+        self.fire_only_in_kill_zone = bool(params.get("fire_only_in_kill_zone", True))
 
     def try_launch(self, shooter: AircraftPlatform, target: AircraftPlatform | None,
                    sensor: SensorSuite) -> MissileEvent | None:
@@ -50,6 +52,9 @@ class MissileManager:
         if distance > self.attack_range:
             return MissileEvent(shooter.agent_id, target.agent_id, shooter.side, False, False,
                                 "out_of_range", distance, shooter.missile_left)
+        if self.fire_only_in_kill_zone and distance > self.launch_range:
+            return MissileEvent(shooter.agent_id, target.agent_id, shooter.side, False, False,
+                                "out_of_launch_range", distance, shooter.missile_left)
         forward = heading_to_unit(shooter.heading, shooter.pitch)
         if los_angle(forward, rel) > self.max_los_angle:
             return MissileEvent(shooter.agent_id, target.agent_id, shooter.side, False, False,
@@ -57,7 +62,5 @@ class MissileManager:
         shooter.missile_left -= 1
         shooter.missile_cooldown = self.cooldown_steps
         hit = distance <= self.hit_range
-        if hit:
-            target.kill("killed")
         return MissileEvent(shooter.agent_id, target.agent_id, shooter.side, True, hit,
                             "hit" if hit else "miss", distance, shooter.missile_left)

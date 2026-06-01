@@ -101,9 +101,11 @@ aircraft_type_params:
     reward_role: "intercept"
 missile_params:
   attack_range: 14000
-  hit_range: 6000
+  launch_range: 6500
+  hit_range: 6500
   cooldown_steps: 25
   max_los_angle_rad: 1.57079632679
+  fire_only_in_kill_zone: true
 sensor_params:
   default_radar_range: 90000
 reward_weights:
