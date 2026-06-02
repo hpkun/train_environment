@@ -89,6 +89,12 @@ through MAV-mediated information sharing:
 This v2 observation mode is still an environment abstraction. It does not claim
 that "UAV can run on unseen composition" equals zero-shot success.
 
+`alive_mask` and `observed_mask` are separate. A valid enemy slot may be alive
+but currently unobserved (`valid=1, alive=1, observed=0`). In that state, the
+actor receives zero enemy geometry while masks preserve the enemy's true alive
+status. The default MAV missile count is 0; armed MAV cases must opt in through
+config.
+
 Formal future experiments should compare at least:
 
 - `brma_sensor + MAPPO`;

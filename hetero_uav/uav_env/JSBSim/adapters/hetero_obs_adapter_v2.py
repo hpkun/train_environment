@@ -7,7 +7,9 @@ import numpy as np
 REQUIRED_V2_KEYS = {
     "ego_geo_state",
     "ally_geo_states",
+    "ally_alive_mask",
     "enemy_geo_states",
+    "enemy_alive_mask",
     "enemy_observed_mask",
     "enemy_track_source",
 }
@@ -139,12 +141,14 @@ class HeteroObsAdapterV2:
     def _build_ally_entities(self, obs: dict, ally_ids: list[str]) -> tuple:
         geo = self._pad_2d(obs["ally_geo_states"], self.max_allies, self.relative_geo_dim)
         roles = self._pad_2d(obs.get("ally_roles", []), self.max_allies, self.role_dim)
+        raw_alive = self._pad_1d(obs["ally_alive_mask"], self.max_allies)
         entities = np.zeros((self.max_allies, self.ally_entity_dim), dtype=np.float32)
         valid = np.zeros(self.max_allies, dtype=np.float32)
         alive = np.zeros(self.max_allies, dtype=np.float32)
         for i, _aid in enumerate(ally_ids[:self.max_allies]):
             valid[i] = 1.0
-            if not np.allclose(geo[i], 0.0):
+            alive[i] = 1.0 if raw_alive[i] > 0.5 else 0.0
+            if alive[i] > 0.5:
                 alive[i] = 1.0
                 entities[i] = np.concatenate([geo[i], roles[i]]).astype(np.float32)
         return entities, valid, alive
@@ -153,15 +157,18 @@ class HeteroObsAdapterV2:
         geo = self._pad_2d(obs["enemy_geo_states"], self.max_enemies, self.relative_geo_dim)
         source = self._pad_2d(obs["enemy_track_source"], self.max_enemies, self.track_source_dim)
         observed = self._pad_1d(obs["enemy_observed_mask"], self.max_enemies)
+        raw_alive = self._pad_1d(obs["enemy_alive_mask"], self.max_enemies)
         entities = np.zeros((self.max_enemies, self.enemy_entity_dim), dtype=np.float32)
         valid = np.zeros(self.max_enemies, dtype=np.float32)
         alive = np.zeros(self.max_enemies, dtype=np.float32)
+        observed_mask = np.zeros(self.max_enemies, dtype=np.float32)
         for i, _eid in enumerate(enemy_ids[:self.max_enemies]):
             valid[i] = 1.0
-            if observed[i] > 0.5:
-                alive[i] = 1.0
+            alive[i] = 1.0 if raw_alive[i] > 0.5 else 0.0
+            if alive[i] > 0.5 and observed[i] > 0.5:
+                observed_mask[i] = 1.0
                 entities[i] = np.concatenate([geo[i], source[i]]).astype(np.float32)
-        return entities, valid, alive, observed.astype(np.float32)
+        return entities, valid, alive, observed_mask
 
     @staticmethod
     def _require_v2_obs(obs: dict) -> None:

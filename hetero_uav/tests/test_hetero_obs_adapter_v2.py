@@ -49,14 +49,16 @@ def test_adapter_v2_5v4_shapes():
         env.close()
 
 
-def _fake_obs(source, observed):
+def _fake_obs(source, observed, alive=1.0):
     return {
         "ego_geo_state": np.ones(7, dtype=np.float32),
         "ego_role": np.array([0, 1, 0, 0], dtype=np.float32),
         "missile_warning": np.array([0], dtype=np.float32),
         "ally_geo_states": np.array([[0.1, 0.2, 0.3, 0.4, 0.5]], dtype=np.float32),
+        "ally_alive_mask": np.array([1], dtype=np.float32),
         "ally_roles": np.array([[0, 1, 0, 0]], dtype=np.float32),
         "enemy_geo_states": np.array([[0.2, 0.1, 0.5, 0.3, 0.4]], dtype=np.float32),
+        "enemy_alive_mask": np.array([alive], dtype=np.float32),
         "enemy_track_source": np.array([source], dtype=np.float32),
         "enemy_observed_mask": np.array([observed], dtype=np.float32),
     }
@@ -71,13 +73,59 @@ def test_adapter_v2_source_preserved(source):
     np.testing.assert_array_equal(out["enemy_entities"][0, -2:], np.asarray(source, dtype=np.float32))
 
 
-def test_adapter_v2_unobserved_enemy_zeroed():
+def test_adapter_v2_alive_but_unobserved_enemy_keeps_alive_mask_and_zero_feature():
     adapter = HeteroObsAdapterV2()
     out = adapter.adapt_agent(
-        "red_0", _fake_obs([0, 0], 0.0),
+        "red_0", _fake_obs([0, 0], observed=0.0, alive=1.0),
         red_ids=["red_0", "red_1"], blue_ids=["blue_0"])
-    assert np.allclose(out["enemy_entities"][0], 0.0)
+    assert out["enemy_valid_mask"][0] == 1.0
+    assert out["enemy_alive_mask"][0] == 1.0
     assert out["enemy_observed_mask"][0] == 0.0
+    assert np.allclose(out["enemy_entities"][0], 0.0)
+
+
+def test_adapter_v2_alive_observed_own_contains_geo_and_source():
+    adapter = HeteroObsAdapterV2()
+    out = adapter.adapt_agent(
+        "red_0", _fake_obs([1, 0], observed=1.0, alive=1.0),
+        red_ids=["red_0", "red_1"], blue_ids=["blue_0"])
+    assert out["enemy_alive_mask"][0] == 1.0
+    assert out["enemy_observed_mask"][0] == 1.0
+    assert not np.allclose(out["enemy_entities"][0, :5], 0.0)
+    np.testing.assert_array_equal(out["enemy_entities"][0, -2:], np.array([1, 0], dtype=np.float32))
+
+
+def test_adapter_v2_alive_observed_mav_shared_contains_geo_and_source():
+    adapter = HeteroObsAdapterV2()
+    out = adapter.adapt_agent(
+        "red_0", _fake_obs([0, 1], observed=1.0, alive=1.0),
+        red_ids=["red_0", "red_1"], blue_ids=["blue_0"])
+    assert out["enemy_alive_mask"][0] == 1.0
+    assert out["enemy_observed_mask"][0] == 1.0
+    assert not np.allclose(out["enemy_entities"][0, :5], 0.0)
+    np.testing.assert_array_equal(out["enemy_entities"][0, -2:], np.array([0, 1], dtype=np.float32))
+
+
+def test_adapter_v2_dead_real_enemy_zero_feature():
+    adapter = HeteroObsAdapterV2()
+    out = adapter.adapt_agent(
+        "red_0", _fake_obs([1, 0], observed=0.0, alive=0.0),
+        red_ids=["red_0", "red_1"], blue_ids=["blue_0"])
+    assert out["enemy_valid_mask"][0] == 1.0
+    assert out["enemy_alive_mask"][0] == 0.0
+    assert out["enemy_observed_mask"][0] == 0.0
+    assert np.allclose(out["enemy_entities"][0], 0.0)
+
+
+def test_adapter_v2_padding_enemy_zero_masks():
+    adapter = HeteroObsAdapterV2()
+    out = adapter.adapt_agent(
+        "red_0", _fake_obs([1, 0], observed=1.0, alive=1.0),
+        red_ids=["red_0", "red_1"], blue_ids=["blue_0"])
+    assert out["enemy_valid_mask"][1] == 0.0
+    assert out["enemy_alive_mask"][1] == 0.0
+    assert out["enemy_observed_mask"][1] == 0.0
+    assert np.allclose(out["enemy_entities"][1], 0.0)
 
 
 def test_adapter_v2_rejects_brma_sensor_obs():

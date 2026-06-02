@@ -41,7 +41,7 @@ DEFAULT_AIRCRAFT_TYPE_PARAMS = {
     "mav": {
         "aircraft_model": "A-4",
         "role": "mav",
-        "num_missiles": 2,
+        "num_missiles": 0,
         "init_altitude_offset_m": 0.0,
         "init_speed_offset_mps": 0.0,
     },
@@ -169,6 +169,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
             low=-np.inf, high=np.inf, shape=(max_allies, 5), dtype=np.float32)
         spaces["enemy_geo_states"] = gymnasium.spaces.Box(
             low=-np.inf, high=np.inf, shape=(max_enemies, 5), dtype=np.float32)
+        spaces["ally_alive_mask"] = gymnasium.spaces.Box(
+            low=0.0, high=1.0, shape=(max_allies,), dtype=np.float32)
+        spaces["enemy_alive_mask"] = gymnasium.spaces.Box(
+            low=0.0, high=1.0, shape=(max_enemies,), dtype=np.float32)
         spaces["enemy_observed_mask"] = gymnasium.spaces.Box(
             low=0.0, high=1.0, shape=(max_enemies,), dtype=np.float32)
         spaces["enemy_track_source"] = gymnasium.spaces.Box(
@@ -226,6 +230,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
         ego_geo_state = np.zeros(7, dtype=np.float32)
         ally_geo_states = np.zeros((max_allies, 5), dtype=np.float32)
         enemy_geo_states = np.zeros((max_enemies, 5), dtype=np.float32)
+        ally_alive_mask = np.zeros(max_allies, dtype=np.float32)
+        enemy_alive_mask = np.zeros(max_enemies, dtype=np.float32)
         enemy_observed_mask = np.zeros(max_enemies, dtype=np.float32)
         enemy_track_source = np.zeros((max_enemies, 2), dtype=np.float32)
 
@@ -234,6 +240,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 "ego_geo_state": ego_geo_state,
                 "ally_geo_states": ally_geo_states,
                 "enemy_geo_states": enemy_geo_states,
+                "ally_alive_mask": ally_alive_mask,
+                "enemy_alive_mask": enemy_alive_mask,
                 "enemy_observed_mask": enemy_observed_mask,
                 "enemy_track_source": enemy_track_source,
             }
@@ -243,6 +251,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         for i, ally_id in enumerate(ally_ids):
             ally_sim = self._get_sim(ally_id)
             if ally_sim is not None and ally_sim.is_alive:
+                ally_alive_mask[i] = 1.0
                 ally_geo_states[i] = self._relative_geo_state(ego_sim, ally_sim)
 
         mav_sim = self._get_red_mav_sim()
@@ -253,6 +262,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             enemy_sim = self._get_sim(enemy_id)
             if enemy_sim is None or not enemy_sim.is_alive:
                 continue
+            enemy_alive_mask[i] = 1.0
 
             own_direct = (
                 self._distance_m(ego_sim, enemy_sim)
@@ -283,6 +293,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "ego_geo_state": ego_geo_state,
             "ally_geo_states": ally_geo_states,
             "enemy_geo_states": enemy_geo_states,
+            "ally_alive_mask": ally_alive_mask,
+            "enemy_alive_mask": enemy_alive_mask,
             "enemy_observed_mask": enemy_observed_mask,
             "enemy_track_source": enemy_track_source,
         }

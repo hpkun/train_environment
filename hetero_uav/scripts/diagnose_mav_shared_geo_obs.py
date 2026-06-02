@@ -21,7 +21,9 @@ CONFIGS = [
 V2_KEYS = [
     "ego_geo_state",
     "ally_geo_states",
+    "ally_alive_mask",
     "enemy_geo_states",
+    "enemy_alive_mask",
     "enemy_observed_mask",
     "enemy_track_source",
 ]
@@ -74,12 +76,20 @@ def _diagnose(config_path: str) -> None:
             print(f"{rid} v2 obs keys: {[key for key in V2_KEYS if key in obs[rid]]}")
         print(f"red_0 enemy_observed_mask: {obs['red_0']['enemy_observed_mask'].tolist()}")
         if "red_1" in obs:
+            print(f"red_1 enemy_alive_mask: {obs['red_1']['enemy_alive_mask'].tolist()}")
             print(f"red_1 enemy_observed_mask: {obs['red_1']['enemy_observed_mask'].tolist()}")
             print(f"red_1 enemy_track_source: {obs['red_1']['enemy_track_source'].tolist()}")
             has_shared = bool((obs["red_1"]["enemy_track_source"][:, 1] > 0.5).any())
             print(f"red_1_has_mav_shared_source: {has_shared}")
+            alive_unobserved = bool((
+                (obs["red_1"]["enemy_alive_mask"] > 0.5)
+                & (obs["red_1"]["enemy_observed_mask"] < 0.5)
+            ).any())
+            print(f"red_1_has_alive_but_unobserved_enemy: {alive_unobserved}")
             if not has_shared:
                 print("warning: reset state has no mav_shared source for red_1")
+            if not alive_unobserved:
+                print("warning: reset state has no alive-but-unobserved enemy for red_1")
         adapted = adapter.adapt_all(
             obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
         print(f"actor dim is 96: {adapter.flat_actor_obs_dim == 96}")

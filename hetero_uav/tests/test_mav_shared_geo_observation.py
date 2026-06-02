@@ -12,7 +12,9 @@ CFG_BRMA_SENSOR = "uav_env/JSBSim/configs/hetero_train_2v2_mav_attack.yaml"
 V2_KEYS = {
     "ego_geo_state",
     "ally_geo_states",
+    "ally_alive_mask",
     "enemy_geo_states",
+    "enemy_alive_mask",
     "enemy_observed_mask",
     "enemy_track_source",
 }
@@ -58,10 +60,15 @@ def test_mav_shared_geo_obs_shapes_and_steps(config_path, ally_shape, enemy_shap
         assert V2_KEYS.issubset(obs["red_0"])
         assert obs["red_0"]["ego_geo_state"].shape == (7,)
         assert obs["red_0"]["ally_geo_states"].shape == ally_shape
+        assert obs["red_0"]["ally_alive_mask"].shape == (ally_shape[0],)
         assert obs["red_0"]["enemy_geo_states"].shape == enemy_shape
+        assert obs["red_0"]["enemy_alive_mask"].shape == (enemy_shape[0],)
         assert obs["red_0"]["enemy_track_source"].shape[-1] == 2
-        mask = obs["red_0"]["enemy_observed_mask"]
-        assert np.all((mask == 0.0) | (mask == 1.0))
+        for mask_key in ["ally_alive_mask", "enemy_alive_mask", "enemy_observed_mask"]:
+            mask = obs["red_0"][mask_key]
+            assert np.all((mask == 0.0) | (mask == 1.0))
+        if np.any(obs["red_0"]["enemy_alive_mask"] > 0.5):
+            assert obs["red_0"]["enemy_alive_mask"].sum() >= obs["red_0"]["enemy_observed_mask"].sum()
         _assert_no_nan(obs)
 
         _step_smoke(env, "zero", steps=3)

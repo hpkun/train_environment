@@ -32,3 +32,14 @@ def test_design_doc_contains_v2_dims():
     text = DOC.read_text(encoding="utf-8")
     assert "flat_actor_obs_dim = 12 + 4*9 + 4*7 + 20 = 96" in text
     assert "critic_state_dim = 96 * 5 = 480" in text
+
+
+def test_design_doc_contains_alive_unobserved_semantics():
+    text = DOC.read_text(encoding="utf-8").lower()
+    assert "alive but unobserved" in text
+    assert "valid=1, alive=1, observed=0" in text
+
+
+def test_design_doc_contains_default_mav_missiles_zero():
+    text = DOC.read_text(encoding="utf-8").lower()
+    assert "default mav missile count is `0`" in text

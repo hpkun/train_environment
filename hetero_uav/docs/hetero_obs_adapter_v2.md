@@ -62,8 +62,20 @@ direct observation > MAV shared observation > unavailable
 - MAV shared: `[0, 1]`
 - unavailable: `[0, 0]`
 
-If `enemy_observed_mask` is 0, the adapter keeps that enemy entity feature and
-source as zero.
+`alive_mask` and `observed_mask` are distinct. An alive but unobserved enemy is
+legal:
+
+```text
+valid=1, alive=1, observed=0
+```
+
+For that case, the adapter keeps `enemy_alive_mask=1` but keeps the enemy entity
+feature and source at zero because the actor does not receive that enemy's
+geometry. Dead real enemies use `valid=1, alive=0, observed=0`; padding enemies
+use `valid=0, alive=0, observed=0`.
+
+The adapter uses raw `ally_alive_mask` and `enemy_alive_mask` from the
+environment. It does not infer alive status from geometry or observed status.
 
 ## Difference From V1
 
@@ -84,3 +96,6 @@ It produces a 96-dimensional actor input and 480-dimensional critic state.
 
 V2 does not change action, missile, evasion, reward, termination, aircraft XML,
 or the MAPPO algorithm.
+
+The default MAV missile count is 0. Armed MAV scenarios must configure missiles
+explicitly in YAML.

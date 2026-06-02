@@ -62,6 +62,8 @@ New raw fields:
 - `ego_geo_state`: shape `(7,)`
 - `ally_geo_states`: shape `(max_allies, 5)`
 - `enemy_geo_states`: shape `(max_enemies, 5)`
+- `ally_alive_mask`: shape `(max_allies,)`
+- `enemy_alive_mask`: shape `(max_enemies,)`
 - `enemy_observed_mask`: shape `(max_enemies,)`
 - `enemy_track_source`: shape `(max_enemies, 2)`
 
@@ -145,6 +147,18 @@ Masks:
 - `enemy_observed_mask`: 4;
 - `mask_dim = 20`.
 
+`alive_mask` and `observed_mask` have different meanings. A real enemy can be
+alive but unobserved:
+
+```text
+valid=1, alive=1, observed=0
+```
+
+In that case the actor does not receive enemy geometry or track source, so the
+enemy feature remains zero, while the mask still preserves the enemy's true
+alive status. Dead real entities use `valid=1, alive=0, observed=0`; padding
+uses `valid=0, alive=0, observed=0`.
+
 Flattening:
 
 ```text
@@ -163,3 +177,6 @@ This observation mode does not change:
 - termination;
 - aircraft XML;
 - MAPPO algorithm.
+
+The default MAV missile count is `0`. Armed MAV scenarios must set
+`num_missiles` explicitly in their YAML config.
