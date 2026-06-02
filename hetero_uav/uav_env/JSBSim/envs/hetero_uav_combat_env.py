@@ -83,6 +83,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         aircraft_type_params: dict | None = None,
         **kwargs,
     ):
+        self._initial_states = kwargs.pop("initial_states", None) or {}
         super().__init__(*args, **kwargs)
         self.aircraft_type_params = deepcopy(DEFAULT_AIRCRAFT_TYPE_PARAMS)
         if aircraft_type_params:
@@ -215,6 +216,34 @@ class HeteroUavCombatEnv(UavCombatEnv):
         init = super()._make_init_state(color, index)
 
         agent_id = f"{color.lower()}_{index}"
+
+        # ---- per-agent initial_states override (paper-aligned configs) ----
+        override = self._initial_states.get(agent_id, {})
+        if "lon" in override:
+            init["ic\\long-gc-deg" if "ic\\long-gc-deg" in init
+                 else "ic/long-gc-deg"] = float(override["lon"])
+        if "lat" in override:
+            init["ic\\lat-geod-deg" if "ic\\lat-geod-deg" in init
+                 else "ic/lat-geod-deg"] = float(override["lat"])
+        if "altitude_m" in override:
+            alt_ft = float(override["altitude_m"]) * FT_PER_M
+            if "ic\\h-sl-ft" in init:
+                init["ic\\h-sl-ft"] = alt_ft
+            elif "ic/h-sl-ft" in init:
+                init["ic/h-sl-ft"] = alt_ft
+        if "speed_mps" in override:
+            speed_fps = float(override["speed_mps"]) * FPS_PER_MPS
+            if "ic\\u-fps" in init:
+                init["ic\\u-fps"] = speed_fps
+            elif "ic/u-fps" in init:
+                init["ic/u-fps"] = speed_fps
+        if "yaw_deg" in override:
+            if "ic\\psi-true-deg" in init:
+                init["ic\\psi-true-deg"] = float(override["yaw_deg"])
+            elif "ic/psi-true-deg" in init:
+                init["ic/psi-true-deg"] = float(override["yaw_deg"])
+
+        # ---- type-based offsets ----
         offsets = self._init_offsets_for(agent_id)
         alt_offset_m = offsets["altitude_offset_m"]
         speed_offset_mps = offsets["speed_offset_mps"]
