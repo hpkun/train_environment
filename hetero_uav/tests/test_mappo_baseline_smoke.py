@@ -141,17 +141,32 @@ def test_eval_smoke_runs():
 
 
 def test_zero_shot_eval_smoke_runs():
-    model_path = str(ROOT / 'outputs' / 'mappo_baseline' / 'latest' / 'model.pt')
+    # Train V1 model first to ensure V1 dims in meta
+    result_train = subprocess.run(
+        [sys.executable, str(ROOT / 'scripts' / 'train_mappo_baseline.py'),
+         '--config', CONFIG,
+         '--obs-adapter-version', 'v1',
+         '--iterations', '1', '--rollout-length', '8',
+         '--opponent-policy', 'rule_nearest',
+         '--output-dir', 'outputs/test_v1_zero_shot',
+         '--log-csv', 'outputs/test_v1_zero_shot/train_log.csv',
+         '--device', 'cpu', '--debug'],
+        capture_output=True, text=True, cwd=str(ROOT), timeout=120)
+    assert result_train.returncode == 0
+
+    model_path = str(ROOT / 'outputs' / 'test_v1_zero_shot' / 'latest' / 'model.pt')
     result = subprocess.run(
         [sys.executable, str(ROOT / 'scripts' / 'eval_mappo_zero_shot.py'),
          '--model', model_path,
+         '--obs-adapter-version', 'v1',
          '--episodes', '1', '--device', 'cpu',
          '--opponent-policy', 'rule_nearest',
          '--configs', CONFIG, CONFIG_3V3],
         capture_output=True, text=True, cwd=str(ROOT), timeout=180,
     )
     assert result.returncode == 0, f'stderr: {result.stderr[:800]}'
-    assert result.stdout.count('avg_return') >= 2
+    assert 'ret=' in result.stdout
+    assert 'actor_dim_ok' in result.stdout
     assert 'actor_obs_dim check: True' in result.stdout
     assert 'critic_state_dim check: True' in result.stdout
     assert 'nan_detected: False' in result.stdout

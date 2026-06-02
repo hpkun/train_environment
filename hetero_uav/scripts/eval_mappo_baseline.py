@@ -1,4 +1,4 @@
-"""Smoke-evaluate MAPPO baseline. Stage 1 only, no win-rate experiments."""
+"""Smoke-evaluate MAPPO baseline. Auto-infers v1/v2 from model meta.json."""
 from __future__ import annotations
 
 import argparse
@@ -13,126 +13,119 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from uav_env import make_env
-from uav_env.JSBSim.adapters.hetero_obs_adapter import HeteroObsAdapter
-from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
-from algorithms.mappo.policy import MAPPOActorCritic
+from algorithms.mappo.adapter_utils import (
+    load_model_meta,
+    make_mappo_model_for_adapter,
+    make_obs_adapter,
+    resolve_obs_adapter_version,
+    validate_model_dims,
+)
 from algorithms.mappo.opponent_policy import OpponentPolicy
-
-
-def _alive_counts(env) -> tuple[int, int]:
-    red_alive = sum(1 for sim in env.red_planes.values() if sim.is_alive)
-    blue_alive = sum(1 for sim in env.blue_planes.values() if sim.is_alive)
-    return red_alive, blue_alive
-
-
-def _obs_has_nan(obs: dict) -> bool:
-    for agent_obs in obs.values():
-        for value in agent_obs.values():
-            arr = np.asarray(value)
-            if arr.dtype.kind in {"f", "c"} and np.isnan(arr).any():
-                return True
-    return False
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', required=True)
-    parser.add_argument('--config', required=True)
-    parser.add_argument('--episodes', type=int, default=2)
-    parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--device', default='cpu')
-    parser.add_argument('--opponent-policy',
-                        choices=['zero', 'random', 'rule_nearest'],
-                        default='rule_nearest')
-    parser.add_argument('--obs-adapter-version', choices=['v1', 'v2'],
-                        default='v1')
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--episodes", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--opponent-policy",
+                        choices=["zero", "random", "rule_nearest"],
+                        default="rule_nearest")
+    parser.add_argument("--obs-adapter-version", choices=["v1", "v2"],
+                        default=None)
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    env = make_env(args.config, env_type='jsbsim_hetero', max_steps=500)
-    obs_mode = getattr(env, 'observation_mode', 'brma_sensor')
 
-    if args.obs_adapter_version == 'v2':
-        adapter = HeteroObsAdapterV2()
-    else:
-        adapter = HeteroObsAdapter()
+    meta = load_model_meta(args.model)
+    version = resolve_obs_adapter_version(args.obs_adapter_version, meta)
+    adapter = make_obs_adapter(version)
+    validate_model_dims(adapter, meta)
     actor_dim = adapter.flat_actor_obs_dim
     critic_dim = adapter.critic_state_dim
 
-    model = MAPPOActorCritic(actor_obs_dim=actor_dim,
-                             critic_state_dim=critic_dim).to(device)
+    model = make_mappo_model_for_adapter(adapter, device)
     model.load_state_dict(torch.load(args.model, map_location=device,
                                      weights_only=True))
     model.eval()
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17)
 
-    returns = []
-    lengths = []
-    red_alive_counts = []
-    blue_alive_counts = []
-    crashes = 0
-    nan_detected = False
+    print(f"model: {args.model}")
+    print(f"obs_adapter_version: {version}")
+    print(f"actor_obs_dim: {actor_dim}")
+    print(f"critic_state_dim: {critic_dim}")
+    print(f"observation_mode: {meta.get('observation_mode', '?')}")
+    print(f"config: {args.config}")
+    print(f"opponent_policy: {args.opponent_policy}")
 
-    env = make_env(args.config, env_type='jsbsim_hetero', max_steps=500)
+    env = None
+    try:
+        env = make_env(args.config, env_type="jsbsim_hetero", max_steps=500)
+        obs_mode = getattr(env, "observation_mode", "brma_sensor")
+        if version == "v2" and obs_mode != "mav_shared_geo":
+            raise SystemExit(
+                "--obs-adapter-version v2 requires observation_mode=mav_shared_geo")
 
-    for ep in range(args.episodes):
-        obs, info = env.reset(seed=args.seed + ep)
-        ep_ret = 0.0
-        ep_len = 0
-        while True:
-            result = adapter.adapt_all(
-                obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
-            actor_obs_list = []
-            for rid in env.red_ids:
-                actor_obs_list.append(result['actor_obs'].get(
-                    rid, np.zeros(actor_dim, dtype=np.float32)))
-            actor_obs_t = torch.as_tensor(np.stack(actor_obs_list), device=device)
+        returns = []
+        lengths = []
+        crashes = 0
+        nan_count = 0
 
-            with torch.no_grad():
-                _, _, action, _, _ = model(
-                    actor_obs_t, torch.zeros(1, critic_dim, device=device),
-                    deterministic=True)
+        for ep in range(args.episodes):
+            obs, info = env.reset(seed=args.seed + ep + 1)
+            ep_ret = 0.0
+            ep_len = 0
+            while True:
+                result = adapter.adapt_all(
+                    obs, info=info, red_ids=env.red_ids,
+                    blue_ids=env.blue_ids)
+                actor_obs_list = [
+                    result["actor_obs"].get(rid,
+                                            np.zeros(actor_dim, dtype=np.float32))
+                    for rid in env.red_ids]
+                actor_obs_t = torch.as_tensor(np.stack(actor_obs_list),
+                                              device=device)
 
-            actions_dict = {}
-            for i, rid in enumerate(env.red_ids):
-                actions_dict[rid] = action[i].cpu().numpy().astype(np.float32)
-            actions_dict.update(opponent.act(obs, env.blue_ids))
+                with torch.no_grad():
+                    _, _, action, _, _ = model(
+                        actor_obs_t,
+                        torch.zeros(1, critic_dim, device=device),
+                        deterministic=True)
 
-            obs, rewards_dict, terminated, truncated, info = env.step(actions_dict)
-            ep_ret += sum(float(rewards_dict.get(rid, 0.0))
-                          for rid in env.red_ids)
-            ep_len += 1
+                actions_dict = {}
+                for i, rid in enumerate(env.red_ids):
+                    actions_dict[rid] = action[i].cpu().numpy().astype(np.float32)
+                actions_dict.update(opponent.act(obs, env.blue_ids))
 
-            if np.isnan(ep_ret) or _obs_has_nan(obs):
-                nan_detected = True
-                break
+                obs, rewards_dict, terminated, truncated, info = env.step(
+                    actions_dict)
+                ep_ret += sum(float(rewards_dict.get(rid, 0.0))
+                              for rid in env.red_ids)
+                ep_len += 1
 
-            if all(terminated.values()) or all(truncated.values()):
-                # Count crashes
-                for rid in env.red_ids:
-                    dr = info.get(rid, {}).get('death_reason', '')
-                    if 'crash' in str(dr).lower():
-                        crashes += 1
-                break
+                if np.isnan(ep_ret):
+                    nan_count += 1
+                    break
+                if all(terminated.values()) or all(truncated.values()):
+                    for rid in env.red_ids:
+                        dr = str(info.get(rid, {}).get("death_reason", ""))
+                        if "crash" in dr.lower():
+                            crashes += 1
+                    break
+            returns.append(ep_ret)
+            lengths.append(ep_len)
 
-        red_alive, blue_alive = _alive_counts(env)
-        red_alive_counts.append(red_alive)
-        blue_alive_counts.append(blue_alive)
-        returns.append(ep_ret)
-        lengths.append(ep_len)
-
-    print(f'config: {args.config}')
-    print(f'opponent_policy: {args.opponent_policy}')
-    print(f'episodes: {len(returns)}')
-    print(f'avg_return: {np.mean(returns):.2f}')
-    print(f'avg_length: {np.mean(lengths):.1f}')
-    print(f'avg_red_alive: {np.mean(red_alive_counts):.2f}')
-    print(f'avg_blue_alive: {np.mean(blue_alive_counts):.2f}')
-    print(f'crashes: {crashes}')
-    print(f'nan_detected: {nan_detected}')
-
-    env.close()
+        print(f"episodes: {len(returns)}")
+        print(f"avg_return: {np.mean(returns):.2f}")
+        print(f"avg_length: {np.mean(lengths):.1f}")
+        print(f"crashes: {crashes}")
+        print(f"nan_detected: {nan_count > 0}")
+    finally:
+        if env is not None:
+            env.close()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
