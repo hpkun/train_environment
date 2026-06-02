@@ -4,10 +4,37 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import gymnasium
+import numpy as np
+
 from ..env import UavCombatEnv
 
 FT_PER_M = 1.0 / 0.3048
 FPS_PER_MPS = 1.0 / 0.3048
+TYPE_VOCAB = ["mav", "attack_uav", "scout_uav", "interceptor_uav"]
+ROLE_VOCAB = ["mav", "attack_uav", "scout_uav", "interceptor_uav"]
+
+
+def _type_onehot(type_name: str) -> np.ndarray:
+    vec = np.zeros(len(TYPE_VOCAB), dtype=np.float32)
+    if type_name in TYPE_VOCAB:
+        vec[TYPE_VOCAB.index(type_name)] = 1.0
+    return vec
+
+
+def _role_onehot(role_name: str) -> np.ndarray:
+    vec = np.zeros(len(ROLE_VOCAB), dtype=np.float32)
+    if role_name in ROLE_VOCAB:
+        vec[ROLE_VOCAB.index(role_name)] = 1.0
+    return vec
+
+
+def _metadata_matrix(agent_ids: list[str], values: dict[str, str], kind: str) -> np.ndarray:
+    width = len(TYPE_VOCAB) if kind == "type" else len(ROLE_VOCAB)
+    if not agent_ids:
+        return np.zeros((0, width), dtype=np.float32)
+    onehot = _type_onehot if kind == "type" else _role_onehot
+    return np.stack([onehot(values.get(aid, "")) for aid in agent_ids], axis=0).astype(np.float32)
 
 DEFAULT_AIRCRAFT_TYPE_PARAMS = {
     "mav": {
@@ -74,6 +101,49 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.agent_roles: dict[str, str] = {}
         self.agent_models: dict[str, str] = {}
         self._refresh_agent_metadata()
+        self._extend_hetero_observation_space()
+
+    def _extend_hetero_observation_space(self) -> None:
+        metadata_spaces = {
+            "ego_type": gymnasium.spaces.Box(
+                low=0.0, high=1.0, shape=(len(TYPE_VOCAB),), dtype=np.float32),
+            "ego_role": gymnasium.spaces.Box(
+                low=0.0, high=1.0, shape=(len(ROLE_VOCAB),), dtype=np.float32),
+        }
+
+        for aid in self.blue_ids:
+            spaces = dict(self.observation_space.spaces[aid].spaces)
+            spaces.update(metadata_spaces)
+            spaces["ally_types"] = gymnasium.spaces.Box(
+                low=0.0, high=1.0,
+                shape=(self.max_num_blue - 1, len(TYPE_VOCAB)), dtype=np.float32)
+            spaces["ally_roles"] = gymnasium.spaces.Box(
+                low=0.0, high=1.0,
+                shape=(self.max_num_blue - 1, len(ROLE_VOCAB)), dtype=np.float32)
+            spaces["enemy_types"] = gymnasium.spaces.Box(
+                low=0.0, high=1.0,
+                shape=(self.max_num_red, len(TYPE_VOCAB)), dtype=np.float32)
+            spaces["enemy_roles"] = gymnasium.spaces.Box(
+                low=0.0, high=1.0,
+                shape=(self.max_num_red, len(ROLE_VOCAB)), dtype=np.float32)
+            self.observation_space.spaces[aid] = gymnasium.spaces.Dict(spaces)
+
+        for aid in self.red_ids:
+            spaces = dict(self.observation_space.spaces[aid].spaces)
+            spaces.update(metadata_spaces)
+            spaces["ally_types"] = gymnasium.spaces.Box(
+                low=0.0, high=1.0,
+                shape=(self.max_num_red - 1, len(TYPE_VOCAB)), dtype=np.float32)
+            spaces["ally_roles"] = gymnasium.spaces.Box(
+                low=0.0, high=1.0,
+                shape=(self.max_num_red - 1, len(ROLE_VOCAB)), dtype=np.float32)
+            spaces["enemy_types"] = gymnasium.spaces.Box(
+                low=0.0, high=1.0,
+                shape=(self.max_num_blue, len(TYPE_VOCAB)), dtype=np.float32)
+            spaces["enemy_roles"] = gymnasium.spaces.Box(
+                low=0.0, high=1.0,
+                shape=(self.max_num_blue, len(ROLE_VOCAB)), dtype=np.float32)
+            self.observation_space.spaces[aid] = gymnasium.spaces.Dict(spaces)
 
     @staticmethod
     def _fit_agent_types(values: list[str] | None, count: int, default: list[str]) -> list[str]:
@@ -96,6 +166,23 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.agent_types[agent_id] = type_name
         self.agent_roles[agent_id] = str(params.get("role", type_name))
         self.agent_models[agent_id] = str(params.get("aircraft_model", "f16"))
+
+    def _get_agent_obs(self, agent_id: str) -> dict:
+        obs = super()._get_agent_obs(agent_id)
+        if agent_id.startswith("blue"):
+            ally_ids = [aid for aid in self.blue_ids if aid != agent_id]
+            enemy_ids = list(self.red_ids)
+        else:
+            ally_ids = [aid for aid in self.red_ids if aid != agent_id]
+            enemy_ids = list(self.blue_ids)
+
+        obs["ego_type"] = _type_onehot(self.agent_types.get(agent_id, ""))
+        obs["ego_role"] = _role_onehot(self.agent_roles.get(agent_id, ""))
+        obs["ally_types"] = _metadata_matrix(ally_ids, self.agent_types, "type")
+        obs["ally_roles"] = _metadata_matrix(ally_ids, self.agent_roles, "role")
+        obs["enemy_types"] = _metadata_matrix(enemy_ids, self.agent_types, "type")
+        obs["enemy_roles"] = _metadata_matrix(enemy_ids, self.agent_roles, "role")
+        return obs
 
     def _aircraft_model_for(self, agent_id: str, color: str, index: int) -> str:
         return self.agent_models.get(agent_id, "f16")
@@ -149,4 +236,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         return init
 
 
-__all__ = ["HeteroUavCombatEnv"]
+__all__ = [
+    "HeteroUavCombatEnv",
+    "ROLE_VOCAB",
+    "TYPE_VOCAB",
+    "_role_onehot",
+    "_type_onehot",
+]
