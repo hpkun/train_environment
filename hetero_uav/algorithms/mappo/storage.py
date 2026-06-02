@@ -1,71 +1,68 @@
+"""Single-environment rollout buffer for MAPPO baseline."""
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 import numpy as np
 import torch
 
 
-@dataclass
-class RolloutBatch:
-    obs: torch.Tensor
-    states: torch.Tensor
-    actions: torch.Tensor
-    old_log_probs: torch.Tensor
-    returns: torch.Tensor
-    advantages: torch.Tensor
+class RolloutBuffer:
+    """Stores rollout trajectories for one env.
 
+    Fields per timestep t:
+        actor_obs[t]   : (num_red, 140)
+        critic_state[t]: (700,)
+        actions[t]     : (num_red, 3)
+        log_probs[t]   : (num_red,)
+        rewards[t]     : (num_red,)
+        dones[t]       : (num_red,)
+        value          : scalar (team value)
+        red_valid[t]   : (5,)
+    """
 
-class RolloutStorage:
-    def __init__(self, rollout_steps: int, num_agents: int, obs_dim: int,
-                 state_dim: int, action_dim: int, gamma: float, gae_lambda: float,
-                 device: torch.device):
-        self.rollout_steps = rollout_steps
-        self.num_agents = num_agents
-        self.gamma = gamma
-        self.gae_lambda = gae_lambda
-        self.device = device
-        self.obs = np.zeros((rollout_steps, num_agents, obs_dim), dtype=np.float32)
-        self.states = np.zeros((rollout_steps, state_dim), dtype=np.float32)
-        self.actions = np.zeros((rollout_steps, num_agents, action_dim), dtype=np.float32)
-        self.log_probs = np.zeros((rollout_steps, num_agents), dtype=np.float32)
-        self.rewards = np.zeros((rollout_steps, num_agents), dtype=np.float32)
-        self.dones = np.zeros((rollout_steps, num_agents), dtype=np.float32)
-        self.values = np.zeros((rollout_steps, num_agents), dtype=np.float32)
-        self.step = 0
+    def __init__(self, max_len: int, num_red: int,
+                 actor_dim: int, critic_dim: int, action_dim: int):
+        self.max_len = max_len
+        self.num_red = num_red
+        self.pos = 0
 
-    def insert(self, obs, state, actions, log_probs, values, rewards, dones) -> None:
-        i = self.step
-        self.obs[i] = obs
-        self.states[i] = state
-        self.actions[i] = actions
-        self.log_probs[i] = log_probs
-        self.values[i] = values
-        self.rewards[i] = rewards
-        self.dones[i] = dones.astype(np.float32)
-        self.step += 1
+        self.actor_obs     = np.zeros((max_len, num_red, actor_dim), dtype=np.float32)
+        self.critic_state  = np.zeros((max_len, critic_dim), dtype=np.float32)
+        self.actions       = np.zeros((max_len, num_red, action_dim), dtype=np.float32)
+        self.log_probs     = np.zeros((max_len, num_red), dtype=np.float32)
+        self.rewards       = np.zeros((max_len, num_red), dtype=np.float32)
+        self.dones         = np.zeros((max_len, num_red), dtype=np.float32)
+        self.values        = np.zeros(max_len, dtype=np.float32)
+        self.red_valid     = np.zeros((max_len, 5), dtype=np.float32)
+        self.full = False
 
-    def compute_batch(self, next_value: np.ndarray) -> RolloutBatch:
-        advantages = np.zeros_like(self.rewards)
-        last_gae = np.zeros((self.num_agents,), dtype=np.float32)
-        next_values = next_value.astype(np.float32)
-        for t in reversed(range(self.rollout_steps)):
-            nonterminal = 1.0 - self.dones[t]
-            delta = self.rewards[t] + self.gamma * next_values * nonterminal - self.values[t]
-            last_gae = delta + self.gamma * self.gae_lambda * nonterminal * last_gae
-            advantages[t] = last_gae
-            next_values = self.values[t]
-        returns = advantages + self.values
-        adv = advantages.reshape(-1)
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-        states_repeated = np.repeat(self.states[:, None, :], self.num_agents, axis=1)
-        return RolloutBatch(
-            obs=torch.as_tensor(self.obs.reshape(-1, self.obs.shape[-1]), device=self.device),
-            states=torch.as_tensor(states_repeated.reshape(-1, self.states.shape[-1]),
-                                   device=self.device),
-            actions=torch.as_tensor(self.actions.reshape(-1, self.actions.shape[-1]),
-                                    device=self.device),
-            old_log_probs=torch.as_tensor(self.log_probs.reshape(-1), device=self.device),
-            returns=torch.as_tensor(returns.reshape(-1), device=self.device),
-            advantages=torch.as_tensor(adv, device=self.device),
+    def store(self, actor_obs, critic_state, actions, log_probs,
+              rewards, dones, value, red_valid):
+        idx = self.pos
+        self.actor_obs[idx]    = actor_obs
+        self.critic_state[idx] = critic_state
+        self.actions[idx]      = actions
+        self.log_probs[idx]    = log_probs
+        self.rewards[idx]      = rewards
+        self.dones[idx]        = dones
+        self.values[idx]       = value
+        self.red_valid[idx]    = red_valid
+        self.pos += 1
+        if self.pos >= self.max_len:
+            self.full = True
+
+    def __len__(self):
+        return self.pos
+
+    def get(self, device):
+        """Return tensors for PPO update."""
+        n = self.pos
+        return (
+            torch.as_tensor(self.actor_obs[:n], device=device),
+            torch.as_tensor(self.critic_state[:n], device=device),
+            torch.as_tensor(self.actions[:n], device=device),
+            torch.as_tensor(self.log_probs[:n], device=device),
+            torch.as_tensor(self.rewards[:n], device=device),
+            torch.as_tensor(self.dones[:n], device=device),
+            torch.as_tensor(self.values[:n], device=device),
+            torch.as_tensor(self.red_valid[:n], device=device),
         )

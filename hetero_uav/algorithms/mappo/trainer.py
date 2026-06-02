@@ -1,83 +1,102 @@
+"""PPO update logic for shared-policy MAPPO baseline."""
 from __future__ import annotations
 
-from pathlib import Path
-
+import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .policy import ActorCritic
+from .utils import compute_gae
 
 
-class MAPPOTrainer:
-    def __init__(self, obs_dim: int, state_dim: int, action_dim: int,
-                 hidden_dim: int, lr: float, clip_param: float,
-                 value_coef: float, entropy_coef: float, max_grad_norm: float,
-                 device: torch.device):
-        self.model = ActorCritic(obs_dim, state_dim, action_dim, hidden_dim).to(device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+class PPOTrainer:
+    """Train MAPPO actor-critic with simple batch PPO."""
+
+    def __init__(self, model, lr_actor=5e-4, lr_critic=5e-4,
+                 clip_param=0.2, entropy_coef=0.01, value_coef=0.5,
+                 max_grad_norm=10.0, ppo_epochs=4,
+                 gamma=0.99, gae_lambda=0.95):
+        self.model = model
+        self.actor_opt = torch.optim.Adam(model.actor.parameters(), lr=lr_actor)
+        self.actor_opt.add_param_group(
+            {'params': [model.action_log_std], 'lr': lr_actor})
+        self.critic_opt = torch.optim.Adam(model.critic.parameters(), lr=lr_critic)
+
         self.clip_param = clip_param
-        self.value_coef = value_coef
         self.entropy_coef = entropy_coef
+        self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
-        self.device = device
+        self.ppo_epochs = ppo_epochs
+        self.gamma = gamma
+        self.gae_lambda = gae_lambda
 
-    def update(self, batch, epochs: int, minibatch_size: int) -> dict[str, float]:
-        n = batch.obs.shape[0]
-        stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
-        updates = 0
-        for _ in range(epochs):
-            indices = torch.randperm(n, device=self.device)
-            for start in range(0, n, minibatch_size):
-                idx = indices[start:start + minibatch_size]
-                log_probs, entropy, values = self.model.evaluate_actions(
-                    batch.obs[idx], batch.states[idx], batch.actions[idx])
-                ratio = torch.exp(log_probs - batch.old_log_probs[idx])
-                surr1 = ratio * batch.advantages[idx]
-                surr2 = torch.clamp(ratio, 1.0 - self.clip_param,
-                                    1.0 + self.clip_param) * batch.advantages[idx]
-                policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = F.mse_loss(values, batch.returns[idx])
-                entropy_loss = entropy.mean()
-                loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy_loss
+    def update(self, buffer):
+        (actor_obs, critic_state, actions, old_log_probs,
+         rewards, dones, values, red_valid) = buffer.get(
+            next(self.model.parameters()).device)
 
-                self.optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+        T, num_red = rewards.shape
+        # Use mean reward over valid agents as team reward
+        valid_count = red_valid[:, :num_red].sum(dim=-1).clamp(min=1)
+        team_reward = (rewards * red_valid[:, :num_red]).sum(dim=-1) / valid_count
 
-                stats["policy_loss"] += float(policy_loss.item())
-                stats["value_loss"] += float(value_loss.item())
-                stats["entropy"] += float(entropy_loss.item())
-                updates += 1
-        return {k: v / max(1, updates) for k, v in stats.items()}
+        # team value + bootstrap
+        with torch.no_grad():
+            next_val = self.model.critic(critic_state[-1:]).squeeze(-1)
+        team_values = values  # scalar per step
+        all_values = torch.cat([team_values, next_val]).to(rewards.device)
 
-    def save(self, path: str | Path, extra: dict | None = None) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "model_state_dict": self.model.state_dict(),
-            "obs_dim": self.model.obs_dim,
-            "state_dim": self.model.state_dim,
-            "action_dim": self.model.action_dim,
+        team_dones = (dones.sum(dim=-1) > 0).float()
+
+        advantages, returns = compute_gae(
+            team_reward, all_values, team_dones,
+            self.gamma, self.gae_lambda)
+
+        if advantages.numel() > 1:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        actor_losses = []
+        critic_losses = []
+        entropies = []
+
+        for _ in range(self.ppo_epochs):
+            self.actor_opt.zero_grad()
+            self.critic_opt.zero_grad()
+
+            new_log_prob, entropy, new_values = self.model.evaluate_actions(
+                actor_obs.view(-1, self.model.actor_obs_dim),
+                critic_state,
+                actions.view(-1, self.model.action_dim),
+            )
+            new_log_prob = new_log_prob.view(T, num_red)
+            entropy = entropy.view(T, num_red)
+            new_values = new_values.squeeze(-1)
+
+            # Mask invalid agents
+            valid = red_valid[:, :num_red]
+            ratio = torch.exp(new_log_prob - old_log_probs)
+            surr1 = ratio * advantages.unsqueeze(-1)
+            surr2 = torch.clamp(ratio, 1 - self.clip_param, 1 + self.clip_param)                     * advantages.unsqueeze(-1)
+            policy_loss = -torch.min(surr1, surr2)
+            policy_loss = (policy_loss * valid).sum() / valid.sum().clamp(min=1)
+
+            value_loss = F.mse_loss(new_values, returns) * self.value_coef
+
+            ent_loss = -(entropy * valid).sum() / valid.sum().clamp(min=1)
+
+            loss = policy_loss + value_loss + self.entropy_coef * ent_loss
+            loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.max_grad_norm)
+            self.actor_opt.step()
+            self.critic_opt.step()
+
+            actor_losses.append(policy_loss.item())
+            critic_losses.append(value_loss.item())
+            entropies.append(-ent_loss.item())
+
+        return {
+            'actor_loss': float(np.mean(actor_losses)),
+            'critic_loss': float(np.mean(critic_losses)),
+            'entropy': float(np.mean(entropies)),
         }
-        if extra:
-            payload.update(extra)
-        torch.save(payload, path)
-
-    @classmethod
-    def load(cls, path: str | Path, device: torch.device, hidden_dim: int = 128):
-        payload = torch.load(path, map_location=device)
-        trainer = cls(
-            obs_dim=int(payload["obs_dim"]),
-            state_dim=int(payload["state_dim"]),
-            action_dim=int(payload["action_dim"]),
-            hidden_dim=hidden_dim,
-            lr=1e-4,
-            clip_param=0.2,
-            value_coef=0.5,
-            entropy_coef=0.0,
-            max_grad_norm=10.0,
-            device=device,
-        )
-        trainer.model.load_state_dict(payload["model_state_dict"])
-        return trainer, payload

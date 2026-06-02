@@ -1,1 +1,1 @@
-"""Algorithm baselines for hetero_uav."""
+"""Algorithm implementations for heterogeneous UAV/MAV combat."""

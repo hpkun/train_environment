@@ -1,60 +1,77 @@
+"""Plain shared-policy MAPPO actor-critic for heterogeneous compositions."""
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+import torch.nn.functional as F
 
 
-def mlp(input_dim: int, hidden_dim: int, output_dim: int) -> nn.Sequential:
-    return nn.Sequential(
-        nn.Linear(input_dim, hidden_dim),
-        nn.Tanh(),
-        nn.Linear(hidden_dim, hidden_dim),
-        nn.Tanh(),
-        nn.Linear(hidden_dim, output_dim),
-    )
+class MAPPOActorCritic(nn.Module):
+    """Shared-actor centralized-critic for MAPPO baseline.
 
+    Actor:  MLP [140, 256, 128] -> Gaussian(mean(3,), learnable log_std(3,))
+    Critic: MLP [700, 256, 128, 1]
+    """
 
-@dataclass
-class ActionBatch:
-    actions: torch.Tensor
-    log_probs: torch.Tensor
-    values: torch.Tensor
-
-
-class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int, state_dim: int, action_dim: int,
-                 hidden_dim: int = 128, log_std_init: float = -0.5):
+    def __init__(self, actor_obs_dim: int = 140, critic_state_dim: int = 700,
+                 action_dim: int = 3):
         super().__init__()
-        self.obs_dim = obs_dim
-        self.state_dim = state_dim
+        self.actor_obs_dim = actor_obs_dim
+        self.critic_state_dim = critic_state_dim
         self.action_dim = action_dim
-        self.actor = mlp(obs_dim, hidden_dim, action_dim)
-        self.critic = mlp(state_dim, hidden_dim, 1)
-        self.log_std = nn.Parameter(torch.full((action_dim,), log_std_init))
 
-    def distribution(self, obs: torch.Tensor) -> Normal:
-        mean = torch.tanh(self.actor(obs))
-        std = torch.exp(self.log_std).expand_as(mean)
-        return Normal(mean, std)
+        self.actor = nn.Sequential(
+            nn.Linear(actor_obs_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 128),
+            nn.Tanh(),
+            nn.Linear(128, action_dim),
+        )
+        self.action_log_std = nn.Parameter(
+            torch.full((action_dim,), -1.204))  # ln(0.3)
 
-    def value(self, state: torch.Tensor) -> torch.Tensor:
-        return self.critic(state).squeeze(-1)
+        self.critic = nn.Sequential(
+            nn.Linear(critic_state_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 128),
+            nn.Tanh(),
+            nn.Linear(128, 1),
+        )
 
-    @torch.no_grad()
-    def act(self, obs: torch.Tensor, state: torch.Tensor) -> ActionBatch:
-        dist = self.distribution(obs)
-        actions = dist.sample().clamp(-1.0, 1.0)
-        log_probs = dist.log_prob(actions).sum(dim=-1)
-        values = self.value(state)
-        return ActionBatch(actions=actions, log_probs=log_probs, values=values)
+    def forward(self, actor_obs, critic_state, deterministic: bool = False):
+        """Return (action_dist, value, action, log_prob, entropy)."""
+        mean = self.actor(actor_obs)
+        mean = torch.nan_to_num(mean, nan=0.0, posinf=0.0, neginf=0.0)
+        mean = mean.clamp(-0.999, 0.999)
+        sigma = torch.exp(self.action_log_std).clamp(min=1e-4)
+        sigma = sigma.unsqueeze(0).expand_as(mean)
+        dist = torch.distributions.Normal(mean, sigma)
 
-    def evaluate_actions(self, obs: torch.Tensor, state: torch.Tensor,
-                         actions: torch.Tensor):
-        dist = self.distribution(obs)
-        log_probs = dist.log_prob(actions).sum(dim=-1)
-        entropy = dist.entropy().sum(dim=-1)
-        values = self.value(state)
-        return log_probs, entropy, values
+        if deterministic:
+            action = mean.clamp(-1.0, 1.0)
+        else:
+            action = dist.sample().clamp(-1.0, 1.0)
+
+        log_prob = dist.log_prob(action).sum(dim=-1)
+
+        entropy = dist.entropy().mean(dim=-1)
+
+        value = self.critic(critic_state).squeeze(-1)
+
+        return dist, value, action, log_prob, entropy
+
+    def evaluate_actions(self, actor_obs, critic_state, actions):
+        """Evaluate given actions (for PPO update)."""
+        mean = self.actor(actor_obs)
+        mean = torch.nan_to_num(mean, nan=0.0, posinf=0.0, neginf=0.0)
+        mean = mean.clamp(-0.999, 0.999)
+        sigma = torch.exp(self.action_log_std).clamp(min=1e-4)
+        sigma = sigma.unsqueeze(0).expand_as(mean)
+        dist = torch.distributions.Normal(mean, sigma)
+
+        new_log_prob = dist.log_prob(actions).sum(dim=-1)
+        entropy = dist.entropy().mean(dim=-1)
+
+        value = self.critic(critic_state).squeeze(-1)
+
+        return new_log_prob, entropy, value

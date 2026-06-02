@@ -1,15 +1,18 @@
+"""GAE and utility functions for MAPPO baseline."""
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
-import yaml
+import torch
 
 
-def load_yaml(path: str | Path) -> dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def episode_outcome(info: dict) -> bool:
-    return info.get("winner") == "red"
+def compute_gae(rewards, values, dones, gamma: float, lam: float):
+    """Compute GAE advantages and returns."""
+    T = len(rewards)
+    advantages = torch.zeros(T, device=rewards.device)
+    gae = 0.0
+    for t in reversed(range(T)):
+        next_val = values[t + 1] * (1.0 - dones[t])
+        delta = rewards[t] + gamma * next_val - values[t]
+        gae = delta + gamma * lam * (1.0 - dones[t]) * gae
+        advantages[t] = gae
+    returns = advantages + values[:T]
+    return advantages, returns
