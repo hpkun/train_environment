@@ -229,6 +229,30 @@ If `jsbsim` is not installed, model-file checks still run, command-line scripts
 print install hints, and backend execution tests are skipped with an explicit
 dependency message.
 
+## Formal Heterogeneous Composition Configs
+
+Formal JSBSim train/test composition configs are under
+`uav_env/JSBSim/configs/`:
+
+- `hetero_train_2v2_mav_attack.yaml`
+- `hetero_test_3v3_mav_2attack.yaml`
+- `hetero_test_3v3_mav_attack_scout.yaml`
+- `hetero_test_3v3_mav_attack_interceptor.yaml`
+
+Use the composition diagnostic before starting MAPPO work:
+
+```bash
+python scripts/diagnose_hetero_compositions.py
+pytest tests/test_jsbsim_hetero_compositions.py
+```
+
+The older `uav_env/JSBSim/configs/hetero_2v2_mav_attack.yaml` is retained as a
+debug alias. The formal train config is
+`hetero_train_2v2_mav_attack.yaml`.
+
+MAPPO training should not start until composition configs and type/role
+observation fields pass these tests.
+
 Even with the simplified FDM, the environment now implements a minimal credible
 combat layer:
 
