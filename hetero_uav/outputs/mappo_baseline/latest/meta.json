@@ -1,1 +1,1 @@
-{"iterations": 1, "episodes": 0, "returns": [], "lengths": []}
+{"iterations": 1, "episodes": 0, "returns": [], "lengths": [], "red_alive": [], "blue_alive": [], "opponent_policy": "rule_nearest"}

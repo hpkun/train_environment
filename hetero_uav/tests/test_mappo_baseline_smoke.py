@@ -11,6 +11,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 
 CONFIG = 'uav_env/JSBSim/configs/hetero_train_2v2_mav_attack.yaml'
+CONFIG_3V3 = 'uav_env/JSBSim/configs/hetero_test_3v3_mav_attack_scout.yaml'
 
 
 def test_import_succeeds():
@@ -30,6 +31,43 @@ def test_actor_forward():
     assert value.shape == (2,)
     assert entropy.shape == (2,)
     assert torch.isfinite(action).all()
+
+
+def test_opponent_policy_zero_shape():
+    from algorithms.mappo.opponent_policy import OpponentPolicy
+    obs = {"blue_0": {}, "blue_1": {}}
+    actions = OpponentPolicy("zero").act(obs, ["blue_0", "blue_1"])
+    assert set(actions) == {"blue_0", "blue_1"}
+    for act in actions.values():
+        assert act.shape == (3,)
+        assert np.allclose(act, 0.0)
+
+
+def test_opponent_policy_random_range():
+    from algorithms.mappo.opponent_policy import OpponentPolicy
+    obs = {"blue_0": {}, "blue_1": {}}
+    actions = OpponentPolicy("random", seed=0).act(obs, ["blue_0", "blue_1"])
+    for act in actions.values():
+        assert act.shape == (3,)
+        assert np.all(act >= -1.0)
+        assert np.all(act <= 1.0)
+
+
+def test_opponent_policy_rule_nearest_range():
+    from algorithms.mappo.opponent_policy import OpponentPolicy
+    obs = {
+        "blue_0": {
+            "enemy_states": np.array([
+                [0.5, -0.2, 0.1, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0.1, 0.3, -0.2, 0, 0, 0, 0, 0, 0, 0, 0],
+            ], dtype=np.float32)
+        }
+    }
+    actions = OpponentPolicy("rule_nearest").act(obs, ["blue_0"])
+    act = actions["blue_0"]
+    assert act.shape == (3,)
+    assert np.all(act >= -1.0)
+    assert np.all(act <= 1.0)
 
 
 def test_critic_shape():
@@ -61,16 +99,25 @@ def test_adapter_plus_env():
         env.close()
 
 
-def test_train_smoke_runs():
-    """Train 1 iteration, 8-step rollout, debug mode."""
+def _run_train_smoke(opponent_policy: str):
     result = subprocess.run(
         [sys.executable, str(ROOT / 'scripts' / 'train_mappo_baseline.py'),
          '--config', CONFIG, '--iterations', '1', '--rollout-length', '8',
-         '--debug', '--device', 'cpu'],
+         '--debug', '--device', 'cpu',
+         '--opponent-policy', opponent_policy],
         capture_output=True, text=True, cwd=str(ROOT), timeout=120,
     )
     assert result.returncode == 0, f'stderr: {result.stderr[:800]}'
     assert 'Saved' in result.stdout
+    assert f'opponent_policy={opponent_policy}' in result.stdout
+
+
+def test_train_smoke_zero_runs():
+    _run_train_smoke('zero')
+
+
+def test_train_smoke_rule_nearest_runs():
+    _run_train_smoke('rule_nearest')
 
 
 def test_model_saved():
@@ -83,11 +130,31 @@ def test_eval_smoke_runs():
     result = subprocess.run(
         [sys.executable, str(ROOT / 'scripts' / 'eval_mappo_baseline.py'),
          '--model', model_path, '--config', CONFIG,
-         '--episodes', '1', '--device', 'cpu'],
+         '--episodes', '1', '--device', 'cpu',
+         '--opponent-policy', 'rule_nearest'],
         capture_output=True, text=True, cwd=str(ROOT), timeout=120,
     )
     assert result.returncode == 0, f'stderr: {result.stderr[:800]}'
     assert 'avg_return' in result.stdout
+    assert 'opponent_policy: rule_nearest' in result.stdout
+    assert 'nan_detected: False' in result.stdout
+
+
+def test_zero_shot_eval_smoke_runs():
+    model_path = str(ROOT / 'outputs' / 'mappo_baseline' / 'latest' / 'model.pt')
+    result = subprocess.run(
+        [sys.executable, str(ROOT / 'scripts' / 'eval_mappo_zero_shot.py'),
+         '--model', model_path,
+         '--episodes', '1', '--device', 'cpu',
+         '--opponent-policy', 'rule_nearest',
+         '--configs', CONFIG, CONFIG_3V3],
+        capture_output=True, text=True, cwd=str(ROOT), timeout=180,
+    )
+    assert result.returncode == 0, f'stderr: {result.stderr[:800]}'
+    assert result.stdout.count('avg_return') >= 2
+    assert 'actor_obs_dim check: True' in result.stdout
+    assert 'critic_state_dim check: True' in result.stdout
+    assert 'nan_detected: False' in result.stdout
 
 
 def test_no_nan_in_policy_init():

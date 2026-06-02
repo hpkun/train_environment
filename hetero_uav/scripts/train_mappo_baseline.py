@@ -17,8 +17,15 @@ if str(ROOT) not in sys.path:
 from uav_env import make_env
 from uav_env.JSBSim.adapters.hetero_obs_adapter import HeteroObsAdapter
 from algorithms.mappo.policy import MAPPOActorCritic
+from algorithms.mappo.opponent_policy import OpponentPolicy
 from algorithms.mappo.storage import RolloutBuffer
 from algorithms.mappo.trainer import PPOTrainer
+
+
+def _alive_counts(env) -> tuple[int, int]:
+    red_alive = sum(1 for sim in env.red_planes.values() if sim.is_alive)
+    blue_alive = sum(1 for sim in env.blue_planes.values() if sim.is_alive)
+    return red_alive, blue_alive
 
 
 def main():
@@ -30,6 +37,9 @@ def main():
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--output-dir', default='outputs/mappo_baseline')
     parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--opponent-policy',
+                        choices=['zero', 'random', 'rule_nearest'],
+                        default='rule_nearest')
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -42,6 +52,7 @@ def main():
     adapter = HeteroObsAdapter()
     model = MAPPOActorCritic().to(device)
     trainer = PPOTrainer(model)
+    opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17)
 
     num_red = env.max_num_red
     obs, info = env.reset(seed=args.seed)
@@ -49,11 +60,14 @@ def main():
     if args.debug:
         print(f'num_red={num_red} actor_obs_dim={model.actor_obs_dim} '
               f'critic_state_dim={model.critic_state_dim}')
+        print(f'opponent_policy={args.opponent_policy}')
 
     total_steps = 0
     episodes_completed = 0
     episode_returns = []
     episode_lengths = []
+    episode_red_alive = []
+    episode_blue_alive = []
 
     current_ep_returns = np.zeros(num_red, dtype=np.float32)
     current_ep_length = 0
@@ -92,8 +106,7 @@ def main():
             actions_dict = {}
             for i, rid in enumerate(env.red_ids):
                 actions_dict[rid] = action_np[i].astype(np.float32)
-            for bid in env.blue_ids:
-                actions_dict[bid] = np.zeros(3, dtype=np.float32)
+            actions_dict.update(opponent.act(obs, env.blue_ids))
 
             obs, rewards_dict, terminated, truncated, info = env.step(actions_dict)
 
@@ -116,6 +129,9 @@ def main():
                 episodes_completed += 1
                 episode_returns.append(float(current_ep_returns.mean()))
                 episode_lengths.append(current_ep_length)
+                red_alive, blue_alive = _alive_counts(env)
+                episode_red_alive.append(float(red_alive))
+                episode_blue_alive.append(float(blue_alive))
                 current_ep_returns[:] = 0.0
                 current_ep_length = 0
                 obs, info = env.reset(seed=args.seed + total_steps)
@@ -125,8 +141,18 @@ def main():
 
         avg_ret = np.mean(episode_returns[-10:]) if episode_returns else 0.0
         avg_len = np.mean(episode_lengths[-10:]) if episode_lengths else 0
+        current_red_alive, current_blue_alive = _alive_counts(env)
+        avg_red_alive = (np.mean(episode_red_alive[-10:])
+                         if episode_red_alive else float(current_red_alive))
+        avg_blue_alive = (np.mean(episode_blue_alive[-10:])
+                          if episode_blue_alive else float(current_blue_alive))
         print(f'Iter {iteration:3d} | steps={total_steps:5d} | '
               f'ret={avg_ret:+8.2f} | len={avg_len:.0f} | '
+              f'average_red_return={avg_ret:+.2f} | '
+              f'average_red_alive={avg_red_alive:.2f} | '
+              f'average_blue_alive={avg_blue_alive:.2f} | '
+              f'episode_count={episodes_completed} | '
+              f'opponent_policy={args.opponent_policy} | '
               f'actor={stats["actor_loss"]:+.4f} '
               f'critic={stats["critic_loss"]:+.4f} '
               f'ent={stats["entropy"]:.4f} | ep={episodes_completed}')
@@ -135,7 +161,10 @@ def main():
     model_path = f'{args.output_dir}/latest/model.pt'
     torch.save(model.state_dict(), model_path)
     meta = {'iterations': args.iterations, 'episodes': episodes_completed,
-            'returns': episode_returns, 'lengths': episode_lengths}
+            'returns': episode_returns, 'lengths': episode_lengths,
+            'red_alive': episode_red_alive,
+            'blue_alive': episode_blue_alive,
+            'opponent_policy': args.opponent_policy}
     with open(f'{args.output_dir}/latest/meta.json', 'w') as f:
         json.dump(meta, f)
     print(f'Saved {model_path}')
