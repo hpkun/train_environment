@@ -1,7 +1,11 @@
-"""Smoke train plain shared-policy MAPPO baseline. Stage 1 only."""
+"""Plain shared-policy MAPPO baseline. Stage 1 trainability diagnostics.
+
+Supports CSV logging, checkpoint saving, action stats, NaN detection.
+"""
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -31,8 +35,8 @@ def _alive_counts(env) -> tuple[int, int]:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
-    parser.add_argument('--iterations', type=int, default=2)
-    parser.add_argument('--rollout-length', type=int, default=32)
+    parser.add_argument('--iterations', type=int, default=20)
+    parser.add_argument('--rollout-length', type=int, default=64)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--output-dir', default='outputs/mappo_baseline')
@@ -40,15 +44,39 @@ def main():
     parser.add_argument('--opponent-policy',
                         choices=['zero', 'random', 'rule_nearest'],
                         default='rule_nearest')
+    parser.add_argument('--log-csv', default=None)
+    parser.add_argument('--save-interval', type=int, default=10)
+    parser.add_argument('--eval-interval', type=int, default=10)
+    parser.add_argument('--max-steps', type=int, default=500)
+    parser.add_argument('--no-save', action='store_true')
     args = parser.parse_args()
+
+    if args.log_csv is None:
+        args.log_csv = f'{args.output_dir}/train_log.csv'
 
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
     os.makedirs(f'{args.output_dir}/latest', exist_ok=True)
+    os.makedirs(f'{args.output_dir}/checkpoints', exist_ok=True)
+    log_dir = os.path.dirname(args.log_csv)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
 
-    env = make_env(args.config, env_type='jsbsim_hetero', max_steps=500)
+    csv_file = open(args.log_csv, 'w', newline='')
+    csv_writer = csv.writer(csv_file)
+    csv_header = ['iteration', 'total_steps', 'average_team_return',
+                  'average_episode_length', 'average_red_alive',
+                  'average_blue_alive', 'actor_loss', 'critic_loss',
+                  'entropy', 'action_mean_abs', 'action_std',
+                  'action_min', 'action_max', 'value_mean', 'value_std',
+                  'nan_detected', 'opponent_policy', 'episodes_completed']
+    csv_writer.writerow(csv_header)
+    csv_file.flush()
+
+    env = make_env(args.config, env_type='jsbsim_hetero',
+                   max_steps=args.max_steps)
     adapter = HeteroObsAdapter()
     model = MAPPOActorCritic().to(device)
     trainer = PPOTrainer(model)
@@ -64,29 +92,32 @@ def main():
 
     total_steps = 0
     episodes_completed = 0
-    episode_returns = []
+    episode_returns = []    # mean over red agents
     episode_lengths = []
     episode_red_alive = []
     episode_blue_alive = []
 
     current_ep_returns = np.zeros(num_red, dtype=np.float32)
     current_ep_length = 0
+    nan_detected = False
+    best_model_path = f'{args.output_dir}/latest/model.pt'
 
     for iteration in range(1, args.iterations + 1):
         buffer = RolloutBuffer(
             max_len=args.rollout_length, num_red=num_red,
             actor_dim=140, critic_dim=700, action_dim=3)
 
+        iter_actions = []  # for action stats
+
         for step in range(args.rollout_length):
             result = adapter.adapt_all(
                 obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
 
-            # Collect actor obs for red agents
             actor_obs_list = []
             for rid in env.red_ids:
                 actor_obs_list.append(result['actor_obs'].get(
                     rid, np.zeros(140, dtype=np.float32)))
-            actor_obs_np = np.stack(actor_obs_list)  # (num_red, 140)
+            actor_obs_np = np.stack(actor_obs_list)
 
             critic_state_np = result['critic_state']
             red_valid_np = result['red_valid_mask']
@@ -101,8 +132,13 @@ def main():
             action_np = action.cpu().numpy()
             log_prob_np = log_prob.cpu().numpy()
             value_np = value.item()
+            iter_actions.append(action_np)
 
-            # Build actions dict: red from model, blue zero (placeholder)
+            if np.isnan(action_np).any() or np.isnan(value_np):
+                nan_detected = True
+                print(f'[WARN] NaN detected at iter {iteration} step {step}')
+                break
+
             actions_dict = {}
             for i, rid in enumerate(env.red_ids):
                 actions_dict[rid] = action_np[i].astype(np.float32)
@@ -110,7 +146,6 @@ def main():
 
             obs, rewards_dict, terminated, truncated, info = env.step(actions_dict)
 
-            # Per-agent reward
             rewards_np = np.array(
                 [float(rewards_dict.get(rid, 0.0)) for rid in env.red_ids],
                 dtype=np.float32)
@@ -136,39 +171,85 @@ def main():
                 current_ep_length = 0
                 obs, info = env.reset(seed=args.seed + total_steps)
 
+            if nan_detected:
+                break
+
+        if nan_detected:
+            print('[WARN] Training stopped due to NaN')
+            break
+
         # PPO update
         stats = trainer.update(buffer)
 
-        avg_ret = np.mean(episode_returns[-10:]) if episode_returns else 0.0
-        avg_len = np.mean(episode_lengths[-10:]) if episode_lengths else 0
-        current_red_alive, current_blue_alive = _alive_counts(env)
+        # Action statistics
+        all_acts = np.concatenate(iter_actions, axis=0)
+        act_mean_abs = float(np.mean(np.abs(all_acts)))
+        act_std = float(np.mean(np.std(all_acts, axis=0)))
+        act_min = float(all_acts.min())
+        act_max = float(all_acts.max())
+
+        # Value statistics from buffer
+        buf_vals = buffer.values[:buffer.pos]
+        val_mean = float(np.mean(buf_vals))
+        val_std = float(np.std(buf_vals))
+
+        avg_ret = (np.mean(episode_returns[-10:])
+                   if episode_returns else 0.0)
+        avg_len = (np.mean(episode_lengths[-10:])
+                   if episode_lengths else 0)
         avg_red_alive = (np.mean(episode_red_alive[-10:])
-                         if episode_red_alive else float(current_red_alive))
+                         if episode_red_alive else float(_alive_counts(env)[0]))
         avg_blue_alive = (np.mean(episode_blue_alive[-10:])
-                          if episode_blue_alive else float(current_blue_alive))
+                          if episode_blue_alive else float(_alive_counts(env)[1]))
+
+        csv_writer.writerow([
+            iteration, total_steps, f'{avg_ret:.4f}',
+            f'{avg_len:.1f}', f'{avg_red_alive:.2f}',
+            f'{avg_blue_alive:.2f}',
+            f'{stats["actor_loss"]:.6f}', f'{stats["critic_loss"]:.6f}',
+            f'{stats["entropy"]:.6f}',
+            f'{act_mean_abs:.6f}', f'{act_std:.6f}',
+            f'{act_min:.6f}', f'{act_max:.6f}',
+            f'{val_mean:.6f}', f'{val_std:.6f}',
+            int(nan_detected), args.opponent_policy,
+            episodes_completed,
+        ])
+        csv_file.flush()
+
         print(f'Iter {iteration:3d} | steps={total_steps:5d} | '
-              f'ret={avg_ret:+8.2f} | len={avg_len:.0f} | '
-              f'average_red_return={avg_ret:+.2f} | '
-              f'average_red_alive={avg_red_alive:.2f} | '
-              f'average_blue_alive={avg_blue_alive:.2f} | '
-              f'episode_count={episodes_completed} | '
-              f'opponent_policy={args.opponent_policy} | '
-              f'actor={stats["actor_loss"]:+.4f} '
-              f'critic={stats["critic_loss"]:+.4f} '
-              f'ent={stats["entropy"]:.4f} | ep={episodes_completed}')
+              f'ret={avg_ret:+7.2f} | len={avg_len:4.0f} | '
+              f'r_alive={avg_red_alive:.1f} b_alive={avg_blue_alive:.1f} | '
+              f'act_loss={stats["actor_loss"]:+.4f} '
+              f'crit_loss={stats["critic_loss"]:+.4f} '
+              f'ent={stats["entropy"]:.4f} | '
+              f'act_mu={act_mean_abs:.3f} act_std={act_std:.3f} | '
+              f'val={val_mean:+.3f} | ep={episodes_completed}')
 
-    # Save
-    model_path = f'{args.output_dir}/latest/model.pt'
-    torch.save(model.state_dict(), model_path)
-    meta = {'iterations': args.iterations, 'episodes': episodes_completed,
-            'returns': episode_returns, 'lengths': episode_lengths,
-            'red_alive': episode_red_alive,
-            'blue_alive': episode_blue_alive,
-            'opponent_policy': args.opponent_policy}
-    with open(f'{args.output_dir}/latest/meta.json', 'w') as f:
-        json.dump(meta, f)
-    print(f'Saved {model_path}')
+        # Checkpoint saving
+        if not args.no_save and iteration % args.save_interval == 0:
+            ckpt_path = (f'{args.output_dir}/checkpoints/'
+                         f'iter_{iteration:04d}.pt')
+            torch.save(model.state_dict(), ckpt_path)
 
+    # Final save
+    if not args.no_save:
+        torch.save(model.state_dict(), best_model_path)
+        meta = {
+            'config': args.config, 'seed': args.seed,
+            'opponent_policy': args.opponent_policy,
+            'iterations': args.iterations,
+            'rollout_length': args.rollout_length,
+            'episodes': episodes_completed,
+            'final_return': avg_ret,
+            'final_red_alive': avg_red_alive,
+            'final_blue_alive': avg_blue_alive,
+            'nan_detected': nan_detected,
+        }
+        with open(f'{args.output_dir}/latest/meta.json', 'w') as f:
+            json.dump(meta, f)
+        print(f'Saved {best_model_path}')
+
+    csv_file.close()
     env.close()
 
 

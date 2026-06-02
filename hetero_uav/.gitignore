@@ -1,0 +1,6 @@
+outputs/
+*.pt
+*.pth
+*.ckpt
+__pycache__/
+.pytest_cache/
