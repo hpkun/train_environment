@@ -12,18 +12,26 @@ aircraft_type_params:
     aircraft_model: "A-4"
     role: "mav"
     num_missiles: 2
+    init_altitude_offset_m: 2000.0
+    init_speed_offset_mps: 0.0
   attack_uav:
     aircraft_model: "f16"
     role: "attack_uav"
     num_missiles: 2
+    init_altitude_offset_m: 0.0
+    init_speed_offset_mps: 0.0
   scout_uav:
     aircraft_model: "f16"
     role: "scout_uav"
     num_missiles: 0
+    init_altitude_offset_m: 0.0
+    init_speed_offset_mps: 0.0
   interceptor_uav:
     aircraft_model: "f16"
     role: "interceptor_uav"
     num_missiles: 2
+    init_altitude_offset_m: 0.0
+    init_speed_offset_mps: 0.0
 sim_freq: 60
 agent_interaction_steps: 12
 max_steps: 20

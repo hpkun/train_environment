@@ -6,27 +6,37 @@ from copy import deepcopy
 
 from ..env import UavCombatEnv
 
+FT_PER_M = 1.0 / 0.3048
+FPS_PER_MPS = 1.0 / 0.3048
 
 DEFAULT_AIRCRAFT_TYPE_PARAMS = {
     "mav": {
         "aircraft_model": "A-4",
         "role": "mav",
         "num_missiles": 2,
+        "init_altitude_offset_m": 0.0,
+        "init_speed_offset_mps": 0.0,
     },
     "attack_uav": {
         "aircraft_model": "f16",
         "role": "attack_uav",
         "num_missiles": 2,
+        "init_altitude_offset_m": 0.0,
+        "init_speed_offset_mps": 0.0,
     },
     "scout_uav": {
         "aircraft_model": "f16",
         "role": "scout_uav",
         "num_missiles": 0,
+        "init_altitude_offset_m": 0.0,
+        "init_speed_offset_mps": 0.0,
     },
     "interceptor_uav": {
         "aircraft_model": "f16",
         "role": "interceptor_uav",
         "num_missiles": 2,
+        "init_altitude_offset_m": 0.0,
+        "init_speed_offset_mps": 0.0,
     },
 }
 
@@ -100,7 +110,43 @@ class HeteroUavCombatEnv(UavCombatEnv):
         info["agent_types"] = dict(self.agent_types)
         info["agent_roles"] = dict(self.agent_roles)
         info["agent_models"] = dict(self.agent_models)
+        info["agent_init_offsets"] = {}
+        for aid in self.agent_ids:
+            info["agent_init_offsets"][aid] = self._init_offsets_for(aid)
         return info
+
+    def _init_offsets_for(self, agent_id: str) -> dict:
+        type_name = self.agent_types.get(agent_id, "attack_uav")
+        params = self.aircraft_type_params.get(
+            type_name, self.aircraft_type_params["attack_uav"])
+        return {
+            "altitude_offset_m": float(params.get("init_altitude_offset_m", 0.0)),
+            "speed_offset_mps": float(params.get("init_speed_offset_mps", 0.0)),
+        }
+
+    def _make_init_state(self, color: str, index: int) -> dict:
+        init = super()._make_init_state(color, index)
+
+        agent_id = f"{color.lower()}_{index}"
+        offsets = self._init_offsets_for(agent_id)
+        alt_offset_m = offsets["altitude_offset_m"]
+        speed_offset_mps = offsets["speed_offset_mps"]
+
+        if alt_offset_m != 0.0:
+            alt_offset_ft = alt_offset_m * FT_PER_M
+            if "ic\\h-sl-ft" in init:
+                init["ic\\h-sl-ft"] = float(init["ic\\h-sl-ft"]) + alt_offset_ft
+            elif "ic/h-sl-ft" in init:
+                init["ic/h-sl-ft"] = float(init["ic/h-sl-ft"]) + alt_offset_ft
+
+        if speed_offset_mps != 0.0:
+            speed_offset_fps = speed_offset_mps * FPS_PER_MPS
+            if "ic\\u-fps" in init:
+                init["ic\\u-fps"] = float(init["ic\\u-fps"]) + speed_offset_fps
+            elif "ic/u-fps" in init:
+                init["ic/u-fps"] = float(init["ic/u-fps"]) + speed_offset_fps
+
+        return init
 
 
 __all__ = ["HeteroUavCombatEnv"]

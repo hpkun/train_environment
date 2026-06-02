@@ -17,6 +17,11 @@ from uav_env import make_env
 def _actions(env, policy: str, rng: np.random.Generator) -> dict:
     if policy == "zero":
         return {aid: np.zeros(3, dtype=np.float32) for aid in env.agent_ids}
+    if policy == "bounded_random":
+        return {
+            aid: rng.uniform(-0.5, 0.5, size=(3,)).astype(np.float32)
+            for aid in env.agent_ids
+        }
     if policy == "random":
         return {
             aid: env.action_space.spaces[aid].sample().astype(np.float32)
@@ -64,7 +69,7 @@ def main() -> None:
     parser.add_argument("--env-type", choices=["jsbsim_brma", "jsbsim_hetero"], required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--steps", type=int, default=200)
-    parser.add_argument("--policy", choices=["zero", "random"], default="zero")
+    parser.add_argument("--policy", choices=["zero", "bounded_random", "random"], default="zero")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -119,6 +124,19 @@ def main() -> None:
             print(f"agent_models: {env.agent_models}")
         if hasattr(env, "agent_types"):
             print(f"agent_types: {env.agent_types}")
+        if hasattr(env, "_init_offsets_for"):
+            init_offsets = {}
+            for aid in env.agent_ids:
+                init_offsets[aid] = env._init_offsets_for(aid)
+            print(f"agent_init_offsets: {init_offsets}")
+        # initial altitudes
+        print("--- initial altitude report ---")
+        for rid in env.red_ids:
+            sim = env._get_sim(rid)
+            if sim is not None:
+                alt_ft = sim.get_property_value("ic/h-sl-ft")
+                alt_m = float(alt_ft) * 0.3048
+                print(f"  {rid} initial_altitude_ft={alt_ft:.1f} initial_altitude_m={alt_m:.1f}")
         print(f"min_altitude: {min_altitude:.3f}")
         print(f"max_altitude: {max_altitude:.3f}")
         print(f"final_altitudes: {scan['altitudes']}")

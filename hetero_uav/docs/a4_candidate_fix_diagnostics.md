@@ -88,3 +88,32 @@ diagnostic/training wrapper for A-4/MAV before changing the formal environment.
 ## Current Interpretation
 
 A-4 throttle is active, but A-4 has weaker acceleration and different trim/control response than f16. The BRMA PID and default targets are f16-oriented, so nominal A-4 level flight is not naturally altitude-holding. Pitch bias is most effective in single-aircraft diagnostics, while higher initial altitude is the cleanest scenario-level mitigation.
+
+## Applied Minimal Fix
+
+The adopted minimal fix is an agent-type-level initial altitude offset:
+
+- `mav` type receives `init_altitude_offset_m: 2000.0` (configurable in `aircraft_type_params`).
+- A-4 mav starts at ~8096 m (26562 ft) instead of the paper baseline 6096 m (20000 ft).
+- f16 aircraft and all other types remain at the paper baseline altitude.
+
+**What was NOT changed**:
+- No aircraft XML modifications.
+- No PID changes.
+- No MAV GCAS logic.
+- No reward / missile / observation / action / termination changes.
+- No UavCombatEnv base class behavior change (`UavCombatEnv` has no `agent_init_offsets`).
+- This is a scenario initial-condition configuration, not a controller or safety mechanism.
+
+**Verification results (200 steps each)**:
+- Zero policy: A-4 red_0 min altitude = 4688 m, no crash.
+- Bounded random (±0.5): A-4 red_0 min altitude = 5732 m, no crash.
+- Full random: A-4 red_0 survives (4016 m), F-16 red_1 crashes (2483 m).
+
+**Files modified**:
+- `uav_env/JSBSim/envs/hetero_uav_combat_env.py` — added `_make_init_state` override, `_init_offsets_for`, FT/M/fps conversion.
+- `uav_env/JSBSim/configs/hetero_2v2_mav_attack.yaml` — added `init_altitude_offset_m` / `init_speed_offset_mps` to `aircraft_type_params`.
+- `scripts/diagnose_hetero_a4_init_applied.py` — new diagnostic script.
+- `scripts/diagnose_jsbsim_formal_env.py` — added `bounded_random` policy, init offset output.
+- `tests/test_jsbsim_hetero_init_offsets.py` — 9 tests, all pass.
+- `docs/a4_candidate_fix_diagnostics.md` — this section.
