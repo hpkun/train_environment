@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from uav_env import make_env
 from uav_env.JSBSim.adapters.hetero_obs_adapter import HeteroObsAdapter
+from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
 from algorithms.mappo.policy import MAPPOActorCritic
 from algorithms.mappo.opponent_policy import OpponentPolicy
 
@@ -43,15 +44,26 @@ def main():
     parser.add_argument('--opponent-policy',
                         choices=['zero', 'random', 'rule_nearest'],
                         default='rule_nearest')
+    parser.add_argument('--obs-adapter-version', choices=['v1', 'v2'],
+                        default='v1')
     args = parser.parse_args()
 
     device = torch.device(args.device)
+    env = make_env(args.config, env_type='jsbsim_hetero', max_steps=500)
+    obs_mode = getattr(env, 'observation_mode', 'brma_sensor')
 
-    model = MAPPOActorCritic().to(device)
+    if args.obs_adapter_version == 'v2':
+        adapter = HeteroObsAdapterV2()
+    else:
+        adapter = HeteroObsAdapter()
+    actor_dim = adapter.flat_actor_obs_dim
+    critic_dim = adapter.critic_state_dim
+
+    model = MAPPOActorCritic(actor_obs_dim=actor_dim,
+                             critic_state_dim=critic_dim).to(device)
     model.load_state_dict(torch.load(args.model, map_location=device,
                                      weights_only=True))
     model.eval()
-    adapter = HeteroObsAdapter()
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17)
 
     returns = []
@@ -73,12 +85,12 @@ def main():
             actor_obs_list = []
             for rid in env.red_ids:
                 actor_obs_list.append(result['actor_obs'].get(
-                    rid, np.zeros(140, dtype=np.float32)))
+                    rid, np.zeros(actor_dim, dtype=np.float32)))
             actor_obs_t = torch.as_tensor(np.stack(actor_obs_list), device=device)
 
             with torch.no_grad():
                 _, _, action, _, _ = model(
-                    actor_obs_t, torch.zeros(1, 700, device=device),
+                    actor_obs_t, torch.zeros(1, critic_dim, device=device),
                     deterministic=True)
 
             actions_dict = {}

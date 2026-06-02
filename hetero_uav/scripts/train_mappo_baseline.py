@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from uav_env import make_env
 from uav_env.JSBSim.adapters.hetero_obs_adapter import HeteroObsAdapter
+from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
 from algorithms.mappo.policy import MAPPOActorCritic
 from algorithms.mappo.opponent_policy import OpponentPolicy
 from algorithms.mappo.storage import RolloutBuffer
@@ -49,6 +50,8 @@ def main():
     parser.add_argument('--eval-interval', type=int, default=10)
     parser.add_argument('--max-steps', type=int, default=500)
     parser.add_argument('--no-save', action='store_true')
+    parser.add_argument('--obs-adapter-version', choices=['v1', 'v2'],
+                        default='v1')
     args = parser.parse_args()
 
     if args.log_csv is None:
@@ -77,8 +80,26 @@ def main():
 
     env = make_env(args.config, env_type='jsbsim_hetero',
                    max_steps=args.max_steps)
-    adapter = HeteroObsAdapter()
-    model = MAPPOActorCritic().to(device)
+    obs_mode = getattr(env, 'observation_mode', 'brma_sensor')
+
+    if args.obs_adapter_version == 'v2':
+        if obs_mode != 'mav_shared_geo':
+            raise SystemExit(
+                '--obs-adapter-version v2 requires observation_mode=mav_shared_geo')
+        adapter = HeteroObsAdapterV2()
+    else:
+        adapter = HeteroObsAdapter()
+
+    actor_obs_dim = adapter.flat_actor_obs_dim
+    critic_state_dim = adapter.critic_state_dim
+    model = MAPPOActorCritic(actor_obs_dim=actor_obs_dim,
+                             critic_state_dim=critic_state_dim).to(device)
+
+    if args.debug:
+        print(f'obs_adapter_version={args.obs_adapter_version} '
+              f'observation_mode={obs_mode} '
+              f'actor_obs_dim={actor_obs_dim} '
+              f'critic_state_dim={critic_state_dim}')
     trainer = PPOTrainer(model)
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17)
 
@@ -105,7 +126,7 @@ def main():
     for iteration in range(1, args.iterations + 1):
         buffer = RolloutBuffer(
             max_len=args.rollout_length, num_red=num_red,
-            actor_dim=140, critic_dim=700, action_dim=3)
+            actor_dim=actor_obs_dim, critic_dim=critic_state_dim, action_dim=3)
 
         iter_actions = []  # for action stats
 
@@ -116,7 +137,7 @@ def main():
             actor_obs_list = []
             for rid in env.red_ids:
                 actor_obs_list.append(result['actor_obs'].get(
-                    rid, np.zeros(140, dtype=np.float32)))
+                    rid, np.zeros(actor_obs_dim, dtype=np.float32)))
             actor_obs_np = np.stack(actor_obs_list)
 
             critic_state_np = result['critic_state']
@@ -244,6 +265,10 @@ def main():
             'final_red_alive': avg_red_alive,
             'final_blue_alive': avg_blue_alive,
             'nan_detected': nan_detected,
+            'obs_adapter_version': args.obs_adapter_version,
+            'actor_obs_dim': actor_obs_dim,
+            'critic_state_dim': critic_state_dim,
+            'observation_mode': obs_mode,
         }
         with open(f'{args.output_dir}/latest/meta.json', 'w') as f:
             json.dump(meta, f)
