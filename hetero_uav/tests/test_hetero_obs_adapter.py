@@ -183,3 +183,81 @@ def test_no_mechanism_change(env_2v2):
                          red_ids=env_2v2.red_ids,
                          blue_ids=env_2v2.blue_ids)
     assert result["critic_state"].shape == (700,)
+
+
+# -------------------------------------------------------------------
+#  7. Artificial dead entity tests (no JSBSim env needed)
+# -------------------------------------------------------------------
+
+def _fake_obs_with_dead_ally():
+    return {
+        "ego_state": np.ones(11, dtype=np.float32),
+        "ego_role": np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+        "missile_warning": np.array([0.0], dtype=np.float32),
+        "altitude": np.array([6000.0], dtype=np.float32),
+        "velocity": np.array([300.0, 0.0, 0.0], dtype=np.float32),
+        "ally_states": np.array([
+            [1.0, 0, 0, 0, 0, 0, 300, 0, 1, 0, 1],  # alive
+            [0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],     # dead
+        ], dtype=np.float32),
+        "ally_roles": np.array([
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ], dtype=np.float32),
+        "enemy_states": np.array([
+            [1.0, 0, 0, 0, 0, 0, 300, 0, 1, 0, 1],  # alive
+            [0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],     # dead
+        ], dtype=np.float32),
+        "enemy_roles": np.array([
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+        ], dtype=np.float32),
+    }
+
+
+def test_dead_ally_valid_alive():
+    a = HeteroObsAdapter()
+    out = a.adapt_agent("red_0", _fake_obs_with_dead_ally(),
+                        red_ids=["red_0", "red_1", "red_2"],
+                        blue_ids=["blue_0", "blue_1"])
+    # 3v2: 2 real allies → valid=[1,1,0,0], 1 dead → alive=[1,0,0,0]
+    assert np.allclose(out["ally_valid_mask"], [1, 1, 0, 0])
+    assert np.allclose(out["ally_alive_mask"], [1, 0, 0, 0])
+
+
+def test_dead_enemy_valid_alive():
+    a = HeteroObsAdapter()
+    out = a.adapt_agent("red_0", _fake_obs_with_dead_ally(),
+                        red_ids=["red_0", "red_1"],
+                        blue_ids=["blue_0", "blue_1"])
+    assert np.allclose(out["enemy_valid_mask"], [1, 1, 0, 0])
+    assert np.allclose(out["enemy_alive_mask"], [1, 0, 0, 0])
+
+
+def test_padding_slots():
+    a = HeteroObsAdapter()
+    out = a.adapt_agent("red_0", _fake_obs_with_dead_ally(),
+                        red_ids=["red_0", "red_1"],
+                        blue_ids=["blue_0", "blue_1"])
+    # padding slots (indices 2 and 3) should be valid=0, alive=0
+    for idx in (2, 3):
+        assert out["ally_valid_mask"][idx] == 0.0
+        assert out["ally_alive_mask"][idx] == 0.0
+        assert out["enemy_valid_mask"][idx] == 0.0
+        assert out["enemy_alive_mask"][idx] == 0.0
+
+
+def test_reset_alive_all_valid_slots(env_2v2):
+    a = HeteroObsAdapter()
+    obs, info = env_2v2.reset(seed=0)
+    result = a.adapt_all(obs, info=info,
+                         red_ids=env_2v2.red_ids,
+                         blue_ids=env_2v2.blue_ids)
+    r0 = result["structured_actor_obs"]["red_0"]
+    # 2v2: 1 ally, 2 enemies. After reset, all valid slots are alive.
+    # ally: valid=[1,0,0,0], alive=[1,0,0,0]
+    assert r0["ally_valid_mask"][0] > 0.5
+    assert r0["ally_alive_mask"][0] > 0.5
+    for i in range(2):
+        assert r0["enemy_valid_mask"][i] > 0.5
+        assert r0["enemy_alive_mask"][i] > 0.5

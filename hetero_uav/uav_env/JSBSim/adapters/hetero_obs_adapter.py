@@ -194,19 +194,47 @@ class HeteroObsAdapter:
         if include_role:
             role_array = np.asarray(obs.get(role_key, []), dtype=np.float32)
 
-        for i in range(min(len(entity_ids), max_slots)):
-            idx = i
-            if idx < state_array.shape[0]:
-                state_vec = state_array[idx]
-                if np.allclose(state_vec, 0.0):
-                    continue  # dead/missing — leave valid=0, alive=0
-                valid_mask[i] = 1.0
-                alive_mask[i] = 1.0  # non-zero state = alive
-                if include_role and role_array is not None and idx < role_array.shape[0]:
-                    entities[i] = np.concatenate([
-                        state_vec, role_array[idx]]).astype(np.float32)
+        # Try to get alive info from env info dict
+        alive_agent_ids: set[str] = set()
+        if info is not None:
+            for key in ("alive_agents", "agent_alive"):
+                if key in info and isinstance(info[key], (list, set)):
+                    alive_agent_ids = set(info[key])
+                    break
+            if not alive_agent_ids:
+                per_agent = info.get("agent_alive", None)
+                if isinstance(per_agent, dict):
+                    alive_agent_ids = {aid for aid, al in per_agent.items()
+                                       if al is True or al == 1}
+
+        for i, eid in enumerate(entity_ids):
+            if i >= max_slots:
+                break
+            # valid: slot corresponds to a real agent
+            valid_mask[i] = 1.0
+
+            # alive: from info if available, else infer from non-zero state
+            if alive_agent_ids:
+                is_alive = eid in alive_agent_ids
+            else:
+                # Fallback: infer alive from non-zero state vector.
+                # Assumption: dead agents have all-zero entity state in BRMA obs.
+                if i < state_array.shape[0]:
+                    is_alive = not np.allclose(state_array[i], 0.0)
                 else:
-                    entities[i, :self.entity_state_dim] = state_vec
+                    is_alive = False
+
+            if is_alive:
+                alive_mask[i] = 1.0
+                if i < state_array.shape[0]:
+                    state_vec = state_array[i]
+                    if include_role and role_array is not None \
+                            and i < role_array.shape[0]:
+                        entities[i] = np.concatenate([
+                            state_vec, role_array[i]]).astype(np.float32)
+                    else:
+                        entities[i, :self.entity_state_dim] = state_vec
+            # else: dead but valid — feature stays zero, valid=1, alive=0
 
         return entities, valid_mask, alive_mask
 

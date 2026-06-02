@@ -61,10 +61,12 @@ Vacant red slots are filled with zeros.  `red_valid_mask` identifies active slot
 ## 6. alive/valid mask definitions
 
 - `valid_mask[i] = 1` if the i-th entity slot corresponds to a real agent
-  (not a padding slot) AND its state vector is non-zero.
-- `alive_mask[i] = 1` if valid_mask[i] = 1 (non-zero state = alive).
-- Dead/missing agents have state = zeros → valid = 0, alive = 0.
-- Non-existent padding slots have valid = 0, alive = 0.
+  in the entity IDs list — **independent** of alive/dead state.
+- `alive_mask[i] = 1` if the real agent is currently alive.
+- Dead agent: valid = 1, alive = 0, entity feature = zeros.
+- Padding slot (no real agent): valid = 0, alive = 0, entity feature = zeros.
+- If alive info cannot be extracted from the environment info dict,
+  alive is inferred via non-zero entity state (fallback assumption).
 
 ## 7. Why v1 only handles red controlled agents
 

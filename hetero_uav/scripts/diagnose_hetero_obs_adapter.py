@@ -31,6 +31,53 @@ def main() -> None:
     print(f"critic_state_dim   = {adapter.critic_state_dim}")
     print()
 
+    # ---- artificial dead entity test (no JSBSim) ----
+    print("=== Artificial dead entity test ===")
+    fake_obs = {
+        "ego_state": np.ones(11, dtype=np.float32),
+        "ego_role": np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+        "missile_warning": np.array([0.0], dtype=np.float32),
+        "altitude": np.array([6000.0], dtype=np.float32),
+        "velocity": np.array([300.0, 0.0, 0.0], dtype=np.float32),
+        "ally_states": np.array([
+            [1.0, 0, 0, 0, 0, 0, 300, 0, 1, 0, 1],   # alive ally
+            [0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],      # dead ally
+        ], dtype=np.float32),
+        "ally_roles": np.array([
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ], dtype=np.float32),
+        "enemy_states": np.array([
+            [1.0, 0, 0, 0, 0, 0, 300, 0, 1, 0, 1],   # alive enemy
+            [0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],      # dead enemy
+        ], dtype=np.float32),
+        "enemy_roles": np.array([
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+        ], dtype=np.float32),
+    }
+
+    out = adapter.adapt_agent(
+        "red_0", fake_obs,
+        red_ids=["red_0", "red_1"],
+        blue_ids=["blue_0", "blue_1"])
+    av = out["ally_valid_mask"]
+    aa = out["ally_alive_mask"]
+    ev = out["enemy_valid_mask"]
+    ea = out["enemy_alive_mask"]
+    # 2v2: 1 real ally → valid=[1,0,0,0], alive=[1,0,0,0]
+    #      2 real enemies, 1 dead → valid=[1,1,0,0], alive=[1,0,0,0]
+    print(f"  ally_valid:  {av.tolist()}  (expect [1, 0, 0, 0])")
+    print(f"  ally_alive:  {aa.tolist()}  (expect [1, 0, 0, 0])")
+    print(f"  enemy_valid: {ev.tolist()} (expect [1, 1, 0, 0])")
+    print(f"  enemy_alive: {ea.tolist()} (expect [1, 0, 0, 0])")
+    assert np.allclose(av, [1, 0, 0, 0]), f"ally_valid: {av}"
+    assert np.allclose(aa, [1, 0, 0, 0]), f"ally_alive: {aa}"
+    assert np.allclose(ev, [1, 1, 0, 0]), f"enemy_valid: {ev}"
+    assert np.allclose(ea, [1, 0, 0, 0]), f"enemy_alive: {ea}"
+    print("  artificial dead entity test PASSED")
+    print()
+
     for cfg_path in CONFIGS:
         print(f"=== {cfg_path} ===")
         env = None
