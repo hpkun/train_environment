@@ -70,3 +70,27 @@ different composition without retraining.
 - Smoke scripts deliberately omit seed averaging and episode statistics.
 - Current `OpponentPolicy = rule_nearest` is a placeholder; paper may
   specify a different blue baseline.
+
+## 8. Observation Modes
+
+`brma_sensor` is the compatibility baseline observation mode. It keeps the
+BRMA-style raw observation path and is useful for debugging, regression tests,
+and ablations.
+
+`mav_shared_geo` is the main experimental candidate observation mode. It adds
+geometric self/entity fields and expresses the MAV situation-support role
+through MAV-mediated information sharing:
+
+- UAV direct observation is preferred;
+- MAV shared observation is used when direct observation is unavailable and the
+  red MAV can track the enemy;
+- unavailable enemies are zeroed and masked.
+
+This v2 observation mode is still an environment abstraction. It does not claim
+that "UAV can run on unseen composition" equals zero-shot success.
+
+Formal future experiments should compare at least:
+
+- `brma_sensor + MAPPO`;
+- `mav_shared_geo + MAPPO`;
+- `mav_shared_geo + attention/role-aware method`.

@@ -8,6 +8,7 @@ import gymnasium
 import numpy as np
 
 from ..env import UavCombatEnv
+from ..utils import get2d_AO_TA_R
 
 FT_PER_M = 1.0 / 0.3048
 FPS_PER_MPS = 1.0 / 0.3048
@@ -81,9 +82,17 @@ class HeteroUavCombatEnv(UavCombatEnv):
         red_agent_types: list[str] | None = None,
         blue_agent_types: list[str] | None = None,
         aircraft_type_params: dict | None = None,
+        observation_mode: str = "brma_sensor",
+        uav_direct_observation_range_m: float = 10000.0,
+        mav_observation_range_m: float = 80000.0,
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
+        if observation_mode not in {"brma_sensor", "mav_shared_geo"}:
+            raise ValueError(f"unknown observation_mode: {observation_mode}")
+        self.observation_mode = observation_mode
+        self.uav_direct_observation_range_m = float(uav_direct_observation_range_m)
+        self.mav_observation_range_m = float(mav_observation_range_m)
         super().__init__(*args, **kwargs)
         self.aircraft_type_params = deepcopy(DEFAULT_AIRCRAFT_TYPE_PARAMS)
         if aircraft_type_params:
@@ -127,6 +136,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
             spaces["enemy_roles"] = gymnasium.spaces.Box(
                 low=0.0, high=1.0,
                 shape=(self.max_num_red, len(ROLE_VOCAB)), dtype=np.float32)
+            if self.observation_mode == "mav_shared_geo":
+                self._add_mav_shared_geo_spaces(
+                    spaces, self.max_num_blue - 1, self.max_num_red)
             self.observation_space.spaces[aid] = gymnasium.spaces.Dict(spaces)
 
         for aid in self.red_ids:
@@ -144,7 +156,23 @@ class HeteroUavCombatEnv(UavCombatEnv):
             spaces["enemy_roles"] = gymnasium.spaces.Box(
                 low=0.0, high=1.0,
                 shape=(self.max_num_blue, len(ROLE_VOCAB)), dtype=np.float32)
+            if self.observation_mode == "mav_shared_geo":
+                self._add_mav_shared_geo_spaces(
+                    spaces, self.max_num_red - 1, self.max_num_blue)
             self.observation_space.spaces[aid] = gymnasium.spaces.Dict(spaces)
+
+    @staticmethod
+    def _add_mav_shared_geo_spaces(spaces: dict, max_allies: int, max_enemies: int) -> None:
+        spaces["ego_geo_state"] = gymnasium.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32)
+        spaces["ally_geo_states"] = gymnasium.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(max_allies, 5), dtype=np.float32)
+        spaces["enemy_geo_states"] = gymnasium.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(max_enemies, 5), dtype=np.float32)
+        spaces["enemy_observed_mask"] = gymnasium.spaces.Box(
+            low=0.0, high=1.0, shape=(max_enemies,), dtype=np.float32)
+        spaces["enemy_track_source"] = gymnasium.spaces.Box(
+            low=0.0, high=1.0, shape=(max_enemies, 2), dtype=np.float32)
 
     @staticmethod
     def _fit_agent_types(values: list[str] | None, count: int, default: list[str]) -> list[str]:
@@ -183,7 +211,135 @@ class HeteroUavCombatEnv(UavCombatEnv):
         obs["ally_roles"] = _metadata_matrix(ally_ids, self.agent_roles, "role")
         obs["enemy_types"] = _metadata_matrix(enemy_ids, self.agent_types, "type")
         obs["enemy_roles"] = _metadata_matrix(enemy_ids, self.agent_roles, "role")
+        if self.observation_mode == "mav_shared_geo":
+            obs.update(self._build_mav_shared_geo_obs(agent_id, ally_ids, enemy_ids))
         return obs
+
+    def _build_mav_shared_geo_obs(
+        self, agent_id: str, ally_ids: list[str], enemy_ids: list[str]
+    ) -> dict:
+        ego_sim = self._get_sim(agent_id)
+        max_allies = len(ally_ids)
+        max_enemies = len(enemy_ids)
+        ego_alive = ego_sim is not None and ego_sim.is_alive
+
+        ego_geo_state = np.zeros(7, dtype=np.float32)
+        ally_geo_states = np.zeros((max_allies, 5), dtype=np.float32)
+        enemy_geo_states = np.zeros((max_enemies, 5), dtype=np.float32)
+        enemy_observed_mask = np.zeros(max_enemies, dtype=np.float32)
+        enemy_track_source = np.zeros((max_enemies, 2), dtype=np.float32)
+
+        if not ego_alive:
+            return {
+                "ego_geo_state": ego_geo_state,
+                "ally_geo_states": ally_geo_states,
+                "enemy_geo_states": enemy_geo_states,
+                "enemy_observed_mask": enemy_observed_mask,
+                "enemy_track_source": enemy_track_source,
+            }
+
+        ego_geo_state = self._ego_geo_state(ego_sim)
+
+        for i, ally_id in enumerate(ally_ids):
+            ally_sim = self._get_sim(ally_id)
+            if ally_sim is not None and ally_sim.is_alive:
+                ally_geo_states[i] = self._relative_geo_state(ego_sim, ally_sim)
+
+        mav_sim = self._get_red_mav_sim()
+        ego_is_red = agent_id.startswith("red_")
+        ego_is_mav = self.agent_roles.get(agent_id) == "mav"
+
+        for i, enemy_id in enumerate(enemy_ids):
+            enemy_sim = self._get_sim(enemy_id)
+            if enemy_sim is None or not enemy_sim.is_alive:
+                continue
+
+            own_direct = (
+                self._distance_m(ego_sim, enemy_sim)
+                <= self.uav_direct_observation_range_m
+            )
+            mav_shared = False
+            if ego_is_red and not ego_is_mav and mav_sim is not None and mav_sim.is_alive:
+                mav_shared = (
+                    self._distance_m(mav_sim, enemy_sim)
+                    <= self.mav_observation_range_m
+                )
+            if ego_is_red and ego_is_mav:
+                own_direct = (
+                    self._distance_m(ego_sim, enemy_sim)
+                    <= self.mav_observation_range_m
+                )
+
+            if own_direct:
+                enemy_geo_states[i] = self._relative_geo_state(ego_sim, enemy_sim)
+                enemy_observed_mask[i] = 1.0
+                enemy_track_source[i] = np.array([1.0, 0.0], dtype=np.float32)
+            elif mav_shared:
+                enemy_geo_states[i] = self._relative_geo_state(ego_sim, enemy_sim)
+                enemy_observed_mask[i] = 1.0
+                enemy_track_source[i] = np.array([0.0, 1.0], dtype=np.float32)
+
+        return {
+            "ego_geo_state": ego_geo_state,
+            "ally_geo_states": ally_geo_states,
+            "enemy_geo_states": enemy_geo_states,
+            "enemy_observed_mask": enemy_observed_mask,
+            "enemy_track_source": enemy_track_source,
+        }
+
+    @staticmethod
+    def _distance_m(a, b) -> float:
+        return float(np.linalg.norm(a.get_position() - b.get_position()))
+
+    def _get_red_mav_sim(self):
+        for aid in self.red_ids:
+            if self.agent_roles.get(aid) == "mav":
+                return self.red_planes.get(aid)
+        return None
+
+    @staticmethod
+    def _ego_geo_state(sim) -> np.ndarray:
+        pos = sim.get_position()
+        vel = sim.get_velocity()
+        roll, pitch, yaw = sim.get_rpy()
+        speed = float(np.linalg.norm(vel))
+        return np.array([
+            pos[0] / 40000.0,
+            pos[1] / 40000.0,
+            pos[2] / 10000.0,
+            speed / 600.0,
+            pitch / np.pi,
+            yaw / np.pi,
+            roll / np.pi,
+        ], dtype=np.float32)
+
+    @staticmethod
+    def _relative_geo_state(observer, target) -> np.ndarray:
+        obs_pos = observer.get_position()
+        obs_vel = observer.get_velocity()
+        tgt_pos = target.get_position()
+        tgt_vel = target.get_velocity()
+        obs_speed = float(np.linalg.norm(obs_vel))
+        tgt_speed = float(np.linalg.norm(tgt_vel))
+        distance = float(np.linalg.norm(tgt_pos - obs_pos))
+        delta_h = float(tgt_pos[2] - obs_pos[2])
+
+        obs_feat = np.array([
+            obs_pos[0], obs_pos[1], -obs_pos[2],
+            obs_vel[0], obs_vel[1], -obs_vel[2],
+        ], dtype=np.float64)
+        tgt_feat = np.array([
+            tgt_pos[0], tgt_pos[1], -tgt_pos[2],
+            tgt_vel[0], tgt_vel[1], -tgt_vel[2],
+        ], dtype=np.float64)
+        ata, aa, _range = get2d_AO_TA_R(obs_feat, tgt_feat)
+        return np.array([
+            (tgt_speed - obs_speed) / 600.0,
+            delta_h / 10000.0,
+            distance / 40000.0,
+            ata / np.pi,
+            aa / np.pi,
+        ], dtype=np.float32)
 
     def _aircraft_model_for(self, agent_id: str, color: str, index: int) -> str:
         return self.agent_models.get(agent_id, "f16")
@@ -198,6 +354,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         info["agent_types"] = dict(self.agent_types)
         info["agent_roles"] = dict(self.agent_roles)
         info["agent_models"] = dict(self.agent_models)
+        info["observation_mode"] = self.observation_mode
         info["agent_init_offsets"] = {}
         for aid in self.agent_ids:
             info["agent_init_offsets"][aid] = self._init_offsets_for(aid)
