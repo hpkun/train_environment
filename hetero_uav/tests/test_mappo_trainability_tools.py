@@ -14,7 +14,8 @@ CONFIG = "uav_env/JSBSim/configs/hetero_train_2v2_mav_attack.yaml"
 def test_train_cli_accepts_log_csv():
     result = subprocess.run(
         [sys.executable, str(TRAIN_SCRIPT), "--help"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=10)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=10)
     assert "--log-csv" in result.stdout
     assert "--save-interval" in result.stdout
     assert "--eval-interval" in result.stdout
@@ -29,7 +30,8 @@ def test_train_smoke_with_log_csv():
          "--opponent-policy", "rule_nearest",
          "--log-csv", log_csv, "--output-dir", out_dir,
          "--device", "cpu", "--debug"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120,
     )
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
     assert Path(log_csv).exists()
@@ -59,7 +61,8 @@ def test_diagnose_trainability_runs():
          str(ROOT / "scripts" / "diagnose_mappo_trainability.py"),
          "--iterations", "2", "--rollout-length", "8", "--device", "cpu",
          "--opponent-policy", "rule_nearest"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120,
     )
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
     assert "trainability smoke: PASSED" in result.stdout
@@ -72,7 +75,8 @@ def test_diagnose_eval_runs():
          str(ROOT / "scripts" / "diagnose_mappo_trainability_eval.py"),
          "--model", model_path, "--episodes", "1", "--device", "cpu",
          "--opponent-policy", "rule_nearest"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120,
     )
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
     # Should have output for at least 2 configs

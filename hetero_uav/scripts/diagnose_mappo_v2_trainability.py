@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -20,10 +21,14 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--opponent-policy", default="rule_nearest")
+    parser.add_argument("--max-steps", type=int, default=128)
+    parser.add_argument("--output-dir", default="outputs/mappo_v2_trainability")
     args = parser.parse_args()
 
-    output_dir = "outputs/mappo_v2_trainability"
+    output_dir = args.output_dir
     log_csv = f"{output_dir}/train_log.csv"
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
 
     print(f"Running {args.iterations} iterations (V2, 96-dim actor)...")
     result = subprocess.run(
@@ -37,8 +42,10 @@ def main():
          "--output-dir", output_dir,
          "--log-csv", log_csv,
          "--opponent-policy", args.opponent_policy,
+         "--max-steps", str(args.max_steps),
          "--save-interval", "10"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=600)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, cwd=str(ROOT), timeout=600)
     print(result.stdout)
     if result.returncode != 0:
         print(f"TRAIN FAILED: {result.stderr[-500:]}")
@@ -49,10 +56,13 @@ def main():
         rows = list(csv.DictReader(f))
     n = len(rows)
     rl = rows[-1]
+    episodes_completed = int(rl["episodes_completed"])
 
     print()
     print("=== V2 Trainability Summary ===")
     print(f"iterations: {n}")
+    print(f'total_steps: {int(rl["total_steps"])}')
+    print(f"episodes_completed: {episodes_completed}")
     print("obs_adapter_version: v2")
     print("actor_obs_dim: 96")
     print("critic_state_dim: 480")
@@ -72,6 +82,8 @@ def main():
     print(f'nan_detected:         {rl["nan_detected"]}')
     print(f"checkpoint:           {output_dir}/latest/model.pt")
     print(f"log_csv:              {log_csv}")
+    if episodes_completed == 0:
+        print("warning: no completed episode in short diagnostic")
 
     assert int(rl["nan_detected"]) == 0
     assert n == args.iterations

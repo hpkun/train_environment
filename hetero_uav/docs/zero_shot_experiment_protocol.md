@@ -100,3 +100,15 @@ Formal future experiments should compare at least:
 - `brma_sensor + MAPPO`;
 - `mav_shared_geo + MAPPO`;
 - `mav_shared_geo + attention/role-aware method`.
+
+## 9. V2 Diagnostic Interpretation
+
+The V2 trainability diagnostic should pass `--max-steps` through to the training
+script so short runs can finish episodes when intended. A diagnostic with no
+completed episode is not evidence of a learning trend; it usually indicates the
+rollout is too short or the episode limit is too long.
+
+Zero-shot smoke scripts should run multiple configs and honor `--episodes`, but
+they remain runtime checks. They verify dimensions, NaN status, and reset/step
+compatibility. Formal zero-shot claims require multiple seeds, multiple
+episodes, fixed training budgets, and baseline comparisons.

@@ -23,6 +23,21 @@ from algorithms.mappo.adapter_utils import (
 from algorithms.mappo.opponent_policy import OpponentPolicy
 
 
+def _obs_has_nan(obs: dict) -> bool:
+    for agent_obs in obs.values():
+        for value in agent_obs.values():
+            arr = np.asarray(value)
+            if arr.dtype.kind in {"f", "c"} and np.isnan(arr).any():
+                return True
+    return False
+
+
+def _alive_counts(env) -> tuple[int, int]:
+    red_alive = sum(1 for sim in env.red_planes.values() if sim.is_alive)
+    blue_alive = sum(1 for sim in env.blue_planes.values() if sim.is_alive)
+    return red_alive, blue_alive
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -56,7 +71,7 @@ def main():
     print(f"obs_adapter_version: {version}")
     print(f"actor_obs_dim: {actor_dim}")
     print(f"critic_state_dim: {critic_dim}")
-    print(f"observation_mode: {meta.get('observation_mode', '?')}")
+    print(f"meta_observation_mode: {meta.get('observation_mode', '?')}")
     print(f"config: {args.config}")
     print(f"opponent_policy: {args.opponent_policy}")
 
@@ -64,12 +79,15 @@ def main():
     try:
         env = make_env(args.config, env_type="jsbsim_hetero", max_steps=500)
         obs_mode = getattr(env, "observation_mode", "brma_sensor")
+        print(f"env_observation_mode: {obs_mode}")
         if version == "v2" and obs_mode != "mav_shared_geo":
             raise SystemExit(
                 "--obs-adapter-version v2 requires observation_mode=mav_shared_geo")
 
         returns = []
         lengths = []
+        red_alive_counts = []
+        blue_alive_counts = []
         crashes = 0
         nan_count = 0
 
@@ -81,22 +99,32 @@ def main():
                 result = adapter.adapt_all(
                     obs, info=info, red_ids=env.red_ids,
                     blue_ids=env.blue_ids)
+                if _obs_has_nan(obs):
+                    nan_count += 1
+                    break
                 actor_obs_list = [
                     result["actor_obs"].get(rid,
                                             np.zeros(actor_dim, dtype=np.float32))
                     for rid in env.red_ids]
-                actor_obs_t = torch.as_tensor(np.stack(actor_obs_list),
-                                              device=device)
+                actor_obs_np = np.stack(actor_obs_list)
+                critic_state_np = result["critic_state"]
+                if np.isnan(actor_obs_np).any() or np.isnan(critic_state_np).any():
+                    nan_count += 1
+                    break
+                actor_obs_t = torch.as_tensor(actor_obs_np, device=device)
+                critic_t = torch.as_tensor(critic_state_np, device=device).unsqueeze(0)
 
                 with torch.no_grad():
                     _, _, action, _, _ = model(
-                        actor_obs_t,
-                        torch.zeros(1, critic_dim, device=device),
-                        deterministic=True)
+                        actor_obs_t, critic_t, deterministic=True)
+                action_np = action.cpu().numpy()
+                if np.isnan(action_np).any():
+                    nan_count += 1
+                    break
 
                 actions_dict = {}
                 for i, rid in enumerate(env.red_ids):
-                    actions_dict[rid] = action[i].cpu().numpy().astype(np.float32)
+                    actions_dict[rid] = action_np[i].astype(np.float32)
                 actions_dict.update(opponent.act(obs, env.blue_ids))
 
                 obs, rewards_dict, terminated, truncated, info = env.step(
@@ -116,10 +144,15 @@ def main():
                     break
             returns.append(ep_ret)
             lengths.append(ep_len)
+            red_alive, blue_alive = _alive_counts(env)
+            red_alive_counts.append(red_alive)
+            blue_alive_counts.append(blue_alive)
 
         print(f"episodes: {len(returns)}")
         print(f"avg_return: {np.mean(returns):.2f}")
         print(f"avg_length: {np.mean(lengths):.1f}")
+        print(f"avg_red_alive: {np.mean(red_alive_counts):.2f}")
+        print(f"avg_blue_alive: {np.mean(blue_alive_counts):.2f}")
         print(f"crashes: {crashes}")
         print(f"nan_detected: {nan_count > 0}")
     finally:

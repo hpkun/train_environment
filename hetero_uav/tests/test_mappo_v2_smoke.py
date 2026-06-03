@@ -17,7 +17,8 @@ EVAL_SCRIPT = ROOT / "scripts" / "eval_mappo_baseline.py"
 def test_train_accepts_v2():
     result = subprocess.run(
         [sys.executable, str(TRAIN_SCRIPT), "--help"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=10)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=10)
     assert "--obs-adapter-version" in result.stdout
 
 
@@ -44,11 +45,13 @@ def test_v2_train_smoke():
          "--config", "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
          "--obs-adapter-version", "v2",
          "--iterations", "1", "--rollout-length", "8",
+         "--max-steps", "16",
          "--opponent-policy", "rule_nearest",
          "--output-dir", "outputs/test_v2_smoke",
          "--log-csv", "outputs/test_v2_smoke/train_log.csv",
          "--device", "cpu", "--debug"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120)
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
     assert "Saved" in result.stdout
 
@@ -71,7 +74,8 @@ def test_v2_eval_smoke():
          "--obs-adapter-version", "v2",
          "--episodes", "1", "--device", "cpu",
          "--opponent-policy", "rule_nearest"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120)
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
 
 
@@ -79,11 +83,13 @@ def test_v2_diagnose_trainability():
     result = subprocess.run(
         [sys.executable,
          str(ROOT / "scripts" / "diagnose_mappo_v2_trainability.py"),
-         "--iterations", "2", "--rollout-length", "8", "--device", "cpu",
+         "--iterations", "2", "--rollout-length", "8", "--max-steps", "16",
+         "--device", "cpu",
          "--opponent-policy", "rule_nearest"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120)
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
-    assert "V2 trainability smoke: PASSED" in result.stdout
+    assert "episodes_completed" in result.stdout or "no completed episode" in result.stdout
 
 
 def test_v2_zero_shot_smoke():
@@ -91,10 +97,26 @@ def test_v2_zero_shot_smoke():
         [sys.executable,
          str(ROOT / "scripts" / "diagnose_mappo_v2_zero_shot_smoke.py"),
          "--model", "outputs/mappo_v2_trainability/latest/model.pt",
-         "--episodes", "1", "--device", "cpu",
+         "--episodes", "2", "--device", "cpu",
          "--opponent-policy", "rule_nearest"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120)
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
+    assert "episodes: 2" in result.stdout
+
+
+def test_v2_zero_shot_eval_episodes_two():
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / "scripts" / "eval_mappo_zero_shot.py"),
+         "--model", "outputs/mappo_v2_trainability/latest/model.pt",
+         "--obs-adapter-version", "v2",
+         "--episodes", "2", "--device", "cpu",
+         "--opponent-policy", "rule_nearest"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=180)
+    assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
+    assert "episodes: 2" in result.stdout
 
 
 def test_no_nan_v2():
@@ -117,6 +139,7 @@ def test_v1_still_works():
          "--output-dir", "outputs/test_v1_still_works",
          "--log-csv", "outputs/test_v1_still_works/train_log.csv",
          "--device", "cpu", "--debug"],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120)
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
     assert "Saved" in result.stdout

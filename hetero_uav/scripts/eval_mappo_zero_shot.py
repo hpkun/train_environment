@@ -34,6 +34,21 @@ V2_CONFIGS = [
 ]
 
 
+def _obs_has_nan(obs: dict) -> bool:
+    for agent_obs in obs.values():
+        for value in agent_obs.values():
+            arr = np.asarray(value)
+            if arr.dtype.kind in {"f", "c"} and np.isnan(arr).any():
+                return True
+    return False
+
+
+def _alive_counts(env) -> tuple[int, int]:
+    red_alive = sum(1 for sim in env.red_planes.values() if sim.is_alive)
+    blue_alive = sum(1 for sim in env.blue_planes.values() if sim.is_alive)
+    return red_alive, blue_alive
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -62,11 +77,13 @@ def main():
                                      weights_only=True))
     model.eval()
 
+    explicit_configs = args.configs is not None
     configs = args.configs or (V2_CONFIGS if version == "v2" else V1_CONFIGS)
 
     print(f"obs_adapter_version: {version}")
     print(f"actor_obs_dim: {actor_dim}")
     print(f"critic_state_dim: {critic_dim}")
+    print(f"episodes: {args.episodes}")
     print(f"configs: {configs}")
 
     for cfg_path in configs:
@@ -78,41 +95,75 @@ def main():
             env = make_env(cfg_path, env_type="jsbsim_hetero", max_steps=500)
             obs_mode = getattr(env, "observation_mode", "brma_sensor")
             if version == "v2" and obs_mode != "mav_shared_geo":
-                print(f"SKIP {cfg_path}: v2 requires mav_shared_geo, got {obs_mode}")
+                message = (
+                    f"v2 requires observation_mode=mav_shared_geo, "
+                    f"got {obs_mode} for {cfg_path}"
+                )
+                if explicit_configs:
+                    raise ValueError(message)
+                print(f"SKIP {cfg_path}: {message}")
                 continue
             opponent = OpponentPolicy(mode=args.opponent_policy, seed=0)
-            obs, info = env.reset(seed=args.seed)
-            ep_ret, ep_len, nan = 0.0, 0, False
-            while True:
-                result = adapter.adapt_all(
-                    obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
-                actor_obs_np = np.stack([
-                    result["actor_obs"].get(rid, np.zeros(actor_dim, dtype=np.float32))
-                    for rid in env.red_ids])
-                actor_obs_t = torch.as_tensor(actor_obs_np, device=device)
-                with torch.no_grad():
-                    _, _, action, _, _ = model(
-                        actor_obs_t,
-                        torch.zeros(1, critic_dim, device=device),
-                        deterministic=True)
-                actions_dict = {}
-                for i, rid in enumerate(env.red_ids):
-                    actions_dict[rid] = action[i].cpu().numpy().astype(np.float32)
-                actions_dict.update(opponent.act(obs, env.blue_ids))
-                obs, rewards_dict, terminated, truncated, info = env.step(actions_dict)
-                ep_ret += sum(float(rewards_dict.get(rid, 0.0))
-                              for rid in env.red_ids)
-                ep_len += 1
-                if np.isnan(ep_ret):
-                    nan = True; break
-                if all(terminated.values()) or all(truncated.values()):
-                    break
-            r_alive = sum(1 for s in env.red_planes.values() if s.is_alive)
-            b_alive = sum(1 for s in env.blue_planes.values() if s.is_alive)
-            print(f"{Path(cfg_path).stem:45s} | ret={ep_ret:+7.1f} "
-                  f"len={ep_len:4d} r_alive={r_alive} b_alive={b_alive} "
-                  f"nan={nan} actor_dim_ok={actor_obs_np.shape[1]==actor_dim} "
-                  f"critic_dim_ok={result['critic_state'].shape[0]==critic_dim}")
+            returns, lengths, red_alive_counts, blue_alive_counts = [], [], [], []
+            nan_detected = False
+            actor_dim_ok = True
+            critic_dim_ok = True
+            for ep in range(args.episodes):
+                obs, info = env.reset(seed=args.seed + ep)
+                ep_ret, ep_len = 0.0, 0
+                while True:
+                    if _obs_has_nan(obs):
+                        nan_detected = True
+                        break
+                    result = adapter.adapt_all(
+                        obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
+                    actor_obs_np = np.stack([
+                        result["actor_obs"].get(
+                            rid, np.zeros(actor_dim, dtype=np.float32))
+                        for rid in env.red_ids])
+                    critic_state_np = result["critic_state"]
+                    actor_dim_ok = actor_dim_ok and actor_obs_np.shape[1] == actor_dim
+                    critic_dim_ok = critic_dim_ok and critic_state_np.shape[0] == critic_dim
+                    if np.isnan(actor_obs_np).any() or np.isnan(critic_state_np).any():
+                        nan_detected = True
+                        break
+                    actor_obs_t = torch.as_tensor(actor_obs_np, device=device)
+                    critic_t = torch.as_tensor(critic_state_np, device=device).unsqueeze(0)
+                    with torch.no_grad():
+                        _, _, action, _, _ = model(
+                            actor_obs_t, critic_t, deterministic=True)
+                    action_np = action.cpu().numpy()
+                    if np.isnan(action_np).any():
+                        nan_detected = True
+                        break
+                    actions_dict = {
+                        rid: action_np[i].astype(np.float32)
+                        for i, rid in enumerate(env.red_ids)
+                    }
+                    actions_dict.update(opponent.act(obs, env.blue_ids))
+                    obs, rewards_dict, terminated, truncated, info = env.step(actions_dict)
+                    ep_ret += sum(float(rewards_dict.get(rid, 0.0))
+                                  for rid in env.red_ids)
+                    ep_len += 1
+                    if np.isnan(ep_ret):
+                        nan_detected = True
+                        break
+                    if all(terminated.values()) or all(truncated.values()):
+                        break
+                r_alive, b_alive = _alive_counts(env)
+                returns.append(ep_ret)
+                lengths.append(ep_len)
+                red_alive_counts.append(r_alive)
+                blue_alive_counts.append(b_alive)
+
+            print(f"=== {cfg_path} ===")
+            print(f"avg_return: {np.mean(returns):.2f}")
+            print(f"avg_length: {np.mean(lengths):.1f}")
+            print(f"avg_red_alive: {np.mean(red_alive_counts):.2f}")
+            print(f"avg_blue_alive: {np.mean(blue_alive_counts):.2f}")
+            print(f"nan_detected: {nan_detected}")
+            print(f"actor_dim_ok: {actor_dim_ok}")
+            print(f"critic_dim_ok: {critic_dim_ok}")
         finally:
             if env is not None:
                 env.close()

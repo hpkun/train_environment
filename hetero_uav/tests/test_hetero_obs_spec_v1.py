@@ -52,7 +52,8 @@ def test_spec_doc_incoming_missile_postponed():
 def test_print_script_runs():
     result = subprocess.run(
         [sys.executable, str(PRINT_SCRIPT)],
-        capture_output=True, text=True, cwd=str(ROOT),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT),
         timeout=120,
     )
     assert result.returncode == 0, f"stderr: {result.stderr[:500]}"

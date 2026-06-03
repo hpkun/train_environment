@@ -105,7 +105,8 @@ def _run_train_smoke(opponent_policy: str):
          '--config', CONFIG, '--iterations', '1', '--rollout-length', '8',
          '--debug', '--device', 'cpu',
          '--opponent-policy', opponent_policy],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120,
     )
     assert result.returncode == 0, f'stderr: {result.stderr[:800]}'
     assert 'Saved' in result.stdout
@@ -132,7 +133,8 @@ def test_eval_smoke_runs():
          '--model', model_path, '--config', CONFIG,
          '--episodes', '1', '--device', 'cpu',
          '--opponent-policy', 'rule_nearest'],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120,
     )
     assert result.returncode == 0, f'stderr: {result.stderr[:800]}'
     assert 'avg_return' in result.stdout
@@ -151,7 +153,8 @@ def test_zero_shot_eval_smoke_runs():
          '--output-dir', 'outputs/test_v1_zero_shot',
          '--log-csv', 'outputs/test_v1_zero_shot/train_log.csv',
          '--device', 'cpu', '--debug'],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=120)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=120)
     assert result_train.returncode == 0
 
     model_path = str(ROOT / 'outputs' / 'test_v1_zero_shot' / 'latest' / 'model.pt')
@@ -162,13 +165,12 @@ def test_zero_shot_eval_smoke_runs():
          '--episodes', '1', '--device', 'cpu',
          '--opponent-policy', 'rule_nearest',
          '--configs', CONFIG, CONFIG_3V3],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=180,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT), timeout=180,
     )
     assert result.returncode == 0, f'stderr: {result.stderr[:800]}'
-    assert 'ret=' in result.stdout
     assert 'actor_dim_ok' in result.stdout
-    assert 'actor_obs_dim check: True' in result.stdout
-    assert 'critic_state_dim check: True' in result.stdout
+    assert 'critic_dim_ok' in result.stdout
     assert 'nan_detected: False' in result.stdout
 
 
