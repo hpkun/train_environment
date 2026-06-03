@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -61,6 +62,7 @@ def main():
     parser.add_argument("--obs-adapter-version", choices=["v1", "v2"],
                         default=None)
     parser.add_argument("--configs", nargs="*", default=None)
+    parser.add_argument("--summary-json", default=None)
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -79,6 +81,8 @@ def main():
 
     explicit_configs = args.configs is not None
     configs = args.configs or (V2_CONFIGS if version == "v2" else V1_CONFIGS)
+
+    summary_records: list[dict] = []
 
     print(f"obs_adapter_version: {version}")
     print(f"actor_obs_dim: {actor_dim}")
@@ -164,9 +168,28 @@ def main():
             print(f"nan_detected: {nan_detected}")
             print(f"actor_dim_ok: {actor_dim_ok}")
             print(f"critic_dim_ok: {critic_dim_ok}")
+
+            summary_records.append({
+                "obs_adapter_version": version,
+                "config": cfg_path,
+                "episodes": args.episodes,
+                "avg_return": float(np.mean(returns)),
+                "avg_length": float(np.mean(lengths)),
+                "avg_red_alive": float(np.mean(red_alive_counts)),
+                "avg_blue_alive": float(np.mean(blue_alive_counts)),
+                "nan_detected": nan_detected,
+                "actor_dim_ok": actor_dim_ok,
+                "critic_dim_ok": critic_dim_ok,
+            })
         finally:
             if env is not None:
                 env.close()
+
+    if args.summary_json and summary_records:
+        import os as _os
+        _os.makedirs(_os.path.dirname(args.summary_json) or ".", exist_ok=True)
+        with open(args.summary_json, "w") as f:
+            json.dump(summary_records, f, indent=2)
 
 
 if __name__ == "__main__":
