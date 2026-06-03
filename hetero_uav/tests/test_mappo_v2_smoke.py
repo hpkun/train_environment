@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -14,11 +14,17 @@ TRAIN_SCRIPT = ROOT / "scripts" / "train_mappo_baseline.py"
 EVAL_SCRIPT = ROOT / "scripts" / "eval_mappo_baseline.py"
 
 
+def _subprocess_env():
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 def test_train_accepts_v2():
     result = subprocess.run(
-        [sys.executable, str(TRAIN_SCRIPT), "--help"],
+        ["python", str(TRAIN_SCRIPT), "--help"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(ROOT), timeout=10)
+        cwd=str(ROOT), timeout=10, env=_subprocess_env())
     assert "--obs-adapter-version" in result.stdout
 
 
@@ -41,7 +47,7 @@ def test_v2_adapter_dims():
 
 def test_v2_train_smoke():
     result = subprocess.run(
-        [sys.executable, str(TRAIN_SCRIPT),
+        ["python", str(TRAIN_SCRIPT),
          "--config", "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
          "--obs-adapter-version", "v2",
          "--iterations", "1", "--rollout-length", "8",
@@ -51,7 +57,7 @@ def test_v2_train_smoke():
          "--log-csv", "outputs/test_v2_smoke/train_log.csv",
          "--device", "cpu", "--debug"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(ROOT), timeout=120)
+        cwd=str(ROOT), timeout=120, env=_subprocess_env())
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
     assert "Saved" in result.stdout
 
@@ -68,53 +74,53 @@ def test_v2_model_saved():
 
 def test_v2_eval_smoke():
     result = subprocess.run(
-        [sys.executable, str(EVAL_SCRIPT),
+        ["python", str(EVAL_SCRIPT),
          "--model", "outputs/test_v2_smoke/latest/model.pt",
          "--config", "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
          "--obs-adapter-version", "v2",
          "--episodes", "1", "--device", "cpu",
          "--opponent-policy", "rule_nearest"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(ROOT), timeout=120)
+        cwd=str(ROOT), timeout=120, env=_subprocess_env())
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
 
 
 def test_v2_diagnose_trainability():
     result = subprocess.run(
-        [sys.executable,
+        ["python",
          str(ROOT / "scripts" / "diagnose_mappo_v2_trainability.py"),
          "--iterations", "2", "--rollout-length", "8", "--max-steps", "16",
          "--device", "cpu",
          "--opponent-policy", "rule_nearest"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(ROOT), timeout=120)
+        cwd=str(ROOT), timeout=120, env=_subprocess_env())
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
     assert "episodes_completed" in result.stdout or "no completed episode" in result.stdout
 
 
 def test_v2_zero_shot_smoke():
     result = subprocess.run(
-        [sys.executable,
+        ["python",
          str(ROOT / "scripts" / "diagnose_mappo_v2_zero_shot_smoke.py"),
          "--model", "outputs/mappo_v2_trainability/latest/model.pt",
          "--episodes", "2", "--device", "cpu",
          "--opponent-policy", "rule_nearest"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(ROOT), timeout=120)
+        cwd=str(ROOT), timeout=120, env=_subprocess_env())
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
     assert "episodes: 2" in result.stdout
 
 
 def test_v2_zero_shot_eval_episodes_two():
     result = subprocess.run(
-        [sys.executable,
+        ["python",
          str(ROOT / "scripts" / "eval_mappo_zero_shot.py"),
          "--model", "outputs/mappo_v2_trainability/latest/model.pt",
          "--obs-adapter-version", "v2",
          "--episodes", "2", "--device", "cpu",
          "--opponent-policy", "rule_nearest"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(ROOT), timeout=180)
+        cwd=str(ROOT), timeout=180, env=_subprocess_env())
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
     assert "episodes: 2" in result.stdout
 
@@ -130,8 +136,9 @@ def test_no_nan_v2():
 
 def test_v1_still_works():
     """V1 path must still pass."""
+    output_dir = ROOT / "outputs" / "test_v1_still_works"
     result = subprocess.run(
-        [sys.executable, str(TRAIN_SCRIPT),
+        ["python", str(TRAIN_SCRIPT),
          "--config", "uav_env/JSBSim/configs/hetero_train_2v2_mav_attack.yaml",
          "--obs-adapter-version", "v1",
          "--iterations", "1", "--rollout-length", "8",
@@ -139,7 +146,6 @@ def test_v1_still_works():
          "--output-dir", "outputs/test_v1_still_works",
          "--log-csv", "outputs/test_v1_still_works/train_log.csv",
          "--device", "cpu", "--debug"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(ROOT), timeout=120)
-    assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
-    assert "Saved" in result.stdout
+        cwd=str(ROOT), timeout=120, env=_subprocess_env())
+    assert result.returncode == 0
+    assert (output_dir / "latest" / "model.pt").exists()

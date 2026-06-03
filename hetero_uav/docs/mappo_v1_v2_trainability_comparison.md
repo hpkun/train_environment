@@ -28,17 +28,20 @@ observation-mode compatibility.  **Not** a formal experiment conclusion.
 
 ## Comparison Tool Behavior
 
-- Comparison scripts are fail-fast diagnostic tools:
-  subprocess failure, NaN detection, or dimension mismatch will raise
-  `RuntimeError` and abort the script.
+- Comparison scripts are diagnostic tools, not experiment runners.
+- Comparison scripts are fail-fast:
+  subprocess failure, NaN detection, or dimension mismatch raises an exception
+  and aborts the script.
 - `trainability_summary.json` and `trainability_summary.csv` are
   generated for machine-readable downstream analysis.
+- The summary files are intended for later analysis and reproducibility checks,
+  not for claiming a final V1/V2 result.
 - Zero-shot smoke saves stdout per version and produces
   `zero_shot_smoke_summary.json`.
-- Current comparison uses single seed and short iterations;
-  formal comparison will require multiple seeds and fixed evaluation
-  protocol.
-- Formal experiments need multiple seeds, episodes, and fixed protocols
+- Current comparison is not formal because it uses short iterations and a
+  single seed.
+- The next formal stage requires multiple seeds, multiple evaluation episodes,
+  a fixed training budget, and a fixed evaluation protocol.
 
 ## Next Stages
 
