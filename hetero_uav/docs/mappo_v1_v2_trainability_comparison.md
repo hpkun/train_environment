@@ -25,6 +25,19 @@ observation-mode compatibility.  **Not** a formal experiment conclusion.
 - V1 and V2 use different observation dimensions and content
 - Short smoke runs (20 iterations, 128 max-steps) are not sufficient
   for conclusions about which observation mode is better
+
+## Comparison Tool Behavior
+
+- Comparison scripts are fail-fast diagnostic tools:
+  subprocess failure, NaN detection, or dimension mismatch will raise
+  `RuntimeError` and abort the script.
+- `trainability_summary.json` and `trainability_summary.csv` are
+  generated for machine-readable downstream analysis.
+- Zero-shot smoke saves stdout per version and produces
+  `zero_shot_smoke_summary.json`.
+- Current comparison uses single seed and short iterations;
+  formal comparison will require multiple seeds and fixed evaluation
+  protocol.
 - Formal experiments need multiple seeds, episodes, and fixed protocols
 
 ## Next Stages
