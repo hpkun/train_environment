@@ -1,4 +1,4 @@
-"""Test multiseed diagnostic. No HAPPO, no attention, no GRU."""
+"""Test multiseed diagnostic — order-independent. No HAPPO/attention/GRU."""
 from __future__ import annotations
 
 import csv
@@ -9,21 +9,18 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EVAL_SCRIPT = ROOT / "scripts" / "eval_mappo_zero_shot.py"
+OUT = Path("outputs/test_mappo_multiseed")
 DIAG_SCRIPT = ROOT / "scripts" / "run_mappo_v1_v2_multiseed_diagnostic.py"
 
 
-def test_eval_supports_summary_json():
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    result = subprocess.run(
-        [sys.executable, str(EVAL_SCRIPT), "--help"],
-        capture_output=True, text=True, encoding="utf-8",
-        errors="replace", cwd=str(ROOT), timeout=10)
-    assert "--summary-json" in result.stdout
-
-
-def test_multiseed_diagnostic_runs():
+def _ensure_multiseed_outputs():
+    required = [
+        OUT / "train_summary.csv",
+        OUT / "eval_summary.csv",
+        OUT / "aggregate_summary.json",
+    ]
+    if all(p.exists() for p in required):
+        return
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     result = subprocess.run(
@@ -32,33 +29,67 @@ def test_multiseed_diagnostic_runs():
          "--iterations", "1", "--rollout-length", "8", "--max-steps", "16",
          "--eval-episodes", "1",
          "--device", "cpu", "--opponent-policy", "rule_nearest",
-         "--output-dir", "outputs/test_mappo_multiseed"],
+         "--output-dir", str(OUT)],
         capture_output=True, text=True, encoding="utf-8",
         errors="replace", cwd=str(ROOT), timeout=300, env=env,
     )
     assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
 
 
+def test_eval_supports_summary_json():
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "eval_mappo_zero_shot.py"),
+         "--help"],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", cwd=str(ROOT), timeout=10)
+    assert "--summary-json" in result.stdout
+
+
 def test_multiseed_outputs_exist():
-    out = Path("outputs/test_mappo_multiseed")
+    _ensure_multiseed_outputs()
     for fname in ["train_summary.csv", "eval_summary.csv",
                   "aggregate_summary.json"]:
-        assert (out / fname).exists(), f"Missing {fname}"
+        assert (OUT / fname).exists(), f"Missing {fname}"
 
-    with open(out / "train_summary.csv") as f:
+
+def test_train_summary_fields():
+    _ensure_multiseed_outputs()
+    with open(OUT / "train_summary.csv") as f:
         rows = list(csv.DictReader(f))
-    versions = {r["version"] for r in rows}
-    assert "v1" in versions and "v2" in versions
+    assert len(rows) >= 2
+    by_version = {r["version"]: r for r in rows}
+    assert set(by_version) == {"v1", "v2"}
+    assert int(float(by_version["v1"]["actor_dim"])) == 140
+    assert int(float(by_version["v2"]["actor_dim"])) == 96
+    assert int(float(by_version["v1"]["critic_dim"])) == 700
+    assert int(float(by_version["v2"]["critic_dim"])) == 480
+    for r in rows:
+        assert int(float(r["nan_detected"])) == 0, f"NaN in {r['version']}"
 
-    with open(out / "eval_summary.csv") as f:
-        e_rows = list(csv.DictReader(f))
-    assert len(e_rows) >= 2
 
-    agg = json.loads((out / "aggregate_summary.json").read_text())
+def test_eval_summary_fields():
+    _ensure_multiseed_outputs()
+    with open(OUT / "eval_summary.csv") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) >= 2
+    for r in rows:
+        assert r["actor_dim_ok"] == "True"
+        assert r["critic_dim_ok"] == "True"
+        assert r["nan_detected"] == "False"
+
+
+def test_aggregate_json_fields():
+    _ensure_multiseed_outputs()
+    agg = json.loads((OUT / "aggregate_summary.json").read_text())
     assert set(agg) == {"v1", "v2"}
     for v in ("v1", "v2"):
-        assert "train_best_return_mean" in agg[v]
-        assert "eval_by_config" in agg[v]
+        d = agg[v]
+        for key in ["train_best_return_mean", "train_best_return_std",
+                    "train_last_return_mean", "train_last_return_std",
+                    "episodes_completed_mean", "final_red_alive_mean",
+                    "final_blue_alive_mean", "eval_by_config"]:
+            assert key in d, f"Missing {key} in {v}"
+        assert len(d["eval_by_config"]) >= 1
 
 
 def test_doc_exists():
@@ -68,3 +99,4 @@ def test_doc_exists():
     assert "brma_sensor" in text
     assert "mav_shared_geo" in text
     assert "not" in text and "formal" in text
+    assert "entity attention" in text.lower()

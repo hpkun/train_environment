@@ -29,6 +29,22 @@ win-rate conclusions.
 - `aggregate_summary.json` — mean/std across seeds, grouped by version and config
 - per-seed `train_log.csv` and checkpoints
 
+## Role in the Pipeline
+
+This diagnostic is a stability check before method innovation.  If V2
+is stable (no NaN, reasonable variance) across multiple seeds, it can
+serve as the main experimental observation mode.  Current results do
+not prove V2 is better than V1.
+
+Next method innovation priority: **entity attention encoder**, not HAPPO,
+because:
+- The research target is composition zero-shot transfer
+- Variable entity counts and masks are the core challenge
+- HAPPO primarily addresses heterogeneous policy updates, not the
+  current bottleneck
+
+See `docs/entity_attention_method_plan.md` for the detailed design.
+
 ## Caveats
 
 - This is a diagnostic, **not** a win-rate experiment.
