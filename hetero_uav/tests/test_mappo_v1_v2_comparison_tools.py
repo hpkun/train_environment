@@ -78,6 +78,17 @@ def test_compare_zero_shot_runs():
 
 
 def test_zero_shot_summary_json():
+    # Ensure zero_shot has run (may need prior train output too)
+    _ensure_comparison_outputs()
+    if not Path(f"{OUT_DIR}/zero_shot_smoke_summary.json").exists():
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        subprocess.run(
+            [sys.executable, str(ZERO_SHOT_SCRIPT),
+             "--episodes", "1", "--device", "cpu",
+             "--opponent-policy", "rule_nearest"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", cwd=str(ROOT), timeout=300, env=env)
     p = Path(f"{OUT_DIR}/zero_shot_smoke_summary.json")
     assert p.exists()
     data = json.loads(p.read_text())
