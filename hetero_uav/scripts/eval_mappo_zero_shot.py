@@ -30,8 +30,8 @@ V1_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_test_3v3_mav_attack_interceptor.yaml",
 ]
 V2_CONFIGS = [
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_4v4.yaml",
 ]
 
 

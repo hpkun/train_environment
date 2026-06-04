@@ -15,15 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = ROOT / "scripts" / "train_mappo_baseline.py"
 EVAL_SCRIPT = ROOT / "scripts" / "eval_mappo_zero_shot.py"
 
-V1_CONFIG = "uav_env/JSBSim/configs/hetero_paper_3v2_mav_2uav_vs_2uav.yaml"
-V2_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml"
+V1_CONFIG = "uav_env/JSBSim/configs/hetero_balanced_brma_sensor_3v3.yaml"
+V2_CONFIG = "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml"
 V1_EVAL_CFGS = [
-    "uav_env/JSBSim/configs/hetero_paper_3v2_mav_2uav_vs_2uav.yaml",
-    "uav_env/JSBSim/configs/hetero_paper_5v4_mav_4uav_vs_4uav.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_brma_sensor_3v3.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_brma_sensor_4v4.yaml",
 ]
 V2_EVAL_CFGS = [
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_4v4.yaml",
 ]
 
 OBS_MODES = {"v1": "brma_sensor", "v2": "mav_shared_geo"}

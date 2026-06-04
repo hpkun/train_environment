@@ -35,7 +35,22 @@ different composition without retraining.
 - `hetero_paper_3v2_mav_2uav_vs_2uav.yaml` (TAM-HAPPO 3v2)
 - `hetero_paper_5v4_mav_4uav_vs_4uav.yaml` (TAM-HAPPO 5v4)
 
-### C. Composition zero-shot config pairs
+These configs are retained as paper scenario references. They are not the
+current default path for MAPPO baseline environment stability validation.
+
+### C. Balanced stability configs
+
+- `hetero_balanced_mav_shared_geo_3v3.yaml`
+- `hetero_balanced_mav_shared_geo_4v4.yaml`
+- `hetero_balanced_brma_sensor_3v3.yaml`
+- `hetero_balanced_brma_sensor_4v4.yaml`
+
+Balanced configs are the current mainline for MAPPO baseline environment
+stability. They keep red and blue counts equal, which avoids mixing stability
+diagnostics with force-size asymmetry and makes later MAPPO-vs-method
+comparisons cleaner.
+
+### D. Composition zero-shot config pairs
 
 - Train: 2v2, eval: 3v2 (seen roles, unseen scale)
 - Train: 2v2, eval: 5v4 (seen roles, unseen scale)
@@ -104,11 +119,12 @@ Formal future experiments should compare at least:
 
 ## 9. V2 Diagnostic Interpretation
 
-The current priority is MAPPO baseline environment stability. V1/V2 comparison
-is useful as a regression and ablation diagnostic, but it does not replace the
-main V2 stability validation workflow. Do not start attention, HAPPO, GRU, or
-role-aware method work until the plain MAPPO baseline can train, save, load, and
-evaluate on seen 3v2 and unseen 5v4 configs without NaNs or dimension errors.
+The current priority is MAPPO baseline environment stability on balanced V2
+3v3/4v4 configs. V1/V2 comparison is useful as a regression and ablation
+diagnostic, but it does not replace the main V2 stability validation workflow.
+Do not start attention, HAPPO, GRU, or role-aware method work until the plain
+MAPPO baseline can train, save, load, and evaluate on balanced 3v3 and 4v4
+configs without NaNs or dimension errors.
 
 The V2 trainability diagnostic should pass `--max-steps` through to the training
 script so short runs can finish episodes when intended. A diagnostic with no

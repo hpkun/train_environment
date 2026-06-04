@@ -19,10 +19,10 @@ ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = ROOT / "scripts" / "train_mappo_baseline.py"
 EVAL_SCRIPT = ROOT / "scripts" / "eval_mappo_zero_shot.py"
 
-TRAIN_CONFIG_V2 = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml"
+TRAIN_CONFIG_V2 = "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml"
 EVAL_CONFIGS_V2 = [
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_4v4.yaml",
 ]
 EXPECTED_DIMS = {
     "v1": (140, 700),

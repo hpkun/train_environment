@@ -18,6 +18,25 @@ environment stability validation in
 | v1 | brma_sensor | 140 | 700 |
 | v2 | mav_shared_geo | 96 | 480 |
 
+## Config Scope
+
+Paper-aligned configs remain available as TAM-HAPPO scenario references:
+
+- `hetero_paper_3v2_mav_2uav_vs_2uav.yaml`
+- `hetero_paper_5v4_mav_4uav_vs_4uav.yaml`
+
+The current diagnostic defaults use balanced red/blue counts:
+
+- V1 train: `hetero_balanced_brma_sensor_3v3.yaml`
+- V1 eval: `hetero_balanced_brma_sensor_3v3.yaml`,
+  `hetero_balanced_brma_sensor_4v4.yaml`
+- V2 train: `hetero_balanced_mav_shared_geo_3v3.yaml`
+- V2 eval: `hetero_balanced_mav_shared_geo_3v3.yaml`,
+  `hetero_balanced_mav_shared_geo_4v4.yaml`
+
+Balanced configs are preferred for the current stability gate because they avoid
+red/blue count asymmetry and make later MAPPO-vs-method comparisons cleaner.
+
 ## Diagnostic Protocol
 
 - seeds: [0, 1] (configurable)

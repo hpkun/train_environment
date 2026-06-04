@@ -17,9 +17,27 @@ This is not an attention, HAPPO, GRU, or role-aware algorithm stage.
 - `actor_obs_dim=96`.
 - `critic_state_dim=480`.
 - Plain MLP actor/critic model save and load.
-- Seen 3v2 evaluation smoke.
-- Unseen 5v4 evaluation smoke.
+- Balanced 3v3 training/evaluation smoke.
+- Balanced 4v4 composition smoke.
 - NaN-free training and evaluation.
+
+## Config Scope
+
+Paper-aligned configs are retained as TAM-HAPPO scenario references:
+
+- `hetero_paper_3v2_mav_2uav_vs_2uav.yaml`
+- `hetero_paper_5v4_mav_4uav_vs_4uav.yaml`
+
+They are no longer the default stability validation path.
+
+Balanced configs are the current mainline:
+
+- Train/default eval: `hetero_balanced_mav_shared_geo_3v3.yaml`
+- Composition smoke eval: `hetero_balanced_mav_shared_geo_4v4.yaml`
+
+The balanced setup avoids mixing environment stability signals with red/blue
+count asymmetry. It is a cleaner gate before comparing plain MAPPO against any
+future method module.
 
 ## What Is Not Claimed
 
@@ -36,7 +54,7 @@ This is not an attention, HAPPO, GRU, or role-aware algorithm stage.
 - Train logs contain no NaN flags.
 - Model metadata reports `obs_adapter_version=v2`, `actor_obs_dim=96`, and
   `critic_state_dim=480`.
-- Evaluation on 3v2 and 5v4 produces no NaN.
+- Evaluation on balanced 3v3 and balanced 4v4 produces no NaN.
 - Evaluation reports `actor_dim_ok=True` and `critic_dim_ok=True`.
 - Summary files are complete:
   - `stability_train_summary.csv`

@@ -12,6 +12,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = ROOT / "scripts" / "train_mappo_baseline.py"
 EVAL_SCRIPT = ROOT / "scripts" / "eval_mappo_baseline.py"
+V2_MAIN_CONFIG = "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml"
 
 
 def _subprocess_env():
@@ -30,8 +31,7 @@ def test_train_accepts_v2():
 
 def test_v2_env_observation_mode():
     from uav_env import make_env
-    env = make_env("uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
-                   env_type="jsbsim_hetero", max_steps=5)
+    env = make_env(V2_MAIN_CONFIG, env_type="jsbsim_hetero", max_steps=5)
     try:
         assert env.observation_mode == "mav_shared_geo"
     finally:
@@ -48,7 +48,7 @@ def test_v2_adapter_dims():
 def test_v2_train_smoke():
     result = subprocess.run(
         ["python", str(TRAIN_SCRIPT),
-         "--config", "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
+         "--config", V2_MAIN_CONFIG,
          "--obs-adapter-version", "v2",
          "--iterations", "1", "--rollout-length", "8",
          "--max-steps", "16",
@@ -76,7 +76,7 @@ def test_v2_eval_smoke():
     result = subprocess.run(
         ["python", str(EVAL_SCRIPT),
          "--model", "outputs/test_v2_smoke/latest/model.pt",
-         "--config", "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
+         "--config", V2_MAIN_CONFIG,
          "--obs-adapter-version", "v2",
          "--episodes", "1", "--device", "cpu",
          "--opponent-policy", "rule_nearest"],

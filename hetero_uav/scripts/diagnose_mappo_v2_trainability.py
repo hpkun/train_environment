@@ -15,7 +15,7 @@ TRAIN_SCRIPT = ROOT / "scripts" / "train_mappo_baseline.py"
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-config",
-                        default="uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml")
+                        default="uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml")
     parser.add_argument("--iterations", type=int, default=10)
     parser.add_argument("--rollout-length", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)

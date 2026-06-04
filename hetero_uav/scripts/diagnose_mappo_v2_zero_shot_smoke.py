@@ -19,8 +19,8 @@ from algorithms.mappo.policy import MAPPOActorCritic
 from algorithms.mappo.opponent_policy import OpponentPolicy
 
 CONFIGS = [
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_4v4.yaml",
 ]
 
 

@@ -1,0 +1,81 @@
+env_type: jsbsim_hetero
+observation_mode: "mav_shared_geo"
+uav_direct_observation_range_m: 10000.0
+mav_observation_range_m: 80000.0
+max_num_red: 3
+max_num_blue: 3
+red_agent_types:
+  - mav
+  - attack_uav
+  - attack_uav
+blue_agent_types:
+  - attack_uav
+  - attack_uav
+  - attack_uav
+aircraft_type_params:
+  mav:
+    aircraft_model: "A-4"
+    role: "mav"
+    num_missiles: 0
+    init_altitude_offset_m: 0.0
+    init_speed_offset_mps: 0.0
+  attack_uav:
+    aircraft_model: "f16"
+    role: "attack_uav"
+    num_missiles: 2
+    init_altitude_offset_m: 0.0
+    init_speed_offset_mps: 0.0
+  scout_uav:
+    aircraft_model: "f16"
+    role: "scout_uav"
+    num_missiles: 0
+    init_altitude_offset_m: 0.0
+    init_speed_offset_mps: 0.0
+  interceptor_uav:
+    aircraft_model: "f16"
+    role: "interceptor_uav"
+    num_missiles: 2
+    init_altitude_offset_m: 0.0
+    init_speed_offset_mps: 0.0
+sim_freq: 60
+agent_interaction_steps: 12
+max_steps: 500
+enable_gcas_for_blue: true
+suppress_jsbsim_output: true
+initial_states:
+  red_0:
+    lon: 120.02
+    lat: 59.98
+    altitude_m: 6000
+    speed_mps: 250
+    yaw_deg: 0.0
+  red_1:
+    lon: 120.00
+    lat: 60.00
+    altitude_m: 6000
+    speed_mps: 250
+    yaw_deg: 0.0
+  red_2:
+    lon: 120.04
+    lat: 60.00
+    altitude_m: 6000
+    speed_mps: 250
+    yaw_deg: 0.0
+  blue_0:
+    lon: 120.00
+    lat: 60.20
+    altitude_m: 6000
+    speed_mps: 250
+    yaw_deg: 180.0
+  blue_1:
+    lon: 120.04
+    lat: 60.20
+    altitude_m: 6000
+    speed_mps: 250
+    yaw_deg: 180.0
+  blue_2:
+    lon: 120.02
+    lat: 60.24
+    altitude_m: 6000
+    speed_mps: 250
+    yaw_deg: 180.0

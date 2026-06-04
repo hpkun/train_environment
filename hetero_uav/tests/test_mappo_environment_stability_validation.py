@@ -10,6 +10,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "validate_mappo_baseline_environment_stability.py"
 OUT_DIR = ROOT / "outputs" / "test_mappo_env_stability"
+BALANCED_TRAIN = "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml"
+BALANCED_EVAL = {
+    "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml",
+    "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_4v4.yaml",
+}
 
 
 def _env():
@@ -22,7 +27,9 @@ def _run_minimal_validation():
     report = OUT_DIR / "stability_report.json"
     if report.exists():
         data = json.loads(report.read_text(encoding="utf-8"))
-        if data.get("status") == "passed":
+        if (data.get("status") == "passed"
+                and data.get("train_config") == BALANCED_TRAIN
+                and set(data.get("eval_configs", [])) == BALANCED_EVAL):
             return
 
     result = subprocess.run(
@@ -98,6 +105,8 @@ def test_stability_report_passed():
     assert data["obs_adapter_version"] == "v2"
     assert data["actor_dim"] == 96
     assert data["critic_dim"] == 480
+    assert data["train_config"] == BALANCED_TRAIN
+    assert set(data["eval_configs"]) == BALANCED_EVAL
     assert data["any_train_nan"] is False
     assert data["any_eval_nan"] is False
     assert data["all_actor_dim_ok"] is True
