@@ -77,7 +77,7 @@ It can be used later as a homogeneous scale-transfer reference.
 | observation V1 brma_sensor | compatibility adapter, actor 140 / critic 700 | ablation/reference | keep available |
 | observation V2 mav_shared_geo | actor 96 / critic 480 | main observation candidate | audit required fields and masks |
 | MAV shared information | abstract direct/shared observation logic | support MAV situation sharing | audit communication assumptions |
-| blue opponent policy | zero/random/rule_nearest only | greedy finite-state / situation-based baseline | design after protocol audit |
+| blue opponent policy | zero/random/rule_nearest plus diagnostic greedy_fsm | greedy finite-state / situation-based baseline | greedy_fsm design in progress; rule_nearest remains default |
 | missile/fire-control | inherited BRMA-style mechanics | explicit protocol documentation | audit against heterogeneous objective |
 | evasion | inherited BRMA logic | explicit heterogeneous audit | audit, do not change blindly |
 | reward | inherited BRMA reward with hetero metadata | explicit MAV/UAV role objective | reward/termination audit needed |
@@ -110,6 +110,11 @@ E2. Paper-aligned 3v2/5v4 smoke and diagnostics.
 E3. Episode length / decision frequency consistency.
 
 E4. Blue greedy finite-state opponent design.
+
+Status: in progress. The current work adds `greedy_fsm` opponent design and
+diagnostics only. `rule_nearest` remains the default until `greedy_fsm` is
+validated, and no training run should switch to `greedy_fsm` without explicit
+user confirmation.
 
 E5. Reward/termination audit for MAV/UAV roles.
 
