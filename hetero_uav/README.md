@@ -229,6 +229,16 @@ If `jsbsim` is not installed, model-file checks still run, command-line scripts
 print install hints, and backend execution tests are skipped with an explicit
 dependency message.
 
+Environment finalization and protocol taxonomy are tracked in:
+
+- `docs/hetero_environment_finalization_plan.md`
+
+Use the readiness audit before entering any method module:
+
+```bash
+python scripts/audit_hetero_environment_readiness.py --include-v1 --steps 3
+```
+
 ## Formal Heterogeneous Composition Configs
 
 Formal JSBSim train/test composition configs are under

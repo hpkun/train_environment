@@ -36,19 +36,20 @@ different composition without retraining.
 - `hetero_paper_5v4_mav_4uav_vs_4uav.yaml` (TAM-HAPPO 5v4)
 
 These configs are retained as paper scenario references. They are not the
-current default path for MAPPO baseline environment stability validation.
+main environment protocol in `hetero_uav`. The current finalization plan treats
+the paper-aligned 3v2/5v4 family as the main heterogeneous protocol because the
+extra red aircraft is the support MAV while the attack-UAV count is matched.
 
-### C. Balanced stability configs
+### C. Balanced hard-ablation configs
 
 - `hetero_balanced_mav_shared_geo_3v3.yaml`
 - `hetero_balanced_mav_shared_geo_4v4.yaml`
 - `hetero_balanced_brma_sensor_3v3.yaml`
 - `hetero_balanced_brma_sensor_4v4.yaml`
 
-Balanced configs are the current mainline for MAPPO baseline environment
-stability. They keep red and blue counts equal, which avoids mixing stability
-diagnostics with force-size asymmetry and makes later MAPPO-vs-method
-comparisons cleaner.
+Balanced configs are hard ablations. They keep total red/blue aircraft counts
+equal, but red has one fewer attack UAV because it includes a non-shooting MAV.
+They are useful stress tests, not the default environment protocol.
 
 ### D. Composition zero-shot config pairs
 
@@ -119,12 +120,12 @@ Formal future experiments should compare at least:
 
 ## 9. V2 Diagnostic Interpretation
 
-The current priority is MAPPO baseline environment stability on balanced V2
-3v3/4v4 configs. V1/V2 comparison is useful as a regression and ablation
-diagnostic, but it does not replace the main V2 stability validation workflow.
-Do not start attention, HAPPO, GRU, or role-aware method work until the plain
-MAPPO baseline can train, save, load, and evaluate on balanced 3v3 and 4v4
-configs without NaNs or dimension errors.
+The current priority is environment protocol readiness. The paper-aligned V2
+3v2/5v4 family is the main heterogeneous protocol, while balanced 3v3/4v4 is a
+hard ablation. V1/V2 comparison remains useful as a regression and ablation
+diagnostic, but it does not replace the environment readiness audit. Do not
+start attention, HAPPO, GRU, or role-aware method work until protocol readiness,
+episode length, opponent policy, and reward/termination audits are complete.
 
 The V2 trainability diagnostic should pass `--max-steps` through to the training
 script so short runs can finish episodes when intended. A diagnostic with no
