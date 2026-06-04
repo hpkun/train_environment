@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +49,50 @@ def _alive_counts(env) -> tuple[int, int]:
     red_alive = sum(1 for sim in env.red_planes.values() if sim.is_alive)
     blue_alive = sum(1 for sim in env.blue_planes.values() if sim.is_alive)
     return red_alive, blue_alive
+
+
+def _classify_episode_result(env, info, terminated, truncated,
+                             episode_length: int) -> dict:
+    del info
+    red_alive_count = sum(1 for sim in env.red_planes.values() if sim.is_alive)
+    blue_alive_count = sum(1 for sim in env.blue_planes.values() if sim.is_alive)
+    red_dead_count = max(len(env.red_planes) - red_alive_count, 0)
+    blue_dead_count = max(len(env.blue_planes) - blue_alive_count, 0)
+    mav_sim = env.red_planes.get("red_0")
+    mav_alive = bool(mav_sim is not None and mav_sim.is_alive)
+    timeout = bool(all(truncated.values()) or episode_length >= getattr(env, "max_steps", 0))
+
+    if blue_alive_count == 0 and red_alive_count > 0:
+        end_reason = "red_win_elimination"
+        winner = "red"
+    elif red_alive_count == 0 and blue_alive_count > 0:
+        end_reason = "blue_win_elimination"
+        winner = "blue"
+    elif red_alive_count == 0 and blue_alive_count == 0:
+        end_reason = "mutual_elimination_draw"
+        winner = "draw"
+    elif timeout:
+        end_reason = "timeout"
+        if red_alive_count > blue_alive_count:
+            winner = "red_alive_advantage"
+        elif red_alive_count < blue_alive_count:
+            winner = "blue_alive_advantage"
+        else:
+            winner = "draw"
+    else:
+        end_reason = "other"
+        winner = "draw"
+
+    return {
+        "red_alive_count": red_alive_count,
+        "blue_alive_count": blue_alive_count,
+        "red_dead_count": red_dead_count,
+        "blue_dead_count": blue_dead_count,
+        "mav_alive": mav_alive,
+        "mav_dead": not mav_alive,
+        "episode_end_reason": end_reason,
+        "winner": winner,
+    }
 
 
 def main():
@@ -109,12 +154,15 @@ def main():
                 continue
             opponent = OpponentPolicy(mode=args.opponent_policy, seed=0)
             returns, lengths, red_alive_counts, blue_alive_counts = [], [], [], []
+            episode_results = []
             nan_detected = False
             actor_dim_ok = True
             critic_dim_ok = True
             for ep in range(args.episodes):
                 obs, info = env.reset(seed=args.seed + ep)
                 ep_ret, ep_len = 0.0, 0
+                terminated = {aid: False for aid in env.agent_ids}
+                truncated = {aid: False for aid in env.agent_ids}
                 while True:
                     if _obs_has_nan(obs):
                         nan_detected = True
@@ -159,12 +207,43 @@ def main():
                 lengths.append(ep_len)
                 red_alive_counts.append(r_alive)
                 blue_alive_counts.append(b_alive)
+                episode_results.append(_classify_episode_result(
+                    env, info, terminated, truncated, ep_len))
+
+            end_reason_counts = Counter(
+                result["episode_end_reason"] for result in episode_results)
+            winner_counts = Counter(result["winner"] for result in episode_results)
+            n_episodes = max(len(episode_results), 1)
+            red_win_count = sum(
+                count for winner, count in winner_counts.items()
+                if winner == "red" or winner == "red_alive_advantage")
+            blue_win_count = sum(
+                count for winner, count in winner_counts.items()
+                if winner == "blue" or winner == "blue_alive_advantage")
+            draw_count = sum(
+                count for winner, count in winner_counts.items()
+                if winner == "draw")
+            timeout_count = end_reason_counts.get("timeout", 0)
+            mav_survival = sum(1 for result in episode_results if result["mav_alive"])
+            red_dead = [result["red_dead_count"] for result in episode_results]
+            blue_dead = [result["blue_dead_count"] for result in episode_results]
 
             print(f"=== {cfg_path} ===")
             print(f"avg_return: {np.mean(returns):.2f}")
             print(f"avg_length: {np.mean(lengths):.1f}")
             print(f"avg_red_alive: {np.mean(red_alive_counts):.2f}")
             print(f"avg_blue_alive: {np.mean(blue_alive_counts):.2f}")
+            print(f"red_win_rate: {red_win_count / n_episodes:.3f}")
+            print(f"blue_win_rate: {blue_win_count / n_episodes:.3f}")
+            print(f"draw_rate: {draw_count / n_episodes:.3f}")
+            print(f"timeout_rate: {timeout_count / n_episodes:.3f}")
+            print(f"mav_survival_rate: {mav_survival / n_episodes:.3f}")
+            print(f"red_alive_final_mean: {np.mean(red_alive_counts):.2f}")
+            print(f"blue_alive_final_mean: {np.mean(blue_alive_counts):.2f}")
+            print(f"red_dead_final_mean: {np.mean(red_dead):.2f}")
+            print(f"blue_dead_final_mean: {np.mean(blue_dead):.2f}")
+            print(f"episode_end_reason_counts: {dict(end_reason_counts)}")
+            print(f"winner_counts: {dict(winner_counts)}")
             print(f"nan_detected: {nan_detected}")
             print(f"actor_dim_ok: {actor_dim_ok}")
             print(f"critic_dim_ok: {critic_dim_ok}")
@@ -177,6 +256,17 @@ def main():
                 "avg_length": float(np.mean(lengths)),
                 "avg_red_alive": float(np.mean(red_alive_counts)),
                 "avg_blue_alive": float(np.mean(blue_alive_counts)),
+                "red_win_rate": float(red_win_count / n_episodes),
+                "blue_win_rate": float(blue_win_count / n_episodes),
+                "draw_rate": float(draw_count / n_episodes),
+                "timeout_rate": float(timeout_count / n_episodes),
+                "mav_survival_rate": float(mav_survival / n_episodes),
+                "red_alive_final_mean": float(np.mean(red_alive_counts)),
+                "blue_alive_final_mean": float(np.mean(blue_alive_counts)),
+                "red_dead_final_mean": float(np.mean(red_dead)),
+                "blue_dead_final_mean": float(np.mean(blue_dead)),
+                "episode_end_reason_counts": dict(end_reason_counts),
+                "winner_counts": dict(winner_counts),
                 "nan_detected": nan_detected,
                 "actor_dim_ok": actor_dim_ok,
                 "critic_dim_ok": critic_dim_ok,

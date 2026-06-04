@@ -91,3 +91,32 @@ Get-Content outputs\mappo_balanced_baseline_500k\seed_0\train_log.csv -Wait
 
 The report is a stability artifact. It should not be interpreted as proof of
 zero-shot success.
+
+## Combat Metrics After 500k
+
+Do not judge the 500k run from return alone. After training, inspect combat
+diagnostics:
+
+- `red_win_rate`
+- `blue_win_rate`
+- `draw_rate`
+- `timeout_rate`
+- MAV survival rate
+- final red/blue alive counts
+- final red/blue dead counts
+- episode end reasons
+
+The balanced scenarios have equal total aircraft counts, but red has one fewer
+shooting attack UAV because red includes a non-shooting MAV. Poor 4v4
+generalization is therefore not automatically a code bug; it may indicate that
+the balanced task is still difficult for plain MAPPO.
+
+Run posthoc combat-metrics evaluation on a saved 500k model:
+
+```bash
+python scripts/evaluate_saved_mappo_with_combat_metrics.py \
+  --model outputs/mappo_balanced_baseline_500k/seed_0/latest/model.pt \
+  --episodes 100 \
+  --device cpu \
+  --opponent-policy rule_nearest
+```

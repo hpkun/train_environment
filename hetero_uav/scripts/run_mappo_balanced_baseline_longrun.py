@@ -232,6 +232,25 @@ def _validate_eval(seed: int, eval_summary_path: Path) -> list[dict]:
             "avg_length": avg_length,
             "avg_red_alive": _finite(rec["avg_red_alive"], "avg_red_alive"),
             "avg_blue_alive": _finite(rec["avg_blue_alive"], "avg_blue_alive"),
+            "red_win_rate": _finite(rec.get("red_win_rate", 0.0), "red_win_rate"),
+            "blue_win_rate": _finite(rec.get("blue_win_rate", 0.0), "blue_win_rate"),
+            "draw_rate": _finite(rec.get("draw_rate", 0.0), "draw_rate"),
+            "timeout_rate": _finite(rec.get("timeout_rate", 0.0), "timeout_rate"),
+            "mav_survival_rate": _finite(
+                rec.get("mav_survival_rate", 0.0), "mav_survival_rate"),
+            "red_alive_final_mean": _finite(
+                rec.get("red_alive_final_mean", rec["avg_red_alive"]),
+                "red_alive_final_mean"),
+            "blue_alive_final_mean": _finite(
+                rec.get("blue_alive_final_mean", rec["avg_blue_alive"]),
+                "blue_alive_final_mean"),
+            "red_dead_final_mean": _finite(
+                rec.get("red_dead_final_mean", 0.0), "red_dead_final_mean"),
+            "blue_dead_final_mean": _finite(
+                rec.get("blue_dead_final_mean", 0.0), "blue_dead_final_mean"),
+            "episode_end_reason_counts": json.dumps(
+                rec.get("episode_end_reason_counts", {}), sort_keys=True),
+            "winner_counts": json.dumps(rec.get("winner_counts", {}), sort_keys=True),
             "nan_detected": bool(rec["nan_detected"]),
             "actor_dim_ok": bool(rec["actor_dim_ok"]),
             "critic_dim_ok": bool(rec["critic_dim_ok"]),
@@ -262,6 +281,18 @@ def _report(args: argparse.Namespace, train_rows: list[dict],
             "avg_return_mean": float(np.mean(returns)),
             "avg_return_std": float(np.std(returns)),
             "avg_length_mean": float(np.mean(lengths)),
+            "red_win_rate_mean": float(np.mean([r["red_win_rate"] for r in rows])),
+            "blue_win_rate_mean": float(np.mean([r["blue_win_rate"] for r in rows])),
+            "draw_rate_mean": float(np.mean([r["draw_rate"] for r in rows])),
+            "timeout_rate_mean": float(np.mean([r["timeout_rate"] for r in rows])),
+            "mav_survival_rate_mean": float(
+                np.mean([r["mav_survival_rate"] for r in rows])),
+            "red_alive_final_mean": float(
+                np.mean([r["red_alive_final_mean"] for r in rows])),
+            "blue_alive_final_mean": float(
+                np.mean([r["blue_alive_final_mean"] for r in rows])),
+            "blue_dead_final_mean": float(
+                np.mean([r["blue_dead_final_mean"] for r in rows])),
         }
 
     return {
