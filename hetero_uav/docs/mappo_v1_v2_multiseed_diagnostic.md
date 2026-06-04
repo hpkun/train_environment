@@ -6,6 +6,11 @@ Multi-seed, medium-length diagnostic to observe V1/V2 training pipeline
 stability.  This is **not** a formal experiment and does not produce
 win-rate conclusions.
 
+The current project priority is MAPPO baseline environment stability. The V1/V2
+comparison is an auxiliary diagnostic and does not replace the mainline V2
+environment stability validation in
+`docs/mappo_baseline_environment_stability.md`.
+
 ## V1/V2 Settings
 
 | Version | Observation | Actor Dim | Critic Dim |
@@ -36,14 +41,10 @@ is stable (no NaN, reasonable variance) across multiple seeds, it can
 serve as the main experimental observation mode.  Current results do
 not prove V2 is better than V1.
 
-Next method innovation priority: **entity attention encoder**, not HAPPO,
-because:
-- The research target is composition zero-shot transfer
-- Variable entity counts and masks are the core challenge
-- HAPPO primarily addresses heterogeneous policy updates, not the
-  current bottleneck
-
-See `docs/entity_attention_method_plan.md` for the detailed design.
+Do not enter attention, HAPPO, GRU, or role-aware algorithm work before the
+MAPPO baseline environment stability validation is clean.
+Entity attention remains only a possible later method direction after this
+baseline stability gate; it is not part of the current diagnostic stage.
 
 ## Caveats
 

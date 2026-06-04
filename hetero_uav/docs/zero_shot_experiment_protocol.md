@@ -46,7 +46,8 @@ different composition without retraining.
 | Stage | Name | Goal |
 |---|---|---|
 | E0 | Environment smoke | All configs load, adapter shapes correct, no NaN |
-| E1 | MAPPO trainability | 20–200 iterations, loss curves, no NaN |
+| E1 | MAPPO baseline environment stability | Plain MAPPO MLP trains/evaluates without NaN on V2 |
+| E1b | MAPPO trainability diagnostics | 20-200 iterations, loss curves, no NaN |
 | E2 | MAPPO baseline formal | Multi-seed, multi-episode, full metrics |
 | E3 | Zero-shot composition | Train on X, eval on Y, gap measurement |
 | E4 | Role-aware / attention | Incremental method improvement |
@@ -102,6 +103,12 @@ Formal future experiments should compare at least:
 - `mav_shared_geo + attention/role-aware method`.
 
 ## 9. V2 Diagnostic Interpretation
+
+The current priority is MAPPO baseline environment stability. V1/V2 comparison
+is useful as a regression and ablation diagnostic, but it does not replace the
+main V2 stability validation workflow. Do not start attention, HAPPO, GRU, or
+role-aware method work until the plain MAPPO baseline can train, save, load, and
+evaluate on seen 3v2 and unseen 5v4 configs without NaNs or dimension errors.
 
 The V2 trainability diagnostic should pass `--max-steps` through to the training
 script so short runs can finish episodes when intended. A diagnostic with no
