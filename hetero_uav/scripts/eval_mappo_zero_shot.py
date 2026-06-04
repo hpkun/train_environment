@@ -108,6 +108,7 @@ def main():
                         default=None)
     parser.add_argument("--configs", nargs="*", default=None)
     parser.add_argument("--summary-json", default=None)
+    parser.add_argument("--max-steps-override", type=int, default=None)
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -141,7 +142,9 @@ def main():
             continue
         env = None
         try:
-            env = make_env(cfg_path, env_type="jsbsim_hetero", max_steps=500)
+            env = make_env(cfg_path, env_type="jsbsim_hetero")
+            if args.max_steps_override is not None:
+                env.max_steps = args.max_steps_override
             obs_mode = getattr(env, "observation_mode", "brma_sensor")
             if version == "v2" and obs_mode != "mav_shared_geo":
                 message = (
@@ -247,11 +250,17 @@ def main():
             print(f"nan_detected: {nan_detected}")
             print(f"actor_dim_ok: {actor_dim_ok}")
             print(f"critic_dim_ok: {critic_dim_ok}")
+            print(f"env_max_steps: {env.max_steps}")
+            print(f"decision_dt: {getattr(env, 'env_dt', 0.0):.2f}")
 
             summary_records.append({
                 "obs_adapter_version": version,
                 "config": cfg_path,
                 "episodes": args.episodes,
+                "sim_freq": getattr(env, "sim_freq", 60),
+                "agent_interaction_steps": getattr(env, "agent_interaction_steps", 12),
+                "decision_dt": float(getattr(env, "env_dt", 0.0)),
+                "env_max_steps": env.max_steps,
                 "avg_return": float(np.mean(returns)),
                 "avg_length": float(np.mean(lengths)),
                 "avg_red_alive": float(np.mean(red_alive_counts)),
