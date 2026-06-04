@@ -118,6 +118,10 @@ class OpponentPolicy:
 
     @classmethod
     def _altitude_value(cls, obs: dict) -> float | None:
+        # Low-intrusion heuristic: current observation variants do not expose a
+        # single canonical altitude scale to this script-layer policy. Revisit
+        # this threshold against the environment's real altitude field before
+        # using greedy_fsm as a training opponent.
         for key in ("altitude", "altitude_norm"):
             if key in obs:
                 return cls._scalar(obs[key])

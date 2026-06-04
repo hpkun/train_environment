@@ -7,7 +7,8 @@ is to be closer to a greedy finite-state controller than `rule_nearest`, while
 remaining a low-intrusion policy layer that only outputs the existing high-level
 action `[pitch, heading, speed]`.
 
-This is environment completion work, not a new algorithm.
+This is environment completion work, not a new algorithm. It is also not final opponent behavior for paper results; it is an environment diagnostic opponent
+until its state coverage and action saturation are validated.
 
 ## Relationship To Papers
 
@@ -22,9 +23,13 @@ reproduction of either paper's controller.
   The policy commands climb, high speed, and a lateral turn intent. The actual
   missile warning and evasion implementation remain owned by the environment.
 - `recover_altitude`: entered when the observation indicates low altitude. The
-  policy commands climb and medium-high speed.
+  policy commands climb and medium-high speed. The altitude check is currently
+  heuristic because the script-layer policy may receive normalized or variant
+  altitude fields; it must be rechecked against the environment's real altitude
+  definition before any training use.
 - `attack_mav_priority`: entered when visible enemy role/type metadata marks a
-  red MAV. The policy turns toward the MAV target.
+  red MAV. The policy turns toward the MAV target. If `enemy_roles` and
+  `enemy_types` are missing, it falls back to nearest-target attack.
 - `attack_nearest`: entered when any visible enemy exists and no MAV-priority
   target is available. It turns toward the nearest observed enemy with segmented
   speed intent.
@@ -41,6 +46,7 @@ It also records `OpponentPolicy.last_states` for diagnostics.
 ## What It Does Not Change
 
 - missile fire-control
+- direct missile control
 - evasion implementation
 - reward
 - termination
@@ -62,7 +68,8 @@ The mode name is:
 --opponent-policy greedy_fsm
 ```
 
-`rule_nearest` remains the default training/evaluation opponent until
+`rule_nearest remains default`: `rule_nearest` remains the default
+training/evaluation opponent until
 `greedy_fsm` is validated and the user explicitly confirms switching.
 
 ## Open Issues
@@ -70,5 +77,9 @@ The mode name is:
 - Whether blue should prioritize MAV attack in every protocol still needs
   confirmation.
 - Target assignment across multiple blue aircraft is not implemented.
+- Candidate maneuver sets are not implemented.
 - Candidate actions are not evaluated by immediate reward or lookahead.
+- Finite-state transition rules are still minimal and need validation against
+  BRMA-MAPPO/TAM-HAPPO assumptions.
+- Explicit opponent validation before training is required.
 - Alignment with the original BRMA rule opponent may need a separate audit.

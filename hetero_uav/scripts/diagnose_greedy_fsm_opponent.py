@@ -93,22 +93,42 @@ def diagnose_one(config: str, policy_name: str, steps: int, seed: int) -> dict:
         if actions_seen:
             action_arr = np.stack(actions_seen).astype(np.float32)
             action_mean_abs = float(np.mean(np.abs(action_arr)))
+            action_mean = float(np.mean(action_arr))
+            action_std = float(np.std(action_arr))
             action_min = float(np.min(action_arr))
             action_max = float(np.max(action_arr))
+            saturation_rate = float(np.mean(np.any(np.abs(action_arr) > 0.95, axis=1)))
         else:
             action_mean_abs = 0.0
+            action_mean = 0.0
+            action_std = 0.0
             action_min = 0.0
             action_max = 0.0
+            saturation_rate = 0.0
+
+        state_transition_count = int(sum(state_counts.values()))
+        if state_counts:
+            dominant_state, dominant_count = state_counts.most_common(1)[0]
+            dominant_state_ratio = float(dominant_count / max(1, state_transition_count))
+        else:
+            dominant_state = ""
+            dominant_state_ratio = 0.0
 
         return {
             "config": config,
             "opponent_policy": policy_name,
             "steps_executed": steps_executed,
             "nan_detected": bool(nan_detected),
+            "blue_action_mean": action_mean,
             "blue_action_mean_abs": action_mean_abs,
+            "blue_action_std": action_std,
             "blue_action_min": action_min,
             "blue_action_max": action_max,
+            "blue_action_saturation_rate": saturation_rate,
             "blue_state_counts": dict(sorted(state_counts.items())),
+            "state_transition_count": state_transition_count,
+            "dominant_state": dominant_state,
+            "dominant_state_ratio": dominant_state_ratio,
             "red_alive_final": red_alive,
             "blue_alive_final": blue_alive,
             "mav_alive_final": mav_alive,
@@ -145,21 +165,45 @@ def main() -> None:
                 f"steps={record['steps_executed']:3d} "
                 f"nan={record['nan_detected']} "
                 f"action_abs={record['blue_action_mean_abs']:.3f} "
+                f"sat={record['blue_action_saturation_rate']:.3f} "
+                f"dominant={record['dominant_state'] or 'none'} "
+                f"dominant_ratio={record['dominant_state_ratio']:.3f} "
                 f"states={record['blue_state_counts']}"
             )
 
     out = Path(args.output_json)
     out.parent.mkdir(parents=True, exist_ok=True)
+    greedy_records = [
+        record for record in records
+        if record["opponent_policy"] == "greedy_fsm"
+    ]
+    greedy_state_coverage = sorted({
+        state
+        for record in greedy_records
+        for state in record["blue_state_counts"].keys()
+    })
+    saturation_values = [
+        float(record["blue_action_saturation_rate"])
+        for record in greedy_records
+    ]
     summary = {
         "configs_checked": len(args.configs),
+        "policies_checked": list(POLICIES),
         "records": len(records),
         "nan_records": sum(1 for record in records if record["nan_detected"]),
+        "greedy_fsm_state_coverage": greedy_state_coverage,
+        "greedy_fsm_has_non_patrol_state": any(
+            state != "patrol" for state in greedy_state_coverage),
+        "greedy_fsm_action_saturation_mean": float(
+            np.mean(saturation_values)) if saturation_values else 0.0,
     }
     out.write_text(
         json.dumps({"records": records, "summary": summary}, indent=2),
         encoding="utf-8",
     )
     print(f"output_json: {out}")
+    if greedy_state_coverage == ["patrol"]:
+        print("warning: greedy_fsm remained in patrol for all diagnosed steps")
     if summary["nan_records"]:
         raise RuntimeError("NaN detected during greedy_fsm opponent diagnosis")
 

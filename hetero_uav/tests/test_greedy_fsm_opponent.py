@@ -85,6 +85,24 @@ def test_greedy_fsm_diagnosis_script_outputs_json(tmp_path):
     policies = {record["opponent_policy"] for record in data["records"]}
     assert {"rule_nearest", "greedy_fsm"}.issubset(policies)
     assert all(not record["nan_detected"] for record in data["records"])
+    assert "greedy_fsm_state_coverage" in data["summary"]
+    assert "greedy_fsm_has_non_patrol_state" in data["summary"]
+    assert "greedy_fsm_action_saturation_mean" in data["summary"]
+
+    for record in data["records"]:
+        assert "blue_action_mean" in record
+        assert "blue_action_std" in record
+        assert "blue_action_saturation_rate" in record
+        assert "dominant_state" in record
+        assert "dominant_state_ratio" in record
+        assert 0.0 <= record["blue_action_saturation_rate"] <= 1.0
+
+    greedy_records = [
+        record for record in data["records"]
+        if record["opponent_policy"] == "greedy_fsm"
+    ]
+    assert greedy_records
+    assert all(record["blue_state_counts"] for record in greedy_records)
 
 
 def test_greedy_fsm_design_doc_exists():
@@ -94,3 +112,7 @@ def test_greedy_fsm_design_doc_exists():
     assert "finite-state" in text
     assert "rule_nearest" in text
     assert "not a new algorithm" in text
+    assert "target assignment" in text
+    assert "candidate maneuver" in text
+    assert "not final opponent" in text
+    assert "rule_nearest remains default" in text

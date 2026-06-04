@@ -111,10 +111,11 @@ E3. Episode length / decision frequency consistency.
 
 E4. Blue greedy finite-state opponent design.
 
-Status: in progress. The current work adds `greedy_fsm` opponent design and
-diagnostics only. `rule_nearest` remains the default until `greedy_fsm` is
-validated, and no training run should switch to `greedy_fsm` without explicit
-user confirmation.
+Status: in progress. The initial `greedy_fsm` diagnostic is implemented.
+`rule_nearest` remains the default until `greedy_fsm` is validated, and no
+training run should switch to `greedy_fsm` without explicit user confirmation.
+Next needed: diagnose state coverage and action saturation. It is not ready as
+the training default.
 
 E5. Reward/termination audit for MAV/UAV roles.
 
