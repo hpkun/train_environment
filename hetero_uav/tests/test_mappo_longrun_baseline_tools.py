@@ -21,9 +21,17 @@ def _env():
 
 def _run_smoke():
     report = OUT_DIR / "longrun_report.json"
+    log_paths = [
+        OUT_DIR / "seed_0" / "train_stdout.log",
+        OUT_DIR / "seed_0" / "train_stderr.log",
+        OUT_DIR / "seed_0" / "eval_stdout.log",
+        OUT_DIR / "seed_0" / "eval_stderr.log",
+    ]
     if report.exists():
         data = json.loads(report.read_text(encoding="utf-8"))
-        if data.get("status") == "passed" and data.get("total_env_steps") == 32:
+        if (data.get("status") == "passed"
+                and data.get("total_env_steps") == 32
+                and all(path.exists() for path in log_paths)):
             return
 
     result = subprocess.run(
@@ -99,6 +107,10 @@ def test_longrun_smoke_outputs():
     assert (OUT_DIR / "longrun_report.json").exists()
     assert (OUT_DIR / "seed_0" / "latest" / "model.pt").exists()
     assert (OUT_DIR / "seed_0" / "latest" / "meta.json").exists()
+    assert (OUT_DIR / "seed_0" / "train_stdout.log").exists()
+    assert (OUT_DIR / "seed_0" / "train_stderr.log").exists()
+    assert (OUT_DIR / "seed_0" / "eval_stdout.log").exists()
+    assert (OUT_DIR / "seed_0" / "eval_stderr.log").exists()
 
 
 def test_longrun_report():
@@ -144,6 +156,29 @@ def test_longrun_csvs_are_clean():
     assert all(row["nan_detected"] == "False" for row in eval_rows)
     assert all(row["actor_dim_ok"] == "True" for row in eval_rows)
     assert all(row["critic_dim_ok"] == "True" for row in eval_rows)
+
+
+def test_longrun_logs_are_recorded():
+    _run_smoke()
+    train_stdout = OUT_DIR / "seed_0" / "train_stdout.log"
+    train_stderr = OUT_DIR / "seed_0" / "train_stderr.log"
+    eval_stdout = OUT_DIR / "seed_0" / "eval_stdout.log"
+    eval_stderr = OUT_DIR / "seed_0" / "eval_stderr.log"
+    for path in (train_stdout, train_stderr, eval_stdout, eval_stderr):
+        assert path.exists(), str(path)
+
+    train_text = train_stdout.read_text(encoding="utf-8", errors="replace")
+    assert "Iter" in train_text or "Saved" in train_text
+
+    with (OUT_DIR / "longrun_train_summary.csv").open(encoding="utf-8") as f:
+        train_rows = list(csv.DictReader(f))
+    assert train_rows[0]["train_stdout_log"]
+    assert train_rows[0]["train_stderr_log"]
+
+    with (OUT_DIR / "longrun_eval_summary.csv").open(encoding="utf-8") as f:
+        eval_rows = list(csv.DictReader(f))
+    assert eval_rows[0]["eval_stdout_log"]
+    assert eval_rows[0]["eval_stderr_log"]
 
 
 def test_longrun_doc_exists():

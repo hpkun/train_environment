@@ -11,6 +11,8 @@ import json
 import math
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -32,9 +34,80 @@ def _tail(text: str, limit: int = 2000) -> str:
     return text[-limit:]
 
 
+def _tail_file(path: Path, limit: int = 2000) -> str:
+    if not path.exists():
+        return "(missing)"
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return _tail(text, limit)
+
+
+def _stream_pipe(pipe, log_file) -> None:
+    try:
+        for line in iter(pipe.readline, ""):
+            log_file.write(line)
+            log_file.flush()
+    finally:
+        pipe.close()
+
+
+def _run_streaming(cmd: list[str], label: str, stdout_path: Path,
+                   stderr_path: Path, timeout: int | None = None) -> None:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"{label} stdout log: {stdout_path}", flush=True)
+    print(f"{label} stderr log: {stderr_path}", flush=True)
+
+    with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_log, \
+            stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_log:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            cwd=str(ROOT),
+            env=env,
+        )
+
+        stderr_thread = threading.Thread(
+            target=_stream_pipe, args=(process.stderr, stderr_log), daemon=True)
+        stderr_thread.start()
+
+        start = time.monotonic()
+        try:
+            assert process.stdout is not None
+            for line in iter(process.stdout.readline, ""):
+                print(line, end="", flush=True)
+                stdout_log.write(line)
+                stdout_log.flush()
+                if timeout is not None and time.monotonic() - start > timeout:
+                    process.kill()
+                    raise TimeoutError(f"{label} timed out after {timeout}s")
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+
+        returncode = process.wait()
+        stderr_thread.join(timeout=5)
+
+    if returncode != 0:
+        print(f"{label} failed with returncode={returncode}")
+        print("stdout tail:")
+        print(_tail_file(stdout_path))
+        print("stderr tail:")
+        print(_tail_file(stderr_path))
+        raise RuntimeError(f"{label} failed with rc={returncode}")
+
+
 def _run(cmd: list[str], label: str, timeout: int = 7200) -> None:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -245,9 +318,11 @@ def main() -> None:
     for seed in args.seeds:
         run_dir = out_dir / f"seed_{seed}"
         log_csv = run_dir / "train_log.csv"
+        train_stdout = run_dir / "train_stdout.log"
+        train_stderr = run_dir / "train_stderr.log"
         print(f"=== Long-run train seed={seed} ===")
-        _run([
-            "python", str(TRAIN_SCRIPT),
+        _run_streaming([
+            "python", "-u", str(TRAIN_SCRIPT),
             "--config", args.train_config,
             "--obs-adapter-version", "v2",
             "--total-env-steps", str(args.total_env_steps),
@@ -259,17 +334,22 @@ def main() -> None:
             "--log-csv", str(log_csv),
             "--opponent-policy", args.opponent_policy,
             "--save-interval", str(args.save_interval),
-        ], label=f"train seed={seed}")
+        ], label=f"train seed={seed}", stdout_path=train_stdout,
+            stderr_path=train_stderr)
 
         train_row = _validate_train(seed, run_dir, args.total_env_steps)
+        train_row["train_stdout_log"] = str(train_stdout)
+        train_row["train_stderr_log"] = str(train_stderr)
         train_rows.append(train_row)
         if int(train_row["episodes_completed"]) == 0:
             warnings.append(f"seed {seed}: no completed episode")
 
         eval_summary = run_dir / "eval_summary.json"
+        eval_stdout = run_dir / "eval_stdout.log"
+        eval_stderr = run_dir / "eval_stderr.log"
         print(f"=== Long-run eval seed={seed} ===")
-        _run([
-            "python", str(EVAL_SCRIPT),
+        _run_streaming([
+            "python", "-u", str(EVAL_SCRIPT),
             "--model", str(run_dir / "latest" / "model.pt"),
             "--obs-adapter-version", "v2",
             "--episodes", str(args.eval_episodes),
@@ -277,8 +357,13 @@ def main() -> None:
             "--opponent-policy", args.opponent_policy,
             "--configs", *args.eval_configs,
             "--summary-json", str(eval_summary),
-        ], label=f"eval seed={seed}")
-        eval_rows.extend(_validate_eval(seed, eval_summary))
+        ], label=f"eval seed={seed}", stdout_path=eval_stdout,
+            stderr_path=eval_stderr)
+        seed_eval_rows = _validate_eval(seed, eval_summary)
+        for row in seed_eval_rows:
+            row["eval_stdout_log"] = str(eval_stdout)
+            row["eval_stderr_log"] = str(eval_stderr)
+        eval_rows.extend(seed_eval_rows)
 
     train_csv = out_dir / "longrun_train_summary.csv"
     eval_csv = out_dir / "longrun_eval_summary.csv"

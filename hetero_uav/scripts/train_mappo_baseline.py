@@ -103,13 +103,13 @@ def main():
         computed_iterations = int(math.ceil(args.total_env_steps / args.rollout_length))
         print(f'total_env_steps_target={args.total_env_steps} '
               f'rollout_length={args.rollout_length} '
-              f'computed_iterations={computed_iterations}')
+              f'computed_iterations={computed_iterations}', flush=True)
 
     if args.debug:
         print(f'obs_adapter_version={args.obs_adapter_version} '
               f'observation_mode={obs_mode} '
               f'actor_obs_dim={actor_obs_dim} '
-              f'critic_state_dim={critic_state_dim}')
+              f'critic_state_dim={critic_state_dim}', flush=True)
     trainer = PPOTrainer(model)
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17)
 
@@ -118,8 +118,8 @@ def main():
 
     if args.debug:
         print(f'num_red={num_red} actor_obs_dim={model.actor_obs_dim} '
-              f'critic_state_dim={model.critic_state_dim}')
-        print(f'opponent_policy={args.opponent_policy}')
+              f'critic_state_dim={model.critic_state_dim}', flush=True)
+        print(f'opponent_policy={args.opponent_policy}', flush=True)
 
     total_steps = 0
     episodes_completed = 0
@@ -181,7 +181,8 @@ def main():
 
             if np.isnan(action_np).any() or np.isnan(value_np):
                 nan_detected = True
-                print(f'[WARN] NaN detected at iter {iteration} step {step}')
+                print(f'[WARN] NaN detected at iter {iteration} step {step}',
+                      flush=True)
                 break
 
             actions_dict = {}
@@ -220,7 +221,7 @@ def main():
                 break
 
         if nan_detected:
-            print('[WARN] Training stopped due to NaN')
+            print('[WARN] Training stopped due to NaN', flush=True)
             break
 
         # PPO update
@@ -269,7 +270,7 @@ def main():
               f'crit_loss={stats["critic_loss"]:+.4f} '
               f'ent={stats["entropy"]:.4f} | '
               f'act_mu={act_mean_abs:.3f} act_std={act_std:.3f} | '
-              f'val={val_mean:+.3f} | ep={episodes_completed}')
+              f'val={val_mean:+.3f} | ep={episodes_completed}', flush=True)
 
         # Checkpoint saving
         if not args.no_save and iteration % args.save_interval == 0:
@@ -302,7 +303,7 @@ def main():
         }
         with open(f'{args.output_dir}/latest/meta.json', 'w') as f:
             json.dump(meta, f)
-        print(f'Saved {best_model_path}')
+        print(f'Saved {best_model_path}', flush=True)
 
     csv_file.close()
     env.close()

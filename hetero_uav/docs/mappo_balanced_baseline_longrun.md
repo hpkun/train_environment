@@ -51,6 +51,23 @@ python scripts/run_mappo_balanced_baseline_longrun.py \
   --opponent-policy rule_nearest
 ```
 
+500k with the default rollout length uses
+`ceil(500000 / 128) = 3907` training iterations.
+
+The long-run runner streams train/eval subprocess stdout to the console in real
+time. It also saves per-seed logs:
+
+- `seed_0/train_stdout.log`
+- `seed_0/train_stderr.log`
+- `seed_0/eval_stdout.log`
+- `seed_0/eval_stderr.log`
+
+To watch the training CSV from another PowerShell terminal:
+
+```powershell
+Get-Content outputs\mappo_balanced_baseline_500k\seed_0\train_log.csv -Wait
+```
+
 ## Recommended Later Protocol
 
 1. Run seed 0 at 500k env steps.
@@ -65,6 +82,10 @@ python scripts/run_mappo_balanced_baseline_longrun.py \
 - `longrun_eval_summary.csv`
 - `longrun_report.json`
 - per-seed `train_log.csv`
+- per-seed `train_stdout.log`
+- per-seed `train_stderr.log`
+- per-seed `eval_stdout.log`
+- per-seed `eval_stderr.log`
 - per-seed `latest/model.pt`
 - per-seed checkpoint files
 
