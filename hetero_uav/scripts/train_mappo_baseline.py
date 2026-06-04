@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -37,6 +38,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--iterations', type=int, default=20)
+    parser.add_argument('--total-env-steps', type=int, default=None)
     parser.add_argument('--rollout-length', type=int, default=64)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--device', default='cpu')
@@ -53,6 +55,8 @@ def main():
     parser.add_argument('--obs-adapter-version', choices=['v1', 'v2'],
                         default='v1')
     args = parser.parse_args()
+    if args.total_env_steps is not None and args.total_env_steps <= 0:
+        raise SystemExit('--total-env-steps must be positive')
 
     if args.log_csv is None:
         args.log_csv = f'{args.output_dir}/train_log.csv'
@@ -94,6 +98,12 @@ def main():
     critic_state_dim = adapter.critic_state_dim
     model = MAPPOActorCritic(actor_obs_dim=actor_obs_dim,
                              critic_state_dim=critic_state_dim).to(device)
+    computed_iterations = args.iterations
+    if args.total_env_steps is not None:
+        computed_iterations = int(math.ceil(args.total_env_steps / args.rollout_length))
+        print(f'total_env_steps_target={args.total_env_steps} '
+              f'rollout_length={args.rollout_length} '
+              f'computed_iterations={computed_iterations}')
 
     if args.debug:
         print(f'obs_adapter_version={args.obs_adapter_version} '
@@ -122,15 +132,29 @@ def main():
     current_ep_length = 0
     nan_detected = False
     best_model_path = f'{args.output_dir}/latest/model.pt'
+    avg_ret = 0.0
+    avg_len = 0.0
+    avg_red_alive = float(_alive_counts(env)[0])
+    avg_blue_alive = float(_alive_counts(env)[1])
+    iterations_completed = 0
 
-    for iteration in range(1, args.iterations + 1):
+    for iteration in range(1, computed_iterations + 1):
+        if args.total_env_steps is not None and total_steps >= args.total_env_steps:
+            break
+        current_rollout_len = args.rollout_length
+        if args.total_env_steps is not None:
+            current_rollout_len = min(
+                args.rollout_length, args.total_env_steps - total_steps)
+        if current_rollout_len <= 0:
+            break
+
         buffer = RolloutBuffer(
-            max_len=args.rollout_length, num_red=num_red,
+            max_len=current_rollout_len, num_red=num_red,
             actor_dim=actor_obs_dim, critic_dim=critic_state_dim, action_dim=3)
 
         iter_actions = []  # for action stats
 
-        for step in range(args.rollout_length):
+        for step in range(current_rollout_len):
             result = adapter.adapt_all(
                 obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
 
@@ -201,6 +225,7 @@ def main():
 
         # PPO update
         stats = trainer.update(buffer)
+        iterations_completed = iteration
 
         # Action statistics
         all_acts = np.concatenate(iter_actions, axis=0)
@@ -259,7 +284,11 @@ def main():
             'config': args.config, 'seed': args.seed,
             'opponent_policy': args.opponent_policy,
             'iterations': args.iterations,
+            'computed_iterations': computed_iterations,
+            'iterations_completed': iterations_completed,
             'rollout_length': args.rollout_length,
+            'total_env_steps_target': args.total_env_steps,
+            'total_env_steps_actual': total_steps,
             'episodes': episodes_completed,
             'final_return': avg_ret,
             'final_red_alive': avg_red_alive,
@@ -268,6 +297,7 @@ def main():
             'obs_adapter_version': args.obs_adapter_version,
             'actor_obs_dim': actor_obs_dim,
             'critic_state_dim': critic_state_dim,
+            'actor_arch': 'mlp',
             'observation_mode': obs_mode,
         }
         with open(f'{args.output_dir}/latest/meta.json', 'w') as f:
