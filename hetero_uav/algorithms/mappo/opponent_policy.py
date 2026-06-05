@@ -105,15 +105,45 @@ class OpponentPolicy:
         if target is not None:
             return cls._attack_action(target), "attack_nearest"
 
-        return cls._search_acquire_action(agent_index), "search_acquire"
+        return cls._search_acquire_action(obs, agent_index), "search_acquire"
 
     @classmethod
-    def _search_acquire_action(cls, agent_index: int = 0) -> np.ndarray:
-        # No hidden state is used here. In paper-aligned configs blue starts
-        # facing the red formation; without a visible target, the lowest-risk
-        # contact intent is to keep heading with a tiny deconfliction offset and
-        # close distance at high speed rather than loiter slowly.
-        heading = 0.05 if agent_index % 2 == 0 else -0.05
+    def _get_current_heading_norm(cls, obs_agent: dict, fallback: float = 0.0) -> float:
+        """Return current heading as normalized [-1, 1] value.
+
+        Action mapping in env.py: target_heading = action[1] * pi.
+        So action[1] represents absolute heading in [-1, 1] where 0=north,
+        0.5=east, 1/-1=south, -0.5=west.
+
+        The ego_geo_state stores yaw_norm = yaw / pi where heading=0 rad ⇛ north
+        maps to yaw_norm=0, heading=pi rad ⇛ south maps to yaw_norm=1 or -1.
+        So yaw_norm from ego_geo_state[5] is directly usable as heading action.
+        """
+        ego_geo = np.asarray(obs_agent.get("ego_geo_state", []), dtype=np.float32).ravel()
+        if ego_geo.size >= 6:
+            yaw_norm = float(ego_geo[5])
+            if np.isfinite(yaw_norm):
+                return float(np.clip(yaw_norm, -1.0, 1.0))
+        # Fallback: cannot read heading — use small offset, not absolute 0
+        # Note: this is unreliable; search_acquire should always receive obs
+        # with ego_geo_state when using the mav_shared_geo observation mode.
+        return float(np.clip(fallback + 0.05, -1.0, 1.0))
+
+    @classmethod
+    def _search_acquire_action(cls, obs_agent: dict | None = None,
+                                agent_index: int = 0) -> np.ndarray:
+        """Keep current heading + minimal deconfliction offset at high speed.
+
+        The env action[1] is an *absolute* target heading (action[1] * pi rad).
+        Search-acquire must preserve the current heading so blue continues
+        toward the red formation instead of turning to absolute 0° (north).
+        """
+        if obs_agent is not None:
+            base_heading = cls._get_current_heading_norm(obs_agent)
+        else:
+            base_heading = 0.0
+        offset = 0.02 if agent_index % 2 == 0 else -0.02
+        heading = float(np.clip(base_heading + offset, -1.0, 1.0))
         return cls._clip_action([0.0, heading, 1.0])
 
     @classmethod
