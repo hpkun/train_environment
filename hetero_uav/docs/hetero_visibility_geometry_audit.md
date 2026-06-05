@@ -20,6 +20,14 @@ is caused by a strategy bug or by blue agents lacking visible enemy tracks.
   patrol policy too weak
 - blue sees enemy but greedy_fsm stays in patrol: greedy_fsm target
   selection bug
+- MAV action trim fixes the A-4 zero-action altitude loss, but blue visibility
+  must still be diagnosed independently.
+- If the red-blue minimum distance keeps increasing, blue search_acquire,
+  heading, or action semantics may be wrong.
+- If the minimum distance decreases but stays outside direct range after 500
+  steps, initial geometry or direct range should be discussed.
+- If the closest distance enters direct range while blue_observed_any remains
+  false, the visibility implementation may have a bug.
 
 ## Relationship to Papers
 
@@ -33,6 +41,10 @@ is caused by a strategy bug or by blue agents lacking visible enemy tracks.
 One 100-step diagnostic is not enough to decide geometry or sensor changes.
 Use a horizon sweep such as 100/250/500 steps before changing initial states or
 observation ranges.
+
+The geometry audit records red-blue distance trend, blue closing fraction,
+direct-range margins, MAV altitude, and whether config-level MAV action trim is
+enabled.
 
 - If blue observes red by 250 or 500 steps, the issue is mainly contact time
   under the current no-training policy.

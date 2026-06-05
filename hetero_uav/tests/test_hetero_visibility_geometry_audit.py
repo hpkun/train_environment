@@ -24,7 +24,14 @@ def test_help():
         [sys.executable, str(SCRIPT), "--help"],
         capture_output=True, text=True, encoding="utf-8",
         errors="replace", cwd=str(ROOT), timeout=10)
-    for flag in ["--steps", "--steps-list", "--red-policy", "--blue-policy", "--output-json"]:
+    for flag in [
+        "--steps",
+        "--steps-list",
+        "--red-policy",
+        "--blue-policy",
+        "--output-json",
+        "--disable-config-trim",
+    ]:
         assert flag in result.stdout
 
 
@@ -53,7 +60,7 @@ def test_short_run():
 
 
 def test_steps_list_run():
-    out = "outputs/test_environment_audit/hetero_visibility_geometry_steps_list.json"
+    out = "outputs/test_environment_audit/hetero_visibility_geometry_after_trim.json"
     result = subprocess.run(
         [sys.executable, str(SCRIPT),
          "--steps-list", "3", "5", "--blue-policy", "greedy_fsm",
@@ -70,12 +77,41 @@ def test_steps_list_run():
     for r in data["records"]:
         assert "horizon_steps" in r
         assert r["horizon_steps"] in [3, 5]
+        for key in [
+            "initial_min_red_blue_distance_m",
+            "final_min_red_blue_distance_m",
+            "min_red_blue_distance_delta_m",
+            "closest_red_blue_distance_m",
+            "blue_closing_fraction",
+            "blue_ever_within_direct_range",
+            "direct_range_margin_closest_m",
+            "action_trim_enabled",
+            "mav_altitude_final_m",
+            "mav_alive_final",
+        ]:
+            assert key in r, f"Missing {key}"
         assert not any(np.isnan(v) if isinstance(v, float) else False
                        for v in r.values() if isinstance(v, (int, float)))
     for item in data["summary"]["horizon_summary_by_config"].values():
         assert "blue_observed_by_3" in item
         assert "blue_observed_by_5" in item
         assert "first_horizon_blue_observed" in item
+
+
+def test_disable_config_trim_run():
+    out = "outputs/test_environment_audit/hetero_visibility_geometry_no_trim.json"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--steps", "3", "--blue-policy", "greedy_fsm", "--disable-config-trim",
+         "--output-json", out],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", cwd=str(ROOT), timeout=120,
+        env=_subprocess_env())
+    assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
+    data = json.loads(Path(out).read_text())
+    assert data["records"]
+    for r in data["records"]:
+        assert r["action_trim_enabled"] is False
 
 
 def test_doc_exists():

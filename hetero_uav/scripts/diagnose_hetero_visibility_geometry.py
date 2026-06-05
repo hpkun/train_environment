@@ -42,6 +42,68 @@ def _enemy_track_counts(obs: dict, agent_id: str) -> dict:
     return {"direct": direct, "shared": shared, "observed": observed}
 
 
+def _alive_sims(sims: dict) -> list:
+    return [sim for sim in sims.values() if sim is not None and sim.is_alive]
+
+
+def _mean_speed(sims: list) -> float:
+    if not sims:
+        return 0.0
+    return float(np.mean([np.linalg.norm(sim.get_velocity()) for sim in sims]))
+
+
+def _red_blue_distances(red_sims: list, blue_sims: list) -> list[float]:
+    distances = []
+    for red in red_sims:
+        red_pos = red.get_position()
+        for blue in blue_sims:
+            distances.append(float(np.linalg.norm(red_pos - blue.get_position())))
+    return distances
+
+
+def _mav_sim(env):
+    roles = getattr(env, "agent_roles", {})
+    for aid in env.red_ids:
+        if roles.get(aid) == "mav":
+            return env.red_planes.get(aid)
+    return env.red_planes.get("red_0")
+
+
+def _geometry_snapshot(env, step: int) -> dict:
+    red_sims = _alive_sims(env.red_planes)
+    blue_sims = _alive_sims(env.blue_planes)
+    distances = _red_blue_distances(red_sims, blue_sims)
+    if distances:
+        min_distance = float(np.min(distances))
+        mean_distance = float(np.mean(distances))
+    else:
+        min_distance = float("inf")
+        mean_distance = float("inf")
+
+    mav = _mav_sim(env)
+    mav_alive = bool(mav is not None and mav.is_alive)
+    mav_altitude = float(mav.get_geodetic()[2]) if mav is not None else 0.0
+    return {
+        "step": int(step),
+        "min_red_blue_distance_m": min_distance,
+        "mean_red_blue_distance_m": mean_distance,
+        "min_blue_to_red_distance_m": min_distance,
+        "min_red_to_blue_distance_m": min_distance,
+        "blue_mean_speed_mps": _mean_speed(blue_sims),
+        "red_mean_speed_mps": _mean_speed(red_sims),
+        "mav_altitude_m": mav_altitude,
+        "mav_alive": mav_alive,
+        "mav_action_trim_enabled": bool(getattr(env, "action_trim_enabled", False)),
+    }
+
+
+def _trim_by_role(env) -> dict:
+    out = {}
+    for key, value in getattr(env, "action_trim_by_role", {}).items():
+        out[str(key)] = [round(float(v), 6) for v in value]
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=100)
@@ -52,6 +114,7 @@ def main():
                         default="greedy_fsm")
     parser.add_argument("--output-json",
                         default="outputs/environment_audit/hetero_visibility_geometry.json")
+    parser.add_argument("--disable-config-trim", action="store_true")
     args = parser.parse_args()
 
     horizons = list(args.steps_list) if args.steps_list else [args.steps]
@@ -74,6 +137,8 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
         env = None
         try:
             env = make_env(cfg_path, env_type="jsbsim_hetero")
+            if args.disable_config_trim and hasattr(env, "set_action_trim_enabled"):
+                env.set_action_trim_enabled(False)
             rng = np.random.default_rng(args.seed)
             red_opponent = OpponentPolicy(mode="random", seed=args.seed + 99)
             blue_opponent = OpponentPolicy(mode=args.blue_policy, seed=args.seed + 100)
@@ -96,6 +161,7 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
             first_red = -1
             first_blue = -1
             mav_alive_any = False
+            geometry_steps = [_geometry_snapshot(env, 0)]
 
             nan_detected = False
             for step in range(steps):
@@ -133,6 +199,7 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
                     steps_blue_obs += 1
 
                 obs, _r, terminated, truncated, info = env.step(actions)
+                geometry_steps.append(_geometry_snapshot(env, step + 1))
                 for agent_obs in obs.values():
                     for value in agent_obs.values():
                         arr = np.asarray(value)
@@ -145,6 +212,27 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
             red_alive = sum(1 for s in env.red_planes.values() if s.is_alive)
             blue_alive = sum(1 for s in env.blue_planes.values() if s.is_alive)
             mav_alive = int(mav_sim is not None and mav_sim.is_alive)
+            min_series = [
+                snap["min_red_blue_distance_m"] for snap in geometry_steps
+                if np.isfinite(snap["min_red_blue_distance_m"])
+            ]
+            initial_min_distance = min_series[0] if min_series else float("inf")
+            final_min_distance = min_series[-1] if min_series else float("inf")
+            if min_series:
+                closest_distance = float(np.min(min_series))
+                closest_step = int(np.argmin(min_series))
+            else:
+                closest_distance = float("inf")
+                closest_step = -1
+            decreasing = 0
+            transitions = 0
+            for prev, current in zip(min_series, min_series[1:]):
+                transitions += 1
+                if current < prev:
+                    decreasing += 1
+            blue_closing_fraction = decreasing / max(transitions, 1)
+            mav_altitudes = [snap["mav_altitude_m"] for snap in geometry_steps]
+            mav_final = geometry_steps[-1] if geometry_steps else {"mav_altitude_m": 0.0, "mav_alive": False}
 
             warnings = []
             if first_red < 0:
@@ -157,6 +245,12 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
                 warnings.append("asymmetric information: red has MAV shared tracks, blue has no direct tracks")
             if first_red < 0 and first_blue < 0 and steps >= 50:
                 warnings.append("initial geometry concern: no mutual observation")
+            if len(min_series) > 1 and final_min_distance > initial_min_distance:
+                warnings.append("red-blue minimum distance increased over horizon")
+            if closest_distance > uav_direct:
+                warnings.append("blue never entered direct observation range")
+            if closest_distance <= uav_direct and first_blue < 0:
+                warnings.append("visibility implementation concern: closest distance entered direct range without blue observation")
 
             rec = {
                 "config": cfg_path,
@@ -179,6 +273,21 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
                 "red_mav_shared_tracks_total": total_red_shared,
                 "red_direct_tracks_total": total_red_direct,
                 "blue_direct_tracks_total": total_blue_direct,
+                "step_geometry": geometry_steps,
+                "initial_min_red_blue_distance_m": initial_min_distance,
+                "final_min_red_blue_distance_m": final_min_distance,
+                "min_red_blue_distance_delta_m": final_min_distance - initial_min_distance,
+                "closest_red_blue_distance_m": closest_distance,
+                "closest_red_blue_distance_step": closest_step,
+                "blue_closing_fraction": blue_closing_fraction,
+                "blue_ever_within_direct_range": bool(closest_distance <= uav_direct),
+                "direct_range_margin_final_m": final_min_distance - uav_direct,
+                "direct_range_margin_closest_m": closest_distance - uav_direct,
+                "mav_altitude_min_m": float(np.min(mav_altitudes)) if mav_altitudes else 0.0,
+                "mav_altitude_final_m": float(mav_final["mav_altitude_m"]),
+                "mav_alive_final": bool(mav_final["mav_alive"]),
+                "action_trim_enabled": bool(getattr(env, "action_trim_enabled", False)),
+                "action_trim_by_role": _trim_by_role(env),
                 "final_red_alive": red_alive, "final_blue_alive": blue_alive,
                 "final_mav_alive": mav_alive,
                 "nan_detected": nan_detected,
@@ -189,6 +298,9 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
                   f"horizon={steps:4d} "
                   f"r_obs={rec['red_observed_any']} b_obs={rec['blue_observed_any']} "
                   f"first_r={first_red} first_b={first_blue} "
+                  f"min0={initial_min_distance:.1f} minf={final_min_distance:.1f} "
+                  f"closest={closest_distance:.1f} "
+                  f"closing={blue_closing_fraction:.2f} "
                   f"mav_shared={rec['red_mav_shared_fraction']:.2f} "
                   f"b_direct={rec['blue_direct_fraction']:.2f} "
                   f"warnings={len(warnings)}")
@@ -236,10 +348,14 @@ def _build_summary(records: list[dict], horizons: list[int]) -> dict:
         "horizon_summary_by_config": by_config,
         "red_never_observed": [r["config"] for r in records if not r["red_observed_any"]],
         "blue_never_observed": [r["config"] for r in records if not r["blue_observed_any"]],
-        "asymmetric_info": [r["config"] for r in records
-                            if "asymmetric information" in r["warnings"]],
-        "initial_geometry_concern": [r["config"] for r in records
-                                     if "initial geometry concern" in r["warnings"]],
+        "asymmetric_info": [
+            r["config"] for r in records
+            if any("asymmetric information" in w for w in r["warnings"])
+        ],
+        "initial_geometry_concern": [
+            r["config"] for r in records
+            if any("initial geometry concern" in w for w in r["warnings"])
+        ],
         "nan_records": [r["config"] for r in records if r.get("nan_detected")],
     }
 

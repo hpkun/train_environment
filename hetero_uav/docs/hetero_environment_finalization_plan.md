@@ -117,6 +117,7 @@ Status: in progress.
 - E4b controlled branch diagnostics: done.
 - E4c search/acquisition behavior: in progress.
 - E4d horizon-sweep visibility diagnostic.
+- E4d after-trim horizon-sweep visibility/geometry diagnostic: in progress.
 - E4e geometry/range decision only after E4c/E4d.
 - E4f target assignment and candidate maneuver scoring.
 - E4g only then consider training with `greedy_fsm`.
@@ -140,13 +141,15 @@ Status: in progress after Tacview observation.
 
 E5b. Config-driven MAV action trim.
 
-Status: in progress.
+Status: done for paper-aligned V2 configs.
 
 - Reason: A-4 zero-action trim mismatch was found in E5a diagnostics.
 - Scope: config-driven high-level action trim for MAV in paper-aligned V2
   configs only.
 - Constraint: no action-space, PID, aircraft XML, reward, termination, missile,
   initial-state, or observation-range change.
+
+Next focus returns to E4 visibility/geometry after trim.
 
 E6. Long-run baseline after environment protocol is frozen.
 
