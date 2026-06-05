@@ -109,13 +109,20 @@ E2. Paper-aligned 3v2/5v4 smoke and diagnostics.
 
 E3. Episode length / decision frequency consistency.
 
-E4. Blue greedy finite-state opponent design.
+E4. Blue opponent logic alignment.
 
-Status: in progress. The initial `greedy_fsm` diagnostic is implemented.
-`rule_nearest` remains the default until `greedy_fsm` is validated, and no
-training run should switch to `greedy_fsm` without explicit user confirmation.
-Next needed: diagnose state coverage and action saturation. It is not ready as
-the training default.
+Status: in progress.
+
+- E4a paper-alignment audit.
+- E4b controlled branch diagnostics.
+- E4c visibility/geometry decision.
+- E4d search/acquisition behavior.
+- E4e target assignment and candidate maneuver scoring.
+- E4f only then consider training with `greedy_fsm`.
+
+The initial `greedy_fsm` diagnostic is implemented, but `rule_nearest` remains
+the default. No training run should switch to `greedy_fsm` without explicit user
+confirmation.
 
 E5. Reward/termination audit for MAV/UAV roles.
 

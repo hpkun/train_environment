@@ -10,6 +10,10 @@ action `[pitch, heading, speed]`.
 This is environment completion work, not a new algorithm. It is also not final opponent behavior for paper results; it is an environment diagnostic opponent
 until its state coverage and action saturation are validated.
 
+The current implementation is an initial version. Live paper-aligned diagnostics
+can be patrol-only because blue may have no visible red tracks, which is a
+visibility/geometry issue rather than automatically an FSM branch bug.
+
 ## Relationship To Papers
 
 BRMA-MAPPO uses a rule-based blue side in its training environment. TAM-HAPPO
@@ -72,6 +76,16 @@ The mode name is:
 training/evaluation opponent until
 `greedy_fsm` is validated and the user explicitly confirms switching.
 
+Controlled branch diagnostics must pass before using `greedy_fsm` in training:
+
+```powershell
+python scripts/diagnose_greedy_fsm_controlled_branches.py --output-json outputs/environment_audit/greedy_fsm_controlled_branches.json
+```
+
+The geometry/range decision remains unresolved. Do not change initial states or
+observation ranges solely because live rollout diagnostics show patrol-only
+behavior.
+
 ## Open Issues
 
 - Whether blue should prioritize MAV attack in every protocol still needs
@@ -82,4 +96,6 @@ training/evaluation opponent until
 - Finite-state transition rules are still minimal and need validation against
   BRMA-MAPPO/TAM-HAPPO assumptions.
 - Explicit opponent validation before training is required.
+- Visibility/geometry alignment with paper-aligned 3v2/5v4 remains unresolved.
+- `greedy_fsm` is not final opponent behavior.
 - Alignment with the original BRMA rule opponent may need a separate audit.
