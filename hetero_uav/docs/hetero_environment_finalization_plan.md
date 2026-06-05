@@ -127,6 +127,17 @@ confirmation.
 
 E5. Reward/termination audit for MAV/UAV roles.
 
+E5a. MAV flight stability audit.
+
+Status: in progress after Tacview observation.
+
+- Reason: A-4 crash under `red-policy zero` cannot be attributed to untrained
+  RL because that rollout does not load a MAPPO actor.
+- Scope: diagnose A-4/MAV level hold, pitch bias, speed-up, and bounded-random
+  action behavior before applying any fix.
+- Constraint: no PID, aircraft XML, reward, termination, initial-state, or
+  observation-range change before diagnosis.
+
 E6. Long-run baseline after environment protocol is frozen.
 
 E7. Only after E1-E6, ask the user whether to enter a method module.
