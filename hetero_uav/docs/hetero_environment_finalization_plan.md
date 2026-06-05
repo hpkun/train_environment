@@ -113,12 +113,13 @@ E4. Blue opponent logic alignment.
 
 Status: in progress.
 
-- E4a paper-alignment audit.
-- E4b controlled branch diagnostics.
-- E4c visibility/geometry decision.
-- E4d search/acquisition behavior.
-- E4e target assignment and candidate maneuver scoring.
-- E4f only then consider training with `greedy_fsm`.
+- E4a blue opponent alignment audit: done.
+- E4b controlled branch diagnostics: done.
+- E4c search/acquisition behavior: in progress.
+- E4d horizon-sweep visibility diagnostic.
+- E4e geometry/range decision only after E4c/E4d.
+- E4f target assignment and candidate maneuver scoring.
+- E4g only then consider training with `greedy_fsm`.
 
 The initial `greedy_fsm` diagnostic is implemented, but `rule_nearest` remains
 the default. No training run should switch to `greedy_fsm` without explicit user

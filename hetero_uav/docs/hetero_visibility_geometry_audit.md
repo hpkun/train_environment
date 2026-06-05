@@ -30,7 +30,18 @@ is caused by a strategy bug or by blue agents lacking visible enemy tracks.
 
 ## Next Actions After Audit
 
-1. Adjust initial geometry if too distant
-2. Adjust observation ranges if needed
-3. Improve blue patrol / target acquisition
-4. Only then validate greedy_fsm as training opponent
+One 100-step diagnostic is not enough to decide geometry or sensor changes.
+Use a horizon sweep such as 100/250/500 steps before changing initial states or
+observation ranges.
+
+- If blue observes red by 250 or 500 steps, the issue is mainly contact time
+  under the current no-training policy.
+- If blue still cannot observe red by 500 steps, then initial geometry or direct
+  observation range becomes an environment protocol decision.
+- Do not adjust geometry before greedy_fsm has explicit search/acquisition
+  behavior.
+
+1. Add explicit blue search/acquisition behavior.
+2. Run horizon-sweep visibility diagnostics.
+3. Decide whether initial geometry or observation ranges are protocol issues.
+4. Only then validate greedy_fsm as a possible training opponent.

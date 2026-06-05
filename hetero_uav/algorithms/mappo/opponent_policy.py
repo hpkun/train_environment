@@ -105,8 +105,21 @@ class OpponentPolicy:
         if target is not None:
             return cls._attack_action(target), "attack_nearest"
 
+        return cls._search_acquire_action(agent_index), "search_acquire"
+
+    @classmethod
+    def _search_acquire_action(cls, agent_index: int = 0) -> np.ndarray:
+        # No hidden state is used here. In paper-aligned configs blue starts
+        # facing the red formation; without a visible target, the lowest-risk
+        # contact intent is to keep heading with a tiny deconfliction offset and
+        # close distance at high speed rather than loiter slowly.
+        heading = 0.05 if agent_index % 2 == 0 else -0.05
+        return cls._clip_action([0.0, heading, 1.0])
+
+    @classmethod
+    def _patrol_action(cls, agent_index: int = 0) -> np.ndarray:
         heading = 0.2 if agent_index % 2 == 0 else -0.2
-        return cls._clip_action([0.0, heading, 0.6]), "patrol"
+        return cls._clip_action([0.0, heading, 0.6])
 
     @staticmethod
     def _scalar(value) -> float:

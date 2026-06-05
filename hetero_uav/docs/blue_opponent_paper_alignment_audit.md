@@ -70,7 +70,8 @@ items remain uncertain and must not be fabricated.
 - `rule_nearest`: selects nearest non-zero enemy observation and points toward
   it with fixed attack speed.
 - `greedy_fsm`: diagnostic finite-state opponent with `evade`,
-  `recover_altitude`, `attack_mav_priority`, `attack_nearest`, and `patrol`.
+  `recover_altitude`, `attack_mav_priority`, `attack_nearest`,
+  `search_acquire`, and legacy `patrol`.
 - Environment missile/fire-control: automatic BRMA-style launch logic.
 - Environment evasion: automatic missile warning response layer.
 - Environment GCAS: Blue GCAS exists in the BRMA-style environment path.
@@ -90,7 +91,7 @@ items remain uncertain and must not be fabricated.
 | target assignment | engaged-target deconfliction exists in fire-control | expected/uncertain | no script-layer target assignment | yes | add target assignment after branch diagnostics |
 | target prioritization | nearest target selection exists in fire-control | MAV priority plausible but uncertain | `greedy_fsm` can prioritize MAV if roles/types observed | partial | validate role/type availability in blue obs |
 | pursuit/intercept | high-level action and PID support it | expected | rule_nearest and greedy_fsm produce pursuit intent | partial | test controlled visible-target cases |
-| patrol/search behavior | boundary helpers exist in original BRMA code | expected | patrol is mild turn and speed intent | yes | add explicit search/acquisition behavior after audit |
+| patrol/search behavior | boundary helpers exist in original BRMA code | expected | `search_acquire` is an initial high-speed contact intent | partial | validate with horizon-sweep visibility diagnostics |
 | missile launch interface | confirmed automatic fire-control | blue UAVs carry missiles | environment owns launch | no low-level gap | keep scripted launch layer unchanged |
 | missile evasion | confirmed environment layer | expected | environment handles evasion; greedy_fsm only adds high-level intent | no low-level gap | keep unchanged |
 | altitude/GCAS safety | Blue GCAS confirmed | safety expected/uncertain | BRMA-style Blue GCAS exists | no current change | do not add MAV GCAS here |
@@ -119,7 +120,7 @@ B1. Blue opponent alignment audit.
 
 B2. Controlled branch tests for `greedy_fsm`.
 
-B3. Target acquisition/search behavior.
+B3. Target acquisition/search behavior and horizon-sweep validation.
 
 B4. Paper-aligned geometry/range decision.
 

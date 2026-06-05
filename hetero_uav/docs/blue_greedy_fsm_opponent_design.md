@@ -37,15 +37,20 @@ reproduction of either paper's controller.
 - `attack_nearest`: entered when any visible enemy exists and no MAV-priority
   target is available. It turns toward the nearest observed enemy with segmented
   speed intent.
+- `search_acquire`: entered when no visible enemy target exists. It keeps a
+  small alternating heading offset and high speed to express contact/search
+  intent without reading hidden state.
 - `patrol`: entered when no visible enemy is available. It uses a mild turning
-  command and medium speed.
+  command and medium speed. This is retained as a legacy fallback concept, but
+  the default no-target greedy_fsm branch is `search_acquire`.
 
 ## Difference From rule_nearest
 
 `rule_nearest` always steers toward the nearest non-zero enemy state and uses a
 fixed attack speed. `greedy_fsm` first checks missile warning, altitude recovery,
 and optional MAV target metadata before falling back to nearest-target attack.
-It also records `OpponentPolicy.last_states` for diagnostics.
+If no target is visible, it uses `search_acquire` instead of passive patrol. It
+also records `OpponentPolicy.last_states` for diagnostics.
 
 ## What It Does Not Change
 
@@ -85,6 +90,12 @@ python scripts/diagnose_greedy_fsm_controlled_branches.py --output-json outputs/
 The geometry/range decision remains unresolved. Do not change initial states or
 observation ranges solely because live rollout diagnostics show patrol-only
 behavior.
+
+No-target behavior should not be passive patrol-only. `search_acquire` is a
+low-intrusion intercept intent: keep the initial heading, add only a small
+per-agent deconfliction offset, and fly fast enough to close range. It still
+does not read hidden state, does not control missiles, and does not enter the
+training protocol by default.
 
 ## Open Issues
 

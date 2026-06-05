@@ -54,10 +54,13 @@ def test_alignment_audit_outputs_expected_flags():
     assert flags["has_mav_priority_branch"] is True
     assert flags["has_nearest_attack_branch"] is True
     assert flags["has_patrol_branch"] is True
+    assert flags["has_search_acquisition_behavior"] is True
     assert flags["has_target_assignment"] is False
     assert flags["has_candidate_maneuver_scoring"] is False
     assert flags["directly_controls_missile"] is False
     assert flags["relies_on_env_fire_control"] is True
+    assert data["gap_flags"]["gap_no_search_acquisition_behavior"] is False
+    assert "search_acquire" in data["greedy_fsm_states"]
 
 
 def test_greedy_fsm_controlled_branches_pass():
@@ -78,7 +81,7 @@ def test_greedy_fsm_controlled_branches_pass():
     data = json.loads(output_json.read_text(encoding="utf-8"))
     records = {record["case"]: record for record in data["records"]}
     for case in [
-        "patrol_case",
+        "search_acquire_case",
         "nearest_attack_case",
         "mav_priority_case",
         "evade_case",

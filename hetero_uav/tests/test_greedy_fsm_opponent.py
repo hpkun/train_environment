@@ -29,7 +29,9 @@ def test_greedy_fsm_empty_obs_returns_valid_action():
     assert np.isfinite(action).all()
     assert np.all(action >= -1.0)
     assert np.all(action <= 1.0)
-    assert policy.last_states["blue_0"] == "patrol"
+    assert action[2] > 0.8
+    assert abs(float(action[1])) <= 0.2
+    assert policy.last_states["blue_0"] == "search_acquire"
 
 
 def test_greedy_fsm_enemy_obs_returns_valid_action_and_state():
@@ -103,6 +105,7 @@ def test_greedy_fsm_diagnosis_script_outputs_json(tmp_path):
     ]
     assert greedy_records
     assert all(record["blue_state_counts"] for record in greedy_records)
+    assert "search_acquire" in data["summary"]["greedy_fsm_state_coverage"]
 
 
 def test_greedy_fsm_design_doc_exists():
@@ -116,3 +119,4 @@ def test_greedy_fsm_design_doc_exists():
     assert "candidate maneuver" in text
     assert "not final opponent" in text
     assert "rule_nearest remains default" in text
+    assert "search_acquire" in text

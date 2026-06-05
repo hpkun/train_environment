@@ -45,6 +45,7 @@ def _enemy_track_counts(obs: dict, agent_id: str) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--steps-list", type=int, nargs="+", default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--red-policy", choices=["zero", "random"], default="zero")
     parser.add_argument("--blue-policy", choices=["zero", "rule_nearest", "greedy_fsm"],
@@ -53,8 +54,23 @@ def main():
                         default="outputs/environment_audit/hetero_visibility_geometry.json")
     args = parser.parse_args()
 
+    horizons = list(args.steps_list) if args.steps_list else [args.steps]
     records = []
     for cfg_path in CONFIGS:
+        for horizon in horizons:
+            records.append(_diagnose_config(cfg_path, horizon, args))
+
+    summary = _build_summary(records, horizons)
+
+    out_dir = os.path.dirname(args.output_json)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    with open(args.output_json, "w") as f:
+        json.dump({"records": records, "summary": summary}, f, indent=2)
+    print(f"Saved {args.output_json}")
+
+
+def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
         env = None
         try:
             env = make_env(cfg_path, env_type="jsbsim_hetero")
@@ -81,7 +97,8 @@ def main():
             first_blue = -1
             mav_alive_any = False
 
-            for step in range(args.steps):
+            nan_detected = False
+            for step in range(steps):
                 # red actions
                 if args.red_policy == "zero":
                     red_acts = {rid: np.zeros(3, dtype=np.float32)
@@ -116,6 +133,11 @@ def main():
                     steps_blue_obs += 1
 
                 obs, _r, terminated, truncated, info = env.step(actions)
+                for agent_obs in obs.values():
+                    for value in agent_obs.values():
+                        arr = np.asarray(value)
+                        if arr.dtype.kind in {"f", "c"} and np.isnan(arr).any():
+                            nan_detected = True
                 mav_sim = env.red_planes.get("red_0") if red_count > 0 else None
                 if mav_sim is not None and mav_sim.is_alive:
                     mav_alive_any = True
@@ -130,10 +152,10 @@ def main():
             if first_blue < 0:
                 warnings.append("blue never observed enemy")
                 if args.blue_policy == "greedy_fsm":
-                    warnings.append("greedy_fsm patrol-only likely caused by no visible blue enemy tracks")
+                    warnings.append("greedy_fsm search-only likely caused by no visible blue enemy tracks")
             if total_red_shared > 0 and total_blue_direct == 0:
                 warnings.append("asymmetric information: red has MAV shared tracks, blue has no direct tracks")
-            if first_red < 0 and first_blue < 0 and args.steps >= 50:
+            if first_red < 0 and first_blue < 0 and steps >= 50:
                 warnings.append("initial geometry concern: no mutual observation")
 
             rec = {
@@ -143,13 +165,14 @@ def main():
                 "decision_dt": float(env.env_dt),
                 "uav_direct_observation_range_m": uav_direct,
                 "mav_observation_range_m": mav_range,
-                "steps_executed": args.steps,
+                "horizon_steps": steps,
+                "steps_executed": steps,
                 "first_step_red_observed": first_red,
                 "first_step_blue_observed": first_blue,
                 "red_observed_any": first_red >= 0,
                 "blue_observed_any": first_blue >= 0,
-                "red_observed_fraction": steps_red_obs / max(args.steps, 1),
-                "blue_observed_fraction": steps_blue_obs / max(args.steps, 1),
+                "red_observed_fraction": steps_red_obs / max(steps, 1),
+                "blue_observed_fraction": steps_blue_obs / max(steps, 1),
                 "red_mav_shared_fraction": total_red_shared / max(total_red_obs, 1),
                 "red_direct_fraction": total_red_direct / max(total_red_obs, 1),
                 "blue_direct_fraction": total_blue_direct / max(total_blue_obs, 1),
@@ -158,11 +181,12 @@ def main():
                 "blue_direct_tracks_total": total_blue_direct,
                 "final_red_alive": red_alive, "final_blue_alive": blue_alive,
                 "final_mav_alive": mav_alive,
+                "nan_detected": nan_detected,
                 "warnings": warnings,
             }
-            records.append(rec)
 
             print(f"{Path(cfg_path).stem:45s} "
+                  f"horizon={steps:4d} "
                   f"r_obs={rec['red_observed_any']} b_obs={rec['blue_observed_any']} "
                   f"first_r={first_red} first_b={first_blue} "
                   f"mav_shared={rec['red_mav_shared_fraction']:.2f} "
@@ -170,26 +194,54 @@ def main():
                   f"warnings={len(warnings)}")
             for w in warnings:
                 print(f"  WARN: {w}")
+            return rec
         finally:
             if env is not None:
                 env.close()
 
-    summary = {
+def _build_summary(records: list[dict], horizons: list[int]) -> dict:
+    by_config: dict[str, dict] = {}
+    for cfg in sorted({record["config"] for record in records}):
+        cfg_records = [record for record in records if record["config"] == cfg]
+        first_blue = next(
+            (record["horizon_steps"] for record in sorted(
+                cfg_records, key=lambda item: item["horizon_steps"])
+             if record["blue_observed_any"]),
+            None,
+        )
+        first_red = next(
+            (record["horizon_steps"] for record in sorted(
+                cfg_records, key=lambda item: item["horizon_steps"])
+             if record["red_observed_any"]),
+            None,
+        )
+        item = {
+            "first_horizon_blue_observed": first_blue,
+            "first_horizon_red_observed": first_red,
+        }
+        for horizon in horizons:
+            record = next(
+                (r for r in cfg_records if r["horizon_steps"] == horizon),
+                None,
+            )
+            item[f"blue_observed_by_{horizon}"] = (
+                bool(record["blue_observed_any"]) if record else False)
+            item[f"red_observed_by_{horizon}"] = (
+                bool(record["red_observed_any"]) if record else False)
+        by_config[cfg] = item
+
+    return {
         "configs_audited": len(records),
+        "horizons": horizons,
+        "horizon_summary_by_config": by_config,
         "red_never_observed": [r["config"] for r in records if not r["red_observed_any"]],
         "blue_never_observed": [r["config"] for r in records if not r["blue_observed_any"]],
         "asymmetric_info": [r["config"] for r in records
                             if "asymmetric information" in r["warnings"]],
         "initial_geometry_concern": [r["config"] for r in records
                                      if "initial geometry concern" in r["warnings"]],
+        "nan_records": [r["config"] for r in records if r.get("nan_detected")],
     }
-
-    out_dir = os.path.dirname(args.output_json)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    with open(args.output_json, "w") as f:
-        json.dump({"records": records, "summary": summary}, f, indent=2)
-    print(f"Saved {args.output_json}")
 
 
 if __name__ == "__main__":

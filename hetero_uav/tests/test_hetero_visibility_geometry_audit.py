@@ -24,7 +24,7 @@ def test_help():
         [sys.executable, str(SCRIPT), "--help"],
         capture_output=True, text=True, encoding="utf-8",
         errors="replace", cwd=str(ROOT), timeout=10)
-    for flag in ["--steps", "--red-policy", "--blue-policy", "--output-json"]:
+    for flag in ["--steps", "--steps-list", "--red-policy", "--blue-policy", "--output-json"]:
         assert flag in result.stdout
 
 
@@ -50,6 +50,32 @@ def test_short_run():
             assert key in r, f"Missing {key}"
         assert not any(np.isnan(v) if isinstance(v, float) else False
                        for v in r.values() if isinstance(v, (int, float)))
+
+
+def test_steps_list_run():
+    out = "outputs/test_environment_audit/hetero_visibility_geometry_steps_list.json"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--steps-list", "3", "5", "--blue-policy", "greedy_fsm",
+         "--output-json", out],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", cwd=str(ROOT), timeout=120,
+        env=_subprocess_env())
+    assert result.returncode == 0, f"stderr: {result.stderr[-500:]}"
+    data = json.loads(Path(out).read_text())
+    assert "records" in data
+    assert "summary" in data
+    assert "horizon_summary_by_config" in data["summary"]
+    assert data["summary"]["horizons"] == [3, 5]
+    for r in data["records"]:
+        assert "horizon_steps" in r
+        assert r["horizon_steps"] in [3, 5]
+        assert not any(np.isnan(v) if isinstance(v, float) else False
+                       for v in r.values() if isinstance(v, (int, float)))
+    for item in data["summary"]["horizon_summary_by_config"].values():
+        assert "blue_observed_by_3" in item
+        assert "blue_observed_by_5" in item
+        assert "first_horizon_blue_observed" in item
 
 
 def test_doc_exists():

@@ -22,11 +22,15 @@ from algorithms.mappo.opponent_policy import OpponentPolicy
 def _obs_cases() -> list[dict]:
     return [
         {
-            "case": "patrol_case",
-            "expected_state": "patrol",
+            "case": "search_acquire_case",
+            "expected_state": "search_acquire",
             "obs": {
                 "altitude": np.array([1.0], dtype=np.float32),
                 "missile_warning": np.array([0.0], dtype=np.float32),
+            },
+            "checks": {
+                "min_speed": 0.8,
+                "max_abs_heading": 0.2,
             },
         },
         {
@@ -97,6 +101,11 @@ def run_case(case: dict) -> dict:
         and action_in_bounds
         and not nan_detected
     )
+    checks = case.get("checks", {})
+    if "min_speed" in checks:
+        passed = passed and bool(action[2] > float(checks["min_speed"]))
+    if "max_abs_heading" in checks:
+        passed = passed and bool(abs(float(action[1])) <= float(checks["max_abs_heading"]))
     return {
         "case": case["case"],
         "expected_state": case["expected_state"],

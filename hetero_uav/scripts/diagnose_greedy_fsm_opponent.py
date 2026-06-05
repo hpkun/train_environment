@@ -194,6 +194,9 @@ def main() -> None:
         "greedy_fsm_state_coverage": greedy_state_coverage,
         "greedy_fsm_has_non_patrol_state": any(
             state != "patrol" for state in greedy_state_coverage),
+        "greedy_fsm_acquired_target": any(
+            state in {"attack_nearest", "attack_mav_priority"}
+            for state in greedy_state_coverage),
         "greedy_fsm_action_saturation_mean": float(
             np.mean(saturation_values)) if saturation_values else 0.0,
     }
@@ -204,6 +207,10 @@ def main() -> None:
     print(f"output_json: {out}")
     if greedy_state_coverage == ["patrol"]:
         print("warning: greedy_fsm remained in patrol for all diagnosed steps")
+    if greedy_state_coverage == ["search_acquire"]:
+        print("warning: greedy_fsm only searched and never acquired target")
+    if summary["greedy_fsm_acquired_target"]:
+        print("greedy_fsm acquired target")
     if summary["nan_records"]:
         raise RuntimeError("NaN detected during greedy_fsm opponent diagnosis")
 

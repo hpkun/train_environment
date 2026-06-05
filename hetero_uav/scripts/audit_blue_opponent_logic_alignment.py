@@ -23,6 +23,7 @@ GREEDY_FSM_STATES = [
     "recover_altitude",
     "attack_mav_priority",
     "attack_nearest",
+    "search_acquire",
     "patrol",
 ]
 
@@ -96,6 +97,7 @@ def build_audit(visibility_json: Path) -> dict:
         "has_altitude_recover_branch": "recover_altitude" in opponent_source,
         "has_mav_priority_branch": "attack_mav_priority" in opponent_source,
         "has_nearest_attack_branch": "attack_nearest" in opponent_source,
+        "has_search_acquisition_behavior": "search_acquire" in opponent_source,
         "has_patrol_branch": "patrol" in opponent_source,
         "has_target_assignment": False,
         "has_candidate_maneuver_scoring": False,
@@ -115,7 +117,8 @@ def build_audit(visibility_json: Path) -> dict:
         "gap_no_target_assignment": not support_flags["has_target_assignment"],
         "gap_no_candidate_maneuver_scoring": not support_flags[
             "has_candidate_maneuver_scoring"],
-        "gap_no_search_acquisition_behavior": True,
+        "gap_no_search_acquisition_behavior": not support_flags[
+            "has_search_acquisition_behavior"],
         "gap_visibility_asymmetry": any(
             "asymmetric information" in warning
             for warning in visibility_summary["visibility_warnings"]),
@@ -124,7 +127,7 @@ def build_audit(visibility_json: Path) -> dict:
 
     recommended = [
         "add controlled branch tests before changing default opponent",
-        "add search/acquisition state to greedy_fsm after branch diagnostics",
+        "horizon-sweep visibility after adding search_acquire",
         "decide whether paper-aligned geometry should be closer or blue direct range should differ",
         "audit reward/termination after opponent logic",
         "do not train with greedy_fsm until explicit opponent validation passes",
