@@ -60,6 +60,7 @@ def test_export_tacview_short_rollout():
     assert "FileVersion=2.1" in text
     assert "ReferenceTime" in text
     assert "#0" in text
+    assert "Type=Air+FixedWing" in text
     assert "Name=red_0" in text or "Name=red_0_mav" in text
     assert "Name=blue_0" in text
     assert "Color=Red" in text
@@ -71,6 +72,9 @@ def test_export_tacview_short_rollout():
     assert "final_red_alive" in meta
     assert "final_blue_alive" in meta
     assert meta["record_missiles"] is True
+    assert meta["acmi_entity_type_fix"] is True
+    if meta["missiles_seen"] > 0:
+        assert "Type=Weapon+Missile" in text
 
 
 def test_tacview_doc_exists():
