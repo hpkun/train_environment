@@ -2,6 +2,11 @@ env_type: jsbsim_hetero
 observation_mode: "mav_shared_geo"
 uav_direct_observation_range_m: 10000.0
 mav_observation_range_m: 80000.0
+action_trim_by_role:
+  mav:
+    pitch: 0.10
+    heading: 0.0
+    speed: 0.0
 max_num_red: 5
 max_num_blue: 4
 red_agent_types:

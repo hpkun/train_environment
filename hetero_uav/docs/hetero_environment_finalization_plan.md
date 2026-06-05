@@ -138,6 +138,16 @@ Status: in progress after Tacview observation.
 - Constraint: no PID, aircraft XML, reward, termination, initial-state, or
   observation-range change before diagnosis.
 
+E5b. Config-driven MAV action trim.
+
+Status: in progress.
+
+- Reason: A-4 zero-action trim mismatch was found in E5a diagnostics.
+- Scope: config-driven high-level action trim for MAV in paper-aligned V2
+  configs only.
+- Constraint: no action-space, PID, aircraft XML, reward, termination, missile,
+  initial-state, or observation-range change.
+
 E6. Long-run baseline after environment protocol is frozen.
 
 E7. Only after E1-E6, ask the user whether to enter a method module.

@@ -85,6 +85,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
         observation_mode: str = "brma_sensor",
         uav_direct_observation_range_m: float = 10000.0,
         mav_observation_range_m: float = 80000.0,
+        action_trim_by_role: dict | None = None,
+        action_trim_by_type: dict | None = None,
+        action_trim_by_agent: dict | None = None,
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
@@ -93,6 +96,12 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.observation_mode = observation_mode
         self.uav_direct_observation_range_m = float(uav_direct_observation_range_m)
         self.mav_observation_range_m = float(mav_observation_range_m)
+        self.action_trim_by_role = self._normalize_action_trim_map(action_trim_by_role)
+        self.action_trim_by_type = self._normalize_action_trim_map(action_trim_by_type)
+        self.action_trim_by_agent = self._normalize_action_trim_map(action_trim_by_agent)
+        self.action_trim_enabled = True
+        self._last_action_trim_applied: dict[str, list[float]] = {}
+        self._last_effective_actions: dict[str, list[float]] = {}
         super().__init__(*args, **kwargs)
         self.aircraft_type_params = deepcopy(DEFAULT_AIRCRAFT_TYPE_PARAMS)
         if aircraft_type_params:
@@ -112,6 +121,61 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.agent_models: dict[str, str] = {}
         self._refresh_agent_metadata()
         self._extend_hetero_observation_space()
+
+    @staticmethod
+    def _normalize_action_trim_map(values: dict | None) -> dict[str, np.ndarray]:
+        if not values:
+            return {}
+        out: dict[str, np.ndarray] = {}
+        for key, raw in values.items():
+            if isinstance(raw, dict):
+                trim = [
+                    float(raw.get("pitch", 0.0)),
+                    float(raw.get("heading", 0.0)),
+                    float(raw.get("speed", 0.0)),
+                ]
+            else:
+                trim = list(raw)
+                if len(trim) != 3:
+                    raise ValueError(f"action trim for {key!r} must have 3 values")
+            out[str(key)] = np.asarray(trim, dtype=np.float32)
+        return out
+
+    def set_action_trim_enabled(self, enabled: bool) -> None:
+        self.action_trim_enabled = bool(enabled)
+
+    def _action_trim_for_agent(self, agent_id: str) -> np.ndarray:
+        if not self.action_trim_enabled:
+            return np.zeros(3, dtype=np.float32)
+        if agent_id in self.action_trim_by_agent:
+            return self.action_trim_by_agent[agent_id]
+        role = self.agent_roles.get(agent_id, "")
+        if role in self.action_trim_by_role:
+            return self.action_trim_by_role[role]
+        type_name = self.agent_types.get(agent_id, "")
+        if type_name in self.action_trim_by_type:
+            return self.action_trim_by_type[type_name]
+        return np.zeros(3, dtype=np.float32)
+
+    def _apply_action_trim(self, actions: dict) -> dict:
+        trimmed = dict(actions)
+        self._last_action_trim_applied = {}
+        self._last_effective_actions = {}
+        for aid, action in actions.items():
+            trim = self._action_trim_for_agent(aid)
+            raw = np.asarray(action, dtype=np.float32)
+            effective = np.clip(raw + trim, -1.0, 1.0).astype(np.float32)
+            trimmed[aid] = effective
+            self._last_action_trim_applied[aid] = [
+                round(float(value), 6) for value in trim
+            ]
+            self._last_effective_actions[aid] = [
+                round(float(value), 6) for value in effective
+            ]
+        return trimmed
+
+    def step(self, actions: dict):
+        return super().step(self._apply_action_trim(actions))
 
     def _extend_hetero_observation_space(self) -> None:
         metadata_spaces = {
@@ -367,6 +431,12 @@ class HeteroUavCombatEnv(UavCombatEnv):
         info["agent_roles"] = dict(self.agent_roles)
         info["agent_models"] = dict(self.agent_models)
         info["observation_mode"] = self.observation_mode
+        info["action_trim_enabled"] = bool(self.action_trim_enabled)
+        info["action_trim_by_role"] = {
+            key: value.tolist() for key, value in self.action_trim_by_role.items()
+        }
+        info["last_action_trim_applied"] = dict(self._last_action_trim_applied)
+        info["last_effective_actions"] = dict(self._last_effective_actions)
         info["agent_init_offsets"] = {}
         for aid in self.agent_ids:
             info["agent_init_offsets"][aid] = self._init_offsets_for(aid)

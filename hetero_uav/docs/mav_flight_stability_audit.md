@@ -50,6 +50,10 @@ target-pitch bias, or safe default behavior. If only bounded random action
 crashes, exploration range is the likely issue. If A-4 drops much more than f16,
 the issue is model-specific control integration.
 
+The follow-up calibration uses config-driven `action_trim_by_role` for the MAV
+in paper-aligned V2 configs. The diagnostic can still reproduce old behavior
+with `--disable-config-trim`.
+
 ## Next Actions
 
 If zero action fails but pitch bias works, discuss a minimal MAV trim or safe

@@ -246,6 +246,7 @@ def main() -> None:
     )
     parser.add_argument("--record-missiles", action="store_true")
     parser.add_argument("--reference-time", default="2026-01-01T00:00:00Z")
+    parser.add_argument("--disable-config-trim", action="store_true")
     args = parser.parse_args()
 
     output_acmi = Path(args.output_acmi)
@@ -257,6 +258,8 @@ def main() -> None:
     from uav_env.JSBSim.render_tacview import TacviewLogger
 
     env = make_env(args.config, env_type="jsbsim_hetero")
+    if args.disable_config_trim and hasattr(env, "set_action_trim_enabled"):
+        env.set_action_trim_enabled(False)
     logger = TacviewLogger(reference_time=args.reference_time)
     rng = np.random.default_rng(args.seed)
     blue_policy = OpponentPolicy(mode=args.blue_policy, seed=args.seed + 17)
@@ -312,6 +315,12 @@ def main() -> None:
             "decision_dt": float(getattr(env, "env_dt", 0.0)),
             "reference_time": args.reference_time,
             "missiles_seen": len(missile_id_map),
+            "action_trim_by_role": {
+                key: [round(float(v), 6) for v in value]
+                for key, value in getattr(env, "action_trim_by_role", {}).items()
+            },
+            "trim_enabled": bool(getattr(env, "action_trim_enabled", False)),
+            "note": "ACMI red-policy zero may still include config-level MAV trim if enabled.",
         }
         metadata.update(_launch_metadata(env, launch_records))
         output_json.write_text(json.dumps(metadata, indent=2), encoding="utf-8")

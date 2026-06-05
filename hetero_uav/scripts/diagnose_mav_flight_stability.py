@@ -122,11 +122,14 @@ def run_case(
     blue_policy_name: str,
     export_acmi: bool,
     output_acmi_dir: Path,
+    disable_config_trim: bool = False,
 ) -> dict:
     from uav_env import make_env
     from uav_env.JSBSim.render_tacview import TacviewLogger
 
     env = make_env(config, env_type="jsbsim_hetero", suppress_jsbsim_output=False)
+    if disable_config_trim and hasattr(env, "set_action_trim_enabled"):
+        env.set_action_trim_enabled(False)
     rng = np.random.default_rng(seed)
     blue_policy = OpponentPolicy(mode=blue_policy_name, seed=seed + 17)
     missile_id_map: dict[str, int] = {}
@@ -144,12 +147,14 @@ def run_case(
         min_speed = initial["speed_mps"]
         max_speed = initial["speed_mps"]
         nan_detected = initial["nan_detected"]
+        planned_mav_action = np.zeros(3, dtype=np.float32)
 
         if logger is not None:
             _record_frame(logger, env, 0.0, True, missile_id_map, logged_explosions)
 
         for step in range(1, int(steps) + 1):
             actions = _red_actions(env, case, rng)
+            planned_mav_action = np.asarray(actions.get(mav_id, np.zeros(3)), dtype=np.float32)
             actions.update(_blue_actions(blue_policy, obs, env.blue_ids))
             obs, _rewards, terminated, truncated, info = env.step(actions)
             steps_executed = step
@@ -168,6 +173,16 @@ def run_case(
 
         final = _scan_mav(env, mav_id)
         red_alive, blue_alive = _alive_counts(env)
+        trim_by_role = getattr(env, "action_trim_by_role", {})
+        trim_enabled = bool(getattr(env, "action_trim_enabled", False))
+        mav_trim = [
+            round(float(value), 6)
+            for value in getattr(env, "_last_action_trim_applied", {}).get(mav_id, [0.0, 0.0, 0.0])
+        ]
+        effective_mav_action = [
+            round(float(value), 6)
+            for value in getattr(env, "_last_effective_actions", {}).get(mav_id, planned_mav_action.tolist())
+        ]
         missiles_seen = len(missile_id_map) if logger is not None else len(_all_missiles(env))
         altitude_delta = final["altitude_m"] - initial["altitude_m"]
         stable_level_like = (
@@ -211,6 +226,12 @@ def run_case(
             "blue_alive_final": int(blue_alive),
             "missiles_seen": int(missiles_seen),
             "automatic_launches_seen": int(automatic_launches_seen),
+            "config_action_trim_by_role": {
+                key: value.tolist() for key, value in trim_by_role.items()
+            },
+            "mav_action_trim_applied": mav_trim,
+            "effective_mav_action": effective_mav_action,
+            "trim_enabled": trim_enabled,
             "stable_level_like": bool(stable_level_like),
             "needs_mav_stability_fix": bool(needs_fix),
             "output_acmi": acmi_path,
@@ -267,6 +288,7 @@ def main() -> None:
     parser.add_argument("--output-json", default="outputs/environment_audit/mav_flight_stability.json")
     parser.add_argument("--output-acmi-dir", default="outputs/tacview/mav_flight_stability")
     parser.add_argument("--export-acmi", action="store_true")
+    parser.add_argument("--disable-config-trim", action="store_true")
     args = parser.parse_args()
 
     output_acmi_dir = Path(args.output_acmi_dir)
@@ -281,6 +303,7 @@ def main() -> None:
                 blue_policy_name=args.blue_policy,
                 export_acmi=args.export_acmi,
                 output_acmi_dir=output_acmi_dir,
+                disable_config_trim=args.disable_config_trim,
             )
             records.append(record)
             print(

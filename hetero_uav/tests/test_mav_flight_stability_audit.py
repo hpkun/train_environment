@@ -15,7 +15,14 @@ def test_mav_flight_stability_help():
         capture_output=True,
         check=True,
     )
-    for flag in ["--configs", "--steps", "--blue-policy", "--output-json", "--export-acmi"]:
+    for flag in [
+        "--configs",
+        "--steps",
+        "--blue-policy",
+        "--output-json",
+        "--export-acmi",
+        "--disable-config-trim",
+    ]:
         assert flag in result.stdout
 
 
@@ -47,6 +54,9 @@ def test_mav_flight_stability_short_diagnostic():
     for record in data["records"]:
         for key in [
             "case",
+            "trim_enabled",
+            "mav_action_trim_applied",
+            "effective_mav_action",
             "mav_initial_altitude_m",
             "mav_final_altitude_m",
             "mav_min_altitude_m",
