@@ -42,6 +42,7 @@ LAUNCH_DIAG_KEYS = (
     "lock_continued",
     "lock_lost",
     "lock_mature_pairs",
+    "ammo_empty_blocked",
     "cooldown_blocked",
     "kill_cooldown_blocked",
     "engaged_blocked",
@@ -728,6 +729,12 @@ class UavCombatEnv(gymnasium.Env):
             if self._missile_cooldown[aid] > 0:
                 self._missile_cooldown[aid] -= 1
 
+            if sim.num_left_missiles <= 0:
+                diag["ammo_empty_blocked"] += 1
+                self._lock_timer[aid] = 0
+                self._lock_target[aid] = None
+                continue
+
             # ---- Shared engaged-targets set (hot-updated across agents) ----
             # Uses self._engaged_targets directly — no per-agent recomputation.
             # The set contains enemy UIDs that have an in-flight friendly
@@ -843,6 +850,9 @@ class UavCombatEnv(gymnasium.Env):
         """Build a launch-quality snapshot without affecting launch decisions."""
 
         team = "red" if shooter.uid.startswith("red") else "blue"
+        target_team = "red" if target.uid.startswith("red") else "blue"
+        roles = getattr(self, "agent_roles", {})
+        models = getattr(self, "agent_models", {})
         try:
             shooter_pos = shooter.get_position()
             shooter_vel = shooter.get_velocity()
@@ -866,8 +876,14 @@ class UavCombatEnv(gymnasium.Env):
 
         return make_launch_quality_record(
             team=team,
+            shooter_team=team,
             shooter_id=shooter.uid,
+            shooter_role=str(roles.get(shooter.uid, "")),
+            shooter_model=str(models.get(shooter.uid, getattr(shooter, "model", ""))),
             target_id=target.uid,
+            target_team=target_team,
+            target_role=str(roles.get(target.uid, "")),
+            target_model=str(models.get(target.uid, getattr(target, "model", ""))),
             current_step=self.current_step,
             physics_frame=self._physics_frame,
             range_m=r,
@@ -878,6 +894,8 @@ class UavCombatEnv(gymnasium.Env):
             target_pos=target_pos,
             target_vel=target_vel,
             target_alive_at_launch=bool(target.is_alive),
+            shooter_num_left_before_launch=int(shooter.num_left_missiles),
+            shooter_num_left_after_launch="",
         )
 
     def _launch_missile(
@@ -889,15 +907,16 @@ class UavCombatEnv(gymnasium.Env):
         missile = MissileSimulator.create(parent, target, f"m{self._missile_id_counter}")
         self._missile_id_counter += 1
         self._missiles_in_flight[missile.uid] = missile
-        if launch_quality is not None:
-            launch_quality["missile_id"] = missile.uid
-            self._launch_quality_records[missile.uid] = launch_quality
-            self._launch_quality_step_records.append(dict(launch_quality))
         self._missile_acmi_id[missile.uid] = self._next_missile_acmi_id
         self._next_missile_acmi_id += 1
         self._missile_cooldown[parent.uid] = self.missile_cooldown_frames
         parent.num_left_missiles = max(0, parent.num_left_missiles - 1)  # fire-for-effect tracking (capacity 999)
         self._missile_launch_counts[parent.uid] += 1
+        if launch_quality is not None:
+            launch_quality["missile_id"] = missile.uid
+            launch_quality["shooter_num_left_after_launch"] = int(parent.num_left_missiles)
+            self._launch_quality_records[missile.uid] = launch_quality
+            self._launch_quality_step_records.append(dict(launch_quality))
 
     def _finalize_launch_quality_record(self, missile: MissileSimulator) -> None:
         """Attach missile termination diagnostics to its launch snapshot."""

@@ -58,11 +58,11 @@ class TacviewLogger:
             alive_current.add(aid)
 
             if aid not in self._introduced:
-                # ---- First appearance: Name + Color (no Type, let TacView infer from Name) ----
+                entity_type = e.get("type", "Air+FixedWing")
                 self._lines.append(
                     f"{aid},T={e['lon']}|{e['lat']}|{e['alt']}|"
                     f"{e['roll']}|{e['pitch']}|{e['yaw']},"
-                    f"Name={e['name']},Color={e['color']}"
+                    f"Type={entity_type},Name={e['name']},Color={e['color']}"
                 )
                 self._introduced.add(aid)
             else:

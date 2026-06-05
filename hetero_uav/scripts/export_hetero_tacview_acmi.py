@@ -18,8 +18,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from algorithms.mappo.opponent_policy import OpponentPolicy
-from uav_env import make_env
-from uav_env.JSBSim.render_tacview import TacviewLogger
 
 
 def _aircraft_acmi_id(agent_id: str) -> int:
@@ -56,6 +54,7 @@ def _aircraft_entries(env) -> list[dict]:
         roll, pitch, yaw = np.asarray(sim.get_rpy(), dtype=np.float64) * (180.0 / np.pi)
         entries.append({
             "acmi_id": _aircraft_acmi_id(agent_id),
+            "type": "Air+FixedWing",
             "lon": _finite_float(lon, f"{agent_id}.lon"),
             "lat": _finite_float(lat, f"{agent_id}.lat"),
             "alt": _finite_float(alt, f"{agent_id}.alt"),
@@ -94,6 +93,7 @@ def _missile_entries(env, missile_id_map: dict[str, int]) -> list[dict]:
         roll, pitch, yaw = np.asarray(missile.get_rpy(), dtype=np.float64) * (180.0 / np.pi)
         entries.append({
             "acmi_id": missile_id_map[uid],
+            "type": "Weapon+Missile",
             "lon": _finite_float(lon, f"{uid}.lon"),
             "lat": _finite_float(lat, f"{uid}.lat"),
             "alt": _finite_float(alt, f"{uid}.alt"),
@@ -145,8 +145,52 @@ def _alive_counts(env) -> tuple[int, int, bool]:
     return red_alive, blue_alive, mav_alive
 
 
+def _launch_record_key(record: dict) -> tuple:
+    return (
+        record.get("missile_id"),
+        record.get("shooter_id"),
+        record.get("target_id"),
+        record.get("launch_step"),
+        record.get("physics_frame"),
+    )
+
+
+def _merge_launch_records(records: list[dict], new_records: list[dict]) -> None:
+    seen = {_launch_record_key(record) for record in records}
+    for record in new_records:
+        key = _launch_record_key(record)
+        if key not in seen:
+            records.append(dict(record))
+            seen.add(key)
+
+
+def _launch_metadata(env, records: list[dict]) -> dict:
+
+    by_target_role: dict[str, int] = {}
+    by_shooter: dict[str, int] = {}
+    mav_targeted = 0
+    roles = getattr(env, "agent_roles", {})
+    for record in records:
+        shooter = str(record.get("shooter_id", ""))
+        target = str(record.get("target_id", ""))
+        target_role = str(record.get("target_role") or roles.get(target, ""))
+        by_shooter[shooter] = by_shooter.get(shooter, 0) + 1
+        if target_role:
+            by_target_role[target_role] = by_target_role.get(target_role, 0) + 1
+        if target_role == "mav":
+            mav_targeted += 1
+
+    return {
+        "missile_launch_counts": by_shooter,
+        "launch_records_count": len(records),
+        "launch_records_by_target_role": by_target_role,
+        "launch_records_by_shooter": by_shooter,
+        "mav_targeted_by_missile_count": mav_targeted,
+    }
+
+
 def _record_frame(
-    logger: TacviewLogger,
+    logger,
     env,
     sim_time: float,
     record_missiles: bool,
@@ -209,12 +253,16 @@ def main() -> None:
     output_acmi.parent.mkdir(parents=True, exist_ok=True)
     output_json.parent.mkdir(parents=True, exist_ok=True)
 
+    from uav_env import make_env
+    from uav_env.JSBSim.render_tacview import TacviewLogger
+
     env = make_env(args.config, env_type="jsbsim_hetero")
     logger = TacviewLogger(reference_time=args.reference_time)
     rng = np.random.default_rng(args.seed)
     blue_policy = OpponentPolicy(mode=args.blue_policy, seed=args.seed + 17)
     missile_id_map: dict[str, int] = {}
     logged_explosions: set[str] = set()
+    launch_records: list[dict] = []
     steps_executed = 0
     final_terminated = False
     final_truncated = False
@@ -229,6 +277,8 @@ def main() -> None:
             actions = _red_actions(env, args.red_policy, rng)
             actions.update(blue_policy.act(obs, env.blue_ids))
             obs, _rewards, terminated, truncated, _info = env.step(actions)
+            _merge_launch_records(launch_records, _info.get("__launch_quality_step__", []))
+            _merge_launch_records(launch_records, _info.get("__launch_quality_done__", []))
             steps_executed = step
             _record_frame(
                 logger, env, step * float(env.env_dt), args.record_missiles,
@@ -241,6 +291,7 @@ def main() -> None:
         logger.write(str(output_acmi))
         red_alive, blue_alive, mav_alive = _alive_counts(env)
         metadata = {
+            "acmi_entity_type_fix": True,
             "config": args.config,
             "output_acmi": str(output_acmi),
             "output_json": str(output_json),
@@ -262,6 +313,7 @@ def main() -> None:
             "reference_time": args.reference_time,
             "missiles_seen": len(missile_id_map),
         }
+        metadata.update(_launch_metadata(env, launch_records))
         output_json.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     finally:
         close = getattr(env, "close", None)
