@@ -30,10 +30,15 @@ class OpponentPolicy:
         self.last_states: dict[str, str] = {}
         # Instance-level target persistence (slot index → last targeted slot)
         self.last_targets: dict[int, int] = {}
+        # Per-agent distance memory and lost-target counter
+        self.last_target_distances: dict[int, float] = {}
+        self.lost_target_steps: dict[int, int] = {}
 
     def reset_memory(self) -> None:
         """Clear per-agent target persistence and state history."""
         self.last_targets.clear()
+        self.last_target_distances.clear()
+        self.lost_target_steps.clear()
         self.last_states.clear()
 
     def act(self, obs_dict: dict, blue_ids: list[str],
@@ -92,18 +97,32 @@ class OpponentPolicy:
         action = np.array([pitch, heading, speed], dtype=np.float32)
         return np.clip(action, -1.0, 1.0).astype(np.float32)
 
+    LOST_TARGET_TURN_BACK_LIMIT = 50  # env steps before giving up
+
     def _greedy_fsm_action(
         self, obs: dict, agent_index: int = 0
     ) -> tuple[np.ndarray, str]:
         if self._scalar(obs.get("missile_warning", 0.0)) > 0.0:
+            self.lost_target_steps.pop(agent_index, None)
             heading = self._fallback_heading(obs, agent_index, scale=0.8)
             return self._clip_action([0.6, heading, 1.0]), "evade"
 
         altitude = self._altitude_value(obs)
         if altitude is not None and altitude < 0.2:
+            self.lost_target_steps.pop(agent_index, None)
             return self._clip_action([0.7, 0.0, 0.8]), "recover_altitude"
 
         enemy_states, source_name = self._get_attack_targets(obs)
+
+        # Turn-back: lost target but have recent memory
+        lost_steps = self.lost_target_steps.get(agent_index, 0)
+        has_visible = self._select_nearest_target(obs) is not None
+
+        if not has_visible and lost_steps > 0:
+            lost_steps += 1
+            self.lost_target_steps[agent_index] = lost_steps
+            if lost_steps <= self.LOST_TARGET_TURN_BACK_LIMIT:
+                return self._turn_back_action(obs, agent_index), "turn_back"
 
         # Target persistence: prefer last-targeted slot if still visible
         last_slot = self.last_targets.get(agent_index)
@@ -113,6 +132,10 @@ class OpponentPolicy:
                     and self._state_is_valid(enemy_states[last_slot])):
                 action = self._attack_action_from_obs(
                     obs, enemy_states[last_slot], source_name, agent_index)
+                # Record distance and reset lost counter
+                self.last_target_distances[agent_index] = self._distance(
+                    enemy_states[last_slot])
+                self.lost_target_steps[agent_index] = 0
                 return action, "attack_nearest"
 
         target = self._select_mav_target(obs)
@@ -123,7 +146,9 @@ class OpponentPolicy:
             for idx, es in enumerate(en_states):
                 if np.array_equal(es, target):
                     self.last_targets[agent_index] = idx
+                    self.last_target_distances[agent_index] = self._distance(es)
                     break
+            self.lost_target_steps[agent_index] = 0
             return action, "attack_mav_priority"
 
         target = self._select_nearest_target(obs)
@@ -134,11 +159,34 @@ class OpponentPolicy:
             for idx, es in enumerate(en_states):
                 if np.array_equal(es, target):
                     self.last_targets[agent_index] = idx
+                    self.last_target_distances[agent_index] = self._distance(es)
                     break
+            self.lost_target_steps[agent_index] = 0
             return action, "attack_nearest"
 
+        # No visible target → start counting lost steps if we had a target
+        if self.last_targets.get(agent_index) is not None:
+            self.lost_target_steps[agent_index] = (
+                self.lost_target_steps.get(agent_index, 0) + 1)
+            if self.lost_target_steps[agent_index] <= self.LOST_TARGET_TURN_BACK_LIMIT:
+                return self._turn_back_action(obs, agent_index), "turn_back"
+
         self.last_targets.pop(agent_index, None)
+        self.lost_target_steps.pop(agent_index, None)
+        self.last_target_distances.pop(agent_index, None)
         return self._search_acquire_action(obs, agent_index), "search_acquire"
+
+    @classmethod
+    def _turn_back_action(cls, obs_agent: dict, agent_index: int = 0) -> np.ndarray:
+        """Conservative turn-back when target is lost after close approach.
+
+        Executes ~90° turn (heading +0.5 or -0.5) to sweep back toward
+        the last known target direction.  Direction alternates per agent.
+        """
+        current_heading = cls._get_current_heading_norm(obs_agent)
+        direction = 0.5 if agent_index % 2 == 0 else -0.5
+        heading = float(np.clip(current_heading + direction, -1.0, 1.0))
+        return cls._clip_action([0.05, heading, 0.8])
 
     @classmethod
     def _get_current_heading_norm(cls, obs_agent: dict, fallback: float = 0.0) -> float:
