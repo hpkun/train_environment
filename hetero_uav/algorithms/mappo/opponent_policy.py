@@ -9,6 +9,16 @@ from __future__ import annotations
 import numpy as np
 
 
+def _wrap_heading_norm(value: float) -> float:
+    """Wrap normalized heading to [-1, 1] where +/-1 are the same direction."""
+    wrapped = float(np.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0))
+    while wrapped > 1.0:
+        wrapped -= 2.0
+    while wrapped < -1.0:
+        wrapped += 2.0
+    return wrapped
+
+
 class OpponentPolicy:
     """Generate blue-side high-level actions for baseline evaluation.
 
@@ -185,7 +195,7 @@ class OpponentPolicy:
         """
         current_heading = cls._get_current_heading_norm(obs_agent)
         direction = 0.5 if agent_index % 2 == 0 else -0.5
-        heading = float(np.clip(current_heading + direction, -1.0, 1.0))
+        heading = _wrap_heading_norm(current_heading + direction)
         return cls._clip_action([0.05, heading, 0.8])
 
     @classmethod
@@ -224,7 +234,7 @@ class OpponentPolicy:
         else:
             base_heading = 0.0
         offset = 0.02 if agent_index % 2 == 0 else -0.02
-        heading = float(np.clip(base_heading + offset, -1.0, 1.0))
+        heading = _wrap_heading_norm(base_heading + offset)
         return cls._clip_action([0.0, heading, 1.0])
 
     @classmethod
@@ -393,7 +403,7 @@ class OpponentPolicy:
             # hold current heading, close distance
             bearing_correction = 0.0
 
-        heading = float(np.clip(current_heading + bearing_correction, -1.0, 1.0))
+        heading = _wrap_heading_norm(current_heading + bearing_correction)
         dist = cls._distance(target)
         if dist > 0.6:
             speed = 1.0

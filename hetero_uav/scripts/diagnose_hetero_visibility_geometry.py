@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 
 from uav_env import make_env
 from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
-from algorithms.mappo.opponent_policy import OpponentPolicy
+from algorithms.mappo.opponent_policy import OpponentPolicy, _wrap_heading_norm
 
 CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
@@ -94,6 +94,8 @@ def _geometry_snapshot(env, step: int) -> dict:
         "mav_altitude_m": mav_altitude,
         "mav_alive": mav_alive,
         "mav_action_trim_enabled": bool(getattr(env, "action_trim_enabled", False)),
+        "red_mav_shared_tracks_total": 0,
+        "blue_direct_tracks_total": 0,
     }
 
 
@@ -162,6 +164,9 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
             first_blue = -1
             mav_alive_any = False
             geometry_steps = [_geometry_snapshot(env, 0)]
+            turn_back_heading_deltas: list[float] = []
+            turn_back_heading_values: list[float] = []
+            turn_back_count = 0
 
             nan_detected = False
             for step in range(steps):
@@ -172,20 +177,40 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
                 else:
                     red_acts = red_opponent.act(obs, env.red_ids)
                 blue_acts = blue_opponent.act(obs, env.blue_ids)
+                if getattr(blue_opponent, "last_states", None):
+                    for bid, state in blue_opponent.last_states.items():
+                        if state != "turn_back" or bid not in blue_acts:
+                            continue
+                        action = np.asarray(blue_acts[bid], dtype=np.float32)
+                        current_heading = blue_opponent._get_current_heading_norm(
+                            obs.get(bid, {})
+                        )
+                        heading_delta = _wrap_heading_norm(
+                            float(action[1]) - current_heading
+                        )
+                        turn_back_heading_deltas.append(abs(float(heading_delta)))
+                        turn_back_heading_values.append(float(action[1]))
+                        turn_back_count += 1
                 actions = {**red_acts, **blue_acts}
 
                 # count tracks before step
                 step_red_obs = 0
                 step_blue_obs = 0
+                step_red_shared = 0
+                step_blue_direct = 0
                 for rid in env.red_ids:
                     tc = _enemy_track_counts(obs, rid)
                     step_red_obs += tc["observed"]
                     total_red_direct += tc["direct"]
                     total_red_shared += tc["shared"]
+                    step_red_shared += tc["shared"]
                 for bid in env.blue_ids:
                     tc = _enemy_track_counts(obs, bid)
                     step_blue_obs += tc["observed"]
                     total_blue_direct += tc["direct"]
+                    step_blue_direct += tc["direct"]
+                geometry_steps[-1]["red_mav_shared_tracks_total"] = step_red_shared
+                geometry_steps[-1]["blue_direct_tracks_total"] = step_blue_direct
 
                 total_red_obs += step_red_obs
                 total_blue_obs += step_blue_obs
@@ -231,6 +256,11 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
                 if current < prev:
                     decreasing += 1
             blue_closing_fraction = decreasing / max(transitions, 1)
+            post_pass_separation = final_min_distance
+            turn_back_heading_delta_mean_abs = (
+                float(np.mean(turn_back_heading_deltas))
+                if turn_back_heading_deltas else 0.0
+            )
             mav_altitudes = [snap["mav_altitude_m"] for snap in geometry_steps]
             mav_final = geometry_steps[-1] if geometry_steps else {"mav_altitude_m": 0.0, "mav_alive": False}
 
@@ -251,6 +281,8 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
                 warnings.append("blue never entered direct observation range")
             if closest_distance <= uav_direct and first_blue < 0:
                 warnings.append("visibility implementation concern: closest distance entered direct range without blue observation")
+            if turn_back_count > 0 and post_pass_separation > uav_direct:
+                warnings.append("turn_back triggered but did not reduce post-pass separation")
 
             rec = {
                 "config": cfg_path,
@@ -283,6 +315,11 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
                 "blue_ever_within_direct_range": bool(closest_distance <= uav_direct),
                 "direct_range_margin_final_m": final_min_distance - uav_direct,
                 "direct_range_margin_closest_m": closest_distance - uav_direct,
+                "heading_wrap_used": True,
+                "turn_back_count": turn_back_count,
+                "turn_back_heading_delta_mean_abs": turn_back_heading_delta_mean_abs,
+                "turn_back_heading_values_sample": turn_back_heading_values[:10],
+                "post_pass_separation_m": post_pass_separation,
                 "mav_altitude_min_m": float(np.min(mav_altitudes)) if mav_altitudes else 0.0,
                 "mav_altitude_final_m": float(mav_final["mav_altitude_m"]),
                 "mav_alive_final": bool(mav_final["mav_alive"]),
@@ -301,6 +338,8 @@ def _diagnose_config(cfg_path: str, steps: int, args) -> dict:
                   f"min0={initial_min_distance:.1f} minf={final_min_distance:.1f} "
                   f"closest={closest_distance:.1f} "
                   f"closing={blue_closing_fraction:.2f} "
+                  f"turn_back={turn_back_count} "
+                  f"post_pass={post_pass_separation:.1f} "
                   f"mav_shared={rec['red_mav_shared_fraction']:.2f} "
                   f"b_direct={rec['blue_direct_fraction']:.2f} "
                   f"warnings={len(warnings)}")

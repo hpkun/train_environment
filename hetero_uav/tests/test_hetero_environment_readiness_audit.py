@@ -59,8 +59,86 @@ def test_audit_help():
         env=_env(),
     )
     assert result.returncode == 0
-    for flag in ("--output-json", "--include-v1", "--steps"):
+    for flag in (
+        "--output-json",
+        "--include-v1",
+        "--steps",
+        "--configs",
+        "--protocol-type",
+        "--skip-step-check",
+    ):
         assert flag in result.stdout
+
+
+def _run_specific_audit(args: list[str], output_json: str):
+    result = subprocess.run(
+        ["python", str(SCRIPT), *args, "--output-json", output_json],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=str(ROOT),
+        timeout=300,
+        env=_env(),
+    )
+    assert result.returncode == 0, (
+        f"stdout: {result.stdout[-1000:]}\nstderr: {result.stderr[-1000:]}"
+    )
+    assert "[AUDIT] start" in result.stdout
+    assert "[AUDIT] done" in result.stdout
+    data = json.loads((ROOT / output_json).read_text(encoding="utf-8"))
+    assert data["records"]
+    assert data["summary"]["failed_configs"] == 0
+    return data
+
+
+def test_single_paper_aligned_config_audit():
+    data = _run_specific_audit(
+        [
+            "--configs",
+            "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
+            "--protocol-type",
+            "paper_aligned",
+            "--steps",
+            "1",
+        ],
+        "outputs/test_environment_audit/single_3v2.json",
+    )
+    assert len(data["records"]) == 1
+    assert data["records"][0]["protocol_type"] == "paper_aligned"
+
+
+def test_single_balanced_config_audit():
+    data = _run_specific_audit(
+        [
+            "--configs",
+            "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml",
+            "--protocol-type",
+            "balanced",
+            "--steps",
+            "1",
+        ],
+        "outputs/test_environment_audit/single_balanced_3v3.json",
+    )
+    assert len(data["records"]) == 1
+    assert data["records"][0]["protocol_type"] == "balanced"
+
+
+def test_skip_step_check_audit():
+    data = _run_specific_audit(
+        [
+            "--configs",
+            "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
+            "--protocol-type",
+            "paper_aligned",
+            "--skip-step-check",
+        ],
+        "outputs/test_environment_audit/skip_step_3v2.json",
+    )
+    record = data["records"][0]
+    assert record["reset_ok"] is True
+    assert record["zero_step_ok"] is None
+    assert record["bounded_random_step_ok"] is None
 
 
 def test_audit_outputs_json():

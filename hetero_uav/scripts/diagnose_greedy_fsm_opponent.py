@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from algorithms.mappo.opponent_policy import OpponentPolicy
+from algorithms.mappo.opponent_policy import OpponentPolicy, _wrap_heading_norm
 from uav_env import make_env
 
 DEFAULT_CONFIGS = [
@@ -51,6 +51,19 @@ def _alive_counts(env) -> tuple[int, int, bool]:
     return red_alive, blue_alive, mav_alive
 
 
+def _min_red_blue_distance(env) -> float:
+    distances = []
+    for red in env.red_planes.values():
+        if red is None or not red.is_alive:
+            continue
+        red_pos = red.get_position()
+        for blue in env.blue_planes.values():
+            if blue is None or not blue.is_alive:
+                continue
+            distances.append(float(np.linalg.norm(red_pos - blue.get_position())))
+    return float(np.min(distances)) if distances else float("inf")
+
+
 def _terminated_or_truncated(terminated: dict, truncated: dict) -> bool:
     return all(bool(v) for v in terminated.values()) or all(
         bool(v) for v in truncated.values()
@@ -61,12 +74,16 @@ def diagnose_one(config: str, policy_name: str, steps: int, seed: int) -> dict:
     env = make_env(config, env_type="jsbsim_hetero")
     policy = OpponentPolicy(mode=policy_name, seed=seed)
     actions_seen: list[np.ndarray] = []
+    min_distance_series: list[float] = []
+    turn_back_heading_deltas: list[float] = []
+    turn_back_heading_values: list[float] = []
     state_counts: Counter[str] = Counter()
     nan_detected = False
     steps_executed = 0
 
     try:
         obs, info = env.reset(seed=seed)
+        min_distance_series.append(_min_red_blue_distance(env))
         nan_detected = nan_detected or _obs_has_nan(obs)
         for _ in range(steps):
             actions = {
@@ -81,10 +98,23 @@ def diagnose_one(config: str, policy_name: str, steps: int, seed: int) -> dict:
                 actions_seen.append(arr)
             if getattr(policy, "last_states", None):
                 state_counts.update(policy.last_states.values())
+                for bid, state in policy.last_states.items():
+                    if state != "turn_back" or bid not in blue_actions:
+                        continue
+                    action = np.asarray(blue_actions[bid], dtype=np.float32)
+                    current_heading = policy._get_current_heading_norm(
+                        obs.get(bid, {})
+                    )
+                    heading_delta = _wrap_heading_norm(
+                        float(action[1]) - current_heading
+                    )
+                    turn_back_heading_deltas.append(abs(float(heading_delta)))
+                    turn_back_heading_values.append(float(action[1]))
             actions.update(blue_actions)
 
             obs, _rewards, terminated, truncated, info = env.step(actions)
             steps_executed += 1
+            min_distance_series.append(_min_red_blue_distance(env))
             nan_detected = nan_detected or _obs_has_nan(obs)
             if _terminated_or_truncated(terminated, truncated):
                 break
@@ -113,6 +143,23 @@ def diagnose_one(config: str, policy_name: str, steps: int, seed: int) -> dict:
         else:
             dominant_state = ""
             dominant_state_ratio = 0.0
+        closest_distance = (
+            float(np.min(min_distance_series)) if min_distance_series else float("inf")
+        )
+        final_distance = (
+            float(min_distance_series[-1]) if min_distance_series else float("inf")
+        )
+        post_pass_separation = final_distance
+        turn_back_count = int(state_counts.get("turn_back", 0))
+        turn_back_heading_delta_mean_abs = (
+            float(np.mean(turn_back_heading_deltas))
+            if turn_back_heading_deltas else 0.0
+        )
+        warnings = []
+        if turn_back_count > 0 and post_pass_separation > 10000.0:
+            warnings.append(
+                "turn_back triggered but did not reduce post-pass separation"
+            )
 
         return {
             "config": config,
@@ -129,6 +176,14 @@ def diagnose_one(config: str, policy_name: str, steps: int, seed: int) -> dict:
             "state_transition_count": state_transition_count,
             "dominant_state": dominant_state,
             "dominant_state_ratio": dominant_state_ratio,
+            "heading_wrap_used": True,
+            "turn_back_count": turn_back_count,
+            "turn_back_heading_delta_mean_abs": turn_back_heading_delta_mean_abs,
+            "turn_back_heading_values_sample": turn_back_heading_values[:10],
+            "closest_distance_m": closest_distance,
+            "final_distance_m": final_distance,
+            "post_pass_separation_m": post_pass_separation,
+            "warnings": warnings,
             "red_alive_final": red_alive,
             "blue_alive_final": blue_alive,
             "mav_alive_final": mav_alive,
@@ -168,6 +223,8 @@ def main() -> None:
                 f"sat={record['blue_action_saturation_rate']:.3f} "
                 f"dominant={record['dominant_state'] or 'none'} "
                 f"dominant_ratio={record['dominant_state_ratio']:.3f} "
+                f"turn_back={record['turn_back_count']} "
+                f"post_pass={record['post_pass_separation_m']:.1f} "
                 f"states={record['blue_state_counts']}"
             )
 
@@ -199,6 +256,7 @@ def main() -> None:
             for state in greedy_state_coverage),
         "greedy_fsm_action_saturation_mean": float(
             np.mean(saturation_values)) if saturation_values else 0.0,
+        "heading_wrap_used": True,
     }
     out.write_text(
         json.dumps({"records": records, "summary": summary}, indent=2),

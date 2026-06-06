@@ -81,14 +81,65 @@ def _obs_cases() -> list[dict]:
                 "missile_warning": np.array([0.0], dtype=np.float32),
             },
         },
+        {
+            "case": "heading_wrap_positive_case",
+            "expected_state": "turn_back",
+            "agent_index": 0,
+            "preload_lost_target": True,
+            "obs": {
+                "altitude": np.array([1.0], dtype=np.float32),
+                "missile_warning": np.array([0.0], dtype=np.float32),
+                "ego_geo_state": np.array([0, 0, 1, 0, 0, 0.9], dtype=np.float32),
+                "enemy_observed_mask": np.zeros(1, dtype=np.float32),
+            },
+            "checks": {
+                "heading_less_than": 0.0,
+                "heading_not_equal": 1.0,
+            },
+        },
+        {
+            "case": "heading_wrap_negative_case",
+            "expected_state": "turn_back",
+            "agent_index": 1,
+            "preload_lost_target": True,
+            "obs": {
+                "altitude": np.array([1.0], dtype=np.float32),
+                "missile_warning": np.array([0.0], dtype=np.float32),
+                "ego_geo_state": np.array([0, 0, 1, 0, 0, -0.9], dtype=np.float32),
+                "enemy_observed_mask": np.zeros(1, dtype=np.float32),
+            },
+            "checks": {
+                "heading_greater_than": 0.0,
+                "heading_not_equal": -1.0,
+            },
+        },
+        {
+            "case": "search_acquire_wrap_case",
+            "expected_state": "search_acquire",
+            "agent_index": 0,
+            "obs": {
+                "altitude": np.array([1.0], dtype=np.float32),
+                "missile_warning": np.array([0.0], dtype=np.float32),
+                "ego_geo_state": np.array([0, 0, 1, 0, 0, 0.99], dtype=np.float32),
+            },
+            "checks": {
+                "heading_less_than": 0.0,
+                "heading_not_equal": 1.0,
+            },
+        },
     ]
 
 
 def run_case(case: dict) -> dict:
     policy = OpponentPolicy("greedy_fsm", seed=0)
-    actions = policy.act({"blue_0": case["obs"]}, ["blue_0"])
-    action = np.asarray(actions["blue_0"], dtype=np.float32)
-    actual_state = policy.last_states.get("blue_0", "")
+    agent_index = int(case.get("agent_index", 0))
+    if case.get("preload_lost_target"):
+        policy.last_targets[agent_index] = 0
+        policy.lost_target_steps[agent_index] = 1
+    action, actual_state = policy._greedy_fsm_action(
+        case["obs"], agent_index=agent_index
+    )
+    action = np.asarray(action, dtype=np.float32)
     nan_detected = bool(np.isnan(action).any())
     action_in_bounds = bool(
         action.shape == (3,)
@@ -106,6 +157,14 @@ def run_case(case: dict) -> dict:
         passed = passed and bool(action[2] > float(checks["min_speed"]))
     if "max_abs_heading" in checks:
         passed = passed and bool(abs(float(action[1])) <= float(checks["max_abs_heading"]))
+    if "heading_less_than" in checks:
+        passed = passed and bool(float(action[1]) < float(checks["heading_less_than"]))
+    if "heading_greater_than" in checks:
+        passed = passed and bool(float(action[1]) > float(checks["heading_greater_than"]))
+    if "heading_not_equal" in checks:
+        passed = passed and bool(
+            not np.isclose(float(action[1]), float(checks["heading_not_equal"]))
+        )
     return {
         "case": case["case"],
         "expected_state": case["expected_state"],

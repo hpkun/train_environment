@@ -97,12 +97,20 @@ per-agent deconfliction offset, and fly fast enough to close range. It still
 does not read hidden state, does not control missiles, and does not enter the
 training protocol by default.
 
+Heading action is a circular absolute heading: `0=north`, `0.5=east`,
+`1/-1=south`, and `-0.5=west`. Any `current_heading + offset` command in
+`greedy_fsm` must wrap to `[-1, 1]`, not clip. The wrap fix applies to
+`search_acquire`, `turn_back`, and attack heading corrections. This matters
+near `+/-1`, where clipping can prevent a real turn-back maneuver.
+
 ## Open Issues
 
 - Whether blue should prioritize MAV attack in every protocol still needs
   confirmation.
 - Target assignment across multiple blue aircraft is not implemented.
 - Candidate maneuver sets are not implemented.
+- Candidate maneuver scoring should wait until heading wrap and post-pass
+  separation diagnostics are verified.
 - Candidate actions are not evaluated by immediate reward or lookahead.
 - Finite-state transition rules are still minimal and need validation against
   BRMA-MAPPO/TAM-HAPPO assumptions.

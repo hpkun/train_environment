@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -80,6 +81,19 @@ def _adapter_version(obs_mode: str) -> str:
     return "v2" if obs_mode == "mav_shared_geo" else "v1"
 
 
+def _infer_protocol_type(config: str) -> str:
+    name = Path(config).name
+    if "balanced_brma_sensor" in name:
+        return "v1_balanced"
+    if "balanced" in name:
+        return "balanced"
+    return "paper_aligned"
+
+
+def _log(message: str) -> None:
+    print(message, flush=True)
+
+
 def _expected_protocol_checks(record: dict) -> list[str]:
     warnings = []
     cfg = Path(record["config"]).name
@@ -134,7 +148,12 @@ def _expected_protocol_checks(record: dict) -> list[str]:
     return warnings
 
 
-def _audit_config(config: str, protocol_type: str, steps: int) -> dict:
+def _audit_config(
+    config: str,
+    protocol_type: str,
+    steps: int,
+    skip_step_check: bool = False,
+) -> dict:
     env = None
     record = {
         "config": config,
@@ -147,13 +166,19 @@ def _audit_config(config: str, protocol_type: str, steps: int) -> dict:
     }
     rng = np.random.default_rng(0)
     try:
+        _log(f"[AUDIT] make_env start: {config}")
         env = make_env(config, env_type="jsbsim_hetero")
+        _log(f"[AUDIT] make_env done: {config}")
+        _log(f"[AUDIT] reset start: {config}")
         obs, info = env.reset(seed=0)
+        _log(f"[AUDIT] reset done: {config}")
         record["reset_ok"] = True
         obs_mode = getattr(env, "observation_mode", "brma_sensor")
+        _log(f"[AUDIT] adapter start: {config}")
         adapter = make_obs_adapter(_adapter_version(obs_mode))
         adapted = adapter.adapt_all(
             obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
+        _log(f"[AUDIT] adapter done: {config}")
 
         agent_types = info.get("agent_types", {})
         counts = _counts(agent_types)
@@ -202,19 +227,25 @@ def _audit_config(config: str, protocol_type: str, steps: int) -> dict:
             record["nan_detected"] = True
             raise RuntimeError(f"{config}: NaN after reset/adapter")
 
-        for mode in ("zero", "bounded_random"):
-            for _ in range(steps):
-                obs, rewards, terminated, truncated, info = env.step(
-                    _actions(env, mode, rng))
-                adapted = adapter.adapt_all(
-                    obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
-                if _contains_nan(obs) or _contains_nan(adapted) or _contains_nan(rewards):
-                    record["nan_detected"] = True
-                    raise RuntimeError(f"{config}: NaN during {mode} step")
-            if mode == "zero":
-                record["zero_step_ok"] = True
-            else:
-                record["bounded_random_step_ok"] = True
+        if skip_step_check:
+            record["zero_step_ok"] = None
+            record["bounded_random_step_ok"] = None
+        else:
+            for mode in ("zero", "bounded_random"):
+                _log(f"[AUDIT] {mode} step start: {config}")
+                for _ in range(steps):
+                    obs, rewards, terminated, truncated, info = env.step(
+                        _actions(env, mode, rng))
+                    adapted = adapter.adapt_all(
+                        obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
+                    if _contains_nan(obs) or _contains_nan(adapted) or _contains_nan(rewards):
+                        record["nan_detected"] = True
+                        raise RuntimeError(f"{config}: NaN during {mode} step")
+                _log(f"[AUDIT] {mode} step done: {config}")
+                if mode == "zero":
+                    record["zero_step_ok"] = True
+                else:
+                    record["bounded_random_step_ok"] = True
 
         record["warnings"].extend(_expected_protocol_checks(record))
     except Exception as exc:
@@ -231,15 +262,43 @@ def main() -> None:
                         default="outputs/environment_audit/hetero_environment_readiness.json")
     parser.add_argument("--include-v1", action="store_true")
     parser.add_argument("--steps", type=int, default=3)
+    parser.add_argument("--configs", nargs="*", default=None)
+    parser.add_argument(
+        "--protocol-type",
+        choices=["paper_aligned", "balanced", "v1_balanced"],
+        default=None,
+    )
+    parser.add_argument("--skip-step-check", action="store_true")
     args = parser.parse_args()
 
     configs: list[tuple[str, str]] = []
-    configs.extend((cfg, "paper_aligned") for cfg in PAPER_CONFIGS)
-    configs.extend((cfg, "balanced") for cfg in BALANCED_CONFIGS)
-    if args.include_v1:
-        configs.extend((cfg, "v1_balanced") for cfg in V1_CONFIGS)
+    if args.configs:
+        configs.extend(
+            (cfg, args.protocol_type or _infer_protocol_type(cfg))
+            for cfg in args.configs
+        )
+    else:
+        configs.extend((cfg, "paper_aligned") for cfg in PAPER_CONFIGS)
+        configs.extend((cfg, "balanced") for cfg in BALANCED_CONFIGS)
+        if args.include_v1:
+            configs.extend((cfg, "v1_balanced") for cfg in V1_CONFIGS)
 
-    records = [_audit_config(cfg, protocol, args.steps) for cfg, protocol in configs]
+    records = []
+    for cfg, protocol in configs:
+        start = time.perf_counter()
+        _log(f"[AUDIT] start {protocol}: {cfg}")
+        record = _audit_config(
+            cfg,
+            protocol,
+            args.steps,
+            skip_step_check=args.skip_step_check,
+        )
+        elapsed = time.perf_counter() - start
+        record["elapsed_seconds"] = elapsed
+        if record.get("error"):
+            _log(f"[AUDIT][ERROR] {cfg}: {record['error']}")
+        _log(f"[AUDIT] done {cfg} elapsed={elapsed:.2f}s")
+        records.append(record)
     failed = [r for r in records if r.get("error")]
     warning_count = sum(len(r.get("warnings", [])) for r in records)
     passed = [r for r in records if not r.get("error")]

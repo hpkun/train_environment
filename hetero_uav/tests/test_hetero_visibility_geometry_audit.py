@@ -57,6 +57,12 @@ def test_short_run():
             assert key in r, f"Missing {key}"
         assert not any(np.isnan(v) if isinstance(v, float) else False
                        for v in r.values() if isinstance(v, (int, float)))
+        assert r["step_geometry"]
+        for key in [
+            "red_mav_shared_tracks_total",
+            "blue_direct_tracks_total",
+        ]:
+            assert key in r["step_geometry"][0], f"Missing step field {key}"
 
 
 def test_steps_list_run():
@@ -88,6 +94,9 @@ def test_steps_list_run():
             "action_trim_enabled",
             "mav_altitude_final_m",
             "mav_alive_final",
+            "heading_wrap_used",
+            "turn_back_heading_delta_mean_abs",
+            "post_pass_separation_m",
         ]:
             assert key in r, f"Missing {key}"
         assert not any(np.isnan(v) if isinstance(v, float) else False

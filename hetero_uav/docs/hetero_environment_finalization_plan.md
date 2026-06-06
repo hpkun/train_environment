@@ -118,6 +118,8 @@ Status: in progress.
 - E4c search/acquisition behavior: in progress.
 - E4d horizon-sweep visibility diagnostic.
 - E4d after-trim horizon-sweep visibility/geometry diagnostic: in progress.
+- E4d heading wrap diagnostic: in progress. Heading offsets in `greedy_fsm`
+  must wrap as circular absolute headings, not clip near `+/-1`.
 - E4e geometry/range decision only after E4c/E4d.
 - E4f target assignment and candidate maneuver scoring.
 - E4g only then consider training with `greedy_fsm`.
@@ -149,8 +151,40 @@ Status: done for paper-aligned V2 configs.
 - Constraint: no action-space, PID, aircraft XML, reward, termination, missile,
   initial-state, or observation-range change.
 
-Next focus returns to E4 visibility/geometry after trim.
+Next focus returns to E4 visibility/geometry after trim and heading-wrap
+verification. Candidate maneuver scoring should wait until turn-back
+post-pass separation is diagnosed.
 
 E6. Long-run baseline after environment protocol is frozen.
 
 E7. Only after E1-E6, ask the user whether to enter a method module.
+
+## Troubleshooting Slow Audit
+
+The main readiness audit should first run without V1 reference configs:
+
+```powershell
+python scripts/audit_hetero_environment_readiness.py --steps 1 --output-json outputs/environment_audit/no_v1_steps1.json
+```
+
+To audit a single paper-aligned V2 config:
+
+```powershell
+python scripts/audit_hetero_environment_readiness.py --configs uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml --protocol-type paper_aligned --steps 1 --output-json outputs/environment_audit/single_3v2.json
+```
+
+To audit a single V1 reference config:
+
+```powershell
+python scripts/audit_hetero_environment_readiness.py --configs uav_env/JSBSim/configs/hetero_balanced_brma_sensor_3v3.yaml --protocol-type v1_balanced --steps 1 --output-json outputs/environment_audit/single_v1_3v3.json
+```
+
+If a step check appears slow, first isolate reset and adapter construction:
+
+```powershell
+python scripts/audit_hetero_environment_readiness.py --configs <config> --protocol-type <type> --skip-step-check --output-json outputs/environment_audit/skip_step.json
+```
+
+V1 `brma_sensor` audit is an optional reference check. It is not a required
+condition for the current mainline V2 environment readiness decision, and it
+should not block paper-aligned or balanced V2 diagnostics.

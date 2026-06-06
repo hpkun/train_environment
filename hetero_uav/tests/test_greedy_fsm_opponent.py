@@ -65,6 +65,57 @@ def test_greedy_fsm_enemy_obs_returns_valid_action_and_state():
     }
 
 
+def test_heading_wrap_helper_and_greedy_fsm_heading_actions():
+    from algorithms.mappo.opponent_policy import (
+        OpponentPolicy,
+        _wrap_heading_norm,
+    )
+
+    assert _wrap_heading_norm(1.2) < 0.0
+    assert _wrap_heading_norm(-1.2) > 0.0
+    assert np.isclose(_wrap_heading_norm(0.5), 0.5)
+
+    positive_obs = {
+        "altitude": np.array([1.0], dtype=np.float32),
+        "missile_warning": np.array([0.0], dtype=np.float32),
+        "ego_geo_state": np.array([0, 0, 1, 0, 0, 0.9], dtype=np.float32),
+        "enemy_observed_mask": np.zeros(1, dtype=np.float32),
+    }
+    policy = OpponentPolicy("greedy_fsm")
+    policy.last_targets[0] = 0
+    policy.lost_target_steps[0] = 1
+    turn_positive, state = policy._greedy_fsm_action(positive_obs, agent_index=0)
+    assert state == "turn_back"
+    assert turn_positive[1] < 0.0
+    assert not np.isclose(float(turn_positive[1]), 1.0)
+
+    negative_obs = {
+        "altitude": np.array([1.0], dtype=np.float32),
+        "missile_warning": np.array([0.0], dtype=np.float32),
+        "ego_geo_state": np.array([0, 0, 1, 0, 0, -0.9], dtype=np.float32),
+        "enemy_observed_mask": np.zeros(1, dtype=np.float32),
+    }
+    policy = OpponentPolicy("greedy_fsm")
+    policy.last_targets[1] = 0
+    policy.lost_target_steps[1] = 1
+    turn_negative, state = policy._greedy_fsm_action(negative_obs, agent_index=1)
+    assert state == "turn_back"
+    assert turn_negative[1] > 0.0
+    assert not np.isclose(float(turn_negative[1]), -1.0)
+
+    search = OpponentPolicy._search_acquire_action(
+        {
+            "altitude": np.array([1.0], dtype=np.float32),
+            "missile_warning": np.array([0.0], dtype=np.float32),
+            "ego_geo_state": np.array([0, 0, 1, 0, 0, 0.99], dtype=np.float32),
+        },
+        agent_index=0,
+    )
+    assert search.shape == (3,)
+    assert np.isfinite(search).all()
+    assert search[1] < 0.0
+
+
 def test_greedy_fsm_diagnosis_script_outputs_json(tmp_path):
     output_json = tmp_path / "greedy_fsm_opponent_diagnostic.json"
     result = subprocess.run(
@@ -90,6 +141,7 @@ def test_greedy_fsm_diagnosis_script_outputs_json(tmp_path):
     assert "greedy_fsm_state_coverage" in data["summary"]
     assert "greedy_fsm_has_non_patrol_state" in data["summary"]
     assert "greedy_fsm_action_saturation_mean" in data["summary"]
+    assert data["summary"]["heading_wrap_used"] is True
 
     for record in data["records"]:
         assert "blue_action_mean" in record
@@ -97,6 +149,9 @@ def test_greedy_fsm_diagnosis_script_outputs_json(tmp_path):
         assert "blue_action_saturation_rate" in record
         assert "dominant_state" in record
         assert "dominant_state_ratio" in record
+        assert "heading_wrap_used" in record
+        assert "turn_back_heading_delta_mean_abs" in record
+        assert "post_pass_separation_m" in record
         assert 0.0 <= record["blue_action_saturation_rate"] <= 1.0
 
     greedy_records = [
