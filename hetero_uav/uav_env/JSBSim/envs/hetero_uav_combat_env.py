@@ -189,6 +189,14 @@ class HeteroUavCombatEnv(UavCombatEnv):
             self._last_step_obs = obs
         return obs, rewards, terminated, truncated, info
 
+    def reset(self, *args, **kwargs):
+        self._last_step_obs = {}
+        self._mav_death_penalized = False
+        obs, info = super().reset(*args, **kwargs)
+        if self.hetero_reward_mode == "minimal_v1":
+            self._last_step_obs = obs
+        return obs, info
+
     def _extend_hetero_observation_space(self) -> None:
         metadata_spaces = {
             "ego_type": gymnasium.spaces.Box(

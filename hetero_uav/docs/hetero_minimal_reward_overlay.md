@@ -39,10 +39,30 @@ role-aware shaping on top of the BRMA legacy reward.  Default mode is
 `r_mav_support` uses the **previous decision-frame observation cache**
 (`self._last_step_obs`). This is a **one-step-lag** pattern:
 
-- On the first step after reset, `_last_step_obs` is empty →
-  `r_mav_support` will be 0.
-- From step 2 onward, the cached obs from the previous step is used.
-- Tests should not assume `r_mav_support > 0` on step 1.
+- **Reset**: `_last_step_obs` is cleared, then seeded with the reset
+  observation (for `minimal_v1` mode). This means the first step after
+  reset uses the reset observation as the "previous decision-frame"
+  observation, enabling support reward from step 1.
+- **Step**: After each call to `super().step()`, `_last_step_obs` is
+  updated with the new observation.
+- Tests should not assume `r_mav_support > 0` on step 1 (it depends on
+  whether the reset observation already contains shared tracks).
+
+### Reset / Cache Semantics
+
+The `HeteroUavCombatEnv.reset()` override ensures clean episode boundaries:
+
+1. **Clear stale cache**: `_last_step_obs = {}` — prevents
+   cross-episode support reward leakage from the previous episode.
+2. **Reset death flag**: `_mav_death_penalized = False` — ensures a
+   fresh first-death detection per episode.
+3. **Seed cache** (minimal_v1 only): `_last_step_obs = obs` — caches
+   the reset observation so the first reward computation has a valid
+   previous decision-frame reference.
+4. **brma_legacy**: `_last_step_obs` is NOT seeded — reward behavior
+   is unchanged.
+
+Termination remains unchanged.
 
 ## How to Enable
 

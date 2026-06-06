@@ -176,25 +176,97 @@ def test_close_range_minimal_reset_and_step():
 
 
 def test_support_reward_one_step_lag():
-    """r_mav_support uses cached observation from the previous step.
-    On the first step, _last_step_obs may be empty, so r_mav_support
-    may be 0.  This test simply confirms no crash."""
+    """r_mav_support uses cached observation from the previous decision-frame.
+
+    After reset, _last_step_obs is seeded with the reset observation,
+    so it is never empty for minimal_v1.  The reward uses one-step-lag
+    semantics (previous decision-frame obs), but the first step already
+    has a valid previous frame (the reset obs)."""
     if not HAVE_UAV_ENV:
         return
     env = make_env(MINIMAL_CFG, env_type="jsbsim_hetero", max_steps=10)
     try:
         obs, info = env.reset(seed=0)
-        # Step 1: _last_step_obs is empty → r_mav_support should be 0
         actions = {aid: np.zeros(3, dtype=np.float32) for aid in env.agent_ids}
         obs, rewards, terminated, truncated, info = env.step(actions)
-        # Step 1 r_mav_support may be 0 (one-step-lag) — just check no crash
+        # support reward should never be negative
         for aid in env.red_ids:
             rcinfo = info.get(aid, {})
             val = float(rcinfo.get("r_mav_support", 0.0))
-            assert val >= 0.0, f"{aid} r_mav_support negative on step1: {val}"
-        # Step 2: now _last_step_obs is populated → support may appear
-        obs, rewards, terminated, truncated, info = env.step(actions)
-        # No assertion on exact value — depends on observation range
+            assert val >= 0.0, f"{aid} r_mav_support negative: {val}"
+    finally:
+        env.close()
+
+
+def test_minimal_v1_reset_seeds_cache():
+    """After reset in minimal_v1 mode, _last_step_obs must be non-empty
+    and contain the real agent ids (not stale data)."""
+    if not HAVE_UAV_ENV:
+        return
+    env = make_env(MINIMAL_CFG, env_type="jsbsim_hetero", max_steps=10)
+    try:
+        obs, info = env.reset(seed=0)
+        assert env.hetero_reward_mode == "minimal_v1"
+        cache = env._last_step_obs
+        assert cache, "_last_step_obs should be non-empty after reset"
+        # Should contain at least one real agent id
+        assert any(aid in cache for aid in env.agent_ids), (
+            f"_last_step_obs keys {list(cache.keys())} should include real agent ids"
+        )
+        # Check that red_0 (MAV) is present
+        assert "red_0" in cache, f"red_0 missing from _last_step_obs: {list(cache.keys())}"
+    finally:
+        env.close()
+
+
+def test_reset_clears_stale_obs_cache():
+    """Reset must clear stale _last_step_obs from a previous episode."""
+    if not HAVE_UAV_ENV:
+        return
+    env = make_env(MINIMAL_CFG, env_type="jsbsim_hetero", max_steps=10)
+    try:
+        obs, info = env.reset(seed=0)
+        # Inject fake stale cache
+        env._last_step_obs = {"fake_agent": {"dummy": 1}}
+        # Reset again — must clear stale data
+        obs, info = env.reset(seed=0)
+        assert "fake_agent" not in env._last_step_obs, (
+            "stale fake_agent should be cleared from _last_step_obs after reset"
+        )
+        # Real agent ids should be present
+        assert "red_0" in env._last_step_obs
+    finally:
+        env.close()
+
+
+def test_reset_clears_mav_death_penalized():
+    """Reset must clear _mav_death_penalized for a fresh episode."""
+    if not HAVE_UAV_ENV:
+        return
+    env = make_env(MINIMAL_CFG, env_type="jsbsim_hetero", max_steps=10)
+    try:
+        obs, info = env.reset(seed=0)
+        env._mav_death_penalized = True
+        obs, info = env.reset(seed=0)
+        assert env._mav_death_penalized is False, (
+            "_mav_death_penalized should be False after reset"
+        )
+    finally:
+        env.close()
+
+
+def test_brma_legacy_reset_does_not_seed_cache():
+    """brma_legacy mode should NOT seed _last_step_obs on reset."""
+    if not HAVE_UAV_ENV:
+        return
+    env = make_env(LEGACY_CFG, env_type="jsbsim_hetero", max_steps=10)
+    try:
+        assert env.hetero_reward_mode == "brma_legacy"
+        obs, info = env.reset(seed=0)
+        # _last_step_obs should remain empty in legacy mode
+        assert env._last_step_obs == {}, (
+            f"brma_legacy _last_step_obs should be empty, got {env._last_step_obs}"
+        )
     finally:
         env.close()
 
