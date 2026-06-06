@@ -28,6 +28,13 @@ class OpponentPolicy:
         self.mode = mode
         self.rng = np.random.default_rng(seed)
         self.last_states: dict[str, str] = {}
+        # Instance-level target persistence (slot index → last targeted slot)
+        self.last_targets: dict[int, int] = {}
+
+    def reset_memory(self) -> None:
+        """Clear per-agent target persistence and state history."""
+        self.last_targets.clear()
+        self.last_states.clear()
 
     def act(self, obs_dict: dict, blue_ids: list[str],
             deterministic: bool = True) -> dict[str, np.ndarray]:
@@ -85,55 +92,53 @@ class OpponentPolicy:
         action = np.array([pitch, heading, speed], dtype=np.float32)
         return np.clip(action, -1.0, 1.0).astype(np.float32)
 
-    # Per-agent target persistence (slot index → last targeted slot)
-    _last_targets: dict[int, int] = {}
-
-    @classmethod
     def _greedy_fsm_action(
-        cls, obs: dict, agent_index: int = 0
+        self, obs: dict, agent_index: int = 0
     ) -> tuple[np.ndarray, str]:
-        if cls._scalar(obs.get("missile_warning", 0.0)) > 0.0:
-            heading = cls._fallback_heading(obs, agent_index, scale=0.8)
-            return cls._clip_action([0.6, heading, 1.0]), "evade"
+        if self._scalar(obs.get("missile_warning", 0.0)) > 0.0:
+            heading = self._fallback_heading(obs, agent_index, scale=0.8)
+            return self._clip_action([0.6, heading, 1.0]), "evade"
 
-        altitude = cls._altitude_value(obs)
+        altitude = self._altitude_value(obs)
         if altitude is not None and altitude < 0.2:
-            return cls._clip_action([0.7, 0.0, 0.8]), "recover_altitude"
+            return self._clip_action([0.7, 0.0, 0.8]), "recover_altitude"
+
+        enemy_states, source_name = self._get_attack_targets(obs)
 
         # Target persistence: prefer last-targeted slot if still visible
-        last_slot = cls._last_targets.get(agent_index)
-        if last_slot is not None:
-            enemy_states = cls._enemy_states(obs)
-            visible = cls._visible_mask(obs, enemy_states.shape[0])
+        last_slot = self.last_targets.get(agent_index)
+        if last_slot is not None and enemy_states.shape[0] > 0:
+            visible = self._visible_mask(obs, enemy_states.shape[0])
             if (last_slot < enemy_states.shape[0] and visible[last_slot]
-                    and cls._state_is_valid(enemy_states[last_slot])):
-                action = cls._attack_action_from_obs(
-                    obs, enemy_states[last_slot], agent_index)
+                    and self._state_is_valid(enemy_states[last_slot])):
+                action = self._attack_action_from_obs(
+                    obs, enemy_states[last_slot], source_name, agent_index)
                 return action, "attack_nearest"
 
-        target = cls._select_mav_target(obs)
+        target = self._select_mav_target(obs)
         if target is not None:
-            action = cls._attack_action_from_obs(obs, target, agent_index)
-            # Record slot for persistence
-            enemy_states = cls._enemy_states(obs)
-            for idx, es in enumerate(enemy_states):
+            action = self._attack_action_from_obs(
+                obs, target, source_name, agent_index)
+            en_states, _sn = self._get_attack_targets(obs)
+            for idx, es in enumerate(en_states):
                 if np.array_equal(es, target):
-                    cls._last_targets[agent_index] = idx
+                    self.last_targets[agent_index] = idx
                     break
             return action, "attack_mav_priority"
 
-        target = cls._select_nearest_target(obs)
+        target = self._select_nearest_target(obs)
         if target is not None:
-            action = cls._attack_action_from_obs(obs, target, agent_index)
-            enemy_states = cls._enemy_states(obs)
-            for idx, es in enumerate(enemy_states):
+            action = self._attack_action_from_obs(
+                obs, target, source_name, agent_index)
+            en_states, _sn = self._get_attack_targets(obs)
+            for idx, es in enumerate(en_states):
                 if np.array_equal(es, target):
-                    cls._last_targets[agent_index] = idx
+                    self.last_targets[agent_index] = idx
                     break
             return action, "attack_nearest"
 
-        cls._last_targets.pop(agent_index, None)
-        return cls._search_acquire_action(obs, agent_index), "search_acquire"
+        self.last_targets.pop(agent_index, None)
+        return self._search_acquire_action(obs, agent_index), "search_acquire"
 
     @classmethod
     def _get_current_heading_norm(cls, obs_agent: dict, fallback: float = 0.0) -> float:
@@ -259,6 +264,20 @@ class OpponentPolicy:
         return np.zeros((0, 0), dtype=np.float32)
 
     @staticmethod
+    def _get_attack_targets(obs: dict) -> tuple[np.ndarray, str]:
+        """Return (target_states, source_name).
+
+        source_name is "enemy_states" for BRMA body-frame relative vectors
+        (target[1] can be used as signed lateral correction), or
+        "enemy_geo_states" for V2 geometric vectors (no signed bearing).
+        """
+        for key in ("enemy_states", "enemy_geo_states"):
+            arr = np.asarray(obs.get(key, []), dtype=np.float32)
+            if arr.ndim == 2 and arr.shape[0] > 0:
+                return np.nan_to_num(arr, nan=0.0), key
+        return np.zeros((0, 0), dtype=np.float32), "none"
+
+    @staticmethod
     def _visible_mask(obs: dict, count: int) -> np.ndarray:
         for key in ("enemy_observed_mask", "enemy_visible_mask", "enemy_alive_mask"):
             arr = np.asarray(obs.get(key, []), dtype=np.float32).reshape(-1)
@@ -302,26 +321,31 @@ class OpponentPolicy:
 
     @classmethod
     def _attack_action_from_obs(cls, obs_agent: dict, target: np.ndarray,
+                                 source_name: str = "enemy_states",
                                  agent_index: int = 0) -> np.ndarray:
         """Attack with absolute-heading-aware correction.
 
-        target comes from enemy_states (BRMA body-frame relative):
-          target[0]=Δx(forward), target[1]=Δy(right), target[2]=Δz(up).
-        target[1] is a signed lateral offset — NOT an absolute bearing.
-        env.py maps action[1] * pi → absolute target heading.
+        target source:
+        - enemy_states (BRMA body-frame): target[1] = Δy (right+) →
+          signed lateral correction can be used.
+        - enemy_geo_states (V2 geometric): target[1] is NOT body-frame
+          lateral — no signed bearing available.  Falls back to holding
+          current heading.
 
-        This method reads current heading from ego_geo_state and adds a
-        signed correction based on target[1], preserving the current
-        heading as baseline rather than forcing absolute ~0°.
+        env.py maps action[1] * pi → absolute target heading.
         """
         current_heading = cls._get_current_heading_norm(obs_agent)
-        # Pitch: use relative vertical delta (positive = target above)
         pitch = float(target[2]) * 2.0 if target.size >= 3 else 0.0
-        # Heading: signed bearing correction from lateral offset
-        # target[1] > 0 → target right → positive heading correction
-        bearing_correction = float(target[1]) * 0.3 if target.size >= 2 else 0.0
+
+        if source_name == "enemy_states":
+            # target[1] > 0 → target right → positive heading correction
+            bearing_correction = float(target[1]) * 0.3 if target.size >= 2 else 0.0
+        else:
+            # enemy_geo_states: no signed bearing available;
+            # hold current heading, close distance
+            bearing_correction = 0.0
+
         heading = float(np.clip(current_heading + bearing_correction, -1.0, 1.0))
-        # Speed by distance
         dist = cls._distance(target)
         if dist > 0.6:
             speed = 1.0
