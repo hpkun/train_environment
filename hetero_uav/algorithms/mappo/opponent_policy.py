@@ -85,6 +85,9 @@ class OpponentPolicy:
         action = np.array([pitch, heading, speed], dtype=np.float32)
         return np.clip(action, -1.0, 1.0).astype(np.float32)
 
+    # Per-agent target persistence (slot index → last targeted slot)
+    _last_targets: dict[int, int] = {}
+
     @classmethod
     def _greedy_fsm_action(
         cls, obs: dict, agent_index: int = 0
@@ -97,14 +100,39 @@ class OpponentPolicy:
         if altitude is not None and altitude < 0.2:
             return cls._clip_action([0.7, 0.0, 0.8]), "recover_altitude"
 
+        # Target persistence: prefer last-targeted slot if still visible
+        last_slot = cls._last_targets.get(agent_index)
+        if last_slot is not None:
+            enemy_states = cls._enemy_states(obs)
+            visible = cls._visible_mask(obs, enemy_states.shape[0])
+            if (last_slot < enemy_states.shape[0] and visible[last_slot]
+                    and cls._state_is_valid(enemy_states[last_slot])):
+                action = cls._attack_action_from_obs(
+                    obs, enemy_states[last_slot], agent_index)
+                return action, "attack_nearest"
+
         target = cls._select_mav_target(obs)
         if target is not None:
-            return cls._attack_action(target), "attack_mav_priority"
+            action = cls._attack_action_from_obs(obs, target, agent_index)
+            # Record slot for persistence
+            enemy_states = cls._enemy_states(obs)
+            for idx, es in enumerate(enemy_states):
+                if np.array_equal(es, target):
+                    cls._last_targets[agent_index] = idx
+                    break
+            return action, "attack_mav_priority"
 
         target = cls._select_nearest_target(obs)
         if target is not None:
-            return cls._attack_action(target), "attack_nearest"
+            action = cls._attack_action_from_obs(obs, target, agent_index)
+            enemy_states = cls._enemy_states(obs)
+            for idx, es in enumerate(enemy_states):
+                if np.array_equal(es, target):
+                    cls._last_targets[agent_index] = idx
+                    break
+            return action, "attack_nearest"
 
+        cls._last_targets.pop(agent_index, None)
         return cls._search_acquire_action(obs, agent_index), "search_acquire"
 
     @classmethod
@@ -260,8 +288,40 @@ class OpponentPolicy:
 
     @classmethod
     def _attack_action(cls, target: np.ndarray) -> np.ndarray:
+        """Legacy attack — does NOT use current heading (preserved for rule_nearest)."""
         pitch = float(target[2]) * 2.0 if target.size >= 3 else 0.0
         heading = float(target[1]) * 2.0 if target.size >= 2 else 0.0
+        dist = cls._distance(target)
+        if dist > 0.6:
+            speed = 1.0
+        elif dist > 0.25:
+            speed = 0.8
+        else:
+            speed = 0.5
+        return cls._clip_action([pitch, heading, speed])
+
+    @classmethod
+    def _attack_action_from_obs(cls, obs_agent: dict, target: np.ndarray,
+                                 agent_index: int = 0) -> np.ndarray:
+        """Attack with absolute-heading-aware correction.
+
+        target comes from enemy_states (BRMA body-frame relative):
+          target[0]=Δx(forward), target[1]=Δy(right), target[2]=Δz(up).
+        target[1] is a signed lateral offset — NOT an absolute bearing.
+        env.py maps action[1] * pi → absolute target heading.
+
+        This method reads current heading from ego_geo_state and adds a
+        signed correction based on target[1], preserving the current
+        heading as baseline rather than forcing absolute ~0°.
+        """
+        current_heading = cls._get_current_heading_norm(obs_agent)
+        # Pitch: use relative vertical delta (positive = target above)
+        pitch = float(target[2]) * 2.0 if target.size >= 3 else 0.0
+        # Heading: signed bearing correction from lateral offset
+        # target[1] > 0 → target right → positive heading correction
+        bearing_correction = float(target[1]) * 0.3 if target.size >= 2 else 0.0
+        heading = float(np.clip(current_heading + bearing_correction, -1.0, 1.0))
+        # Speed by distance
         dist = cls._distance(target)
         if dist > 0.6:
             speed = 1.0
