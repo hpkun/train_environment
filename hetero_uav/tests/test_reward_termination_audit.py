@@ -2,11 +2,34 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _find_python():
+    """Find a Python executable that can import gymnasium."""
+    candidates = []
+    candidates.append(sys.executable)
+    found = shutil.which("python")
+    if found and found not in candidates:
+        candidates.append(found)
+    for py in candidates:
+        try:
+            result = subprocess.run(
+                [py, "-c", "import gymnasium"],
+                capture_output=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                return py
+        except Exception:
+            continue
+    return sys.executable
 
 
 def _env():
@@ -17,7 +40,7 @@ def _env():
 
 def test_reward_termination_audit_help_lists_expected_args():
     result = subprocess.run(
-        ["python", "scripts/audit_reward_termination_hetero.py", "--help"],
+        [_find_python(), "scripts/audit_reward_termination_hetero.py", "--help"],
         cwd=ROOT,
         env=_env(),
         text=True,
@@ -43,7 +66,7 @@ def test_reward_termination_audit_short_rollout_outputs_json_and_markdown():
     output_md = "outputs/test_environment_audit/reward_termination_audit.md"
     result = subprocess.run(
         [
-            "python",
+            _find_python(),
             "scripts/audit_reward_termination_hetero.py",
             "--steps",
             "5",

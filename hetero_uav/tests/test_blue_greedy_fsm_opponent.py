@@ -2,12 +2,38 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _find_python():
+    """Find a Python executable that can import gymnasium."""
+    candidates = []
+    # 1. sys.executable (correct when running under brmamappo)
+    candidates.append(sys.executable)
+    # 2. 'python' from PATH (may be shadowed by Anaconda in subprocess)
+    found = shutil.which("python")
+    if found and found not in candidates:
+        candidates.append(found)
+    # Test each candidate
+    for py in candidates:
+        try:
+            result = subprocess.run(
+                [py, "-c", "import gymnasium"],
+                capture_output=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                return py
+        except Exception:
+            continue
+    return sys.executable
 
 
 def _env():
@@ -165,7 +191,7 @@ def test_diagnose_blue_greedy_fsm_opponent_runs():
     output_json = "outputs/test_environment_audit/blue_greedy_fsm_opponent_close_range.json"
     result = subprocess.run(
         [
-            "python",
+            _find_python(),
             "scripts/diagnose_blue_greedy_fsm_opponent.py",
             "--steps",
             "20",

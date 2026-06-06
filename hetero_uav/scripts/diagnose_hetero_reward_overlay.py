@@ -14,8 +14,9 @@ from uav_env import make_env
 from algorithms.mappo.opponent_policy import OpponentPolicy
 
 CONFIGS = {
-    "legacy": "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
-    "minimal": "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_reward_minimal.yaml",
+    "legacy_3v2": "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
+    "minimal_3v2": "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_reward_minimal.yaml",
+    "close_range_minimal_3v2": "uav_env/JSBSim/configs/hetero_diagnostic_close_range_mav_shared_geo_3v2_reward_minimal.yaml",
 }
 OVERLAY_KEYS = ["r_mav_survival", "r_mav_death", "r_mav_support",
                 "r_shared_track_used", "r_attack_kill_bonus"]
@@ -50,6 +51,14 @@ def _run(env, policy_mode: str, steps: int = 20):
     return total_rew, comp_sums, nan
 
 
+def _overlay_present(comps: dict, agent_id: str) -> bool:
+    """Return True if any overlay component has non-zero accumulated value."""
+    for k in OVERLAY_KEYS:
+        if abs(comps.get(agent_id, {}).get(k, 0.0)) > 1e-9:
+            return True
+    return False
+
+
 def main():
     for label, cfg in CONFIGS.items():
         print(f"=== {label} ({cfg}) ===")
@@ -58,8 +67,10 @@ def main():
             try:
                 total, comps, nan = _run(env, pmode)
                 mav_id = "red_0"
+                overlay = _overlay_present(comps, mav_id)
                 print(f"  {pmode}: total_red_rew={total[mav_id]:+.3f} "
                       f"nan={nan}")
+                print(f"    overlay components present? {overlay}")
                 for k in OVERLAY_KEYS:
                     v = comps.get(mav_id, {}).get(k, 0.0)
                     present = "YES" if abs(v) > 1e-9 else "0"
@@ -67,6 +78,14 @@ def main():
             finally:
                 env.close()
         print()
+
+    print("--- notes ---")
+    print("legacy_3v2:            overlay components present? should be false")
+    print("minimal_3v2:           overlay components present? should be true")
+    print("close_range_minimal:   overlay components present? should be true")
+    print("r_mav_support:         one-step-lag observation cache")
+    print("                        (may be 0 on first step after reset)")
+    print("r_mav_death:           first-death detection (any cause, once per episode)")
 
 
 if __name__ == "__main__":

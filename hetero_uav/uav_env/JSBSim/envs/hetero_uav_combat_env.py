@@ -97,6 +97,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.hetero_reward_mode = hetero_reward_mode
         # Cached per-step obs for reward overlay (minimal_v1)
         self._last_step_obs: dict = {}
+        # First-death detection for MAV (minimal_v1) — penalize once per episode
+        self._mav_death_penalized: bool = False
         if observation_mode not in {"brma_sensor", "mav_shared_geo"}:
             raise ValueError(f"unknown observation_mode: {observation_mode}")
         self.observation_mode = observation_mode
@@ -455,7 +457,17 @@ class HeteroUavCombatEnv(UavCombatEnv):
         if mav_id and mav_id in self.red_planes:
             mav = self.red_planes[mav_id]
             r_mav_survival = 0.005 if mav.is_alive else 0.0
-            r_mav_death = -2.0 if (not mav.is_alive and mav_id in self._crashed_this_step) else 0.0
+
+            if mav.is_alive:
+                self._mav_death_penalized = False
+                r_mav_death = 0.0
+            elif not self._mav_death_penalized:
+                # First death detected (crash, missile kill, or any cause)
+                r_mav_death = -2.0
+                self._mav_death_penalized = True
+            else:
+                r_mav_death = 0.0
+
             base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_mav_survival + r_mav_death
             components[mav_id]["r_mav_survival"] = float(r_mav_survival)
             components[mav_id]["r_mav_death"] = float(r_mav_death)

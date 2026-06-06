@@ -18,10 +18,31 @@ role-aware shaping on top of the BRMA legacy reward.  Default mode is
 | Component | When | Magnitude |
 |---|---|---|
 | r_mav_survival | MAV alive each step | +0.005 |
-| r_mav_death | MAV death detected | -2.0 |
+| r_mav_death | MAV first death detected (any cause: crash, missile kill, etc.) | -2.0 (once per episode) |
 | r_mav_support | MAV provides shared tracks to attack UAV | +0.01 × count (capped 0.05) |
 | r_shared_track_used | attack UAV uses MAV shared track | +0.005 × count (capped 0.02) |
 | r_attack_kill_bonus | attack UAV kills blue | TODO: 0.0 currently |
+
+### r_mav_death — First-Death Detection
+
+`r_mav_death` uses a first-death detection mechanism (`self._mav_death_penalized`):
+
+- On reset (MAV alive): the penalized flag is cleared automatically.
+- When MAV transitions from alive → dead (any cause: crash, GCAS,
+  missile kill): a one-time penalty of -2.0 is applied.
+- Subsequent steps where MAV remains dead: no additional penalty.
+- This covers crash-style death AND missile-kill death, unlike the
+  old `_crashed_this_step` check which only covered crashes.
+
+### r_mav_support — One-Step-Lag
+
+`r_mav_support` uses the **previous decision-frame observation cache**
+(`self._last_step_obs`). This is a **one-step-lag** pattern:
+
+- On the first step after reset, `_last_step_obs` is empty →
+  `r_mav_support` will be 0.
+- From step 2 onward, the cached obs from the previous step is used.
+- Tests should not assume `r_mav_support > 0` on step 1.
 
 ## How to Enable
 
@@ -32,6 +53,14 @@ hetero_reward_mode: minimal_v1
 ## How to Disable
 
 Omit `hetero_reward_mode` or set it to `brma_legacy`.
+
+## Configs
+
+| Config | hetero_reward_mode | Purpose |
+|---|---|---|
+| hetero_mav_shared_geo_3v2.yaml | brma_legacy (default) | Paper-aligned baseline |
+| hetero_mav_shared_geo_3v2_reward_minimal.yaml | minimal_v1 | Minimal overlay, paper-aligned range |
+| hetero_diagnostic_close_range_mav_shared_geo_3v2_reward_minimal.yaml | minimal_v1 | Diagnostic, close-range, overlay |
 
 ## Relation to Papers
 
