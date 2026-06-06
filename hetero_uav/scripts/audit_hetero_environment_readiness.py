@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -38,6 +39,13 @@ V2_REQUIRED_KEYS = {
     "ally_alive_mask",
     "enemy_alive_mask",
 }
+
+try:
+    _SAFE_STDOUT_FD = os.dup(1)
+    _SAFE_STDERR_FD = os.dup(2)
+except OSError:
+    _SAFE_STDOUT_FD = None
+    _SAFE_STDERR_FD = None
 
 
 def _contains_nan(value) -> bool:
@@ -91,7 +99,14 @@ def _infer_protocol_type(config: str) -> str:
 
 
 def _log(message: str) -> None:
-    print(message, flush=True)
+    try:
+        print(message, flush=True)
+    except OSError:
+        if _SAFE_STDOUT_FD is not None:
+            os.dup2(_SAFE_STDOUT_FD, 1)
+        if _SAFE_STDERR_FD is not None:
+            os.dup2(_SAFE_STDERR_FD, 2)
+        print(message, flush=True)
 
 
 def _expected_protocol_checks(record: dict) -> list[str]:
@@ -316,14 +331,14 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
 
-    print(f"configs_checked: {len(records)}")
-    print(f"passed_configs: {len(passed)}")
-    print(f"warnings: {warning_count}")
-    print(f"failed_configs: {len(failed)}")
-    print(f"output_json: {out_path}")
+    _log(f"configs_checked: {len(records)}")
+    _log(f"passed_configs: {len(passed)}")
+    _log(f"warnings: {warning_count}")
+    _log(f"failed_configs: {len(failed)}")
+    _log(f"output_json: {out_path}")
     if failed:
         for record in failed:
-            print(f"FAILED {record['config']}: {record.get('error')}")
+            _log(f"FAILED {record['config']}: {record.get('error')}")
         raise RuntimeError("hetero environment readiness audit failed")
 
 

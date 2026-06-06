@@ -101,6 +101,17 @@ It can be used later as a homogeneous scale-transfer reference.
 - Current balanced 4v4 failure should not be used to judge the algorithm until
   the protocol is finalized.
 
+## Current Readiness Status
+
+- Paper-aligned V2 3v2/5v4 is the main environment protocol.
+- Balanced 3v3/4v4 is a hard ablation, not the main readiness target.
+- V1 `brma_sensor` is an optional reference audit.
+- Current readiness audit should run without `--include-v1` for the main
+  protocol.
+- Slow `--include-v1` behavior should not block V2 main readiness.
+- The next implementation task is blue greedy finite-state opponent design and
+  diagnostics, not training or method-module work.
+
 ## Next Environment Tasks In Priority Order
 
 E1. Environment protocol audit and config readiness.
