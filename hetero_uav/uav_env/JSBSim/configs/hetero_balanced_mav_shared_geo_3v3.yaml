@@ -79,3 +79,5 @@ initial_states:
     altitude_m: 6000
     speed_mps: 250
     yaw_deg: 180.0
+
+hetero_reward_mode: "brma_legacy"

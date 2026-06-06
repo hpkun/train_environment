@@ -113,6 +113,10 @@ It can be used later as a homogeneous scale-transfer reference.
   full paper reproduction.
 - The next environment task is greedy_fsm diagnostics followed by
   reward/termination audit, not training or method-module work.
+- **Protocol review** (`docs/hetero_environment_protocol_review.md`) is the
+  final environment review before training.  `brma_legacy` remains the default
+  reward; `minimal_v1` is an optional overlay that should NOT automatically
+  become the main protocol default.
 
 ## Next Environment Tasks In Priority Order
 

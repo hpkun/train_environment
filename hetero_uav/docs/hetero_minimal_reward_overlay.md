@@ -64,6 +64,14 @@ The `HeteroUavCombatEnv.reset()` override ensures clean episode boundaries:
 
 Termination remains unchanged.
 
+## Protocol Review
+
+The `minimal_v1` overlay is an **optional** role-aware shaping layer.
+It should NOT automatically become the main protocol default.  The
+protocol review (`docs/hetero_environment_protocol_review.md`) documents
+the decision: `brma_legacy` remains the default baseline reward for
+paper-aligned and balanced configs.
+
 ## How to Enable
 
 ```yaml
@@ -72,7 +80,9 @@ hetero_reward_mode: minimal_v1
 
 ## How to Disable
 
-Omit `hetero_reward_mode` or set it to `brma_legacy`.
+Omit `hetero_reward_mode` or set it to `brma_legacy`.  All main configs
+explicitly declare `hetero_reward_mode: "brma_legacy"` for protocol
+clarity, even though `brma_legacy` is already the default.
 
 ## Configs
 
