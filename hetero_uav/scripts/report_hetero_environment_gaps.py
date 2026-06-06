@@ -27,13 +27,12 @@ IMPLEMENTED = [
 PARTIAL = [
     "MAV shared observation has no communication delay/noise",
     "V2 geometry observation is abstracted, not full radar/RCS/EO sensor model",
-    "blue opponent is currently rule_nearest and not greedy finite-state",
+    "blue greedy finite-state greedy_fsm opponent is implemented as an engineering approximation; still not a full paper reproduction",
     "reward/termination inherited from BRMA and not yet audited for MAV/UAV roles",
     "balanced protocol is hard ablation, not main paper-aligned setting",
 ]
 
 MISSING = [
-    "design and implement blue greedy finite-state / situation-based opponent",
     "audit reward and termination for heterogeneous MAV/UAV objective",
     "add training log outcome metrics if still needed",
     "finalize paper-aligned environment protocol before new methods",
@@ -102,7 +101,7 @@ def _markdown(report: dict) -> str:
         "# Heterogeneous Environment Gap Report",
         "",
         "The current environment is not ready for method module work. The next "
-        "environment task is blue greedy finite-state opponent design and diagnostics.",
+        "environment task is greedy_fsm diagnostics followed by reward/termination audit.",
         "",
         "## Protocol Status",
     ]
@@ -167,7 +166,7 @@ def build_report(audit: dict) -> dict:
             "abstracted_partially_aligned": PARTIAL,
             "missing_next_actions": MISSING,
         },
-        "next_environment_task": "blue_greedy_finite_state_opponent",
+        "next_environment_task": "blue_greedy_fsm_diagnostics_then_reward_termination_audit",
         "ready_for_method_module": False,
         "method_module_blocked_reason": (
             "not ready for method module until paper-aligned environment protocol, "

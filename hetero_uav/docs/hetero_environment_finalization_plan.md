@@ -77,7 +77,7 @@ It can be used later as a homogeneous scale-transfer reference.
 | observation V1 brma_sensor | compatibility adapter, actor 140 / critic 700 | ablation/reference | keep available |
 | observation V2 mav_shared_geo | actor 96 / critic 480 | main observation candidate | audit required fields and masks |
 | MAV shared information | abstract direct/shared observation logic | support MAV situation sharing | audit communication assumptions |
-| blue opponent policy | zero/random/rule_nearest plus diagnostic greedy_fsm | greedy finite-state / situation-based baseline | greedy_fsm design in progress; rule_nearest remains default |
+| blue opponent policy | zero/random/rule_nearest plus diagnostic greedy_fsm | greedy finite-state / situation-based baseline | greedy_fsm engineering approximation exists; continue diagnostics |
 | missile/fire-control | inherited BRMA-style mechanics | explicit protocol documentation | audit against heterogeneous objective |
 | evasion | inherited BRMA logic | explicit heterogeneous audit | audit, do not change blindly |
 | reward | inherited BRMA reward with hetero metadata | explicit MAV/UAV role objective | reward/termination audit needed |
@@ -109,8 +109,10 @@ It can be used later as a homogeneous scale-transfer reference.
 - Current readiness audit should run without `--include-v1` for the main
   protocol.
 - Slow `--include-v1` behavior should not block V2 main readiness.
-- The next implementation task is blue greedy finite-state opponent design and
-  diagnostics, not training or method-module work.
+- The current blue greedy_fsm opponent is an engineering approximation, not a
+  full paper reproduction.
+- The next environment task is greedy_fsm diagnostics followed by
+  reward/termination audit, not training or method-module work.
 
 ## Next Environment Tasks In Priority Order
 

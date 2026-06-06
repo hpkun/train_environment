@@ -9,6 +9,8 @@ action `[pitch, heading, speed]`.
 
 This is environment completion work, not a new algorithm. It is also not final opponent behavior for paper results; it is an environment diagnostic opponent
 until its state coverage and action saturation are validated.
+It is an environment component for pre-training readiness checks, not a learned
+policy or a neural network.
 
 The current implementation is an initial version. Live paper-aligned diagnostics
 can be patrol-only because blue may have no visible red tracks, which is a
@@ -37,6 +39,10 @@ reproduction of either paper's controller.
 - `attack_nearest`: entered when any visible enemy exists and no MAV-priority
   target is available. It turns toward the nearest observed enemy with segmented
   speed intent.
+- `target assignment`: within one `act()` call, visible targets already assigned
+  to another blue agent are skipped when alternatives exist. If the environment
+  exposes engaged-target information through `refresh_engaged_targets()`, the
+  policy can use it as an additional deconfliction hint.
 - `search_acquire`: entered when no visible enemy target exists. It keeps a
   small alternating heading offset and high speed to express contact/search
   intent without reading hidden state.

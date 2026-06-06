@@ -79,7 +79,10 @@ def test_gap_report_from_mainline_v2_readiness():
     ]:
         assert token in combined
 
-    assert data["next_environment_task"] == "blue_greedy_finite_state_opponent"
+    assert (
+        data["next_environment_task"]
+        == "blue_greedy_fsm_diagnostics_then_reward_termination_audit"
+    )
     assert data["ready_for_method_module"] is False
     assert len(data["protocol_status"]) == 2
     assert all(item["exists"] for item in data["protocol_status"])

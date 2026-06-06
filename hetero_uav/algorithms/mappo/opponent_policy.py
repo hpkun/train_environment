@@ -52,9 +52,11 @@ class OpponentPolicy:
         self.last_states.clear()
 
     def act(self, obs_dict: dict, blue_ids: list[str],
-            deterministic: bool = True) -> dict[str, np.ndarray]:
+            deterministic: bool = True, env=None) -> dict[str, np.ndarray]:
         del deterministic
         self.last_states = {}
+        self.last_assigned_targets: dict[str, int] = {}
+        self.used_env_refresh_engaged_targets = False
         if self.mode == "zero":
             return {
                 bid: np.zeros(3, dtype=np.float32)
@@ -67,11 +69,21 @@ class OpponentPolicy:
             }
         if self.mode == "greedy_fsm":
             actions = {}
+            assigned_targets: set[int] = set()
+            engaged_targets = self._env_engaged_target_slots(env)
+            assigned_targets.update(engaged_targets)
             for index, bid in enumerate(blue_ids):
                 action, state = self._greedy_fsm_action(
-                    obs_dict.get(bid, {}), agent_index=index)
+                    obs_dict.get(bid, {}),
+                    agent_index=index,
+                    assigned_targets=assigned_targets,
+                )
                 actions[bid] = action
                 self.last_states[bid] = state
+                target_slot = self.last_targets.get(index)
+                if target_slot is not None:
+                    assigned_targets.add(target_slot)
+                    self.last_assigned_targets[bid] = target_slot
             return actions
         return {
             bid: self._rule_nearest_action(obs_dict.get(bid, {}))
@@ -110,8 +122,13 @@ class OpponentPolicy:
     LOST_TARGET_TURN_BACK_LIMIT = 50  # env steps before giving up
 
     def _greedy_fsm_action(
-        self, obs: dict, agent_index: int = 0
+        self, obs: dict, agent_index: int = 0,
+        assigned_targets: set[int] | None = None,
     ) -> tuple[np.ndarray, str]:
+        if not obs:
+            return np.array([0.0, 0.0, 0.3], dtype=np.float32), "missing_obs"
+
+        assigned_targets = assigned_targets or set()
         if self._scalar(obs.get("missile_warning", 0.0)) > 0.0:
             self.lost_target_steps.pop(agent_index, None)
             heading = self._fallback_heading(obs, agent_index, scale=0.8)
@@ -126,7 +143,8 @@ class OpponentPolicy:
 
         # Turn-back: lost target but have recent memory
         lost_steps = self.lost_target_steps.get(agent_index, 0)
-        has_visible = self._select_nearest_target(obs) is not None
+        visible_target, _visible_idx = self._select_nearest_target(obs)
+        has_visible = visible_target is not None
 
         if not has_visible and lost_steps > 0:
             lost_steps += 1
@@ -148,29 +166,21 @@ class OpponentPolicy:
                 self.lost_target_steps[agent_index] = 0
                 return action, "attack_nearest"
 
-        target = self._select_mav_target(obs)
+        target, target_idx = self._select_mav_target(obs, assigned_targets)
         if target is not None:
             action = self._attack_action_from_obs(
                 obs, target, source_name, agent_index)
-            en_states, _sn = self._get_attack_targets(obs)
-            for idx, es in enumerate(en_states):
-                if np.array_equal(es, target):
-                    self.last_targets[agent_index] = idx
-                    self.last_target_distances[agent_index] = self._distance(es)
-                    break
+            self.last_targets[agent_index] = target_idx
+            self.last_target_distances[agent_index] = self._distance(target)
             self.lost_target_steps[agent_index] = 0
             return action, "attack_mav_priority"
 
-        target = self._select_nearest_target(obs)
+        target, target_idx = self._select_nearest_target(obs, assigned_targets)
         if target is not None:
             action = self._attack_action_from_obs(
                 obs, target, source_name, agent_index)
-            en_states, _sn = self._get_attack_targets(obs)
-            for idx, es in enumerate(en_states):
-                if np.array_equal(es, target):
-                    self.last_targets[agent_index] = idx
-                    self.last_target_distances[agent_index] = self._distance(es)
-                    break
+            self.last_targets[agent_index] = target_idx
+            self.last_target_distances[agent_index] = self._distance(target)
             self.lost_target_steps[agent_index] = 0
             return action, "attack_nearest"
 
@@ -270,48 +280,88 @@ class OpponentPolicy:
     @classmethod
     def _fallback_heading(cls, obs: dict, agent_index: int, scale: float) -> float:
         target = cls._select_nearest_target(obs)
-        if target is not None and target.size >= 2:
-            return float(np.clip(np.sign(float(target[1])) * scale, -1.0, 1.0))
+        target_state, _target_idx = target
+        if target_state is not None and target_state.size >= 2:
+            return float(np.clip(np.sign(float(target_state[1])) * scale, -1.0, 1.0))
         return scale if agent_index % 2 == 0 else -scale
 
     @classmethod
-    def _select_mav_target(cls, obs: dict) -> np.ndarray | None:
+    def _select_mav_target(
+        cls, obs: dict, assigned_targets: set[int] | None = None
+    ) -> tuple[np.ndarray | None, int | None]:
         enemy_states = cls._enemy_states(obs)
         if enemy_states.shape[0] == 0:
-            return None
+            return None, None
 
         role_indices = cls._mav_indices(obs.get("enemy_roles", None))
         if not role_indices:
             role_indices = cls._mav_indices(obs.get("enemy_types", None))
         if not role_indices:
-            return None
+            return None, None
 
+        assigned_targets = assigned_targets or set()
         visible = cls._visible_mask(obs, enemy_states.shape[0])
         candidates: list[tuple[float, np.ndarray]] = []
         for idx in role_indices:
+            if idx in assigned_targets:
+                continue
             if idx >= enemy_states.shape[0] or not visible[idx]:
                 continue
             state = enemy_states[idx]
             if cls._state_is_valid(state):
-                candidates.append((cls._distance(state), state))
+                candidates.append((cls._distance(state), state, idx))
         if not candidates:
-            return None
-        return min(candidates, key=lambda item: item[0])[1]
+            return None, None
+        _, state, idx = min(candidates, key=lambda item: item[0])
+        return state, idx
 
     @classmethod
-    def _select_nearest_target(cls, obs: dict) -> np.ndarray | None:
+    def _select_nearest_target(
+        cls, obs: dict, assigned_targets: set[int] | None = None
+    ) -> tuple[np.ndarray | None, int | None]:
         enemy_states = cls._enemy_states(obs)
         if enemy_states.shape[0] == 0:
-            return None
+            return None, None
         visible = cls._visible_mask(obs, enemy_states.shape[0])
-        candidates: list[tuple[float, np.ndarray]] = []
+        assigned_targets = assigned_targets or set()
+        candidates: list[tuple[float, np.ndarray, int]] = []
+        fallback_candidates: list[tuple[float, np.ndarray, int]] = []
         for idx, state in enumerate(enemy_states):
             if not visible[idx] or not cls._state_is_valid(state):
                 continue
-            candidates.append((cls._distance(state), state))
+            item = (cls._distance(state), state, idx)
+            fallback_candidates.append(item)
+            if idx not in assigned_targets:
+                candidates.append(item)
         if not candidates:
-            return None
-        return min(candidates, key=lambda item: item[0])[1]
+            candidates = fallback_candidates
+        if not candidates:
+            return None, None
+        _, state, idx = min(candidates, key=lambda item: item[0])
+        return state, idx
+
+    def _env_engaged_target_slots(self, env) -> set[int]:
+        if env is None or not hasattr(env, "refresh_engaged_targets"):
+            return set()
+        try:
+            engaged = env.refresh_engaged_targets()
+            self.used_env_refresh_engaged_targets = True
+        except Exception:
+            return set()
+        if isinstance(engaged, dict):
+            values = engaged.values()
+        else:
+            values = engaged or []
+        slots: set[int] = set()
+        for value in values:
+            if isinstance(value, str) and value.startswith("red_"):
+                try:
+                    slots.add(int(value.split("_", 1)[1]))
+                except (IndexError, ValueError):
+                    continue
+            elif isinstance(value, (int, np.integer)):
+                slots.add(int(value))
+        return slots
 
     @staticmethod
     def _enemy_states(obs: dict) -> np.ndarray:

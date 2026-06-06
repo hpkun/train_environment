@@ -102,7 +102,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--opponent-policy",
-                        choices=["zero", "random", "rule_nearest"],
+                        choices=["zero", "random", "rule_nearest", "greedy_fsm"],
                         default="rule_nearest")
     parser.add_argument("--obs-adapter-version", choices=["v1", "v2"],
                         default=None)
@@ -195,7 +195,7 @@ def main():
                         rid: action_np[i].astype(np.float32)
                         for i, rid in enumerate(env.red_ids)
                     }
-                    actions_dict.update(opponent.act(obs, env.blue_ids))
+                    actions_dict.update(opponent.act(obs, env.blue_ids, env=env))
                     obs, rewards_dict, terminated, truncated, info = env.step(actions_dict)
                     ep_ret += sum(float(rewards_dict.get(rid, 0.0))
                                   for rid in env.red_ids)
