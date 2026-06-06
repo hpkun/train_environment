@@ -57,6 +57,11 @@ for protocol clarity, even though this is already the default.
 - `rule_nearest` remains available
 - `greedy_fsm` is a diagnostic environment opponent (engineering approximation)
 - `greedy_fsm` is **NOT** yet declared the final default training opponent
+- **Blue opponent default remains undecided** — run
+  `scripts/validate_blue_opponent_protocol.py` before any long baseline
+  to compare opponent behaviour
+- `greedy_fsm` may be designated as a **hard opponent** rather than the
+  default baseline opponent
 
 ## 4. What is Frozen
 
