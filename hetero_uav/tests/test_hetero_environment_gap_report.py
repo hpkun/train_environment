@@ -81,7 +81,7 @@ def test_gap_report_from_mainline_v2_readiness():
 
     assert (
         data["next_environment_task"]
-        == "blue_greedy_fsm_diagnostics_then_reward_termination_audit"
+        == "reward_termination_audit_review"
     )
     assert data["ready_for_method_module"] is False
     assert len(data["protocol_status"]) == 2
