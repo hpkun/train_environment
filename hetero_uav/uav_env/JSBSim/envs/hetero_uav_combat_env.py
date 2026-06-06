@@ -88,9 +88,15 @@ class HeteroUavCombatEnv(UavCombatEnv):
         action_trim_by_role: dict | None = None,
         action_trim_by_type: dict | None = None,
         action_trim_by_agent: dict | None = None,
+        hetero_reward_mode: str = "brma_legacy",
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
+        if hetero_reward_mode not in {"brma_legacy", "minimal_v1"}:
+            raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
+        self.hetero_reward_mode = hetero_reward_mode
+        # Cached per-step obs for reward overlay (minimal_v1)
+        self._last_step_obs: dict = {}
         if observation_mode not in {"brma_sensor", "mav_shared_geo"}:
             raise ValueError(f"unknown observation_mode: {observation_mode}")
         self.observation_mode = observation_mode
@@ -175,7 +181,11 @@ class HeteroUavCombatEnv(UavCombatEnv):
         return trimmed
 
     def step(self, actions: dict):
-        return super().step(self._apply_action_trim(actions))
+        trimmed = self._apply_action_trim(actions)
+        obs, rewards, terminated, truncated, info = super().step(trimmed)
+        if self.hetero_reward_mode == "minimal_v1":
+            self._last_step_obs = obs
+        return obs, rewards, terminated, truncated, info
 
     def _extend_hetero_observation_space(self) -> None:
         metadata_spaces = {
@@ -424,6 +434,53 @@ class HeteroUavCombatEnv(UavCombatEnv):
         type_name = self.agent_types.get(agent_id, "attack_uav")
         params = self.aircraft_type_params.get(type_name, self.aircraft_type_params["attack_uav"])
         return int(params.get("num_missiles", self.num_missiles_per_plane))
+
+    def _compute_rewards(self) -> tuple[dict, dict]:
+        """Override to add minimal hetero role-aware overlay."""
+        base_rewards, components = super()._compute_rewards()
+
+        if self.hetero_reward_mode != "minimal_v1":
+            return base_rewards, components
+
+        # ---- minimal_v1 overlay ----
+        mav_id = self.red_ids[0] if self.red_ids else None
+
+        for aid in self.agent_ids:
+            comp = components.setdefault(aid, {})
+            for key in ("r_mav_survival", "r_mav_death", "r_mav_support",
+                        "r_shared_track_used", "r_attack_kill_bonus"):
+                comp.setdefault(key, 0.0)
+
+        # A. MAV survival shaping
+        if mav_id and mav_id in self.red_planes:
+            mav = self.red_planes[mav_id]
+            r_mav_survival = 0.005 if mav.is_alive else 0.0
+            r_mav_death = -2.0 if (not mav.is_alive and mav_id in self._crashed_this_step) else 0.0
+            base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_mav_survival + r_mav_death
+            components[mav_id]["r_mav_survival"] = float(r_mav_survival)
+            components[mav_id]["r_mav_death"] = float(r_mav_death)
+
+        # B. MAV support shaping — from cached obs
+        for rid in self.red_ids:
+            if rid not in self._last_step_obs:
+                continue
+            o = self._last_step_obs[rid]
+            shared_count = 0
+            src = np.asarray(o.get("enemy_track_source", []), dtype=np.float32)
+            if src.ndim == 2 and src.shape[1] >= 2:
+                shared_count = int(np.sum(src[:, 1] > 0.5))
+            if shared_count > 0 and mav_id and mav_id != rid:
+                support = min(0.01 * shared_count, 0.05)
+                base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + support
+                components[mav_id]["r_mav_support"] = float(support)
+                used = min(0.005 * shared_count, 0.02)
+                base_rewards[rid] = base_rewards.get(rid, 0.0) + used
+                components[rid]["r_shared_track_used"] = float(used)
+
+        # C. attack UAV kill bonus — TODO, set 0 for now
+        # D. terminal overlay — not modified
+
+        return base_rewards, components
 
     def _get_info(self, reward_components: dict | None = None) -> dict:
         info = super()._get_info(reward_components)
