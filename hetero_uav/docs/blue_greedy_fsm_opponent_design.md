@@ -15,6 +15,10 @@ policy or a neural network.
 The current implementation is an initial version. Live paper-aligned diagnostics
 can be patrol-only because blue may have no visible red tracks, which is a
 visibility/geometry issue rather than automatically an FSM branch bug.
+The close-range diagnostic config is used to separate FSM logic from
+paper-aligned initial geometry: if close-range runs enter attack branches, the
+remaining issue is likely observability/initial spacing rather than the
+`greedy_fsm` branch table itself.
 
 ## Relationship To Papers
 
@@ -45,10 +49,18 @@ reproduction of either paper's controller.
   policy can use it as an additional deconfliction hint.
 - `search_acquire`: entered when no visible enemy target exists. It keeps a
   small alternating heading offset and high speed to express contact/search
-  intent without reading hidden state.
+  intent. When the environment exposes `get_blue_own_kinematics()`, the heading
+  command is based on the aircraft's current heading instead of a fixed
+  absolute zero heading. When `get_blue_own_positions()` is available, a simple
+  diagnostic return-heading can be used if a blue aircraft is far from the blue
+  formation center. This does not change any environment boundary or
+  termination mechanism.
 - `patrol`: entered when no visible enemy is available. It uses a mild turning
   command and medium speed. This is retained as a legacy fallback concept, but
   the default no-target greedy_fsm branch is `search_acquire`.
+- `turn_back`: entered after a target is lost while recent target memory still
+  exists. It also uses the current own heading when available, then applies a
+  wrapped +/-90 degree sweep command.
 
 ## Difference From rule_nearest
 
@@ -56,7 +68,12 @@ reproduction of either paper's controller.
 fixed attack speed. `greedy_fsm` first checks missile warning, altitude recovery,
 and optional MAV target metadata before falling back to nearest-target attack.
 If no target is visible, it uses `search_acquire` instead of passive patrol. It
-also records `OpponentPolicy.last_states` for diagnostics.
+also records `OpponentPolicy.last_states`, `last_assigned_targets`, and whether
+environment hooks were used:
+
+- `used_env_refresh_engaged_targets`
+- `used_env_own_kinematics`
+- `used_env_own_positions`
 
 ## What It Does Not Change
 
@@ -74,7 +91,7 @@ also records `OpponentPolicy.last_states` for diagnostics.
 Use the mode explicitly when running diagnostics:
 
 ```powershell
-python scripts/diagnose_greedy_fsm_opponent.py --steps 50 --output-json outputs/environment_audit/greedy_fsm_opponent_diagnostic.json
+python scripts/diagnose_blue_greedy_fsm_opponent.py --steps 80 --include-close-range --output-json outputs/blue_greedy_fsm_diagnostic/summary.json
 ```
 
 The mode name is:
@@ -109,6 +126,11 @@ Heading action is a circular absolute heading: `0=north`, `0.5=east`,
 `search_acquire`, `turn_back`, and attack heading corrections. This matters
 near `+/-1`, where clipping can prevent a real turn-back maneuver.
 
+The diagnostic config
+`uav_env/JSBSim/configs/hetero_diagnostic_close_range_mav_shared_geo_3v2.yaml`
+keeps the same environment mechanics but moves red and blue closer together.
+It is diagnostic-only and must not be treated as the default training setup.
+
 ## Open Issues
 
 - Whether blue should prioritize MAV attack in every protocol still needs
@@ -124,3 +146,5 @@ near `+/-1`, where clipping can prevent a real turn-back maneuver.
 - Visibility/geometry alignment with paper-aligned 3v2/5v4 remains unresolved.
 - `greedy_fsm` is not final opponent behavior.
 - Alignment with the original BRMA rule opponent may need a separate audit.
+- Reward and termination auditing remains the next environment task before any
+  training-default opponent change.

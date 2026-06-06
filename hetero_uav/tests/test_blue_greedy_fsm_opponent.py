@@ -78,6 +78,61 @@ def test_target_assignment_deconflicts_multiple_blue_agents():
     assert policy.last_assigned_targets["blue_0"] != policy.last_assigned_targets["blue_1"]
 
 
+def test_greedy_fsm_reads_optional_env_ownship_context():
+    from algorithms.mappo.opponent_policy import OpponentPolicy
+
+    class MockEnv:
+        def refresh_engaged_targets(self):
+            return {"red_1"}
+
+        def get_blue_own_kinematics(self):
+            return {
+                "blue_0": {
+                    "heading": np.pi / 2.0,
+                    "position": np.array([20000.0, 0.0, 6000.0], dtype=np.float32),
+                }
+            }
+
+        def get_blue_own_positions(self):
+            return {
+                "blue_0": np.array([20000.0, 0.0, 6000.0], dtype=np.float32),
+                "blue_1": np.array([0.0, 0.0, 6000.0], dtype=np.float32),
+            }
+
+    policy = OpponentPolicy("greedy_fsm", seed=0)
+    action = policy.act({"blue_0": {}}, ["blue_0"], env=MockEnv())["blue_0"]
+    assert action.shape == (3,)
+    assert np.isfinite(action).all()
+    assert policy.used_env_refresh_engaged_targets is True
+    assert policy.used_env_own_kinematics is True
+    assert policy.used_env_own_positions is True
+    assert policy.last_states["blue_0"] == "missing_obs"
+
+
+def test_search_acquire_uses_env_heading_when_no_target_visible():
+    from algorithms.mappo.opponent_policy import OpponentPolicy
+
+    class MockEnv:
+        def get_blue_own_kinematics(self):
+            return {"blue_0": {"heading": np.pi / 2.0}}
+
+        def get_blue_own_positions(self):
+            return {"blue_0": np.array([0.0, 0.0, 6000.0], dtype=np.float32)}
+
+    policy = OpponentPolicy("greedy_fsm", seed=0)
+    obs = {
+        "blue_0": {
+            "enemy_states": np.zeros((1, 3), dtype=np.float32),
+            "enemy_observed_mask": np.zeros(1, dtype=np.float32),
+            "altitude": np.array([1.0], dtype=np.float32),
+            "ego_geo_state": np.zeros(6, dtype=np.float32),
+        }
+    }
+    action = policy.act(obs, ["blue_0"], env=MockEnv())["blue_0"]
+    assert policy.last_states["blue_0"] == "search_acquire"
+    assert np.isclose(action[1], 0.52, atol=1e-5)
+
+
 def test_rule_nearest_still_available():
     from algorithms.mappo.opponent_policy import OpponentPolicy
 
@@ -94,14 +149,27 @@ def test_rule_nearest_still_available():
     assert np.isfinite(action).all()
 
 
+def test_close_range_diagnostic_config_exists():
+    path = (
+        ROOT
+        / "uav_env/JSBSim/configs/hetero_diagnostic_close_range_mav_shared_geo_3v2.yaml"
+    )
+    assert path.exists()
+    text = path.read_text(encoding="utf-8")
+    assert "enable_gcas_for_blue: true" in text
+    assert "max_num_red: 3" in text
+    assert "max_num_blue: 2" in text
+
+
 def test_diagnose_blue_greedy_fsm_opponent_runs():
-    output_json = "outputs/test_environment_audit/blue_greedy_fsm_opponent.json"
+    output_json = "outputs/test_environment_audit/blue_greedy_fsm_opponent_close_range.json"
     result = subprocess.run(
         [
             "python",
             "scripts/diagnose_blue_greedy_fsm_opponent.py",
             "--steps",
-            "5",
+            "20",
+            "--include-close-range",
             "--output-json",
             output_json,
         ],
@@ -119,7 +187,25 @@ def test_diagnose_blue_greedy_fsm_opponent_runs():
     configs = {Path(record["config"]).name for record in data["records"]}
     assert "hetero_mav_shared_geo_3v2.yaml" in configs
     assert "hetero_mav_shared_geo_5v4.yaml" in configs
+    assert "hetero_diagnostic_close_range_mav_shared_geo_3v2.yaml" in configs
     for record in data["records"]:
         assert -1.0 <= record["blue_action_min"] <= 1.0
         assert -1.0 <= record["blue_action_max"] <= 1.0
         assert record["nan_detected"] is False
+        assert "blue_action_mean" in record
+        assert "state_counts" in record
+        assert "assigned_target_counts" in record
+        assert "used_env_refresh_engaged_targets" in record
+        assert "used_env_own_kinematics" in record
+        assert "used_env_own_positions" in record
+        assert record["used_env_refresh_engaged_targets"] is True
+        assert record["used_env_own_kinematics"] is True
+        assert record["used_env_own_positions"] is True
+    close_records = [
+        record
+        for record in data["records"]
+        if Path(record["config"]).name
+        == "hetero_diagnostic_close_range_mav_shared_geo_3v2.yaml"
+    ]
+    assert close_records
+    assert any(record["state_counts"] for record in close_records)

@@ -19,6 +19,9 @@ DEFAULT_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
 ]
+CLOSE_RANGE_CONFIG = (
+    "uav_env/JSBSim/configs/hetero_diagnostic_close_range_mav_shared_geo_3v2.yaml"
+)
 
 
 def _contains_nan(value) -> bool:
@@ -52,12 +55,17 @@ def _validate_blue_actions(actions: dict[str, np.ndarray], blue_ids: list[str]) 
 
 def diagnose_config(config: str, red_policy: str, steps: int, seed: int) -> dict:
     rng = np.random.default_rng(seed)
-    env = make_env(config, env_type="jsbsim_hetero")
+    # Keep this diagnostic script's stdout usable on Windows. The JSBSim
+    # low-level output suppressor can corrupt the process stdout file
+    # descriptor in repeated env construction/close cycles; disabling it here
+    # affects only diagnostic logging, not the environment mechanics.
+    env = make_env(config, env_type="jsbsim_hetero", suppress_jsbsim_output=False)
     policy = OpponentPolicy("greedy_fsm", seed=seed + 17)
     actions_seen: list[np.ndarray] = []
     defensive_triggered = False
     target_assignment_used = False
     state_counts: dict[str, int] = {}
+    assigned_target_counts: dict[str, int] = {}
     nan_detected = False
     steps_executed = 0
 
@@ -73,6 +81,9 @@ def diagnose_config(config: str, red_policy: str, steps: int, seed: int) -> dict
             )
             assigned = getattr(policy, "last_assigned_targets", {})
             target_assignment_used = target_assignment_used or len(set(assigned.values())) > 1
+            for slot in assigned.values():
+                key = str(slot)
+                assigned_target_counts[key] = assigned_target_counts.get(key, 0) + 1
             for state in policy.last_states.values():
                 state_counts[state] = state_counts.get(state, 0) + 1
 
@@ -107,8 +118,15 @@ def diagnose_config(config: str, red_policy: str, steps: int, seed: int) -> dict
             "blue_action_mean": action_mean,
             "defensive_action_triggered": bool(defensive_triggered),
             "target_assignment_used": bool(target_assignment_used),
+            "assigned_target_counts": assigned_target_counts,
             "used_env_refresh_engaged_targets": bool(
                 getattr(policy, "used_env_refresh_engaged_targets", False)
+            ),
+            "used_env_own_kinematics": bool(
+                getattr(policy, "used_env_own_kinematics", False)
+            ),
+            "used_env_own_positions": bool(
+                getattr(policy, "used_env_own_positions", False)
             ),
             "state_counts": state_counts,
             "nan_detected": bool(nan_detected),
@@ -119,20 +137,35 @@ def diagnose_config(config: str, red_policy: str, steps: int, seed: int) -> dict
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--configs", nargs="*", default=DEFAULT_CONFIGS)
-    parser.add_argument("--steps", type=int, default=5)
+    parser.add_argument("--configs", nargs="*", default=None)
+    parser.add_argument("--steps", type=int, default=80)
+    parser.add_argument("--include-close-range", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--output-json",
-        default="outputs/environment_audit/blue_greedy_fsm_opponent_diagnostic.json",
+        default="outputs/blue_greedy_fsm_diagnostic/summary.json",
     )
     args = parser.parse_args()
 
+    configs = list(args.configs) if args.configs else list(DEFAULT_CONFIGS)
+    if args.include_close_range:
+        configs.append(CLOSE_RANGE_CONFIG)
+
     records = []
-    for config in args.configs:
+    warnings = []
+    for config in configs:
         for red_policy in ("zero", "bounded_random"):
             record = diagnose_config(config, red_policy, args.steps, args.seed)
             records.append(record)
+            is_close = Path(config).name == Path(CLOSE_RANGE_CONFIG).name
+            has_attack = any(
+                state in record["state_counts"]
+                for state in ("attack_nearest", "attack_mav_priority")
+            )
+            if is_close and not has_attack:
+                warnings.append(
+                    f"{Path(config).name} red={red_policy}: close-range did not trigger attack state"
+                )
             print(
                 f"{Path(config).stem:38s} red={red_policy:14s} "
                 f"steps={record['steps_executed']:3d} "
@@ -141,6 +174,7 @@ def main() -> None:
                 f"action_mean={record['blue_action_mean']:.3f} "
                 f"defensive={record['defensive_action_triggered']} "
                 f"assignment={record['target_assignment_used']} "
+                f"states={record['state_counts']} "
                 f"nan={record['nan_detected']}",
                 flush=True,
             )
@@ -154,6 +188,7 @@ def main() -> None:
         "any_target_assignment_used": any(
             r["target_assignment_used"] for r in records
         ),
+        "warnings": warnings,
     }
     out = Path(args.output_json)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -162,6 +197,8 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"output_json: {out}", flush=True)
+    for warning in warnings:
+        print(f"warning: {warning}", flush=True)
     if summary["nan_records"]:
         raise RuntimeError("NaN detected in greedy_fsm diagnostic")
 

@@ -43,6 +43,10 @@ class OpponentPolicy:
         # Per-agent distance memory and lost-target counter
         self.last_target_distances: dict[int, float] = {}
         self.lost_target_steps: dict[int, int] = {}
+        self.last_assigned_targets: dict[str, int] = {}
+        self.used_env_refresh_engaged_targets = False
+        self.used_env_own_kinematics = False
+        self.used_env_own_positions = False
 
     def reset_memory(self) -> None:
         """Clear per-agent target persistence and state history."""
@@ -50,6 +54,10 @@ class OpponentPolicy:
         self.last_target_distances.clear()
         self.lost_target_steps.clear()
         self.last_states.clear()
+        self.last_assigned_targets.clear()
+        self.used_env_refresh_engaged_targets = False
+        self.used_env_own_kinematics = False
+        self.used_env_own_positions = False
 
     def act(self, obs_dict: dict, blue_ids: list[str],
             deterministic: bool = True, env=None) -> dict[str, np.ndarray]:
@@ -57,6 +65,10 @@ class OpponentPolicy:
         self.last_states = {}
         self.last_assigned_targets: dict[str, int] = {}
         self.used_env_refresh_engaged_targets = False
+        self.used_env_own_kinematics = False
+        self.used_env_own_positions = False
+        own_kinematics = self._env_blue_own_kinematics(env)
+        own_positions = self._env_blue_own_positions(env)
         if self.mode == "zero":
             return {
                 bid: np.zeros(3, dtype=np.float32)
@@ -73,10 +85,12 @@ class OpponentPolicy:
             engaged_targets = self._env_engaged_target_slots(env)
             assigned_targets.update(engaged_targets)
             for index, bid in enumerate(blue_ids):
+                ownship = self._ownship_context(bid, own_kinematics, own_positions)
                 action, state = self._greedy_fsm_action(
                     obs_dict.get(bid, {}),
                     agent_index=index,
                     assigned_targets=assigned_targets,
+                    ownship=ownship,
                 )
                 actions[bid] = action
                 self.last_states[bid] = state
@@ -124,6 +138,7 @@ class OpponentPolicy:
     def _greedy_fsm_action(
         self, obs: dict, agent_index: int = 0,
         assigned_targets: set[int] | None = None,
+        ownship: dict | None = None,
     ) -> tuple[np.ndarray, str]:
         if not obs:
             return np.array([0.0, 0.0, 0.3], dtype=np.float32), "missing_obs"
@@ -150,7 +165,7 @@ class OpponentPolicy:
             lost_steps += 1
             self.lost_target_steps[agent_index] = lost_steps
             if lost_steps <= self.LOST_TARGET_TURN_BACK_LIMIT:
-                return self._turn_back_action(obs, agent_index), "turn_back"
+                return self._turn_back_action(obs, agent_index, ownship), "turn_back"
 
         # Target persistence: prefer last-targeted slot if still visible
         last_slot = self.last_targets.get(agent_index)
@@ -189,21 +204,23 @@ class OpponentPolicy:
             self.lost_target_steps[agent_index] = (
                 self.lost_target_steps.get(agent_index, 0) + 1)
             if self.lost_target_steps[agent_index] <= self.LOST_TARGET_TURN_BACK_LIMIT:
-                return self._turn_back_action(obs, agent_index), "turn_back"
+                return self._turn_back_action(obs, agent_index, ownship), "turn_back"
 
         self.last_targets.pop(agent_index, None)
         self.lost_target_steps.pop(agent_index, None)
         self.last_target_distances.pop(agent_index, None)
-        return self._search_acquire_action(obs, agent_index), "search_acquire"
+        return self._search_acquire_action(obs, agent_index, ownship), "search_acquire"
 
     @classmethod
-    def _turn_back_action(cls, obs_agent: dict, agent_index: int = 0) -> np.ndarray:
+    def _turn_back_action(
+        cls, obs_agent: dict, agent_index: int = 0, ownship: dict | None = None
+    ) -> np.ndarray:
         """Conservative turn-back when target is lost after close approach.
 
         Executes ~90° turn (heading +0.5 or -0.5) to sweep back toward
         the last known target direction.  Direction alternates per agent.
         """
-        current_heading = cls._get_current_heading_norm(obs_agent)
+        current_heading = cls._own_heading_norm(obs_agent, ownship)
         direction = 0.5 if agent_index % 2 == 0 else -0.5
         heading = _wrap_heading_norm(current_heading + direction)
         return cls._clip_action([0.05, heading, 0.8])
@@ -232,17 +249,18 @@ class OpponentPolicy:
 
     @classmethod
     def _search_acquire_action(cls, obs_agent: dict | None = None,
-                                agent_index: int = 0) -> np.ndarray:
+                                agent_index: int = 0,
+                                ownship: dict | None = None) -> np.ndarray:
         """Keep current heading + minimal deconfliction offset at high speed.
 
         The env action[1] is an *absolute* target heading (action[1] * pi rad).
         Search-acquire must preserve the current heading so blue continues
         toward the red formation instead of turning to absolute 0° (north).
         """
-        if obs_agent is not None:
-            base_heading = cls._get_current_heading_norm(obs_agent)
-        else:
-            base_heading = 0.0
+        base_heading = cls._own_heading_norm(obs_agent or {}, ownship)
+        boundary_heading = cls._boundary_return_heading_norm(ownship)
+        if boundary_heading is not None:
+            base_heading = boundary_heading
         offset = 0.02 if agent_index % 2 == 0 else -0.02
         heading = _wrap_heading_norm(base_heading + offset)
         return cls._clip_action([0.0, heading, 1.0])
@@ -284,6 +302,29 @@ class OpponentPolicy:
         if target_state is not None and target_state.size >= 2:
             return float(np.clip(np.sign(float(target_state[1])) * scale, -1.0, 1.0))
         return scale if agent_index % 2 == 0 else -scale
+
+    @classmethod
+    def _own_heading_norm(cls, obs_agent: dict, ownship: dict | None = None) -> float:
+        if ownship:
+            heading_norm = ownship.get("heading_norm")
+            if heading_norm is not None and np.isfinite(float(heading_norm)):
+                return _wrap_heading_norm(float(heading_norm))
+        return cls._get_current_heading_norm(obs_agent)
+
+    @classmethod
+    def _boundary_return_heading_norm(cls, ownship: dict | None) -> float | None:
+        if not ownship:
+            return None
+        position = ownship.get("position")
+        center = ownship.get("blue_center_position")
+        if position is None or center is None:
+            return None
+        rel = np.asarray(center, dtype=np.float32)[:2] - np.asarray(position, dtype=np.float32)[:2]
+        distance = float(np.linalg.norm(rel))
+        if distance < 12000.0:
+            return None
+        north, east = float(rel[0]), float(rel[1])
+        return _wrap_heading_norm(float(np.arctan2(east, north) / np.pi))
 
     @classmethod
     def _select_mav_target(
@@ -362,6 +403,48 @@ class OpponentPolicy:
             elif isinstance(value, (int, np.integer)):
                 slots.add(int(value))
         return slots
+
+    def _env_blue_own_kinematics(self, env) -> dict:
+        if env is None or not hasattr(env, "get_blue_own_kinematics"):
+            return {}
+        try:
+            data = env.get_blue_own_kinematics()
+        except Exception:
+            return {}
+        self.used_env_own_kinematics = True
+        return data or {}
+
+    def _env_blue_own_positions(self, env) -> dict:
+        if env is None or not hasattr(env, "get_blue_own_positions"):
+            return {}
+        try:
+            data = env.get_blue_own_positions()
+        except Exception:
+            return {}
+        self.used_env_own_positions = True
+        return data or {}
+
+    @staticmethod
+    def _ownship_context(
+        blue_id: str, own_kinematics: dict, own_positions: dict
+    ) -> dict:
+        context: dict = {}
+        kin = own_kinematics.get(blue_id, {}) if own_kinematics else {}
+        if kin:
+            if "heading" in kin:
+                context["heading_norm"] = float(kin["heading"]) / np.pi
+            if "position" in kin:
+                context["position"] = np.asarray(kin["position"], dtype=np.float32)
+        if blue_id in own_positions:
+            context["position"] = np.asarray(own_positions[blue_id], dtype=np.float32)
+        positions = [
+            np.asarray(pos, dtype=np.float32)
+            for pos in (own_positions or {}).values()
+            if np.asarray(pos).size >= 2
+        ]
+        if positions:
+            context["blue_center_position"] = np.mean(np.stack(positions), axis=0)
+        return context
 
     @staticmethod
     def _enemy_states(obs: dict) -> np.ndarray:
