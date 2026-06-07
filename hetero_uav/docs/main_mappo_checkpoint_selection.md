@@ -4,33 +4,28 @@
 
 RL training is non-monotonic.  The final checkpoint (`latest`) often
 reflects late-training collapse (e.g. red always loses, MAV never
-survives) rather than the best policy.  Evaluating intermediate
-checkpoints is standard RL experiment practice.
+survives) rather than the best policy.
 
-## What This Does
+## Preferred Workflow: Training-Time Eval
 
-- Defaults to sampled checkpoint evaluation instead of full 79-checkpoint sweeps
-- Evaluates selected checkpoints and `latest/model.pt`
-- Ranks evaluated checkpoints with a diagnostic score
-- Reports whether any checkpoint shows red_win_rate > 0 or
-  mav_survival_rate > 0
+Use `--eval-during-training` with the training script.  This runs
+lightweight periodic evaluations and saves the best checkpoint to
+`output_dir/best/model.pt`.  This is the recommended path and avoids
+lengthy post-hoc checkpoint sweeps.
 
-## Selection Modes
+## Fallback: Full Checkpoint Sweep
 
-- `sampled`: default. Select checkpoints by stride, include `latest`, and cap
-  the count with `--max-checkpoints`.
-- `top-train`: read `train_log.csv`, select checkpoints with high
-  `average_team_return`, include `latest`, and cap the count.
-- `all`: explicitly evaluate every checkpoint. This may be very slow and is
-  not the default experiment path.
+The `scripts/evaluate_main_mappo_checkpoints.py` script can evaluate all
+saved checkpoints post-hoc.  This is **slow** and intended only for
+post-hoc debugging when training-time eval was not enabled.
+
+Full checkpoint sweeps are **not** the default experiment path.
 
 ## Scoring
 
 `primary_score = red_win_rate + 0.1 * mav_survival_rate + 0.01 * avg_return`
 
 This is a **diagnostic ranking metric**, not a paper performance claim.
-It prioritizes red wins and MAV survival to surface checkpoints that
-avoid total blue domination.
 
 ## Constraints
 

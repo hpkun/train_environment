@@ -113,6 +113,9 @@ def main() -> None:
         choices=["rule_nearest", "greedy_fsm"],
         default="greedy_fsm",
     )
+    parser.add_argument('--eval-during-training', action='store_true')
+    parser.add_argument('--eval-interval-steps', type=int, default=50000)
+    parser.add_argument('--train-eval-episodes', type=int, default=5)
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -128,6 +131,7 @@ def main() -> None:
     print(f"[exp] rollout_length={args.rollout_length}", flush=True)
     print(f"[exp] max_steps={args.max_steps}", flush=True)
     print(f"[exp] eval_episodes={args.eval_episodes}", flush=True)
+    print(f"[exp] eval_during_training={args.eval_during_training}", flush=True)
     print(f"[exp] output_dir={out_dir}", flush=True)
 
     # ---- 1. Train ----
@@ -146,6 +150,12 @@ def main() -> None:
         "--opponent-policy", args.opponent_policy,
         "--save-interval", "10",
     ]
+    if args.eval_during_training:
+        train_cmd.extend([
+            "--eval-during-training",
+            "--eval-interval-steps", str(args.eval_interval_steps),
+            "--train-eval-episodes", str(args.train_eval_episodes),
+        ])
     _run_streaming(
         train_cmd,
         "train",
@@ -240,8 +250,10 @@ def main() -> None:
         if not rec["actor_dim_ok"] or not rec["critic_dim_ok"]:
             raise SystemExit(f"dim mismatch: {rec['eval_config']}")
 
+    best_pt = out_dir / "best" / "model.pt"
     print(f"[exp] output_dir: {out_dir}", flush=True)
     print(f"[exp] summary: {summary_json}", flush=True)
+    print(f"[exp] best_checkpoint_exists: {best_pt.exists()}", flush=True)
     print(f"[exp] passed — main experiment smoke OK", flush=True)
 
 

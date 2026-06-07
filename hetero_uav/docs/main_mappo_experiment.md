@@ -23,6 +23,15 @@ Default blue opponent is `greedy_fsm`. For baseline trainability
 diagnostics, `--opponent-policy rule_nearest` runs a weaker rule-based
 opponent pilot. This is not a new method or an environment change.
 
+## Training-Time Diagnostics
+
+New since 2026-06: training now records extended metrics in `train_log.csv`
+(action saturation, episode outcome rates, missile stats) and can run
+lightweight periodic eval (`--eval-during-training`) with best-checkpoint
+selection.  Full checkpoint sweeps are discouraged for regular workflow;
+use `eval_log.csv` and `best/model.pt` instead.  Checkpoint sweeps remain
+available for post-hoc debug only.
+
 ## Experiment Scale
 
 | Stage | Total env steps | Purpose |
