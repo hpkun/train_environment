@@ -17,6 +17,12 @@
 - Eval 3v2: same as train
 - Eval 5v4: red = 1 MAV + 4 attack_uav, blue = 4 attack_uav
 
+## Opponent Policy
+
+Default blue opponent is `greedy_fsm`. For baseline trainability
+diagnostics, `--opponent-policy rule_nearest` runs a weaker rule-based
+opponent pilot. This is not a new method or an environment change.
+
 ## Experiment Scale
 
 | Stage | Total env steps | Purpose |

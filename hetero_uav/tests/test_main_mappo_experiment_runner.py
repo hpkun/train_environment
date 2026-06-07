@@ -39,6 +39,17 @@ def _env():
 PYTHON = _find_python()
 
 
+def test_help_includes_opponent_policy():
+    result = subprocess.run(
+        [PYTHON, "scripts/run_main_mappo_experiment.py", "--help"],
+        cwd=ROOT, env=_env(),
+        text=True, capture_output=True,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--opponent-policy" in result.stdout
+
+
 def test_main_experiment_short_smoke():
     output_dir = "outputs/test_main_mappo_experiment"
     result = subprocess.run(
@@ -82,3 +93,41 @@ def test_main_experiment_short_smoke():
         for k in ["avg_return", "red_win_rate", "blue_win_rate", "draw_rate",
                   "timeout_rate", "mav_survival_rate"]:
             assert k in rec, f"missing {k}"
+
+
+def test_main_experiment_rule_nearest_smoke():
+    output_dir = "outputs/test_main_mappo_experiment_rule_nearest"
+    result = subprocess.run(
+        [
+            PYTHON,
+            "scripts/run_main_mappo_experiment.py",
+            "--total-env-steps", "64",
+            "--rollout-length", "16",
+            "--max-steps", "64",
+            "--eval-episodes", "1",
+            "--device", "cpu",
+            "--opponent-policy", "rule_nearest",
+            "--output-dir", output_dir,
+        ],
+        cwd=ROOT,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
+    assert result.returncode == 0, (
+        f"runner failed:\nstdout={result.stdout[-800:]}\nstderr={result.stderr[-800:]}"
+    )
+
+    out = ROOT / output_dir
+    summary = json.loads((out / "main_experiment_summary.json").read_text(encoding="utf-8"))
+    assert isinstance(summary, list) and len(summary) > 0
+    for rec in summary:
+        assert rec["opponent_policy"] == "rule_nearest"
+        assert rec["actor_dim"] == 96
+        assert rec["critic_dim"] == 480
+        assert rec["nan_detected"] is False
+        assert rec["actor_dim_ok"] is True
+        assert rec["critic_dim_ok"] is True

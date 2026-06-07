@@ -5,7 +5,6 @@ Fixed protocol:
   eval:  hetero_mav_shared_geo_3v2.yaml + hetero_mav_shared_geo_5v4.yaml
   obs_adapter: v2
   reward: brma_legacy
-  opponent: greedy_fsm
   algorithm: current shared-actor MAPPO baseline (unchanged)
 """
 from __future__ import annotations
@@ -27,7 +26,6 @@ EVAL_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
 ]
 OBS_ADAPTER = "v2"
-OPPONENT = "greedy_fsm"
 
 
 def _stream_pipe(pipe, log_path: Path, echo: bool, tail: deque[str]) -> None:
@@ -110,6 +108,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", default="outputs/main_mappo_experiment")
+    parser.add_argument(
+        "--opponent-policy",
+        choices=["rule_nearest", "greedy_fsm"],
+        default="greedy_fsm",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -119,7 +122,7 @@ def main() -> None:
     print(f"[exp] train_config={TRAIN_CONFIG}", flush=True)
     print(f"[exp] eval_configs={EVAL_CONFIGS}", flush=True)
     print(f"[exp] obs_adapter_version={OBS_ADAPTER}", flush=True)
-    print(f"[exp] opponent_policy={OPPONENT}", flush=True)
+    print(f"[exp] opponent_policy={args.opponent_policy}", flush=True)
     print("[exp] reward_mode=brma_legacy", flush=True)
     print(f"[exp] total_env_steps={args.total_env_steps}", flush=True)
     print(f"[exp] rollout_length={args.rollout_length}", flush=True)
@@ -140,7 +143,7 @@ def main() -> None:
         "--device", args.device,
         "--output-dir", str(out_dir),
         "--log-csv", str(out_dir / "train_log.csv"),
-        "--opponent-policy", OPPONENT,
+        "--opponent-policy", args.opponent_policy,
         "--save-interval", "10",
     ]
     _run_streaming(
@@ -179,7 +182,7 @@ def main() -> None:
         "--obs-adapter-version", OBS_ADAPTER,
         "--episodes", str(args.eval_episodes),
         "--device", args.device,
-        "--opponent-policy", OPPONENT,
+        "--opponent-policy", args.opponent_policy,
         "--configs", *EVAL_CONFIGS,
         "--summary-json", str(eval_json),
     ]
@@ -197,13 +200,12 @@ def main() -> None:
     # ---- 3. Summary ----
     summary_records: list[dict] = []
     for rec in eval_data:
-        cfg_name = Path(rec.get("config", "")).name
         summary_records.append({
             "seed": args.seed,
             "total_env_steps": args.total_env_steps,
             "train_config": TRAIN_CONFIG,
             "eval_config": rec.get("config", ""),
-            "opponent_policy": OPPONENT,
+            "opponent_policy": args.opponent_policy,
             "obs_adapter_version": OBS_ADAPTER,
             "actor_dim": actor_dim,
             "critic_dim": critic_dim,
@@ -239,9 +241,6 @@ def main() -> None:
             raise SystemExit(f"dim mismatch: {rec['eval_config']}")
 
     print(f"[exp] output_dir: {out_dir}", flush=True)
-    print(f"[exp] train_log.csv: {train_csv}", flush=True)
-    print(f"[exp] latest/model.pt: {model_pt}", flush=True)
-    print(f"[exp] eval_summary.json: {eval_json}", flush=True)
     print(f"[exp] summary: {summary_json}", flush=True)
     print(f"[exp] passed — main experiment smoke OK", flush=True)
 
