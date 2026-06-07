@@ -22,7 +22,7 @@ blue_agent_types:
   - attack_uav
 aircraft_type_params:
   mav:
-    aircraft_model: "A-4"
+    aircraft_model: "f22"
     role: "mav"
     num_missiles: 0
     init_altitude_offset_m: 0.0

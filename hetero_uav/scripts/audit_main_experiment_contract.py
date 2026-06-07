@@ -234,8 +234,8 @@ def _violations(config_contract: dict, compositions: dict, adapter_contract: dic
         if comp["blue_attack_uav_count"] != blue_attack:
             violations.append(f"{key}_blue_attack_uav_count_mismatch")
         for aid, model in comp["aircraft_models"].items():
-            if aid == "red_0" and model != "A-4":
-                violations.append(f"{key}_mav_model_not_A-4")
+            if aid == "red_0" and model != "f22":
+                violations.append(f"{key}_mav_model_not_f22")
             if aid != "red_0" and model != "f16":
                 violations.append(f"{key}_{aid}_model_not_f16")
         for aid, count in comp["missile_counts"].items():
