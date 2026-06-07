@@ -1,0 +1,64 @@
+[
+  {
+    "obs_adapter_version": "v2",
+    "config": "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
+    "episodes": 20,
+    "sim_freq": 60,
+    "agent_interaction_steps": 12,
+    "decision_dt": 0.2,
+    "env_max_steps": 1000,
+    "avg_return": -114.17128710344801,
+    "avg_length": 314.95,
+    "avg_red_alive": 0.0,
+    "avg_blue_alive": 2.0,
+    "red_win_rate": 0.0,
+    "blue_win_rate": 1.0,
+    "draw_rate": 0.0,
+    "timeout_rate": 0.0,
+    "mav_survival_rate": 0.0,
+    "red_alive_final_mean": 0.0,
+    "blue_alive_final_mean": 2.0,
+    "red_dead_final_mean": 3.0,
+    "blue_dead_final_mean": 0.0,
+    "episode_end_reason_counts": {
+      "blue_win_elimination": 20
+    },
+    "winner_counts": {
+      "blue": 20
+    },
+    "nan_detected": false,
+    "actor_dim_ok": true,
+    "critic_dim_ok": true
+  },
+  {
+    "obs_adapter_version": "v2",
+    "config": "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
+    "episodes": 20,
+    "sim_freq": 60,
+    "agent_interaction_steps": 12,
+    "decision_dt": 0.2,
+    "env_max_steps": 1000,
+    "avg_return": -232.9031647915502,
+    "avg_length": 254.35,
+    "avg_red_alive": 0.0,
+    "avg_blue_alive": 4.0,
+    "red_win_rate": 0.0,
+    "blue_win_rate": 1.0,
+    "draw_rate": 0.0,
+    "timeout_rate": 0.0,
+    "mav_survival_rate": 0.0,
+    "red_alive_final_mean": 0.0,
+    "blue_alive_final_mean": 4.0,
+    "red_dead_final_mean": 5.0,
+    "blue_dead_final_mean": 0.0,
+    "episode_end_reason_counts": {
+      "blue_win_elimination": 20
+    },
+    "winner_counts": {
+      "blue": 20
+    },
+    "nan_detected": false,
+    "actor_dim_ok": true,
+    "critic_dim_ok": true
+  }
+]
