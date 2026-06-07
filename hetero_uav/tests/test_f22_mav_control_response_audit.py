@@ -2,11 +2,34 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _find_python():
+    candidates = [sys.executable]
+    found = shutil.which("python")
+    if found and found not in candidates:
+        candidates.append(found)
+    for py in candidates:
+        try:
+            result = subprocess.run(
+                [py, "-c", "import gymnasium"],
+                capture_output=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return py
+        except Exception:
+            continue
+    return sys.executable
+
+
+PYTHON = _find_python()
 
 
 def _env():
@@ -17,7 +40,7 @@ def _env():
 
 def test_f22_mav_control_response_audit_help_runs():
     result = subprocess.run(
-        ["python", "scripts/audit_f22_mav_control_response.py", "--help"],
+        [PYTHON, "scripts/audit_f22_mav_control_response.py", "--help"],
         cwd=ROOT,
         env=_env(),
         text=True,
@@ -37,7 +60,7 @@ def test_f22_mav_control_response_short_audit_outputs_expected_fields():
     output_md = "outputs/test_environment_audit/f22_control_response.md"
     result = subprocess.run(
         [
-            "python",
+            PYTHON,
             "scripts/audit_f22_mav_control_response.py",
             "--steps",
             "5",
