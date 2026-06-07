@@ -9,10 +9,20 @@ checkpoints is standard RL experiment practice.
 
 ## What This Does
 
-- Evaluates all saved checkpoints and `latest/model.pt`
+- Defaults to sampled checkpoint evaluation instead of full 79-checkpoint sweeps
+- Evaluates selected checkpoints and `latest/model.pt`
 - Ranks evaluated checkpoints with a diagnostic score
 - Reports whether any checkpoint shows red_win_rate > 0 or
   mav_survival_rate > 0
+
+## Selection Modes
+
+- `sampled`: default. Select checkpoints by stride, include `latest`, and cap
+  the count with `--max-checkpoints`.
+- `top-train`: read `train_log.csv`, select checkpoints with high
+  `average_team_return`, include `latest`, and cap the count.
+- `all`: explicitly evaluate every checkpoint. This may be very slow and is
+  not the default experiment path.
 
 ## Scoring
 

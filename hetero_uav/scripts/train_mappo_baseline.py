@@ -54,9 +54,13 @@ def main():
     parser.add_argument('--no-save', action='store_true')
     parser.add_argument('--obs-adapter-version', choices=['v1', 'v2'],
                         default='v1')
+    parser.add_argument('--console-log-interval', type=int, default=1,
+                        help='Print one training progress line every N iterations.')
     args = parser.parse_args()
     if args.total_env_steps is not None and args.total_env_steps <= 0:
         raise SystemExit('--total-env-steps must be positive')
+    if args.console_log_interval <= 0:
+        raise SystemExit('--console-log-interval must be positive')
 
     if args.log_csv is None:
         args.log_csv = f'{args.output_dir}/train_log.csv'
@@ -263,14 +267,26 @@ def main():
         ])
         csv_file.flush()
 
-        print(f'Iter {iteration:3d} | steps={total_steps:5d} | '
-              f'ret={avg_ret:+7.2f} | len={avg_len:4.0f} | '
-              f'r_alive={avg_red_alive:.1f} b_alive={avg_blue_alive:.1f} | '
-              f'act_loss={stats["actor_loss"]:+.4f} '
-              f'crit_loss={stats["critic_loss"]:+.4f} '
-              f'ent={stats["entropy"]:.4f} | '
-              f'act_mu={act_mean_abs:.3f} act_std={act_std:.3f} | '
-              f'val={val_mean:+.3f} | ep={episodes_completed}', flush=True)
+        if iteration % args.console_log_interval == 0:
+            if args.total_env_steps is None:
+                steps_text = str(total_steps)
+                progress_text = ''
+            else:
+                steps_text = f'{total_steps}/{args.total_env_steps}'
+                progress = 100.0 * min(total_steps, args.total_env_steps) / args.total_env_steps
+                progress_text = f' progress={progress:.1f}%'
+            print(
+                f'[train] iter={iteration:04d} steps={steps_text}{progress_text} '
+                f'ep={episodes_completed} ret={avg_ret:.2f} len={avg_len:.0f} '
+                f'red_alive={avg_red_alive:.1f} blue_alive={avg_blue_alive:.1f} '
+                f'actor={stats["actor_loss"]:.4f} '
+                f'critic={stats["critic_loss"]:.4f} '
+                f'ent={stats["entropy"]:.4f} '
+                f'action_abs={act_mean_abs:.3f} '
+                f'action_min={act_min:.2f} action_max={act_max:.2f} '
+                f'nan={int(nan_detected)}',
+                flush=True,
+            )
 
         # Checkpoint saving
         if not args.no_save and iteration % args.save_interval == 0:

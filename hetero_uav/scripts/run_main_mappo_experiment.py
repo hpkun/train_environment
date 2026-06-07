@@ -13,8 +13,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+import threading
 import subprocess
-import sys
+from collections import deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,22 +30,72 @@ OBS_ADAPTER = "v2"
 OPPONENT = "greedy_fsm"
 
 
-def _run(cmd: list[str], label: str, timeout: int | None = None) -> None:
+def _stream_pipe(pipe, log_path: Path, echo: bool, tail: deque[str]) -> None:
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        for line in iter(pipe.readline, ""):
+            log_file.write(line)
+            log_file.flush()
+            tail.append(line.rstrip())
+            if echo:
+                print(line, end="", flush=True)
+    pipe.close()
+
+
+def _run_streaming(
+    cmd: list[str],
+    label: str,
+    stdout_path: Path,
+    stderr_path: Path,
+    timeout: int | None = None,
+) -> None:
     print(f"[exp] {label}: {' '.join(cmd)}", flush=True)
-    result = subprocess.run(
+    print(f"[exp] {label} stdout log: {stdout_path}", flush=True)
+    print(f"[exp] {label} stderr log: {stderr_path}", flush=True)
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    stdout_tail: deque[str] = deque(maxlen=40)
+    stderr_tail: deque[str] = deque(maxlen=40)
+    process = subprocess.Popen(
         cmd,
         cwd=str(ROOT),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=timeout,
+        env=env,
     )
-    if result.returncode != 0:
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout_thread = threading.Thread(
+        target=_stream_pipe,
+        args=(process.stdout, stdout_path, True, stdout_tail),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_stream_pipe,
+        args=(process.stderr, stderr_path, False, stderr_tail),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+        raise SystemExit(f"{label} timed out")
+    stdout_thread.join()
+    stderr_thread.join()
+    if returncode != 0:
         print(f"[exp] FAIL {label}", flush=True)
-        print(result.stdout[-500:], flush=True)
-        print(result.stderr[-500:], flush=True)
-        raise SystemExit(f"{label} failed (rc={result.returncode})")
+        print("[exp] stdout tail:", flush=True)
+        print("\n".join(stdout_tail), flush=True)
+        print("[exp] stderr tail:", flush=True)
+        print("\n".join(stderr_tail), flush=True)
+        raise SystemExit(f"{label} failed (rc={returncode})")
     print(f"[exp] OK {label}", flush=True)
 
 
@@ -63,9 +115,21 @@ def main() -> None:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    print("[exp] protocol", flush=True)
+    print(f"[exp] train_config={TRAIN_CONFIG}", flush=True)
+    print(f"[exp] eval_configs={EVAL_CONFIGS}", flush=True)
+    print(f"[exp] obs_adapter_version={OBS_ADAPTER}", flush=True)
+    print(f"[exp] opponent_policy={OPPONENT}", flush=True)
+    print("[exp] reward_mode=brma_legacy", flush=True)
+    print(f"[exp] total_env_steps={args.total_env_steps}", flush=True)
+    print(f"[exp] rollout_length={args.rollout_length}", flush=True)
+    print(f"[exp] max_steps={args.max_steps}", flush=True)
+    print(f"[exp] eval_episodes={args.eval_episodes}", flush=True)
+    print(f"[exp] output_dir={out_dir}", flush=True)
+
     # ---- 1. Train ----
     train_cmd = [
-        sys.executable, "-u",
+        "python", "-u",
         str(ROOT / "scripts" / "train_mappo_baseline.py"),
         "--config", TRAIN_CONFIG,
         "--obs-adapter-version", OBS_ADAPTER,
@@ -79,7 +143,12 @@ def main() -> None:
         "--opponent-policy", OPPONENT,
         "--save-interval", "10",
     ]
-    _run(train_cmd, "train")
+    _run_streaming(
+        train_cmd,
+        "train",
+        out_dir / "train_stdout.log",
+        out_dir / "train_stderr.log",
+    )
 
     model_pt = out_dir / "latest" / "model.pt"
     meta_json = out_dir / "latest" / "meta.json"
@@ -104,7 +173,7 @@ def main() -> None:
     # ---- 2. Eval ----
     eval_json = out_dir / "eval_summary.json"
     eval_cmd = [
-        sys.executable, "-u",
+        "python", "-u",
         str(ROOT / "scripts" / "eval_mappo_zero_shot.py"),
         "--model", str(model_pt),
         "--obs-adapter-version", OBS_ADAPTER,
@@ -114,7 +183,12 @@ def main() -> None:
         "--configs", *EVAL_CONFIGS,
         "--summary-json", str(eval_json),
     ]
-    _run(eval_cmd, "eval")
+    _run_streaming(
+        eval_cmd,
+        "eval",
+        out_dir / "eval_stdout.log",
+        out_dir / "eval_stderr.log",
+    )
 
     if not eval_json.exists():
         raise SystemExit(f"missing {eval_json}")
@@ -165,6 +239,9 @@ def main() -> None:
             raise SystemExit(f"dim mismatch: {rec['eval_config']}")
 
     print(f"[exp] output_dir: {out_dir}", flush=True)
+    print(f"[exp] train_log.csv: {train_csv}", flush=True)
+    print(f"[exp] latest/model.pt: {model_pt}", flush=True)
+    print(f"[exp] eval_summary.json: {eval_json}", flush=True)
     print(f"[exp] summary: {summary_json}", flush=True)
     print(f"[exp] passed — main experiment smoke OK", flush=True)
 
