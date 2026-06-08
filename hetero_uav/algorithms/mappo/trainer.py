@@ -8,6 +8,15 @@ import torch.nn.functional as F
 from .utils import compute_gae
 
 
+def _team_dones_from_repeated_agent_dones(dones):
+    """Extract team episode done from repeated per-red columns.
+
+    Training stores the same episode-level done value for every controlled red
+    agent. Individual death is represented by active_mask, not by team_dones.
+    """
+    return dones[:, 0].float()
+
+
 class PPOTrainer:
     """Train MAPPO actor-critic with simple batch PPO."""
 
@@ -31,13 +40,13 @@ class PPOTrainer:
 
     def update(self, buffer):
         (actor_obs, critic_state, actions, old_log_probs,
-         rewards, dones, values, red_valid) = buffer.get(
+         rewards, dones, values, active_mask) = buffer.get(
             next(self.model.parameters()).device)
 
         T, num_red = rewards.shape
-        # Use mean reward over valid agents as team reward
-        valid_count = red_valid[:, :num_red].sum(dim=-1).clamp(min=1)
-        team_reward = (rewards * red_valid[:, :num_red]).sum(dim=-1) / valid_count
+        # active_mask is an alive-agent mask, not a slot-valid mask.
+        valid_count = active_mask[:, :num_red].sum(dim=-1).clamp(min=1)
+        team_reward = (rewards * active_mask[:, :num_red]).sum(dim=-1) / valid_count
 
         # team value + bootstrap
         with torch.no_grad():
@@ -45,7 +54,7 @@ class PPOTrainer:
         team_values = values  # scalar per step
         all_values = torch.cat([team_values, next_val]).to(rewards.device)
 
-        team_dones = (dones.sum(dim=-1) > 0).float()
+        team_dones = _team_dones_from_repeated_agent_dones(dones)
 
         advantages, returns = compute_gae(
             team_reward, all_values, team_dones,
@@ -71,8 +80,8 @@ class PPOTrainer:
             entropy = entropy.view(T, num_red)
             new_values = new_values.squeeze(-1)
 
-            # Mask invalid agents
-            valid = red_valid[:, :num_red]
+            # Mask dead / inactive agents out of actor loss and entropy.
+            valid = active_mask[:, :num_red]
             ratio = torch.exp(new_log_prob - old_log_probs)
             surr1 = ratio * advantages.unsqueeze(-1)
             surr2 = torch.clamp(ratio, 1 - self.clip_param, 1 + self.clip_param)                     * advantages.unsqueeze(-1)

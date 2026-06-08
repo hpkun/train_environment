@@ -16,7 +16,7 @@ class RolloutBuffer:
         rewards[t]     : (num_red,)
         dones[t]       : (num_red,)
         value          : scalar (team value)
-        red_valid[t]   : (5,)
+        red_valid[t]   : (num_red,)
     """
 
     def __init__(self, max_len: int, num_red: int,
@@ -32,7 +32,7 @@ class RolloutBuffer:
         self.rewards       = np.zeros((max_len, num_red), dtype=np.float32)
         self.dones         = np.zeros((max_len, num_red), dtype=np.float32)
         self.values        = np.zeros(max_len, dtype=np.float32)
-        self.red_valid     = np.zeros((max_len, 5), dtype=np.float32)
+        self.red_valid     = np.zeros((max_len, num_red), dtype=np.float32)
         self.full = False
 
     def store(self, actor_obs, critic_state, actions, log_probs,

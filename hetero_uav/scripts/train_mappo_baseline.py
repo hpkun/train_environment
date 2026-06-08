@@ -43,6 +43,35 @@ def _alive_counts(env) -> tuple[int, int]:
     return red_alive, blue_alive
 
 
+def _build_red_alive_mask(info: dict, env, red_ids: list[str]) -> np.ndarray:
+    """Build PPO active-agent mask for controlled red agents.
+
+    ``red_valid_mask`` from the observation adapter means a padded slot exists.
+    For PPO loss masking we need an alive mask so dead agents stop contributing
+    to actor loss and team reward aggregation.
+    """
+    mask = np.zeros(len(red_ids), dtype=np.float32)
+    for i, rid in enumerate(red_ids):
+        agent_info = info.get(rid, {}) if isinstance(info, dict) else {}
+        if isinstance(agent_info, dict) and "alive" in agent_info:
+            alive = bool(agent_info["alive"])
+        else:
+            sim = getattr(env, "red_planes", {}).get(rid) if env is not None else None
+            alive = bool(sim is not None and getattr(sim, "is_alive", False))
+        mask[i] = 1.0 if alive else 0.0
+    return mask
+
+
+def _team_episode_done(terminated: dict, truncated: dict) -> bool:
+    """Return episode-level done for centralized critic GAE.
+
+    Individual aircraft death should be represented through the active-agent
+    mask. It should not truncate centralized team value unless the whole episode
+    has terminated or truncated.
+    """
+    return bool(all(terminated.values()) or all(truncated.values()))
+
+
 def _mav_alive(env) -> bool:
     sim = env.red_planes.get("red_0")
     return sim is not None and sim.is_alive
@@ -296,7 +325,10 @@ def main():
             actor_obs_np = np.stack(actor_obs_list)
 
             critic_state_np = result['critic_state']
-            red_valid_np = result['red_valid_mask']
+            # Adapter red_valid_mask is a padded-slot mask. PPO needs an
+            # active-agent mask, so dead red agents do not contribute to actor
+            # loss or team reward after individual death.
+            red_alive_mask = _build_red_alive_mask(info, env, env.red_ids)
 
             actor_obs_t = torch.as_tensor(actor_obs_np, device=device)
             critic_t = torch.as_tensor(critic_state_np, device=device).unsqueeze(0)
@@ -322,19 +354,20 @@ def main():
             actions_dict.update(opponent.act(obs, env.blue_ids, env=env))
 
             obs, rewards_dict, terminated, truncated, info = env.step(actions_dict)
+            episode_done = _team_episode_done(terminated, truncated)
 
             rewards_np = np.array(
                 [float(rewards_dict.get(rid, 0.0)) for rid in env.red_ids],
                 dtype=np.float32)
-            dones_np = np.array(
-                [float(terminated.get(rid, False) or truncated.get(rid, False))
-                 for rid in env.red_ids], dtype=np.float32)
+            # Team done is repeated for each red agent because centralized GAE
+            # should reset only on episode-level termination/truncation.
+            dones_np = np.full((num_red,), float(episode_done), dtype=np.float32)
 
             current_ep_returns += rewards_np
             current_ep_length += 1
 
             buffer.store(actor_obs_np, critic_state_np, action_np, log_prob_np,
-                         rewards_np, dones_np, value_np, red_valid_np)
+                         rewards_np, dones_np, value_np, red_alive_mask)
             total_steps += 1
 
             # Missile fire stats from info
@@ -353,7 +386,7 @@ def main():
                     if isinstance(reasons, dict):
                         recent_missile_stats["hit"] += int(reasons.get("hit", 0))
 
-            if all(terminated.values()) or all(truncated.values()):
+            if episode_done:
                 episodes_completed += 1
                 episode_returns.append(float(current_ep_returns.mean()))
                 episode_lengths.append(current_ep_length)
