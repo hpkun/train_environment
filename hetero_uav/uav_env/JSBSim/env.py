@@ -544,7 +544,7 @@ class UavCombatEnv(gymnasium.Env):
         """Convert normalised actor outputs ∈ [-1, 1] to physical setpoints.
 
         Control-flow priority (team-aware):
-          Layer 1 — Missile evasion:     BOTH teams  (paper §2.1.3, scripted)
+          Layer 1 — Missile evasion:     RED team only  (scripted)
           Layer 2 — GCAS safety net:     BLUE only   (hard-coded baseline)
           Layer 3 — Agent action:        BOTH teams  (identical §2.4 mapping)
 
@@ -569,11 +569,13 @@ class UavCombatEnv(gymnasium.Env):
             # =================================================================
             #  Layer 1 — Missile Evasion Script (paper §2.1.3)
             #
-            #  BOTH teams.  When MWS detects an incoming missile, the script
-            #  overrides all other control.  The paper explicitly lists missile
-            #  evasion as scripted behaviour that is NOT learned.
+            #  RED team only.  Missile warning / scripted evasion is modeled as
+            #  a red MAV/UAV formation information advantage.  The blue
+            #  rule-based opponent does not use scripted missile evasion.
             # =================================================================
-            incoming = sim.check_missile_warning()
+            incoming = None
+            if not is_blue:
+                incoming = sim.check_missile_warning()
             if incoming is not None:
                 alt_m = sim.get_geodetic()[2]
 
