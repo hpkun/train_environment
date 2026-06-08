@@ -92,13 +92,15 @@ class HeteroUavCombatEnv(UavCombatEnv):
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
-        if hetero_reward_mode not in {"brma_legacy", "minimal_v1"}:
+        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1"}:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
-        # Cached per-step obs for reward overlay (minimal_v1)
+        # Cached per-step obs for reward overlay (minimal_v1 / role_v1)
         self._last_step_obs: dict = {}
-        # First-death detection for MAV (minimal_v1) — penalize once per episode
+        # First-death detection for MAV — penalize once per episode
         self._mav_death_penalized: bool = False
+        # First-death detection per UAV (role_v1)
+        self._uav_death_penalized: set[str] = set()
         if observation_mode not in {"brma_sensor", "mav_shared_geo"}:
             raise ValueError(f"unknown observation_mode: {observation_mode}")
         self.observation_mode = observation_mode
@@ -185,15 +187,16 @@ class HeteroUavCombatEnv(UavCombatEnv):
     def step(self, actions: dict):
         trimmed = self._apply_action_trim(actions)
         obs, rewards, terminated, truncated, info = super().step(trimmed)
-        if self.hetero_reward_mode == "minimal_v1":
+        if self.hetero_reward_mode in {"minimal_v1", "role_v1"}:
             self._last_step_obs = obs
         return obs, rewards, terminated, truncated, info
 
     def reset(self, *args, **kwargs):
         self._last_step_obs = {}
         self._mav_death_penalized = False
+        self._uav_death_penalized = set()
         obs, info = super().reset(*args, **kwargs)
-        if self.hetero_reward_mode == "minimal_v1":
+        if self.hetero_reward_mode in {"minimal_v1", "role_v1"}:
             self._last_step_obs = obs
         return obs, info
 
@@ -449,56 +452,197 @@ class HeteroUavCombatEnv(UavCombatEnv):
         """Override to add minimal hetero role-aware overlay."""
         base_rewards, components = super()._compute_rewards()
 
-        if self.hetero_reward_mode != "minimal_v1":
+        if self.hetero_reward_mode not in {"minimal_v1", "role_v1"}:
             return base_rewards, components
 
-        # ---- minimal_v1 overlay ----
         mav_id = self.red_ids[0] if self.red_ids else None
 
+        # ---- minimal_v1 overlay ----
+        if self.hetero_reward_mode == "minimal_v1":
+            for aid in self.agent_ids:
+                comp = components.setdefault(aid, {})
+                for key in ("r_mav_survival", "r_mav_death", "r_mav_support",
+                            "r_shared_track_used", "r_attack_kill_bonus"):
+                    comp.setdefault(key, 0.0)
+
+            if mav_id and mav_id in self.red_planes:
+                mav = self.red_planes[mav_id]
+                r_mav_survival = 0.005 if mav.is_alive else 0.0
+                if mav.is_alive:
+                    self._mav_death_penalized = False
+                    r_mav_death = 0.0
+                elif not self._mav_death_penalized:
+                    r_mav_death = -2.0
+                    self._mav_death_penalized = True
+                else:
+                    r_mav_death = 0.0
+                base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_mav_survival + r_mav_death
+                components[mav_id]["r_mav_survival"] = float(r_mav_survival)
+                components[mav_id]["r_mav_death"] = float(r_mav_death)
+
+            for rid in self.red_ids:
+                if rid not in self._last_step_obs:
+                    continue
+                o = self._last_step_obs[rid]
+                shared_count = 0
+                src = np.asarray(o.get("enemy_track_source", []), dtype=np.float32)
+                if src.ndim == 2 and src.shape[1] >= 2:
+                    shared_count = int(np.sum(src[:, 1] > 0.5))
+                if shared_count > 0 and mav_id and mav_id != rid:
+                    support = min(0.01 * shared_count, 0.05)
+                    base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + support
+                    components[mav_id]["r_mav_support"] = float(support)
+                    used = min(0.005 * shared_count, 0.02)
+                    base_rewards[rid] = base_rewards.get(rid, 0.0) + used
+                    components[rid]["r_shared_track_used"] = float(used)
+
+            return base_rewards, components
+
+        # ---- role_v1 overlay ----
+        ROLE_MAV_KEYS = [
+            "r_role_mav_survival", "r_role_mav_death",
+            "r_role_mav_support", "r_role_mav_team_contribution",
+        ]
+        ROLE_UAV_KEYS = [
+            "r_role_uav_attack_window", "r_role_uav_kill_bonus",
+            "r_role_uav_death_penalty", "r_role_uav_missile_warning",
+        ]
         for aid in self.agent_ids:
             comp = components.setdefault(aid, {})
-            for key in ("r_mav_survival", "r_mav_death", "r_mav_support",
-                        "r_shared_track_used", "r_attack_kill_bonus"):
-                comp.setdefault(key, 0.0)
+            role = self.agent_roles.get(aid, "")
+            if role == "mav":
+                for key in ROLE_MAV_KEYS:
+                    comp.setdefault(key, 0.0)
+            elif role == "attack_uav":
+                for key in ROLE_UAV_KEYS:
+                    comp.setdefault(key, 0.0)
 
-        # A. MAV survival shaping
+        # --- A. MAV rewards ---
         if mav_id and mav_id in self.red_planes:
             mav = self.red_planes[mav_id]
-            r_mav_survival = 0.005 if mav.is_alive else 0.0
 
+            # A1. Survival (+0.01/step)
             if mav.is_alive:
+                r = 0.01
                 self._mav_death_penalized = False
-                r_mav_death = 0.0
-            elif not self._mav_death_penalized:
-                # First death detected (crash, missile kill, or any cause)
-                r_mav_death = -2.0
-                self._mav_death_penalized = True
             else:
-                r_mav_death = 0.0
+                r = 0.0
+            base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r
+            components[mav_id]["r_role_mav_survival"] = float(r)
 
-            base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_mav_survival + r_mav_death
-            components[mav_id]["r_mav_survival"] = float(r_mav_survival)
-            components[mav_id]["r_mav_death"] = float(r_mav_death)
+            # A2. Death penalty (-10, once)
+            if not mav.is_alive and not self._mav_death_penalized:
+                d = -10.0
+                self._mav_death_penalized = True
+                base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + d
+                components[mav_id]["r_role_mav_death"] = float(d)
+            else:
+                components[mav_id]["r_role_mav_death"] = 0.0
 
-        # B. MAV support shaping — from cached obs
-        for rid in self.red_ids:
-            if rid not in self._last_step_obs:
-                continue
-            o = self._last_step_obs[rid]
-            shared_count = 0
-            src = np.asarray(o.get("enemy_track_source", []), dtype=np.float32)
-            if src.ndim == 2 and src.shape[1] >= 2:
-                shared_count = int(np.sum(src[:, 1] > 0.5))
-            if shared_count > 0 and mav_id and mav_id != rid:
-                support = min(0.01 * shared_count, 0.05)
+        # A3. MAV support: bonus when MAV sees alive enemies
+        if mav_id and mav_id in self._last_step_obs:
+            o = self._last_step_obs.get(mav_id, {})
+            alive_mask = np.asarray(o.get("enemy_alive_mask", []), dtype=np.float32)
+            enemy_seen = int(np.sum(alive_mask > 0.5))
+            support = min(0.005 * enemy_seen, 0.03)
+            components[mav_id].setdefault("r_role_mav_support", 0.0)
+            if support > 0:
                 base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + support
-                components[mav_id]["r_mav_support"] = float(support)
-                used = min(0.005 * shared_count, 0.02)
-                base_rewards[rid] = base_rewards.get(rid, 0.0) + used
-                components[rid]["r_shared_track_used"] = float(used)
+                components[mav_id]["r_role_mav_support"] = float(support)
 
-        # C. attack UAV kill bonus — TODO, set 0 for now
-        # D. terminal overlay — not modified
+            # A3b. Extra support when UAVs use MAV shared tracks
+            for rid in self.red_ids:
+                if rid == mav_id or rid not in self._last_step_obs:
+                    continue
+                uav_obs = self._last_step_obs[rid]
+                src = np.asarray(uav_obs.get("enemy_track_source", []), dtype=np.float32)
+                if src.ndim == 2 and src.shape[1] >= 2:
+                    shared = int(np.sum(src[:, 1] > 0.5))
+                    if shared > 0:
+                        extra = min(0.005 * shared, 0.02)
+                        base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + extra
+                        components[mav_id]["r_role_mav_support"] = (
+                            float(components[mav_id].get("r_role_mav_support", 0.0)) + extra
+                        )
+
+        # A4. MAV team contribution: when red kills, MAV alive gets bonus
+        for aid in self.red_ids:
+            kills = self._step_kill_count.get(aid, 0)
+            if kills > 0 and mav_id and mav_id != aid:
+                mav_sim = self.red_planes.get(mav_id)
+                if mav_sim is not None and mav_sim.is_alive:
+                    bonus = min(1.0 * kills, 5.0)
+                    base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + bonus
+                    components[mav_id].setdefault("r_role_mav_team_contribution", 0.0)
+                    components[mav_id]["r_role_mav_team_contribution"] = (
+                        float(components[mav_id]["r_role_mav_team_contribution"]) + bonus
+                    )
+
+        # --- B. UAV rewards ---
+        for aid in self.red_ids:
+            role = self.agent_roles.get(aid, "")
+            if role != "attack_uav":
+                continue
+            sim = self.red_planes.get(aid)
+            if sim is None or not sim.is_alive:
+                # UAV death penalty (once)
+                if aid not in self._uav_death_penalized:
+                    pid = -5.0
+                    self._uav_death_penalized.add(aid)
+                    base_rewards[aid] = base_rewards.get(aid, 0.0) + pid
+                    components[aid]["r_role_uav_death_penalty"] = float(pid)
+                continue
+
+            # B1. Attack window shaping
+            if aid in self._last_step_obs:
+                uav_obs = self._last_step_obs[aid]
+                ego_geo = np.asarray(uav_obs.get("ego_geo_state", []), dtype=np.float32)
+                enemy_geo = np.asarray(uav_obs.get("enemy_geo_states", []), dtype=np.float32)
+                enemy_alive = np.asarray(uav_obs.get("enemy_alive_mask", []), dtype=np.float32)
+
+                window_reward = 0.0
+                if enemy_geo.ndim == 2 and enemy_alive.ndim == 1:
+                    for i in range(min(len(enemy_alive), enemy_geo.shape[0])):
+                        if enemy_alive[i] < 0.5:
+                            continue
+                        eg = enemy_geo[i]
+                        # eg = [speed_diff, delta_h, distance, ata/pi, aa/pi]
+                        distance_norm = abs(float(eg[2]))  # distance/40000
+                        ata_norm = abs(float(eg[3]))        # ata/pi
+                        aa_norm = abs(float(eg[4]))         # aa/pi
+                        # Reward if within reasonable engagement parameters
+                        if distance_norm < 0.5 and ata_norm < 0.3:
+                            window_reward += 0.005
+                if window_reward > 0:
+                    window_reward = min(window_reward, 0.03)
+                    base_rewards[aid] = base_rewards.get(aid, 0.0) + window_reward
+                    components[aid]["r_role_uav_attack_window"] = float(window_reward)
+                else:
+                    components[aid]["r_role_uav_attack_window"] = 0.0
+
+            # B2. Kill bonus
+            kills = self._step_kill_count.get(aid, 0)
+            if kills > 0:
+                kb = min(8.0 * kills, 10.0)
+                base_rewards[aid] = base_rewards.get(aid, 0.0) + kb
+                components[aid]["r_role_uav_kill_bonus"] = float(kb)
+            else:
+                components[aid]["r_role_uav_kill_bonus"] = 0.0
+
+            # B3. Missile warning (light penalty)
+            mw = 1.0
+            if aid in self._last_step_obs:
+                mw_arr = np.asarray(
+                    self._last_step_obs[aid].get("missile_warning", [0.0]),
+                    dtype=np.float32,
+                ).ravel()
+                if len(mw_arr) > 0 and mw_arr[0] > 0.5:
+                    mw = -0.005
+                else:
+                    mw = 0.0
+            components[aid]["r_role_uav_missile_warning"] = float(mw)
+            if mw != 0.0:
+                base_rewards[aid] = base_rewards.get(aid, 0.0) + mw
 
         return base_rewards, components
 
