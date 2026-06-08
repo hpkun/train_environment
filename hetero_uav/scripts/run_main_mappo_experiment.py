@@ -16,16 +16,34 @@ import os
 import threading
 import subprocess
 from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-TRAIN_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml"
-EVAL_CONFIGS = [
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
-]
-OBS_ADAPTER = "v2"
+
+@dataclass
+class ExperimentSpec:
+    train_config: str = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml"
+    eval_configs: list[str] = field(default_factory=lambda: [
+        "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
+        "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
+    ])
+    obs_adapter_version: str = "v2"
+    opponent_policy: str = "greedy_fsm"
+    total_env_steps: int = 100000
+    rollout_length: int = 128
+    max_steps: int = 1000
+    eval_episodes: int = 20
+    seed: int = 0
+    device: str = "cpu"
+    output_dir: str = "outputs/main_mappo_experiment"
+    enable_eval_during_training: bool = False
+    eval_interval_steps: int = 50000
+    train_eval_episodes: int = 5
+
+
+# -- internal helpers --------------------------------------------------------
 
 
 def _stream_pipe(pipe, log_path: Path, echo: bool, tail: deque[str]) -> None:
@@ -39,13 +57,8 @@ def _stream_pipe(pipe, log_path: Path, echo: bool, tail: deque[str]) -> None:
     pipe.close()
 
 
-def _run_streaming(
-    cmd: list[str],
-    label: str,
-    stdout_path: Path,
-    stderr_path: Path,
-    timeout: int | None = None,
-) -> None:
+def _run_streaming(cmd: list[str], label: str, stdout_path: Path,
+                   stderr_path: Path, timeout: int | None = None) -> None:
     print(f"[exp] {label}: {' '.join(cmd)}", flush=True)
     print(f"[exp] {label} stdout log: {stdout_path}", flush=True)
     print(f"[exp] {label} stderr log: {stderr_path}", flush=True)
@@ -55,27 +68,15 @@ def _run_streaming(
     stdout_tail: deque[str] = deque(maxlen=40)
     stderr_tail: deque[str] = deque(maxlen=40)
     process = subprocess.Popen(
-        cmd,
-        cwd=str(ROOT),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
+        cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", env=env,
     )
     assert process.stdout is not None
     assert process.stderr is not None
     stdout_thread = threading.Thread(
-        target=_stream_pipe,
-        args=(process.stdout, stdout_path, True, stdout_tail),
-        daemon=True,
-    )
+        target=_stream_pipe, args=(process.stdout, stdout_path, True, stdout_tail), daemon=True)
     stderr_thread = threading.Thread(
-        target=_stream_pipe,
-        args=(process.stderr, stderr_path, False, stderr_tail),
-        daemon=True,
-    )
+        target=_stream_pipe, args=(process.stderr, stderr_path, False, stderr_tail), daemon=True)
     stdout_thread.start()
     stderr_thread.start()
     try:
@@ -97,71 +98,48 @@ def _run_streaming(
     print(f"[exp] OK {label}", flush=True)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Minimal main-experiment runner (MAPPO baseline)"
-    )
-    parser.add_argument("--total-env-steps", type=int, default=100000)
-    parser.add_argument("--rollout-length", type=int, default=128)
-    parser.add_argument("--max-steps", type=int, default=1000)
-    parser.add_argument("--eval-episodes", type=int, default=20)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--output-dir", default="outputs/main_mappo_experiment")
-    parser.add_argument(
-        "--opponent-policy",
-        choices=["rule_nearest", "greedy_fsm"],
-        default="greedy_fsm",
-    )
-    parser.add_argument('--eval-during-training', action='store_true')
-    parser.add_argument('--eval-interval-steps', type=int, default=50000)
-    parser.add_argument('--train-eval-episodes', type=int, default=5)
-    args = parser.parse_args()
+# -- public API --------------------------------------------------------------
 
-    out_dir = Path(args.output_dir)
+
+def run_experiment(spec: ExperimentSpec) -> None:
+    out_dir = Path(spec.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("[exp] protocol", flush=True)
-    print(f"[exp] train_config={TRAIN_CONFIG}", flush=True)
-    print(f"[exp] eval_configs={EVAL_CONFIGS}", flush=True)
-    print(f"[exp] obs_adapter_version={OBS_ADAPTER}", flush=True)
-    print(f"[exp] opponent_policy={args.opponent_policy}", flush=True)
-    print("[exp] reward_mode=brma_legacy", flush=True)
-    print(f"[exp] total_env_steps={args.total_env_steps}", flush=True)
-    print(f"[exp] rollout_length={args.rollout_length}", flush=True)
-    print(f"[exp] max_steps={args.max_steps}", flush=True)
-    print(f"[exp] eval_episodes={args.eval_episodes}", flush=True)
-    print(f"[exp] eval_during_training={args.eval_during_training}", flush=True)
+    print(f"[exp] train_config={spec.train_config}", flush=True)
+    print(f"[exp] eval_configs={spec.eval_configs}", flush=True)
+    print(f"[exp] obs_adapter_version={spec.obs_adapter_version}", flush=True)
+    print(f"[exp] opponent_policy={spec.opponent_policy}", flush=True)
+    print(f"[exp] total_env_steps={spec.total_env_steps}", flush=True)
+    print(f"[exp] rollout_length={spec.rollout_length}", flush=True)
+    print(f"[exp] max_steps={spec.max_steps}", flush=True)
+    print(f"[exp] eval_episodes={spec.eval_episodes}", flush=True)
+    print(f"[exp] eval_during_training={spec.enable_eval_during_training}", flush=True)
     print(f"[exp] output_dir={out_dir}", flush=True)
 
     # ---- 1. Train ----
     train_cmd = [
         "python", "-u",
         str(ROOT / "scripts" / "train_mappo_baseline.py"),
-        "--config", TRAIN_CONFIG,
-        "--obs-adapter-version", OBS_ADAPTER,
-        "--total-env-steps", str(args.total_env_steps),
-        "--rollout-length", str(args.rollout_length),
-        "--max-steps", str(args.max_steps),
-        "--seed", "0",
-        "--device", args.device,
+        "--config", spec.train_config,
+        "--obs-adapter-version", spec.obs_adapter_version,
+        "--total-env-steps", str(spec.total_env_steps),
+        "--rollout-length", str(spec.rollout_length),
+        "--max-steps", str(spec.max_steps),
+        "--seed", str(spec.seed),
+        "--device", spec.device,
         "--output-dir", str(out_dir),
         "--log-csv", str(out_dir / "train_log.csv"),
-        "--opponent-policy", args.opponent_policy,
+        "--opponent-policy", spec.opponent_policy,
         "--save-interval", "10",
     ]
-    if args.eval_during_training:
+    if spec.enable_eval_during_training:
         train_cmd.extend([
             "--eval-during-training",
-            "--eval-interval-steps", str(args.eval_interval_steps),
-            "--train-eval-episodes", str(args.train_eval_episodes),
+            "--eval-interval-steps", str(spec.eval_interval_steps),
+            "--train-eval-episodes", str(spec.train_eval_episodes),
         ])
-    _run_streaming(
-        train_cmd,
-        "train",
-        out_dir / "train_stdout.log",
-        out_dir / "train_stderr.log",
-    )
+    _run_streaming(train_cmd, "train", out_dir / "train_stdout.log", out_dir / "train_stderr.log")
 
     model_pt = out_dir / "latest" / "model.pt"
     meta_json = out_dir / "latest" / "meta.json"
@@ -176,7 +154,6 @@ def main() -> None:
     if actor_dim != 96 or critic_dim != 480:
         raise SystemExit(f"dim mismatch: actor={actor_dim}, critic={critic_dim}")
 
-    # Check train log for NaN
     train_csv = out_dir / "train_log.csv"
     with open(train_csv, "r", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
@@ -189,19 +166,14 @@ def main() -> None:
         "python", "-u",
         str(ROOT / "scripts" / "eval_mappo_zero_shot.py"),
         "--model", str(model_pt),
-        "--obs-adapter-version", OBS_ADAPTER,
-        "--episodes", str(args.eval_episodes),
-        "--device", args.device,
-        "--opponent-policy", args.opponent_policy,
-        "--configs", *EVAL_CONFIGS,
+        "--obs-adapter-version", spec.obs_adapter_version,
+        "--episodes", str(spec.eval_episodes),
+        "--device", spec.device,
+        "--opponent-policy", spec.opponent_policy,
+        "--configs", *spec.eval_configs,
         "--summary-json", str(eval_json),
     ]
-    _run_streaming(
-        eval_cmd,
-        "eval",
-        out_dir / "eval_stdout.log",
-        out_dir / "eval_stderr.log",
-    )
+    _run_streaming(eval_cmd, "eval", out_dir / "eval_stdout.log", out_dir / "eval_stderr.log")
 
     if not eval_json.exists():
         raise SystemExit(f"missing {eval_json}")
@@ -211,12 +183,12 @@ def main() -> None:
     summary_records: list[dict] = []
     for rec in eval_data:
         summary_records.append({
-            "seed": args.seed,
-            "total_env_steps": args.total_env_steps,
-            "train_config": TRAIN_CONFIG,
+            "seed": spec.seed,
+            "total_env_steps": spec.total_env_steps,
+            "train_config": spec.train_config,
             "eval_config": rec.get("config", ""),
-            "opponent_policy": args.opponent_policy,
-            "obs_adapter_version": OBS_ADAPTER,
+            "opponent_policy": spec.opponent_policy,
+            "obs_adapter_version": spec.obs_adapter_version,
             "actor_dim": actor_dim,
             "critic_dim": critic_dim,
             "avg_return": rec.get("avg_return", 0.0),
@@ -243,7 +215,6 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(summary_records)
 
-    # Final checks
     for rec in summary_records:
         if rec["nan_detected"]:
             raise SystemExit(f"eval NaN: {rec['eval_config']}")
@@ -255,6 +226,40 @@ def main() -> None:
     print(f"[exp] summary: {summary_json}", flush=True)
     print(f"[exp] best_checkpoint_exists: {best_pt.exists()}", flush=True)
     print(f"[exp] passed — main experiment smoke OK", flush=True)
+
+
+# -- CLI entry (brma_legacy mainline) ----------------------------------------
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Minimal main-experiment runner (MAPPO baseline)")
+    parser.add_argument("--total-env-steps", type=int, default=100000)
+    parser.add_argument("--rollout-length", type=int, default=128)
+    parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--eval-episodes", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--output-dir", default="outputs/main_mappo_experiment")
+    parser.add_argument("--opponent-policy", choices=["rule_nearest", "greedy_fsm"], default="greedy_fsm")
+    parser.add_argument('--eval-during-training', action='store_true')
+    parser.add_argument('--eval-interval-steps', type=int, default=50000)
+    parser.add_argument('--train-eval-episodes', type=int, default=5)
+    args = parser.parse_args()
+
+    spec = ExperimentSpec(
+        total_env_steps=args.total_env_steps,
+        rollout_length=args.rollout_length,
+        max_steps=args.max_steps,
+        eval_episodes=args.eval_episodes,
+        seed=args.seed,
+        device=args.device,
+        output_dir=args.output_dir,
+        opponent_policy=args.opponent_policy,
+        enable_eval_during_training=args.eval_during_training,
+        eval_interval_steps=args.eval_interval_steps,
+        train_eval_episodes=args.train_eval_episodes,
+    )
+    run_experiment(spec)
 
 
 if __name__ == "__main__":

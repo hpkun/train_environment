@@ -11,32 +11,28 @@
 | Blue opponent | `greedy_fsm` |
 | Algorithm | Current shared-actor MAPPO baseline (unchanged) |
 
-## Composition
+## Running
 
-- Train: red = 1 MAV + 2 attack_uav, blue = 2 attack_uav
-- Eval 3v2: same as train
-- Eval 5v4: red = 1 MAV + 4 attack_uav, blue = 4 attack_uav
+### Mainline (brma_legacy)
 
-## Opponent Policy
+```bash
+python scripts/run_main_mappo_experiment.py --total-env-steps 500000 ...
+```
 
-Default blue opponent is `greedy_fsm`. For baseline trainability
-diagnostics, `--opponent-policy rule_nearest` runs a weaker rule-based
-opponent pilot. This is not a new method or an environment change.
+### role_v1 Reward Ablation
 
-## Training-Time Diagnostics
+```bash
+python scripts/run_main_mappo_role_v1_experiment.py
+```
 
-New since 2026-06: training now records extended metrics in `train_log.csv`
-(action saturation, episode outcome rates, missile stats) and can run
-lightweight periodic eval (`--eval-during-training`) with best-checkpoint
-selection.  Full checkpoint sweeps are discouraged for regular workflow;
-use `eval_log.csv` and `best/model.pt` instead.  Checkpoint sweeps remain
-available for post-hoc debug only.
+No CLI arguments needed — edit the script's top-level constants to adjust
+steps, output dir, etc.
 
 ## Experiment Scale
 
 | Stage | Total env steps | Purpose |
 |---|---|---|
-| Pilot | 100k | Quick sanity check |
+| Pilot | 50k–100k | Quick sanity check |
 | Baseline candidate | 500k | Formal baseline for paper |
 
 This is a MAPPO baseline — not a method module.  No attention, HAPPO,
