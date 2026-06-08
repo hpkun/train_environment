@@ -101,3 +101,20 @@ def test_smoke_online_eval():
 
     eval_log_path = out / "eval_log.csv"
     assert eval_log_path.exists(), f"missing {eval_log_path}"
+
+def _count_hits_helper(mt):
+    """Same logic as scripts/train_mappo_baseline.py to avoid gymnasium import."""
+    total = 0
+    if isinstance(mt, dict):
+        for team, reasons in mt.items():
+            if isinstance(reasons, dict):
+                total += int(reasons.get("hit", 0))
+    return total
+
+
+def test_missile_hit_count_from_nested_info():
+    mt = {"red": {"hit": 1}, "blue": {"hit": 2}, "none": {}}
+    assert _count_hits_helper(mt) == 3
+    assert _count_hits_helper({}) == 0
+    assert _count_hits_helper({"red": {"miss": 1}}) == 0
+    assert _count_hits_helper({"red": {"hit": 5}, "blue": {"hit": 3}}) == 8

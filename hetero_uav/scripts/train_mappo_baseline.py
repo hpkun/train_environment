@@ -48,6 +48,19 @@ def _mav_alive(env) -> bool:
     return sim is not None and sim.is_alive
 
 
+def _count_missile_hits_from_info(mt: dict) -> int:
+    """Return total missile hit count from info['__missile_term__'].
+
+    Structure: {'red': {'hit': N, ...}, 'blue': {'hit': M, ...}}
+    """
+    total = 0
+    if isinstance(mt, dict):
+        for team, reasons in mt.items():
+            if isinstance(reasons, dict):
+                total += int(reasons.get("hit", 0))
+    return total
+
+
 def _episode_outcome(env, any_truncated: bool, ep_length: int) -> dict:
     red_alive, blue_alive = _alive_counts(env)
     mav_survived = _mav_alive(env)
@@ -336,9 +349,9 @@ def main():
                             recent_missile_stats["blue_fired"] += fired
             mt = info.get("__missile_term__", {})
             if isinstance(mt, dict):
-                for reason, count in mt.items():
-                    if "hit" in str(reason).lower():
-                        recent_missile_stats["hit"] += int(count)
+                for team, reasons in mt.items():
+                    if isinstance(reasons, dict):
+                        recent_missile_stats["hit"] += int(reasons.get("hit", 0))
 
             if all(terminated.values()) or all(truncated.values()):
                 episodes_completed += 1
