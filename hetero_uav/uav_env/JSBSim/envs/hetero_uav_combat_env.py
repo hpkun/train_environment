@@ -539,11 +539,11 @@ class HeteroUavCombatEnv(UavCombatEnv):
             else:
                 components[mav_id]["r_role_mav_death"] = 0.0
 
-        # A3. MAV support: bonus when MAV sees alive enemies
+        # A3. MAV support: bonus when MAV actually observes enemies (not just alive)
         if mav_id and mav_id in self._last_step_obs:
             o = self._last_step_obs.get(mav_id, {})
-            alive_mask = np.asarray(o.get("enemy_alive_mask", []), dtype=np.float32)
-            enemy_seen = int(np.sum(alive_mask > 0.5))
+            observed_mask = np.asarray(o.get("enemy_observed_mask", []), dtype=np.float32)
+            enemy_seen = int(np.sum(observed_mask > 0.5))
             support = min(0.005 * enemy_seen, 0.03)
             components[mav_id].setdefault("r_role_mav_support", 0.0)
             if support > 0:

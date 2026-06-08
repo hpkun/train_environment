@@ -138,6 +138,7 @@ def run_experiment(spec: ExperimentSpec) -> None:
             "--eval-during-training",
             "--eval-interval-steps", str(spec.eval_interval_steps),
             "--train-eval-episodes", str(spec.train_eval_episodes),
+            "--eval-configs", *spec.eval_configs,
         ])
     _run_streaming(train_cmd, "train", out_dir / "train_stdout.log", out_dir / "train_stderr.log")
 
