@@ -6,6 +6,9 @@ models.
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
 
 
@@ -28,9 +31,11 @@ class OpponentPolicy:
     - ``rule_nearest``: steer toward the nearest non-zero red entity in each
       blue agent's own ``enemy_states`` observation.
     - ``greedy_fsm``: low-intrusion finite-state scripted blue intent policy.
+    - ``brma_rule``: delegates to the parent project's ``rule_based_agent.py``
+      (BRMA-MAPPO paper-aligned blue opponent).
     """
 
-    MODES = {"zero", "random", "rule_nearest", "greedy_fsm"}
+    MODES = {"zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"}
 
     def __init__(self, mode: str = "zero", seed: int | None = None):
         if mode not in self.MODES:
@@ -99,10 +104,66 @@ class OpponentPolicy:
                     assigned_targets.add(target_slot)
                     self.last_assigned_targets[bid] = target_slot
             return actions
+        if self.mode == "brma_rule":
+            return self._brma_rule_actions(obs_dict, blue_ids, env)
         return {
             bid: self._rule_nearest_action(obs_dict.get(bid, {}))
             for bid in blue_ids
         }
+
+    def _brma_rule_actions(self, obs_dict, blue_ids, env) -> dict[str, np.ndarray]:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+            from rule_based_agent import blue_coordinated_actions
+        except ImportError as e:
+            raise ImportError(
+                "brma_rule requires parent project rule_based_agent.py. "
+                "Ensure the parent repo root is accessible. "
+                f"Original error: {e}"
+            ) from e
+
+        num_blue = len(blue_ids)
+        num_red = 0
+        if env is not None:
+            num_red = len(getattr(env, "red_ids", []))
+
+        engaged_targets = set()
+        if env is not None and hasattr(env, "refresh_engaged_targets"):
+            try:
+                engaged_targets = env.refresh_engaged_targets()
+            except Exception:
+                pass
+        if engaged_targets is None:
+            engaged_targets = set()
+
+        own_positions = {}
+        if env is not None and hasattr(env, "get_blue_own_positions"):
+            try:
+                own_positions = env.get_blue_own_positions()
+            except Exception:
+                pass
+        if own_positions is None:
+            own_positions = {}
+
+        own_headings = {}
+        if env is not None and hasattr(env, "get_blue_own_kinematics"):
+            try:
+                kin = env.get_blue_own_kinematics()
+                own_headings = {bid: float(k.get("heading", 0.0)) for bid, k in kin.items()}
+            except Exception:
+                pass
+        if own_headings is None:
+            own_headings = {}
+
+        blue_obs = {bid: obs_dict.get(bid, {}) for bid in blue_ids}
+        return blue_coordinated_actions(
+            blue_obs=blue_obs,
+            num_blue=num_blue,
+            num_red=num_red,
+            engaged_targets=engaged_targets,
+            own_positions=own_positions,
+            own_headings=own_headings,
+        )
 
     @staticmethod
     def _rule_nearest_action(obs: dict) -> np.ndarray:
