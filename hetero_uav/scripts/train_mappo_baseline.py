@@ -219,6 +219,8 @@ def main():
                   'entropy', 'action_mean_abs', 'action_std',
                   'action_min', 'action_max', 'value_mean', 'value_std',
                   'action_saturation_rate',
+                  'mav_action_mean_abs_recent', 'uav_action_mean_abs_recent',
+                  'mav_action_saturation_rate_recent', 'uav_action_saturation_rate_recent',
                   'train_red_win_rate_recent', 'train_blue_win_rate_recent',
                   'train_draw_rate_recent', 'train_timeout_rate_recent',
                   'train_mav_survival_rate_recent',
@@ -440,6 +442,14 @@ def main():
         act_max = float(all_acts.max())
         act_sat = float(np.mean(np.abs(all_acts) >= 0.999))
 
+        # Per-role action stats (MAV = red_0 index 0, UAVs = rest)
+        mav_acts = np.concatenate([a[0:1] for a in iter_actions], axis=0)
+        uav_acts = np.concatenate([a[1:] for a in iter_actions], axis=0)
+        mav_act_abs = float(np.mean(np.abs(mav_acts))) if mav_acts.size > 0 else 0.0
+        uav_act_abs = float(np.mean(np.abs(uav_acts))) if uav_acts.size > 0 else 0.0
+        mav_sat = float(np.mean(np.abs(mav_acts) >= 0.999)) if mav_acts.size > 0 else 0.0
+        uav_sat = float(np.mean(np.abs(uav_acts) >= 0.999)) if uav_acts.size > 0 else 0.0
+
         # Value statistics
         buf_vals = buffer.values[:buffer.pos]
         val_mean = float(np.mean(buf_vals))
@@ -487,6 +497,8 @@ def main():
             f'{act_min:.6f}', f'{act_max:.6f}',
             f'{val_mean:.6f}', f'{val_std:.6f}',
             f'{act_sat:.6f}',
+            f'{mav_act_abs:.6f}', f'{uav_act_abs:.6f}',
+            f'{mav_sat:.6f}', f'{uav_sat:.6f}',
             f'{red_win_rate:.4f}', f'{blue_win_rate:.4f}',
             f'{draw_rate:.4f}', f'{timeout_rate:.4f}',
             f'{mav_surv_rate:.4f}',
