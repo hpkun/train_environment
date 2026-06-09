@@ -157,7 +157,7 @@ def main():
     parser.add_argument('--output-dir', default='outputs/mappo_baseline')
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--opponent-policy',
-                        choices=['zero', 'random', 'rule_nearest', 'greedy_fsm'],
+                        choices=['zero', 'random', 'rule_nearest', 'greedy_fsm', 'brma_rule'],
                         default='rule_nearest')
     parser.add_argument('--log-csv', default=None)
     parser.add_argument('--save-interval', type=int, default=10)
