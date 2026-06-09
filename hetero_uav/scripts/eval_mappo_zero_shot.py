@@ -247,7 +247,25 @@ def main():
             print(f"red_dead_final_mean: {np.mean(red_dead):.2f}")
             print(f"blue_dead_final_mean: {np.mean(blue_dead):.2f}")
             print(f"episode_end_reason_counts: {dict(end_reason_counts)}")
+            # -- granular breakdown metrics --
+            red_elim = end_reason_counts.get("red_win_elimination", 0) / n_episodes
+            blue_elim = end_reason_counts.get("blue_win_elimination", 0) / n_episodes
+            red_to_adv = winner_counts.get("red_alive_advantage", 0) / n_episodes
+            blue_to_adv = winner_counts.get("blue_alive_advantage", 0) / n_episodes
+            to_draw = end_reason_counts.get("timeout", 0) / n_episodes
+            to_draw = (winner_counts.get("draw", 0) / n_episodes
+                       if end_reason_counts.get("timeout", 0) > 0 else 0.0)
+            rdf = float(np.mean(red_dead)) if red_dead else 0.0
+            bdf = float(np.mean(blue_dead)) if blue_dead else 0.0
+            kdr = bdf / max(rdf, 1e-6)
+
             print(f"winner_counts: {dict(winner_counts)}")
+            print(f"red_elimination_win_rate: {red_elim:.3f}")
+            print(f"blue_elimination_win_rate: {blue_elim:.3f}")
+            print(f"red_timeout_alive_advantage_rate: {red_to_adv:.3f}")
+            print(f"blue_timeout_alive_advantage_rate: {blue_to_adv:.3f}")
+            print(f"timeout_draw_rate: {to_draw:.3f}")
+            print(f"kill_death_ratio: {kdr:.3f}")
             print(f"nan_detected: {nan_detected}")
             print(f"actor_dim_ok: {actor_dim_ok}")
             print(f"critic_dim_ok: {critic_dim_ok}")
@@ -270,11 +288,17 @@ def main():
                 "blue_win_rate": float(blue_win_count / n_episodes),
                 "draw_rate": float(draw_count / n_episodes),
                 "timeout_rate": float(timeout_count / n_episodes),
+                "red_elimination_win_rate": float(red_elim),
+                "blue_elimination_win_rate": float(blue_elim),
+                "red_timeout_alive_advantage_rate": float(red_to_adv),
+                "blue_timeout_alive_advantage_rate": float(blue_to_adv),
+                "timeout_draw_rate": float(to_draw),
+                "kill_death_ratio": float(kdr),
                 "mav_survival_rate": float(mav_survival / n_episodes),
                 "red_alive_final_mean": float(np.mean(red_alive_counts)),
                 "blue_alive_final_mean": float(np.mean(blue_alive_counts)),
-                "red_dead_final_mean": float(np.mean(red_dead)),
-                "blue_dead_final_mean": float(np.mean(blue_dead)),
+                "red_dead_final_mean": rdf,
+                "blue_dead_final_mean": bdf,
                 "episode_end_reason_counts": dict(end_reason_counts),
                 "winner_counts": dict(winner_counts),
                 "nan_detected": nan_detected,
