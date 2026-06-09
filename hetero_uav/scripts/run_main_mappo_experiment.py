@@ -38,6 +38,7 @@ class ExperimentSpec:
     seed: int = 0
     device: str = "cpu"
     output_dir: str = "outputs/main_mappo_experiment"
+    actor_arch: str = "mlp"
     enable_eval_during_training: bool = False
     eval_interval_steps: int = 50000
     train_eval_episodes: int = 5
@@ -110,6 +111,7 @@ def run_experiment(spec: ExperimentSpec) -> None:
     print(f"[exp] eval_configs={spec.eval_configs}", flush=True)
     print(f"[exp] obs_adapter_version={spec.obs_adapter_version}", flush=True)
     print(f"[exp] opponent_policy={spec.opponent_policy}", flush=True)
+    print(f"[exp] actor_arch={spec.actor_arch}", flush=True)
     print(f"[exp] total_env_steps={spec.total_env_steps}", flush=True)
     print(f"[exp] rollout_length={spec.rollout_length}", flush=True)
     print(f"[exp] max_steps={spec.max_steps}", flush=True)
@@ -131,6 +133,7 @@ def run_experiment(spec: ExperimentSpec) -> None:
         "--output-dir", str(out_dir),
         "--log-csv", str(out_dir / "train_log.csv"),
         "--opponent-policy", spec.opponent_policy,
+        "--actor-arch", spec.actor_arch,
         "--save-interval", "10",
     ]
     if spec.enable_eval_during_training:
@@ -189,6 +192,7 @@ def run_experiment(spec: ExperimentSpec) -> None:
             "train_config": spec.train_config,
             "eval_config": rec.get("config", ""),
             "opponent_policy": spec.opponent_policy,
+            "actor_arch": spec.actor_arch,
             "obs_adapter_version": spec.obs_adapter_version,
             "actor_dim": actor_dim,
             "critic_dim": critic_dim,

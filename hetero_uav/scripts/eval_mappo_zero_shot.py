@@ -119,8 +119,9 @@ def main():
     validate_model_dims(adapter, meta)
     actor_dim = adapter.flat_actor_obs_dim
     critic_dim = adapter.critic_state_dim
+    actor_arch = meta.get("actor_arch", "mlp")
 
-    model = make_mappo_model_for_adapter(adapter, device)
+    model = make_mappo_model_for_adapter(adapter, device, actor_arch=actor_arch)
     model.load_state_dict(torch.load(args.model, map_location=device,
                                      weights_only=True))
     model.eval()

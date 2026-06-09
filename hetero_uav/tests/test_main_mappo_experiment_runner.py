@@ -156,3 +156,30 @@ def test_role_v1_smoke_runs():
         assert rec["critic_dim"] == 480
         assert rec["nan_detected"] is False
         assert rec["actor_dim_ok"] is True
+
+
+def test_role_conditioned_smoke_runs():
+    """smoke_main_mappo_role_conditioned_experiment.py should pass."""
+    result = subprocess.run(
+        [PYTHON, "scripts/smoke_main_mappo_role_conditioned_experiment.py"],
+        cwd=ROOT, env=_env(),
+        text=True, capture_output=True,
+        encoding="utf-8", errors="replace", timeout=600,
+    )
+    assert result.returncode == 0, (
+        f"smoke failed:\nstdout={result.stdout[-800:]}\nstderr={result.stderr[-800:]}"
+    )
+
+    out = ROOT / "outputs/test_main_mappo_experiment_role_conditioned"
+    for fname in ["train_log.csv", "main_experiment_summary.json"]:
+        assert (out / fname).exists(), f"missing {fname}"
+
+    meta = json.loads((out / "latest/meta.json").read_text(encoding="utf-8"))
+    assert meta.get("actor_arch") == "role_conditioned", f"meta actor_arch={meta.get('actor_arch')}"
+
+    summary = json.loads((out / "main_experiment_summary.json").read_text(encoding="utf-8"))
+    for rec in summary:
+        assert rec.get("actor_arch") == "role_conditioned"
+        assert rec["actor_dim"] == 96
+        assert rec["critic_dim"] == 480
+        assert rec["nan_detected"] is False

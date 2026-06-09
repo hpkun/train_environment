@@ -168,6 +168,8 @@ def main():
                         default='v1')
     parser.add_argument('--console-log-interval', type=int, default=1,
                         help='Print one training progress line every N iterations.')
+    parser.add_argument('--actor-arch', choices=['mlp', 'role_conditioned'],
+                        default='mlp')
     # -- periodic eval during training --
     parser.add_argument('--eval-during-training', action='store_true')
     parser.add_argument('--eval-interval-steps', type=int, default=50000)
@@ -248,8 +250,8 @@ def main():
 
     actor_obs_dim = adapter.flat_actor_obs_dim
     critic_state_dim = adapter.critic_state_dim
-    model = MAPPOActorCritic(actor_obs_dim=actor_obs_dim,
-                             critic_state_dim=critic_state_dim).to(device)
+    from algorithms.mappo.adapter_utils import make_mappo_model_for_adapter
+    model = make_mappo_model_for_adapter(adapter, device, actor_arch=args.actor_arch)
     computed_iterations = args.iterations
     if args.total_env_steps is not None:
         computed_iterations = int(math.ceil(args.total_env_steps / args.rollout_length))
@@ -551,7 +553,7 @@ def main():
                             'obs_adapter_version': args.obs_adapter_version,
                             'actor_obs_dim': actor_obs_dim,
                             'critic_state_dim': critic_state_dim,
-                            'actor_arch': 'mlp',
+                            'actor_arch': args.actor_arch,
                             'observation_mode': obs_mode,
                         }
                         with open(f'{args.output_dir}/best/meta.json', 'w') as f:
@@ -585,7 +587,7 @@ def main():
             'obs_adapter_version': args.obs_adapter_version,
             'actor_obs_dim': actor_obs_dim,
             'critic_state_dim': critic_state_dim,
-            'actor_arch': 'mlp',
+            'actor_arch': args.actor_arch,
             'observation_mode': obs_mode,
             'best_score': round(best_score, 6) if best_score > -float("inf") else None,
         }

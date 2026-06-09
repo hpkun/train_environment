@@ -6,7 +6,7 @@ from pathlib import Path
 
 from uav_env.JSBSim.adapters.hetero_obs_adapter import HeteroObsAdapter
 from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
-from .policy import MAPPOActorCritic
+from .policy import MAPPOActorCritic, RoleConditionedMAPPOActorCritic
 
 
 def load_model_meta(model_path: str | Path) -> dict:
@@ -48,9 +48,17 @@ def validate_model_dims(adapter, meta: dict) -> None:
             f"adapter={adapter.critic_state_dim}")
 
 
-def make_mappo_model_for_adapter(adapter, device):
-    """Create MAPPOActorCritic with dimensions from the adapter."""
-    return MAPPOActorCritic(
+def make_mappo_model_for_adapter(adapter, device, actor_arch: str = "mlp"):
+    """Create model with dimensions from the adapter.
+
+    actor_arch:
+      "mlp"              → MAPPOActorCritic (baseline)
+      "role_conditioned" → RoleConditionedMAPPOActorCritic
+    """
+    kwargs = dict(
         actor_obs_dim=adapter.flat_actor_obs_dim,
         critic_state_dim=adapter.critic_state_dim,
-    ).to(device)
+    )
+    if actor_arch == "role_conditioned":
+        return RoleConditionedMAPPOActorCritic(**kwargs).to(device)
+    return MAPPOActorCritic(**kwargs).to(device)
