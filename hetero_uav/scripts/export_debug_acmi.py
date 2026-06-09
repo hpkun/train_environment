@@ -62,6 +62,8 @@ def main():
              "0,ReferenceTime=2026-01-01T00:00:00Z", "0,Title=hetero_uav_debug",
              "0,DataSource=hetero_uav_jsbsim"]
     recorded, prev_alive = set(), {}
+    dead_removed = set()  # aircraft that died and were removed
+    death_info = {}       # per-aircraft death step/time/position
     frame, ep_ret, done = 0, 0.0, False
     debug_red0 = []
 
@@ -81,24 +83,45 @@ def main():
         for aid in env.red_ids + env.blue_ids:
             sim = env.red_planes.get(aid) or env.blue_planes.get(aid)
             if sim is None: continue
-            oid_ = meta_air[aid]["obj_id"]; pos = sim.get_position()
-            lon, lat = to_ll(pos[0], pos[1]); alt = float(pos[2])
-            r, p, y = sim.get_rpy()
-            rd_, pd_, yd_ = math.degrees(r), math.degrees(p), math.degrees(y)
-            if oid_ not in recorded:
-                lines.append(f"{oid_},T={lon}|{lat}|{alt}|{rd_}|{pd_}|{yd_},Type=Air+FixedWing,Name={meta_air[aid]['name']},Coalition={meta_air[aid]['coalition']},Color={meta_air[aid]['color']}")
-                recorded.add(oid_)
-            else:
-                if prev_alive.get(oid_, True) and not sim.is_alive:
-                    lines.append(f"0,Event=Destroyed|{oid_}|{aid} destroyed")
-                lines.append(f"{oid_},T={lon}|{lat}|{alt}|{rd_}|{pd_}|{yd_}")
-            prev_alive[oid_] = sim.is_alive
+            oid_ = meta_air[aid]["obj_id"]
+            alive_now = sim.is_alive
 
-        if frame < 50:
+            # First appearance
+            if oid_ not in recorded:
+                pos = sim.get_position()
+                lon, lat = to_ll(pos[0], pos[1]); alt = float(pos[2])
+                r, p, y = sim.get_rpy()
+                lines.append(f"{oid_},T={lon}|{lat}|{alt}|{math.degrees(r)}|{math.degrees(p)}|{math.degrees(y)},Type=Air+FixedWing,Name={meta_air[aid]['name']},Coalition={meta_air[aid]['coalition']},Color={meta_air[aid]['color']}")
+                recorded.add(oid_)
+                prev_alive[oid_] = alive_now
+                continue
+
+            # Death detection
+            if prev_alive.get(oid_, True) and not alive_now and oid_ not in dead_removed:
+                pos = sim.get_position()
+                lines.append(f"0,Event=Destroyed|{oid_}|{aid} destroyed")
+                death_info[aid] = dict(step=frame, time_s=frame * dt, lon=to_ll(pos[0], pos[1])[0], lat=to_ll(pos[0], pos[1])[1], altitude_m=float(pos[2]))
+                dead_removed.add(oid_)
+
+            # Only write T= if still alive
+            if alive_now:
+                pos = sim.get_position()
+                lon, lat = to_ll(pos[0], pos[1]); alt = float(pos[2])
+                r, p, y = sim.get_rpy()
+                lines.append(f"{oid_},T={lon}|{lat}|{alt}|{math.degrees(r)}|{math.degrees(p)}|{math.degrees(y)}")
+            # Dead aircraft: no T= line written (remains at last position in Tacview)
+
+            prev_alive[oid_] = alive_now
+
+        if frame < 100:
             sim = env.red_planes.get("red_0")
             rpy = rd(sim.get_rpy()) if sim and sim.is_alive else [0,0,0]
             pos = sim.get_position() if sim else [0,0,0]
-            red0_act = list(acts.get("red_0", [0,0,0]).tolist() if hasattr(acts.get("red_0"), "tolist") else acts.get("red_0", [0,0,0]))
+            red0_raw = list(acts.get("red_0", [0,0,0]).tolist() if hasattr(acts.get("red_0"), "tolist") else acts.get("red_0", [0,0,0]))
+            red0_trim = env._last_action_trim_applied.get("red_0", None)
+            red0_eff = env._last_effective_actions.get("red_0", None)
+            mw = info.get("red_0", {}).get("missile_warning", None) if isinstance(info, dict) else None
+            if hasattr(mw, "tolist"): mw = mw.tolist()
             blu_info = {}
             for bid in env.blue_ids:
                 bsim = env.blue_planes.get(bid)
@@ -110,9 +133,12 @@ def main():
                             d = float(np.linalg.norm(bsim.get_position() - rs.get_position()))
                             nr = d if nr < 0 else min(nr, d)
                 blu_info[bid] = round(nr, 1) if nr > 0 else -1
-            debug_red0.append(dict(step=frame, act=red0_act, roll=rpy[0], pitch=rpy[1], yaw=rpy[2],
-                                   alt=float(pos[2]) if sim else 0, speed=float(np.linalg.norm(sim.get_velocity())) if sim and sim.is_alive else 0,
-                                   alive=bool(sim and sim.is_alive), blue_nr_dist=blu_info))
+            debug_red0.append(dict(
+                step=frame, raw_action=red0_raw, action_trim=red0_trim, effective_action=red0_eff,
+                roll_deg=rpy[0], pitch_deg=rpy[1], yaw_deg=rpy[2],
+                altitude=float(pos[2]) if sim else 0, speed=float(np.linalg.norm(sim.get_velocity())) if sim and sim.is_alive else 0,
+                alive=bool(sim and sim.is_alive),
+                missile_warning=mw, nearest_blue_distance=blu_info))
 
         frame += 1
         if frame > 5000: break
@@ -126,10 +152,17 @@ def main():
     oa = Path(args.output_acmi); os_ = Path(args.output_summary)
     oa.parent.mkdir(parents=True, exist_ok=True); os_.parent.mkdir(parents=True, exist_ok=True)
     oa.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os_.write_text(json.dumps(dict(model=args.model, config=args.config, frames=frame, decision_dt=dt,
-                                   simulated_time_s=frame*dt, red_alive_final=ra, blue_alive_final=ba, mav_alive=ma,
-                                   total_return=float(ep_ret), red0_first50=debug_red0,
-                                   output_acmi=str(oa)), indent=2))
+    red0_death = death_info.get("red_0", None)
+    os_.write_text(json.dumps(dict(
+        model=args.model, config=args.config, frames=frame, decision_dt=dt,
+        simulated_time_s=frame*dt, red_alive_final=ra, blue_alive_final=ba, mav_alive=ma,
+        total_return=float(ep_ret),
+        red0_death_step=red0_death["step"] if red0_death else None,
+        red0_death_altitude=red0_death["altitude_m"] if red0_death else None,
+        red0_stopped_logging_after_death=True if red0_death else False,
+        red0_first100=debug_red0,
+        all_death_info=death_info,
+        output_acmi=str(oa)), indent=2))
     print(f"output_acmi: {oa}"); print(f"output_summary: {os_}")
     print(f"frames: {frame} sim_t: {frame*dt:.0f}s red_alive: {ra} blue_alive: {ba} mav_alive: {ma}")
 
