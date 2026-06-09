@@ -170,6 +170,15 @@ def main():
                         help='Print one training progress line every N iterations.')
     parser.add_argument('--actor-arch', choices=['mlp', 'role_conditioned'],
                         default='mlp')
+    # -- PPO hyperparameters --
+    parser.add_argument('--ppo-epochs', type=int, default=4)
+    parser.add_argument('--entropy-coef', type=float, default=0.01)
+    parser.add_argument('--actor-lr', type=float, default=5e-4)
+    parser.add_argument('--critic-lr', type=float, default=5e-4)
+    parser.add_argument('--clip-param', type=float, default=0.2)
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--gae-lambda', type=float, default=0.95)
+    parser.add_argument('--max-grad-norm', type=float, default=10.0)
     # -- periodic eval during training --
     parser.add_argument('--eval-during-training', action='store_true')
     parser.add_argument('--eval-interval-steps', type=int, default=50000)
@@ -264,7 +273,10 @@ def main():
               f'observation_mode={obs_mode} '
               f'actor_obs_dim={actor_obs_dim} '
               f'critic_state_dim={critic_state_dim}', flush=True)
-    trainer = PPOTrainer(model)
+    trainer = PPOTrainer(model, lr_actor=args.actor_lr, lr_critic=args.critic_lr,
+                         clip_param=args.clip_param, entropy_coef=args.entropy_coef,
+                         max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
+                         gamma=args.gamma, gae_lambda=args.gae_lambda)
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17)
 
     num_red = env.max_num_red
@@ -555,6 +567,11 @@ def main():
                             'critic_state_dim': critic_state_dim,
                             'actor_arch': args.actor_arch,
                             'observation_mode': obs_mode,
+                            'ppo_epochs': args.ppo_epochs,
+                            'entropy_coef': args.entropy_coef,
+                            'actor_lr': args.actor_lr,
+                            'critic_lr': args.critic_lr,
+                            'rollout_length': args.rollout_length,
                         }
                         with open(f'{args.output_dir}/best/meta.json', 'w') as f:
                             json.dump(meta, f)
@@ -589,6 +606,11 @@ def main():
             'critic_state_dim': critic_state_dim,
             'actor_arch': args.actor_arch,
             'observation_mode': obs_mode,
+            'ppo_epochs': args.ppo_epochs,
+            'entropy_coef': args.entropy_coef,
+            'actor_lr': args.actor_lr,
+            'critic_lr': args.critic_lr,
+            'rollout_length': args.rollout_length,
             'best_score': round(best_score, 6) if best_score > -float("inf") else None,
         }
         with open(f'{args.output_dir}/latest/meta.json', 'w') as f:

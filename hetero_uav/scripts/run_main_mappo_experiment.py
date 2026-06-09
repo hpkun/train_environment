@@ -135,6 +135,10 @@ def run_experiment(spec: ExperimentSpec) -> None:
         "--opponent-policy", spec.opponent_policy,
         "--actor-arch", spec.actor_arch,
         "--save-interval", "10",
+        "--ppo-epochs", "10",
+        "--entropy-coef", "0.05",
+        "--actor-lr", "0.0002",
+        "--critic-lr", "0.0005",
     ]
     if spec.enable_eval_during_training:
         train_cmd.extend([
