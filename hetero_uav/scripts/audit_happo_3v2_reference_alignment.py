@@ -144,7 +144,7 @@ def build_audit() -> dict[str, Any]:
             "ACMI should show MAV maintaining a support posture while UAVs engage.",
         ],
         "happo_ref_v0_reward_design": {
-            "implemented_this_round": False,
+            "implemented_this_round": True,
             "purpose": "paper-reference reward for validation only, not replacement for brma_legacy baseline",
             "mav_components": [
                 "survival reward",
@@ -161,10 +161,10 @@ def build_audit() -> dict[str, Any]:
                 "death penalty",
                 "team event reward",
             ],
-            "blocking_note": "Do not implement until reward scale and component audit criteria are fixed.",
+            "implementation_note": "Implemented as a small additive role overlay; brma_legacy remains unchanged.",
         },
         "minimal_happo_v0_plan": {
-            "implemented_this_round": False,
+            "implemented_this_round": True,
             "policy": [
                 "separate MAV actor",
                 "separate UAV actor",
@@ -182,7 +182,7 @@ def build_audit() -> dict[str, Any]:
                 "no GRU in first HAPPO reference v0",
                 "no observation dim change",
             ],
-            "smoke_runner": "Only after implementation is scoped as one coherent change.",
+            "smoke_runner": "scripts/smoke_happo_3v2_reference.py",
         },
         "next_steps": [
             "Use this audit to decide whether to implement HAPPO reference v0 smoke.",
@@ -242,7 +242,8 @@ def _markdown(data: dict[str, Any]) -> str:
         "- Sequential HAPPO update.",
         "- No attention in first stage.",
         "- Optional recurrent/temporal module later.",
-        "- No reward, missile, PID, aircraft XML, or observation-dimension changes in this audit.",
+        "- happo_ref_v0 reward mode exists as an explicit role overlay.",
+        "- No missile, PID, aircraft XML, action-space, or observation-dimension changes in this audit.",
         "",
         "## Next Steps",
     ])

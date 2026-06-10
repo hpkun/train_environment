@@ -1,0 +1,52 @@
+"""Rollout buffer for HAPPO reference v0."""
+from __future__ import annotations
+
+import numpy as np
+import torch
+
+
+class HAPPORolloutBuffer:
+    def __init__(self, max_len: int, num_red: int, actor_dim: int,
+                 critic_dim: int, action_dim: int, role_ids):
+        self.max_len = int(max_len)
+        self.num_red = int(num_red)
+        self.pos = 0
+        self.actor_obs = np.zeros((max_len, num_red, actor_dim), dtype=np.float32)
+        self.critic_state = np.zeros((max_len, critic_dim), dtype=np.float32)
+        self.actions = np.zeros((max_len, num_red, action_dim), dtype=np.float32)
+        self.log_probs = np.zeros((max_len, num_red), dtype=np.float32)
+        self.rewards = np.zeros((max_len, num_red), dtype=np.float32)
+        self.dones = np.zeros((max_len, num_red), dtype=np.float32)
+        self.values = np.zeros(max_len, dtype=np.float32)
+        self.active_masks = np.zeros((max_len, num_red), dtype=np.float32)
+        self.role_ids = np.asarray(role_ids, dtype=np.int64)
+
+    def store(self, actor_obs, critic_state, actions, log_probs,
+              rewards, dones, value, active_masks):
+        idx = self.pos
+        self.actor_obs[idx] = actor_obs
+        self.critic_state[idx] = critic_state
+        self.actions[idx] = actions
+        self.log_probs[idx] = log_probs
+        self.rewards[idx] = rewards
+        self.dones[idx] = dones
+        self.values[idx] = float(value)
+        self.active_masks[idx] = active_masks
+        self.pos += 1
+
+    def __len__(self):
+        return self.pos
+
+    def get(self, device):
+        n = self.pos
+        return {
+            "actor_obs": torch.as_tensor(self.actor_obs[:n], device=device),
+            "critic_state": torch.as_tensor(self.critic_state[:n], device=device),
+            "actions": torch.as_tensor(self.actions[:n], device=device),
+            "old_log_probs": torch.as_tensor(self.log_probs[:n], device=device),
+            "rewards": torch.as_tensor(self.rewards[:n], device=device),
+            "dones": torch.as_tensor(self.dones[:n], device=device),
+            "values": torch.as_tensor(self.values[:n], device=device),
+            "active_masks": torch.as_tensor(self.active_masks[:n], device=device),
+            "role_ids": torch.as_tensor(self.role_ids, device=device),
+        }

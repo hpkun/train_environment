@@ -32,6 +32,31 @@ policy head.
 
 This is still only a reference validation step, not full TAM-HAPPO.
 
+## Paper-Grounded Boundary
+
+HAPPO reference v0 is not a TAM-HAPPO reproduction. It is an environment
+validation path for checking whether heterogeneous MAV/UAV policies can produce
+reasonable 3v2 behavior in the current codebase.
+
+If GRU is not implemented, the result is only a no-temporal HAPPO ablation. It
+must not be described as having the paper's temporal state-memory module.
+
+If multi-head attention is not implemented in the centralized value network,
+the result cannot claim an attention-enhanced value network. It is a
+non-attention HAPPO-style baseline.
+
+Because the environment keeps high-level `[pitch, heading, speed]` with PID, it
+does not reproduce the paper action space `[Ct, Ca, Ce, Cr]`. The paper action
+uses throttle, aileron, elevator, and rudder controls, with `Ct` in `[0.4, 0.9]`,
+`Ca/Ce/Cr` in `[-1, 1]`, and 40 discrete levels per dimension.
+
+Missile launch and evasion remain scripted environment mechanics. This is a
+local engineering choice for the current environment, not a paper-consistent
+implementation of learned missile-aware maneuvering.
+
+Therefore HAPPO reference v0 is for environment validation and controlled
+ablation evidence only. It should not be used as a paper result reproduction.
+
 ## Similarities With The Heterogeneous Paper
 
 - 3v2 setup: one MAV with two UAVs against two UAV opponents.
@@ -56,6 +81,48 @@ These differences are acceptable for the next validation step because changing
 action interface, missile mechanics, and algorithm at the same time would make
 the result hard to interpret.
 
+## Current Implementation Status
+
+Earlier work added HAPPO reference v0 as a minimal runnable validation path:
+
+- `happo_ref_v0` reward mode is available by explicit config or CLI choice;
+- MAV and UAV use separate actors;
+- the critic is centralized;
+- actor updates run sequentially by role;
+- train, eval, smoke, 200k runner, and 1M runner scripts exist.
+
+The implementation remains a reference validation baseline. It is not full
+TAM-HAPPO.
+
+## happo_ref_v0 Reward Components
+
+The reward mode is an additive role overlay on top of the existing BRMA reward.
+It is enabled only when `hetero_reward_mode: happo_ref_v0` or
+`--reward-mode happo_ref_v0` is used.
+
+MAV components:
+
+- `mav_survival`;
+- `mav_support`;
+- `mav_attack` fixed at zero;
+- `mav_dodge` fixed at zero;
+- `event`;
+- `safety`;
+- `death_penalty`.
+
+UAV components:
+
+- `uav_attack_window`;
+- `uav_fire`;
+- `uav_hit`;
+- `uav_dodge`;
+- `event`;
+- `safety`;
+- `death_penalty`.
+
+Unavailable components are recorded as zero rather than raising errors, so the
+reward can be audited from `info["reward_components"]`.
+
 ## HAPPO Reference v0 Scope
 
 HAPPO reference v0 should be the smallest coherent method change:
@@ -73,13 +140,19 @@ HAPPO reference v0 should be the smallest coherent method change:
 The first smoke test should only verify that this setup can collect rollout,
 update once, save, load, and evaluate without NaN.
 
+The sequential update is a simplified HAPPO-style v0 role-wise PPO update. It
+keeps separate MAV/UAV update phases but does not implement the full strict
+HAPPO correction-factor machinery.
+
 ## Reward Position
 
-`happo_ref_v0` reward is a design item, not implemented in this audit.
+`happo_ref_v0` reward exists from earlier implementation work, but this
+paper-grounded review does not validate it as exact paper reward reproduction.
 
 The current recommended first HAPPO validation should keep `brma_legacy` to
 avoid mixing method validation with reward redesign. A role reward can be
-revisited only after the HAPPO smoke path is stable.
+revisited only after the HAPPO smoke path is stable and after each paper reward
+module is mapped to available observations.
 
 ## Success Criteria
 
@@ -96,9 +169,31 @@ minimum useful signals are:
 ## Training Protocol
 
 1. Run HAPPO reference v0 smoke only.
-2. If smoke passes, run a 200k 3v2 validation.
+2. If smoke passes, run:
+
+   `python scripts/run_happo_3v2_reference_200k.py`
+
 3. If the 200k run shows MAV survival, UAV engagement, and non-timeout combat,
    then consider a 1M run and 5v4 zero-shot transfer.
+
+## 200k Success Criteria
+
+- MAV survival is clearly above the shared MLP baseline.
+- `blue_dead_mean > 0`.
+- `red_missile_hits_mean > 0`.
+- Episodes are not all timeout draws.
+- ACMI, if exported later, shows different MAV/UAV roles.
+
+## Failure Triage Order
+
+If 200k fails, inspect in this order:
+
+1. reward component magnitudes;
+2. blue target preference;
+3. missile hit logic;
+4. MAV dynamics;
+5. observation sharing;
+6. only then consider temporal modules or attention.
 
 ## Stop Doing
 

@@ -37,8 +37,8 @@ def test_audit_happo_3v2_reference_alignment_outputs_expected_schema():
         check=True,
     )
 
-    assert "happo_ref_v0_reward_implemented: False" in result.stdout
-    assert "happo_smoke_implemented: False" in result.stdout
+    assert "happo_ref_v0_reward_implemented: True" in result.stdout
+    assert "happo_smoke_implemented: True" in result.stdout
     assert out_json.exists()
     assert out_md.exists()
 
@@ -52,8 +52,8 @@ def test_audit_happo_3v2_reference_alignment_outputs_expected_schema():
     ]:
         assert key in data
 
-    assert data["happo_ref_v0_reward_design"]["implemented_this_round"] is False
-    assert data["minimal_happo_v0_plan"]["implemented_this_round"] is False
+    assert data["happo_ref_v0_reward_design"]["implemented_this_round"] is True
+    assert data["minimal_happo_v0_plan"]["implemented_this_round"] is True
     assert any(gap["name"] == "happo_update_gap" for gap in data["gaps"])
 
     md = out_md.read_text(encoding="utf-8")
