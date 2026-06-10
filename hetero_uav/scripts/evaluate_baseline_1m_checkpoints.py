@@ -34,18 +34,25 @@ def main():
     p.add_argument("--experiment-dir", default=DEFAULT_DIR)
     p.add_argument("--episodes", type=int, default=20)
     p.add_argument("--device", default="cpu")
+    p.add_argument("--checkpoint-mode", choices=["both", "best_only"], default="both")
     p.add_argument("--output-json", default=None)
     p.add_argument("--output-md", default=None)
     args = p.parse_args()
 
     exp = Path(args.experiment_dir)
-    out_j = args.output_json or str(exp / "checkpoint_eval/baseline_1m_checkpoint_eval.json")
-    out_m = args.output_md or str(exp / "checkpoint_eval/baseline_1m_checkpoint_eval.md")
+    suffix = "_best_only" if args.checkpoint_mode == "best_only" else ""
+    out_j = args.output_json or str(exp / f"checkpoint_eval/baseline_1m_checkpoint_eval{suffix}.json")
+    out_m = args.output_md or str(exp / f"checkpoint_eval/baseline_1m_checkpoint_eval{suffix}.md")
     out_j_p = Path(out_j); out_j_p.parent.mkdir(parents=True, exist_ok=True)
 
+    checkpoints = []
+    if args.checkpoint_mode in ("both", "best_only"):
+        checkpoints.append(("best", str(exp / "best/model.pt")))
+    if args.checkpoint_mode == "both":
+        checkpoints.append(("latest", str(exp / "latest/model.pt")))
+
     results = {}
-    for name, pth in [("latest", str(exp / "latest/model.pt")),
-                       ("best", str(exp / "best/model.pt"))]:
+    for name, pth in checkpoints:
         print(f"Evaluating {name} ({pth})...")
         data = eval_checkpoint(pth, args.episodes, args.device)
         results[name] = data if data else "EVAL_FAILED"

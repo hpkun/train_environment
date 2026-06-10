@@ -23,3 +23,10 @@ def test_smoke():
     assert r.returncode==0,f"{r.stdout[-500:]} {r.stderr[-500:]}"
     d=json.loads((ROOT/"outputs/main_mappo_baseline_1m_fast_brma_rule_no_mav_trim/checkpoint_eval/baseline_1m_checkpoint_eval.json").read_text(encoding="utf-8"))
     assert "latest" in d and "best" in d
+
+
+def test_best_only_mode():
+    r=subprocess.run([PY,"scripts/evaluate_baseline_1m_checkpoints.py","--checkpoint-mode","best_only","--episodes","1","--experiment-dir","outputs/main_mappo_baseline_1m_fast_brma_rule_no_mav_trim","--output-json","outputs/main_mappo_baseline_1m_fast_brma_rule_no_mav_trim/checkpoint_eval/test_best_only.json"],cwd=ROOT,env=_env(),text=True,capture_output=True,encoding="utf-8",errors="replace",timeout=600)
+    assert r.returncode==0,f"{r.stdout[-500:]} {r.stderr[-500:]}"
+    d=json.loads((ROOT/"outputs/main_mappo_baseline_1m_fast_brma_rule_no_mav_trim/checkpoint_eval/test_best_only.json").read_text(encoding="utf-8"))
+    assert "best" in d and "latest" not in d, "best_only should only contain best"
