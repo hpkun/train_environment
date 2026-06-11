@@ -184,6 +184,39 @@ minimum useful signals are:
 - Episodes are not all timeout draws.
 - ACMI, if exported later, shows different MAV/UAV roles.
 
+## 200k Result Summary
+
+The 200k HAPPO reference v0 run completed and produced `latest` and `best`
+checkpoints under `outputs/happo_3v2_reference_200k`.
+
+The training log stayed in timeout-survival behavior: the latest train row has
+`red_win=1.0`, `timeout=1.0`, `mav_survival=1.0`, `red_alive_final=3.0`,
+`blue_alive_final=2.0`, and zero missiles fired/hit. This should not be
+reported as effective combat.
+
+The 50-episode checkpoint re-evaluation is more diagnostic:
+
+- best 3v2: `red_win_rate=0.0`, `blue_win_rate=0.92`,
+  `mav_survival_rate=0.0`, `blue_dead_mean=0.22`,
+  `red_missile_hits_mean=0.22`;
+- best 5v4: `red_win_rate=0.0`, `blue_win_rate=1.0`,
+  `mav_survival_rate=0.0`, `blue_dead_mean=0.56`,
+  `red_missile_hits_mean=0.56`;
+- latest 3v2: `red_win_rate=0.0`, `blue_win_rate=1.0`,
+  `mav_survival_rate=0.0`, `blue_dead_mean=0.0`,
+  `red_missile_hits_mean=0.0`;
+- latest 5v4: `red_win_rate=0.0`, `blue_win_rate=0.98`,
+  `mav_survival_rate=0.0`, `blue_dead_mean=0.14`,
+  `red_missile_hits_mean=0.14`.
+
+ACMI export succeeded for best/latest 3v2 episode 0. Both exported episodes end
+in `blue_win_elimination`, and the MAV dies in both.
+
+Decision: HAPPO v0 partially works as a runnable validation path, but it does
+not validate the environment strongly enough for a 1M HAPPO reference run.
+Reward/observation/targeting should be inspected before adding GRU, attention,
+or full TAM-HAPPO.
+
 ## Failure Triage Order
 
 If 200k fails, inspect in this order:
