@@ -232,6 +232,12 @@ The next validation gate is:
 
 Do not start a 1M HAPPO reference run until this gate is resolved.
 
+The MAV failure gate currently blocks 1M. Death-event logging identifies
+`Crash_LowAlt` as the dominant MAV death reason, fixed safe MAV action does
+not produce survival, action scaling does not rescue the MAV, and available
+blue missile metadata does not show MAV-target preference. The current primary
+failure hypothesis is F-22 control or dynamics instability.
+
 ## Failure Triage Order
 
 If 200k fails, inspect in this order:

@@ -129,3 +129,26 @@ Before any 1M run, the required diagnostic sequence is:
 If those diagnostics still show systematic MAV death or deterministic collapse,
 the next step is to adjust the validation setup rather than increasing the
 training horizon.
+
+## 8. MAV Failure Gate
+
+The post-200k MAV failure gate is complete. It adds death-event logging and
+runs fixed-action, survival-ablation, and blue-target diagnostics.
+
+Key results:
+
+- death reasons are no longer only unknown; the dominant reason is
+  `Crash_LowAlt`;
+- F-22 fixed-action sweep is not stable;
+- F-16 MAV surrogate is more stable in the fixed-action sweep but still fails
+  the full HAPPO survival ablation;
+- fixed safe MAV action does not keep the MAV alive;
+- MAV action scaling does not keep the MAV alive;
+- available missile metadata does not show blue systematically targeting the
+  MAV;
+- `run_1m_allowed = false`.
+
+The current primary hypothesis is `f22_control_or_dynamics_instability`, with a
+secondary concern that a fixed MAV can become predictable and vulnerable. The
+next step is not more training; it is a narrow MAV control/dynamics stability
+fix or a temporary F-16 MAV surrogate validation path.

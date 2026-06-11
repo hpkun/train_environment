@@ -296,6 +296,7 @@ class UavCombatEnv(gymnasium.Env):
 
         # Death reason tracking (set on the step the agent dies, cleared on reset)
         self._death_reasons: dict[str, str | None] = {}
+        self._death_events_step: list[dict] = []
 
         # Kill cooldown: prevent "machine gun" multi-kill bursts (paper: 0.5 s between kills)
         self._last_kill_step: dict[str, int] = {}      # agent_id → env step of last kill
@@ -414,6 +415,7 @@ class UavCombatEnv(gymnasium.Env):
 
         # Reset death reasons
         self._death_reasons = {}
+        self._death_events_step = []
 
         # Reset kill cooldown tracking
         self._last_kill_step = {}
@@ -486,9 +488,14 @@ class UavCombatEnv(gymnasium.Env):
     def step(self, actions: dict):
         self.current_step += 1
         self._crashed_this_step.clear()
+        self._death_events_step = []
         self._launch_diag_step = make_empty_launch_diag()
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
+        alive_before = {
+            aid: bool((sim := self._get_sim(aid)) is not None and sim.is_alive)
+            for aid in self.agent_ids
+        }
 
         # 0. Pre-compute kill-cooldown denial set (before physics loop).
         #    An agent that scored a kill within the last KILL_COOLDOWN_STEPS
@@ -514,6 +521,7 @@ class UavCombatEnv(gymnasium.Env):
 
         # 3. Check terminations
         self._check_crash_terminations()
+        self._death_events_step = self._build_death_events(alive_before)
 
         # 4. Compute rewards
         rewards, reward_components = self._compute_rewards()
@@ -1066,6 +1074,100 @@ class UavCombatEnv(gymnasium.Env):
                 # Crash reduces N_red or N_blue → penalised via r_end = 30×(ΔN)
                 # in the step that the round ends.  No separate crash penalty needed.
 
+    def _missile_hit_record_for_target(self, agent_id: str) -> dict | None:
+        for record in self._launch_quality_done_step_records:
+            if record.get("target_id") != agent_id:
+                continue
+            if record.get("termination_reason") != "hit":
+                continue
+            return record
+        return None
+
+    def _death_event_for_agent(self, agent_id: str) -> dict:
+        sim = self._get_sim(agent_id)
+        side = "red" if agent_id.startswith("red_") else "blue"
+        reason = self._death_reasons.get(agent_id)
+        missile_record = self._missile_hit_record_for_target(agent_id)
+        low_altitude = None
+        over_g = None
+        out_of_bounds = None
+        crash = None
+        altitude = speed = roll_deg = pitch_deg = heading_deg = None
+        if sim is not None:
+            try:
+                altitude = float(sim.get_geodetic()[2])
+                low_altitude = bool(altitude < self.BATTLEFIELD_ALTITUDE_MIN)
+            except Exception:
+                pass
+            try:
+                velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
+                speed = float(np.linalg.norm(velocity))
+            except Exception:
+                pass
+            try:
+                roll, pitch, heading = sim.get_rpy()
+                roll_deg = float(np.degrees(roll))
+                pitch_deg = float(np.degrees(pitch))
+                heading_deg = float(np.degrees(heading))
+            except Exception:
+                pass
+            try:
+                pos = sim.get_position()
+                out_of_bounds = bool(
+                    abs(float(pos[0])) > self.BATTLEFIELD_HALF_SIZE
+                    or abs(float(pos[1])) > self.BATTLEFIELD_HALF_SIZE
+                )
+            except Exception:
+                pass
+            over_g = bool(agent_id in self._crashed_this_step and reason == "Crash_OverG")
+            crash = bool(agent_id in self._crashed_this_step)
+
+        if missile_record is not None:
+            death_reason = "missile_hit"
+            source = "missile_term"
+        elif reason:
+            death_reason = str(reason)
+            source = "existing_info"
+        elif low_altitude:
+            death_reason = "low_altitude_or_crash"
+            source = "state_heuristic"
+        else:
+            death_reason = "unknown_environment_death"
+            source = "unknown"
+
+        roles = getattr(self, "agent_roles", {})
+        models = getattr(self, "agent_models", {})
+        return {
+            "agent_id": agent_id,
+            "step": int(self.current_step),
+            "side": side,
+            "role": str(roles.get(agent_id, "")),
+            "aircraft_model": str(models.get(agent_id, getattr(sim, "model", ""))) if sim is not None else None,
+            "death_reason": death_reason,
+            "death_reason_source": source,
+            "killed_by_missile": bool(missile_record is not None),
+            "missile_owner": missile_record.get("shooter_id") if missile_record else None,
+            "missile_target": missile_record.get("target_id") if missile_record else None,
+            "low_altitude": low_altitude,
+            "over_g": over_g,
+            "out_of_bounds": out_of_bounds,
+            "crash": crash,
+            "altitude": altitude,
+            "speed": speed,
+            "roll_deg": roll_deg,
+            "pitch_deg": pitch_deg,
+            "heading_deg": heading_deg,
+        }
+
+    def _build_death_events(self, alive_before: dict[str, bool]) -> list[dict]:
+        events: list[dict] = []
+        for aid in self.agent_ids:
+            sim = self._get_sim(aid)
+            alive_now = bool(sim is not None and sim.is_alive)
+            if alive_before.get(aid, False) and not alive_now:
+                events.append(self._death_event_for_agent(aid))
+        return events
+
     def _get_terminated(self) -> dict:
         blue_all_dead = all(not s.is_alive for s in self.blue_planes.values())
         red_all_dead = all(not s.is_alive for s in self.red_planes.values())
@@ -1495,6 +1597,7 @@ class UavCombatEnv(gymnasium.Env):
         info["__launch_quality_done__"] = [
             dict(record) for record in self._launch_quality_done_step_records
         ]
+        info["death_events"] = [dict(event) for event in self._death_events_step]
         return info
 
     # ------------------------------------------------------------------
