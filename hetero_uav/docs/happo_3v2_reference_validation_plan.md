@@ -217,6 +217,21 @@ not validate the environment strongly enough for a 1M HAPPO reference run.
 Reward/observation/targeting should be inspected before adding GRU, attention,
 or full TAM-HAPPO.
 
+The key unresolved contradiction is that the latest training row reports
+timeout red-win survival, while deterministic checkpoint evaluation reports
+blue elimination wins and zero MAV survival. This must be treated as a
+train/eval consistency issue, not as evidence that the policy has learned a
+valid timeout survival strategy.
+
+The next validation gate is:
+
+1. train/eval consistency audit;
+2. deterministic versus stochastic checkpoint evaluation;
+3. MAV failure-mode audit;
+4. explicit 1M readiness decision.
+
+Do not start a 1M HAPPO reference run until this gate is resolved.
+
 ## Failure Triage Order
 
 If 200k fails, inspect in this order:

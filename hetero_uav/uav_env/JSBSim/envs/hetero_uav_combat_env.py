@@ -68,6 +68,20 @@ DEFAULT_AIRCRAFT_TYPE_PARAMS = {
     },
 }
 
+HAPPO_REF_V0_REWARD_COMPONENT_KEYS = (
+    "mav_survival",
+    "mav_support",
+    "mav_attack",
+    "mav_dodge",
+    "uav_attack_window",
+    "uav_fire",
+    "uav_hit",
+    "uav_dodge",
+    "event",
+    "safety",
+    "death_penalty",
+)
+
 
 class HeteroUavCombatEnv(UavCombatEnv):
     """BRMA environment with per-agent aircraft model, role, and missile count.
@@ -448,6 +462,13 @@ class HeteroUavCombatEnv(UavCombatEnv):
         params = self.aircraft_type_params.get(type_name, self.aircraft_type_params["attack_uav"])
         return int(params.get("num_missiles", self.num_missiles_per_plane))
 
+    def _ensure_happo_ref_v0_reward_component_keys(self, components: dict) -> None:
+        """Expose stable per-agent HAPPO reward component fields for audits."""
+        for aid in self.agent_ids:
+            comp = components.setdefault(aid, {})
+            for key in HAPPO_REF_V0_REWARD_COMPONENT_KEYS:
+                comp.setdefault(key, 0.0)
+
     def _compute_rewards(self) -> tuple[dict, dict]:
         """Override to add minimal hetero role-aware overlay."""
         base_rewards, components = super()._compute_rewards()
@@ -500,15 +521,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
         # ---- happo_ref_v0 overlay ----
         if self.hetero_reward_mode == "happo_ref_v0":
-            keys = [
-                "mav_survival", "mav_support", "mav_attack", "mav_dodge",
-                "uav_attack_window", "uav_fire", "uav_hit", "uav_dodge",
-                "event", "safety", "death_penalty",
-            ]
-            for aid in self.agent_ids:
-                comp = components.setdefault(aid, {})
-                for key in keys:
-                    comp.setdefault(key, 0.0)
+            self._ensure_happo_ref_v0_reward_component_keys(components)
 
             # Safety terms are deliberately small. The base BRMA reward still
             # carries the primary shaping; this mode only adds role signals.

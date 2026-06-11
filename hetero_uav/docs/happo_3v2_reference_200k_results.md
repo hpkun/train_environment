@@ -111,3 +111,21 @@ Rationale:
 
 Next work should inspect reward/observation/targeting before adding GRU,
 attention, or full TAM-HAPPO.
+
+## 7. Train/Eval Consistency Follow-Up
+
+The latest training row and deterministic checkpoint evaluation disagree
+strongly. The train row is a recent on-policy stochastic rollout window, while
+the checkpoint evaluation is a saved-policy deterministic rollout. It is
+therefore not valid to treat the latest train row timeout survival as an
+effective combat result.
+
+Before any 1M run, the required diagnostic sequence is:
+
+- audit train/eval consistency;
+- compare deterministic and stochastic policy modes;
+- audit MAV failure modes.
+
+If those diagnostics still show systematic MAV death or deterministic collapse,
+the next step is to adjust the validation setup rather than increasing the
+training horizon.

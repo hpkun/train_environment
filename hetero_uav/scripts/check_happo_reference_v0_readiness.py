@@ -127,7 +127,12 @@ def _check_reward(config: str, blocking: list[str], warnings: list[str]) -> dict
         out["step_ok"] = True
         components = info.get("reward_components", {})
         out["reward_components_present"] = isinstance(components, dict) and bool(components)
-        out["reward_component_keys"] = sorted(components.keys()) if isinstance(components, dict) else []
+        component_keys = set()
+        if isinstance(components, dict):
+            for values in components.values():
+                if isinstance(values, dict):
+                    component_keys.update(str(key) for key in values.keys())
+        out["reward_component_keys"] = sorted(component_keys)
         required_tokens = ["safety", "event", "death_penalty"]
         missing = [t for t in required_tokens if not any(t in k for k in out["reward_component_keys"])]
         out["required_reward_tokens_missing"] = missing
