@@ -9,6 +9,22 @@ from algorithms.mappo.utils import compute_gae
 from .happo_policy import MAV_ROLE_ID, UAV_ROLE_ID
 
 
+def _compute_grouped_gae(team_reward, values, next_values, team_dones,
+                         env_ids, gamma: float, gae_lambda: float):
+    advantages = torch.zeros_like(team_reward)
+    returns = torch.zeros_like(team_reward)
+    for env_id in torch.unique(env_ids):
+        idx = torch.nonzero(env_ids == env_id, as_tuple=False).flatten()
+        last_gae = torch.zeros((), device=team_reward.device)
+        for pos in reversed(idx.tolist()):
+            nonterminal = 1.0 - team_dones[pos]
+            delta = team_reward[pos] + gamma * next_values[pos] * nonterminal - values[pos]
+            last_gae = delta + gamma * gae_lambda * nonterminal * last_gae
+            advantages[pos] = last_gae
+            returns[pos] = advantages[pos] + values[pos]
+    return advantages, returns
+
+
 class HAPPOReferenceTrainer:
     """Simplified HAPPO-style trainer.
 
@@ -78,12 +94,18 @@ class HAPPOReferenceTrainer:
         dones = data["dones"]
         valid_count = active.sum(dim=-1).clamp(min=1)
         team_reward = (rewards * active).sum(dim=-1) / valid_count
-        with torch.no_grad():
-            next_val = self.policy.value(data["critic_state"][-1:])
-        all_values = torch.cat([values, next_val])
         team_dones = dones[:, 0].float()
-        advantages, returns = compute_gae(
-            team_reward, all_values, team_dones, self.gamma, self.gae_lambda)
+        next_values = data.get("next_values")
+        if next_values is not None and not torch.isnan(next_values).any():
+            advantages, returns = _compute_grouped_gae(
+                team_reward, values, next_values, team_dones,
+                data["env_ids"], self.gamma, self.gae_lambda)
+        else:
+            with torch.no_grad():
+                next_val = self.policy.value(data["critic_state"][-1:])
+            all_values = torch.cat([values, next_val])
+            advantages, returns = compute_gae(
+                team_reward, all_values, team_dones, self.gamma, self.gae_lambda)
         if advantages.numel() > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 

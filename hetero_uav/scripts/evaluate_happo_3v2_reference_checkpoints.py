@@ -152,8 +152,12 @@ def main() -> int:
     parser.add_argument("--configs", nargs="*", default=DEFAULT_CONFIGS)
     parser.add_argument("--output-json", default=None)
     parser.add_argument("--output-md", default=None)
+    parser.add_argument("--fast", action="store_true",
+                        help="Quick screening: 20 episodes and 3v2 seen config only.")
     args = parser.parse_args()
 
+    if args.fast:
+        args.episodes = 20
     exp_dir = _rel(args.experiment_dir)
     if not exp_dir.exists():
         print(f"experiment directory does not exist: {exp_dir}", file=sys.stderr)
@@ -164,6 +168,8 @@ def main() -> int:
     try:
         if args.configs == DEFAULT_CONFIGS:
             args.configs = _default_configs_for(exp_dir)
+        if args.fast:
+            args.configs = [cfg for cfg in args.configs if "3v2" in cfg] or args.configs[:1]
         for name, model in _checkpoint_paths(exp_dir, args.checkpoint_mode):
             records.extend(_run_eval(name, model, args, out_dir))
     except FileNotFoundError as exc:

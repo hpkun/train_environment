@@ -138,12 +138,16 @@ def collect(args) -> tuple[dict[str, np.ndarray], dict]:
                     envelope_flags.append(envelope_flag)
                     if len(arrays["actor_obs"]) >= args.max_samples:
                         break
-                if len(arrays["actor_obs"]) >= args.max_samples or team_done(terminated, truncated):
+                reached_sample_cap = (
+                    args.stop_when_samples_reached
+                    and len(arrays["actor_obs"]) >= args.max_samples
+                )
+                if reached_sample_cap or team_done(terminated, truncated):
                     break
             ep_red_fired.append(red_fired_total)
             ep_red_hits.append(red_hits_total)
             ep_blue_dead.append(sum(not sim.is_alive for sim in env.blue_planes.values()))
-            if len(arrays["actor_obs"]) >= args.max_samples:
+            if args.stop_when_samples_reached and len(arrays["actor_obs"]) >= args.max_samples:
                 break
     finally:
         env.close()
@@ -166,6 +170,7 @@ def collect(args) -> tuple[dict[str, np.ndarray], dict]:
     summary = {
         "num_samples": int(packed["actor_obs"].shape[0]),
         "episodes": int(len(ep_red_fired)),
+        "episodes_used": int(len(ep_red_fired)),
         "config": args.config,
         "opponent_policy": args.opponent_policy,
         "red_missiles_fired_mean": float(np.mean(ep_red_fired)) if ep_red_fired else 0.0,
@@ -186,7 +191,8 @@ def main() -> int:
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--opponent-policy", choices=["brma_rule", "zero"], default="brma_rule")
-    parser.add_argument("--max-samples", type=int, default=200000)
+    parser.add_argument("--max-samples", type=int, default=100000)
+    parser.add_argument("--stop-when-samples-reached", action="store_true", default=True)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 

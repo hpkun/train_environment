@@ -18,11 +18,13 @@ class HAPPORolloutBuffer:
         self.rewards = np.zeros((max_len, num_red), dtype=np.float32)
         self.dones = np.zeros((max_len, num_red), dtype=np.float32)
         self.values = np.zeros(max_len, dtype=np.float32)
+        self.next_values = np.full(max_len, np.nan, dtype=np.float32)
         self.active_masks = np.zeros((max_len, num_red), dtype=np.float32)
+        self.env_ids = np.zeros(max_len, dtype=np.int64)
         self.role_ids = np.asarray(role_ids, dtype=np.int64)
 
     def store(self, actor_obs, critic_state, actions, log_probs,
-              rewards, dones, value, active_masks):
+              rewards, dones, value, active_masks, next_value=None, env_id=0):
         idx = self.pos
         self.actor_obs[idx] = actor_obs
         self.critic_state[idx] = critic_state
@@ -31,7 +33,10 @@ class HAPPORolloutBuffer:
         self.rewards[idx] = rewards
         self.dones[idx] = dones
         self.values[idx] = float(value)
+        if next_value is not None:
+            self.next_values[idx] = float(next_value)
         self.active_masks[idx] = active_masks
+        self.env_ids[idx] = int(env_id)
         self.pos += 1
 
     def __len__(self):
@@ -47,6 +52,8 @@ class HAPPORolloutBuffer:
             "rewards": torch.as_tensor(self.rewards[:n], device=device),
             "dones": torch.as_tensor(self.dones[:n], device=device),
             "values": torch.as_tensor(self.values[:n], device=device),
+            "next_values": torch.as_tensor(self.next_values[:n], device=device),
             "active_masks": torch.as_tensor(self.active_masks[:n], device=device),
+            "env_ids": torch.as_tensor(self.env_ids[:n], device=device),
             "role_ids": torch.as_tensor(self.role_ids, device=device),
         }

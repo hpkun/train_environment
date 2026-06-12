@@ -27,6 +27,7 @@ DEFAULT_EVAL_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml",
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
 ]
+NUM_ENVS = 4
 
 
 def _build_red_alive_mask(info: dict, env, red_ids: list[str]) -> np.ndarray:
@@ -156,8 +157,12 @@ def main() -> None:
     (out_dir / "best").mkdir(parents=True, exist_ok=True)
     (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
 
-    env = make_env(args.config, env_type="jsbsim_hetero",
-                   hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
+    envs = [
+        make_env(args.config, env_type="jsbsim_hetero",
+                 hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
+        for _ in range(NUM_ENVS)
+    ]
+    env = envs[0]
     adapter = HeteroObsAdapterV2()
     actor_dim = adapter.flat_actor_obs_dim
     critic_dim = adapter.critic_state_dim
@@ -174,15 +179,20 @@ def main() -> None:
         max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
         gamma=args.gamma, gae_lambda=args.gae_lambda,
     )
-    opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17)
-    obs, info = env.reset(seed=args.seed)
+    opponents = [
+        OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17 + i)
+        for i in range(NUM_ENVS)
+    ]
+    env_states = [e.reset(seed=args.seed + i) for i, e in enumerate(envs)]
+    obs_list = [state[0] for state in env_states]
+    info_list = [state[1] for state in env_states]
     roles = _role_ids(env)
     iterations = int(math.ceil(args.total_env_steps / args.rollout_length))
     total_steps = 0
     episodes = 0
-    current_ep_return = np.zeros(len(env.red_ids), dtype=np.float32)
-    current_ep_len = 0
-    prev_hit_totals = {"red": 0, "blue": 0}
+    current_ep_return = [np.zeros(len(env.red_ids), dtype=np.float32) for _ in range(NUM_ENVS)]
+    current_ep_len = [0 for _ in range(NUM_ENVS)]
+    prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(NUM_ENVS)]
     recent = deque(maxlen=100)
     best_score = -float("inf")
     nan_detected = False
@@ -217,68 +227,88 @@ def main() -> None:
             buffer = HAPPORolloutBuffer(rollout_len, len(env.red_ids), actor_dim,
                                         critic_dim, 3, roles)
             red_fired = blue_fired = hits = 0
-            for _ in range(rollout_len):
-                adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
-                actor_obs = np.stack([
-                    adapted["actor_obs"].get(rid, np.zeros(actor_dim, dtype=np.float32))
-                    for rid in env.red_ids
-                ])
-                critic = adapted["critic_state"]
-                active = _build_red_alive_mask(info, env, env.red_ids)
-                with torch.no_grad():
-                    out = policy.act(
-                        torch.as_tensor(actor_obs, device=device),
-                        roles=roles,
-                        critic_state=torch.as_tensor(critic, device=device),
-                        deterministic=False,
-                    )
-                actions = out["action"].cpu().numpy()
-                log_probs = out["log_prob"].cpu().numpy()
-                value = float(out["value"].item())
-                if np.isnan(actions).any() or np.isnan(value):
-                    nan_detected = True
-                    break
-                action_dict = {rid: actions[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
-                action_dict.update(opponent.act(obs, env.blue_ids, env=env))
-                obs, rewards, terminated, truncated, info = env.step(action_dict)
-                reward_np = np.array([float(rewards.get(rid, 0.0)) for rid in env.red_ids], dtype=np.float32)
-                done = _team_done(terminated, truncated)
-                done_np = np.full((len(env.red_ids),), float(done), dtype=np.float32)
-                buffer.store(actor_obs, critic, actions, log_probs, reward_np, done_np, value, active)
-                current_ep_return += reward_np
-                current_ep_len += 1
-                total_steps += 1
-                for aid in env.agent_ids:
-                    fired = int(info.get(aid, {}).get("missiles_fired_this_step", 0))
-                    if aid.startswith("red_"):
-                        red_fired += fired
+            while len(buffer) < rollout_len and total_steps < args.total_env_steps:
+                for env_idx, rollout_env in enumerate(envs):
+                    if len(buffer) >= rollout_len or total_steps >= args.total_env_steps:
+                        break
+                    obs = obs_list[env_idx]
+                    info = info_list[env_idx]
+                    adapted = adapter.adapt_all(
+                        obs, info=info, red_ids=rollout_env.red_ids, blue_ids=rollout_env.blue_ids)
+                    actor_obs = np.stack([
+                        adapted["actor_obs"].get(rid, np.zeros(actor_dim, dtype=np.float32))
+                        for rid in rollout_env.red_ids
+                    ])
+                    critic = adapted["critic_state"]
+                    active = _build_red_alive_mask(info, rollout_env, rollout_env.red_ids)
+                    with torch.no_grad():
+                        out = policy.act(
+                            torch.as_tensor(actor_obs, device=device),
+                            roles=roles,
+                            critic_state=torch.as_tensor(critic, device=device),
+                            deterministic=False,
+                        )
+                    actions = out["action"].cpu().numpy()
+                    log_probs = out["log_prob"].cpu().numpy()
+                    value = float(out["value"].item())
+                    if np.isnan(actions).any() or np.isnan(value):
+                        nan_detected = True
+                        break
+                    action_dict = {rid: actions[i].astype(np.float32)
+                                   for i, rid in enumerate(rollout_env.red_ids)}
+                    action_dict.update(opponents[env_idx].act(obs, rollout_env.blue_ids, env=rollout_env))
+                    next_obs, rewards, terminated, truncated, next_info = rollout_env.step(action_dict)
+                    reward_np = np.array([float(rewards.get(rid, 0.0)) for rid in rollout_env.red_ids], dtype=np.float32)
+                    done = _team_done(terminated, truncated)
+                    done_np = np.full((len(rollout_env.red_ids),), float(done), dtype=np.float32)
+                    if done:
+                        next_value = 0.0
                     else:
-                        blue_fired += fired
-                mt = info.get("__missile_term__", {})
-                if isinstance(mt, dict):
-                    red_hit_total = int(mt.get("red", {}).get("hit", 0))
-                    blue_hit_total = int(mt.get("blue", {}).get("hit", 0))
-                    hits += max(red_hit_total - prev_hit_totals["red"], 0)
-                    hits += max(blue_hit_total - prev_hit_totals["blue"], 0)
-                    prev_hit_totals["red"] = red_hit_total
-                    prev_hit_totals["blue"] = blue_hit_total
-                if done:
-                    outcome = _episode_outcome(env, truncated, current_ep_len)
-                    ra, ba = _alive_counts(env)
-                    recent.append({
-                        "return": float(current_ep_return.mean()),
-                        "winner": outcome["winner"],
-                        "end_reason": outcome["end_reason"],
-                        "mav": _mav_alive(env),
-                        "red_alive": ra,
-                        "blue_alive": ba,
-                    })
-                    episodes += 1
-                    current_ep_return[:] = 0.0
-                    current_ep_len = 0
-                    obs, info = env.reset(seed=args.seed + total_steps)
-                    prev_hit_totals = {"red": 0, "blue": 0}
-                if total_steps >= args.total_env_steps:
+                        next_adapted = adapter.adapt_all(
+                            next_obs, info=next_info, red_ids=rollout_env.red_ids, blue_ids=rollout_env.blue_ids)
+                        with torch.no_grad():
+                            next_value = float(policy.value(
+                                torch.as_tensor(next_adapted["critic_state"], device=device).unsqueeze(0)
+                            ).item())
+                    buffer.store(
+                        actor_obs, critic, actions, log_probs, reward_np, done_np,
+                        value, active, next_value=next_value, env_id=env_idx)
+                    current_ep_return[env_idx] += reward_np
+                    current_ep_len[env_idx] += 1
+                    total_steps += 1
+                    for aid in rollout_env.agent_ids:
+                        fired = int(next_info.get(aid, {}).get("missiles_fired_this_step", 0))
+                        if aid.startswith("red_"):
+                            red_fired += fired
+                        else:
+                            blue_fired += fired
+                    mt = next_info.get("__missile_term__", {})
+                    if isinstance(mt, dict):
+                        red_hit_total = int(mt.get("red", {}).get("hit", 0))
+                        blue_hit_total = int(mt.get("blue", {}).get("hit", 0))
+                        hits += max(red_hit_total - prev_hit_totals[env_idx]["red"], 0)
+                        hits += max(blue_hit_total - prev_hit_totals[env_idx]["blue"], 0)
+                        prev_hit_totals[env_idx]["red"] = red_hit_total
+                        prev_hit_totals[env_idx]["blue"] = blue_hit_total
+                    if done:
+                        outcome = _episode_outcome(rollout_env, truncated, current_ep_len[env_idx])
+                        ra, ba = _alive_counts(rollout_env)
+                        recent.append({
+                            "return": float(current_ep_return[env_idx].mean()),
+                            "winner": outcome["winner"],
+                            "end_reason": outcome["end_reason"],
+                            "mav": _mav_alive(rollout_env),
+                            "red_alive": ra,
+                            "blue_alive": ba,
+                        })
+                        episodes += 1
+                        current_ep_return[env_idx][:] = 0.0
+                        current_ep_len[env_idx] = 0
+                        next_obs, next_info = rollout_env.reset(seed=args.seed + total_steps + env_idx)
+                        prev_hit_totals[env_idx] = {"red": 0, "blue": 0}
+                    obs_list[env_idx] = next_obs
+                    info_list[env_idx] = next_info
+                if nan_detected:
                     break
             if nan_detected:
                 break
@@ -342,6 +372,7 @@ def main() -> None:
                             "sequential_update": True,
                             "attention": False,
                             "recurrent": False,
+                            "num_envs": NUM_ENVS,
                             "init_checkpoint": args.init_checkpoint,
                         }, indent=2), encoding="utf-8")
                 tmp_model.unlink(missing_ok=True)
@@ -366,6 +397,7 @@ def main() -> None:
         "recurrent": False,
         "missile_scripted": True,
         "evasion_scripted": True,
+        "num_envs": NUM_ENVS,
         "init_checkpoint": args.init_checkpoint,
         "total_env_steps_actual": total_steps,
         "episodes": episodes,
@@ -373,7 +405,8 @@ def main() -> None:
     }
     (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    env.close()
+    for rollout_env in envs:
+        rollout_env.close()
     print(f"Saved {latest_model}", flush=True)
 
 
