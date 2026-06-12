@@ -193,3 +193,19 @@ Decision: B. HAPPO surrogate 1M is only a survival baseline.
 It is not a usable combat baseline. The training rollout is stable and NaN-free, but it mainly shows timeout survival. The independent evaluation shows that latest collapses, and best is only partially better. Best has small 3v2 red missile hit and blue death rates, but not enough to claim a stable combat strategy.
 
 Do not continue longer training as the next step. The next step should be a minimal combat-oriented reward/curriculum before new algorithm design.
+
+## Red Attack Chain Follow-Up
+
+Before entering combat reward/curriculum, the red fire chain was audited separately in `docs/red_attack_pipeline_audit.md`.
+
+Result:
+
+- Red UAV missile counts are correct.
+- Red and blue share the same automatic fire-control scan path.
+- Red observations contain enemy tracks under `mav_shared_geo`.
+- Red logging fields are present.
+- A forced launch-envelope probe confirms that red UAV can fire in a valid envelope.
+- A direct-chase scripted red oracle can fire and hit.
+- HAPPO best/latest do not enter the full launch envelope because launch angle/aspect conditions are not satisfied.
+
+Therefore, if a red oracle cannot fire in a future setup, training or reward changes should stop until the fire chain is repaired. In the current audited setup, the fire chain works; the learned HAPPO policy is not engaging.
