@@ -79,6 +79,40 @@ Independent 100-episode evaluation did not confirm a stable combat policy:
 - best 5v4: red win 0.33, blue win 0.02, draw 0.65, MAV survival 0.00, red hit 1.24;
 - latest collapsed to blue elimination wins in both 3v2 and 5v4.
 
+### Oracle-Pretrain Fine-Tune 200k
+
+The direct-chase oracle dataset verified that the red attack chain is usable:
+red UAVs can close distance, fire, hit, and kill blue aircraft. Behavior
+cloning the shared UAV actor from this dataset reduced the supervised action
+loss, but the 200k closed-loop fine-tune still did not pass the combat-pilot
+gate on the normal 3v2 geometry.
+
+- best 3v2: survival-oriented, MAV survival 0.83, but red fire/hit/blue death
+  all 0;
+- latest 3v2: some red fire/hit, but MAV survival 0;
+- latest 5v4: aggressive attack signal, but still MAV survival 0.
+
+Conclusion: the next step is an easy combat task with shorter initial distance
+and better initial heading, not another blind 1M run.
+
+### Easy Combat 100k
+
+The easy combat task shortened the initial red-UAV/blue-UAV distance and
+aligned the initial headings while keeping reward, observation, action,
+missile dynamics, PID, aircraft XML, and actor/critic dimensions unchanged.
+Training used the oracle-pretrained checkpoint, CUDA, and the hardcoded
+4-environment rollout path.
+
+The 100k run completed without NaN, but it still did not produce red attack
+behavior in fast checkpoint evaluation:
+
+- best 3v2: red fire 0.00, red hit 0.00, blue death 0.00, MAV survival 1.00;
+- latest 3v2: red fire 0.00, red hit 0.00, blue death 0.00, MAV survival 1.00;
+- both checkpoints won only by timeout alive advantage.
+
+Conclusion: easy combat improved survival but did not make HAPPO reference v0
+transfer oracle imitation into closed-loop attack behavior.
+
 Conclusion: HAPPO reference v0 with F-16 surrogate is mainly a survival baseline, not a reliable combat baseline.
 
 ### Red Direct Chase Oracle Sanity Check

@@ -110,15 +110,47 @@ def _write_final_decision(exp_dir: Path, records: list[dict]) -> None:
         "5v4_not_complete_collapse": float(best5.get("blue_win_rate", 1.0) or 1.0) < 1.0,
     }
     usable = bool(all(criteria.values()))
+    easy_candidates = [record for record in (best3, latest3) if record]
+    easy_per_checkpoint = {}
+    for record in easy_candidates:
+        name = record.get("checkpoint", "unknown")
+        fired = float(record.get("red_missiles_fired_mean", 0.0) or 0.0)
+        hits = float(record.get("red_missile_hits_mean", 0.0) or 0.0)
+        blue_dead = float(record.get("blue_dead_mean", 0.0) or 0.0)
+        mav_surv = float(record.get("mav_survival_rate", 0.0) or 0.0)
+        blue_win = float(record.get("blue_win_rate", 1.0) or 1.0)
+        red_elim = float(record.get("red_elimination_win_rate", 0.0) or 0.0)
+        not_timeout_only = red_elim > 0.0 or hits > 0.1 or blue_dead > 0.1
+        easy_per_checkpoint[name] = {
+            "red_missiles_fired_mean_gt_0_5": fired > 0.5,
+            "hit_or_blue_dead_gt_0_1": hits > 0.1 or blue_dead > 0.1,
+            "mav_survival_rate_ge_0_3": mav_surv >= 0.3,
+            "blue_win_rate_lt_0_9": blue_win < 0.9,
+            "not_pure_timeout_alive_advantage": not_timeout_only,
+            "easy_task_success": bool(
+                fired > 0.5
+                and (hits > 0.1 or blue_dead > 0.1)
+                and mav_surv >= 0.3
+                and blue_win < 0.9
+                and not_timeout_only
+            ),
+        }
+    easy_task_success = any(v["easy_task_success"] for v in easy_per_checkpoint.values())
     decision = {
         "usable_as_combat_pilot": usable,
         "recommend_1m": usable,
+        "easy_task_success": bool(easy_task_success),
+        "recommend_easy_200k": bool(easy_task_success),
+        "recommend_return_to_normal_geometry": bool(easy_task_success),
         "next_step": (
+            "continue easy combat to 200k, then gradually restore normal initial geometry"
+            if easy_task_success else
             "run 1M oracle-pretrain fine-tune"
             if usable else
             "build easy combat task by shortening initial distance and adjusting initial heading"
         ),
         "criteria": criteria,
+        "easy_task_criteria_by_checkpoint": easy_per_checkpoint,
         "best_3v2": best3,
         "latest_3v2": latest3,
         "best_5v4": best5,
@@ -132,11 +164,18 @@ def _write_final_decision(exp_dir: Path, records: list[dict]) -> None:
         "",
         f"- usable_as_combat_pilot: {usable}",
         f"- recommend_1m: {usable}",
+        f"- easy_task_success: {easy_task_success}",
+        f"- recommend_easy_200k: {easy_task_success}",
+        f"- recommend_return_to_normal_geometry: {easy_task_success}",
         f"- next_step: {decision['next_step']}",
         "",
         "## Criteria",
     ]
     lines.extend(f"- {key}: {value}" for key, value in criteria.items())
+    lines.extend(["", "## Easy Task Criteria"])
+    for name, values in easy_per_checkpoint.items():
+        lines.append(f"### {name}")
+        lines.extend(f"- {key}: {value}" for key, value in values.items())
     out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

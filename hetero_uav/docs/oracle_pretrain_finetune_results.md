@@ -51,17 +51,33 @@ The MAV actor is intentionally not behavior-cloned from direct-chase attack samp
 
 ## 5. 200k fine-tune result
 
-The implementation path is ready:
+Run:
 
 ```powershell
 python scripts/run_happo_oracle_pretrain_finetune_200k.py
 ```
 
-In this Codex execution environment, the real JSBSim data collection and 200k fine-tune were not run because the active Python environment lacks `gymnasium/jsbsim`, and `conda run -n brmamappo ...` was blocked by sandbox permission review timeout. No result numbers are claimed here.
+The completed run was stable (`nan_detected=false`) and reached
+`total_env_steps_actual=200000`, but it did not pass the combat-pilot gate.
+The best 3v2 checkpoint remained a survival policy:
+
+- `red_missiles_fired_mean=0`;
+- `red_missile_hits_mean=0`;
+- `blue_dead_mean=0`;
+- `mav_survival_rate=0.83`.
+
+The latest 3v2 checkpoint produced some attack signal, but MAV survival
+collapsed:
+
+- `red_missiles_fired_mean=1.07`;
+- `red_missile_hits_mean=0.15`;
+- `blue_dead_mean=0.15`;
+- `mav_survival_rate=0.0`.
+
+Conclusion: oracle imitation alone did not reliably transfer to normal
+closed-loop 3v2 combat while preserving MAV survival.
 
 ## 6. 3v2 seen result
-
-Pending real run.
 
 After the 200k run, evaluate with:
 
@@ -71,13 +87,15 @@ python scripts/evaluate_happo_3v2_reference_checkpoints.py --output-dir outputs/
 
 ## 7. 5v4 zero-shot result
 
-Pending real run.
-
 The evaluation script uses the checkpoint metadata to keep the trained 3v2 config as the seen config and evaluates 5v4 as the zero-shot scale-transfer config.
 
 ## 8. Red fire / hit / blue death
 
-Pending real run.
+The red fire chain is still valid. The oracle dataset produced
+`red_missiles_fired_mean=2.38`, `red_missile_hits_mean=1.94`, and
+`blue_dead_mean=1.94`. The learned policy did not consistently reproduce this
+under normal 3v2 geometry, so the next step is the easy combat task rather
+than 1M training.
 
 The final decision will read:
 
@@ -108,4 +126,3 @@ The generated decision files are:
 ## 11. If it fails
 
 If oracle-pretrain 200k does not pass the combat-pilot gate, the next step should only be an easy combat task: shorten initial distance and adjust initial heading so learned policy first acquires approach-and-fire behavior.
-
