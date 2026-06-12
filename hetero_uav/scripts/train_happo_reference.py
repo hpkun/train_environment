@@ -126,7 +126,7 @@ def main() -> None:
     parser.add_argument("--total-env-steps", type=int, default=64)
     parser.add_argument("--rollout-length", type=int, default=16)
     parser.add_argument("--max-steps", type=int, default=64)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
                         choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"])
@@ -145,6 +145,8 @@ def main() -> None:
     parser.add_argument("--eval-configs", nargs="*", default=None)
     parser.add_argument("--init-checkpoint", default=None)
     args = parser.parse_args()
+    if args.device == "cuda" and not torch.cuda.is_available():
+        args.device = "cpu"
 
     from uav_env import make_env
     from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
