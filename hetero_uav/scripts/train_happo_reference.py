@@ -189,7 +189,8 @@ def main() -> None:
     obs_list = [state[0] for state in env_states]
     info_list = [state[1] for state in env_states]
     roles = _role_ids(env)
-    iterations = int(math.ceil(args.total_env_steps / args.rollout_length))
+    transitions_per_rollout = int(args.rollout_length * NUM_ENVS)
+    iterations = int(math.ceil(args.total_env_steps / transitions_per_rollout))
     total_steps = 0
     episodes = 0
     current_ep_return = [np.zeros(len(env.red_ids), dtype=np.float32) for _ in range(NUM_ENVS)]
@@ -223,15 +224,15 @@ def main() -> None:
             ])
         last_eval = -999999
         for iteration in range(1, iterations + 1):
-            rollout_len = min(args.rollout_length, args.total_env_steps - total_steps)
-            if rollout_len <= 0:
+            rollout_transitions = min(transitions_per_rollout, args.total_env_steps - total_steps)
+            if rollout_transitions <= 0:
                 break
-            buffer = HAPPORolloutBuffer(rollout_len, len(env.red_ids), actor_dim,
+            buffer = HAPPORolloutBuffer(rollout_transitions, len(env.red_ids), actor_dim,
                                         critic_dim, 3, roles)
             red_fired = blue_fired = hits = 0
-            while len(buffer) < rollout_len and total_steps < args.total_env_steps:
+            while len(buffer) < rollout_transitions and total_steps < args.total_env_steps:
                 for env_idx, rollout_env in enumerate(envs):
-                    if len(buffer) >= rollout_len or total_steps >= args.total_env_steps:
+                    if len(buffer) >= rollout_transitions or total_steps >= args.total_env_steps:
                         break
                     obs = obs_list[env_idx]
                     info = info_list[env_idx]
@@ -375,6 +376,8 @@ def main() -> None:
                             "attention": False,
                             "recurrent": False,
                             "num_envs": NUM_ENVS,
+                            "rollout_length_per_env": args.rollout_length,
+                            "transitions_per_rollout": transitions_per_rollout,
                             "init_checkpoint": args.init_checkpoint,
                         }, indent=2), encoding="utf-8")
                 tmp_model.unlink(missing_ok=True)
@@ -400,6 +403,8 @@ def main() -> None:
         "missile_scripted": True,
         "evasion_scripted": True,
         "num_envs": NUM_ENVS,
+        "rollout_length_per_env": args.rollout_length,
+        "transitions_per_rollout": transitions_per_rollout,
         "init_checkpoint": args.init_checkpoint,
         "total_env_steps_actual": total_steps,
         "episodes": episodes,
