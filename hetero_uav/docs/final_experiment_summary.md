@@ -101,6 +101,17 @@ The observation alignment test verifies the fixed-capacity V2 input contract:
 
 Conclusion: the unified observation can support the 3v2-to-5v4 zero-shot protocol.
 
+### Oracle-Pretrain Fine-Tune Path
+
+The direct-chase oracle imitation path has been implemented as the next minimal step after the survival baselines:
+
+- collect red UAV direct-chase oracle samples;
+- behavior-clone only the shared UAV actor;
+- keep MAV actor and critic frozen during pretraining;
+- fine-tune HAPPO reference v0 for 200k steps from the oracle-pretrained checkpoint.
+
+In this Codex run, the real JSBSim collection and 200k fine-tune were not executed because the active Python environment lacks `gymnasium/jsbsim`, and `conda run -n brmamappo` was blocked by sandbox permission review timeout. No oracle-pretrain performance result is claimed yet.
+
 ## 5. Results Table
 
 | experiment | train scenario | eval scenario | aircraft | policy | reward | MAV survival | red fire | red hit | blue death | win type | conclusion |
@@ -115,6 +126,7 @@ Conclusion: the unified observation can support the 3v2-to-5v4 zero-shot protoco
 | Red direct chase oracle vs blue zero | none | 3v2 sanity | F-16 MAV surrogate + F-16 UAVs | scripted direct chase | environment fire-control | red team survives in sanity case | 2.00 | 2.00 | 2.00 | red elimination win 1.00 | attack chain works |
 | Red direct chase oracle vs blue BRMA rule | none | 3v2 sanity | F-16 MAV surrogate + F-16 UAVs | scripted direct chase | environment fire-control | red team survives in sanity case | 2.25 | 2.00 | 2.00 | red elimination win 1.00 | learned policy lacks engagement behavior |
 | BRMA observation alignment test | none | 3v2 / 5v4 contract | not aircraft-dependent | V2 adapter contract | none | not applicable | not applicable | not applicable | not applicable | not a combat test | unified observation contract verified |
+| Oracle-pretrain HAPPO 200k | 3v2 | 3v2 / 5v4 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO fine-tune | happo_ref_v0 | pending | pending | pending | pending | pending | implemented, real run pending |
 
 ## 6. Main Findings
 
@@ -125,6 +137,7 @@ Conclusion: the unified observation can support the 3v2-to-5v4 zero-shot protoco
 - Current learned results are mainly survival baselines, not combat baselines.
 - The red attack pipeline is operational; the direct chase oracle can fire, hit, and destroy blue aircraft.
 - The learned policy's key failure is tactical engagement: it does not reliably learn approach angle, alignment, and launch-envelope satisfaction.
+- The oracle-pretrain path is the minimal next intervention, but its combat result is still pending a real brmamappo run.
 
 ## 7. What Can Be Claimed
 

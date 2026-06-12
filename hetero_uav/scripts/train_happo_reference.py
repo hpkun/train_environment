@@ -20,8 +20,6 @@ if str(ROOT) not in sys.path:
 
 from algorithms.happo import HAPPOReferencePolicy, HAPPORolloutBuffer, HAPPOReferenceTrainer
 from algorithms.mappo.opponent_policy import OpponentPolicy
-from uav_env import make_env
-from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
 
 
 DEFAULT_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml"
@@ -144,7 +142,11 @@ def main() -> None:
     parser.add_argument("--eval-interval-steps", type=int, default=25000)
     parser.add_argument("--train-eval-episodes", type=int, default=1)
     parser.add_argument("--eval-configs", nargs="*", default=None)
+    parser.add_argument("--init-checkpoint", default=None)
     args = parser.parse_args()
+
+    from uav_env import make_env
+    from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
 
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
@@ -160,6 +162,12 @@ def main() -> None:
     actor_dim = adapter.flat_actor_obs_dim
     critic_dim = adapter.critic_state_dim
     policy = HAPPOReferencePolicy(actor_dim, critic_dim).to(device)
+    if args.init_checkpoint:
+        init_path = Path(args.init_checkpoint)
+        if not init_path.is_absolute():
+            init_path = ROOT / init_path
+        policy.load(init_path, map_location=device)
+        print(f"Loaded init_checkpoint: {init_path}", flush=True)
     trainer = HAPPOReferenceTrainer(
         policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
         clip_param=args.clip_param, entropy_coef=args.entropy_coef,
@@ -334,6 +342,7 @@ def main() -> None:
                             "sequential_update": True,
                             "attention": False,
                             "recurrent": False,
+                            "init_checkpoint": args.init_checkpoint,
                         }, indent=2), encoding="utf-8")
                 tmp_model.unlink(missing_ok=True)
                 (out_dir / "_tmp_eval.json").unlink(missing_ok=True)
@@ -357,6 +366,7 @@ def main() -> None:
         "recurrent": False,
         "missile_scripted": True,
         "evasion_scripted": True,
+        "init_checkpoint": args.init_checkpoint,
         "total_env_steps_actual": total_steps,
         "episodes": episodes,
         "nan_detected": nan_detected,

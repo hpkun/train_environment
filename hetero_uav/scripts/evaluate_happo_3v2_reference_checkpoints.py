@@ -14,6 +14,7 @@ DEFAULT_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml",
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
 ]
+ZERO_SHOT_5V4_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml"
 
 
 def _rel(path: str) -> Path:
@@ -24,6 +25,19 @@ def _rel(path: str) -> Path:
 def _checkpoint_paths(exp_dir: Path, mode: str) -> list[tuple[str, Path]]:
     names = ["best", "latest"] if mode == "all" else [mode.replace("_only", "")]
     return [(name, exp_dir / name / "model.pt") for name in names]
+
+
+def _load_meta(model: Path) -> dict:
+    meta = model.parent / "meta.json"
+    return json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else {}
+
+
+def _default_configs_for(exp_dir: Path) -> list[str]:
+    for name in ("best", "latest"):
+        cfg = _load_meta(exp_dir / name / "model.pt").get("config")
+        if cfg:
+            return [cfg, ZERO_SHOT_5V4_CONFIG]
+    return DEFAULT_CONFIGS
 
 
 def _run_eval(name: str, model: Path, args, out_dir: Path) -> list[dict]:
@@ -73,9 +87,64 @@ def _write_md(path: Path, records: list[dict]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _write_final_decision(exp_dir: Path, records: list[dict]) -> None:
+    def find(checkpoint: str, needle: str) -> dict:
+        for record in records:
+            if record.get("checkpoint") == checkpoint and needle in record.get("config", ""):
+                return record
+        return {}
+
+    best3 = find("best", "3v2")
+    best5 = find("best", "5v4")
+    latest3 = find("latest", "3v2")
+    latest5 = find("latest", "5v4")
+    criteria = {
+        "3v2_red_missiles_fired_mean_gt_0_3": float(best3.get("red_missiles_fired_mean", 0.0) or 0.0) > 0.3,
+        "3v2_hit_or_blue_dead_gt_0_1": (
+            float(best3.get("red_missile_hits_mean", 0.0) or 0.0) > 0.1
+            or float(best3.get("blue_dead_mean", 0.0) or 0.0) > 0.1
+        ),
+        "3v2_mav_survival_rate_ge_0_3": float(best3.get("mav_survival_rate", 0.0) or 0.0) >= 0.3,
+        "3v2_blue_win_rate_lt_0_9": float(best3.get("blue_win_rate", 1.0) or 1.0) < 0.9,
+        "5v4_red_missiles_fired_mean_gt_0": float(best5.get("red_missiles_fired_mean", 0.0) or 0.0) > 0.0,
+        "5v4_not_complete_collapse": float(best5.get("blue_win_rate", 1.0) or 1.0) < 1.0,
+    }
+    usable = bool(all(criteria.values()))
+    decision = {
+        "usable_as_combat_pilot": usable,
+        "recommend_1m": usable,
+        "next_step": (
+            "run 1M oracle-pretrain fine-tune"
+            if usable else
+            "build easy combat task by shortening initial distance and adjusting initial heading"
+        ),
+        "criteria": criteria,
+        "best_3v2": best3,
+        "latest_3v2": latest3,
+        "best_5v4": best5,
+        "latest_5v4": latest5,
+    }
+    out_json = exp_dir / "final_decision.json"
+    out_md = exp_dir / "final_decision.md"
+    out_json.write_text(json.dumps(decision, indent=2), encoding="utf-8")
+    lines = [
+        "# Oracle-Pretrain Fine-Tune Final Decision",
+        "",
+        f"- usable_as_combat_pilot: {usable}",
+        f"- recommend_1m: {usable}",
+        f"- next_step: {decision['next_step']}",
+        "",
+        "## Criteria",
+    ]
+    lines.extend(f"- {key}: {value}" for key, value in criteria.items())
+    out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate HAPPO 3v2 reference checkpoints")
     parser.add_argument("--experiment-dir", default=DEFAULT_DIR)
+    parser.add_argument("--output-dir", dest="experiment_dir", default=argparse.SUPPRESS,
+                        help="Alias for --experiment-dir")
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--opponent-policy", default="brma_rule")
@@ -93,6 +162,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     records: list[dict] = []
     try:
+        if args.configs == DEFAULT_CONFIGS:
+            args.configs = _default_configs_for(exp_dir)
         for name, model in _checkpoint_paths(exp_dir, args.checkpoint_mode):
             records.extend(_run_eval(name, model, args, out_dir))
     except FileNotFoundError as exc:
@@ -103,8 +174,10 @@ def main() -> int:
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(records, indent=2), encoding="utf-8")
     _write_md(out_md, records)
+    _write_final_decision(exp_dir, records)
     print(f"output_json: {out_json}")
     print(f"output_md: {out_md}")
+    print(f"final_decision_json: {exp_dir / 'final_decision.json'}")
     print(f"records: {len(records)}")
     return 0
 
