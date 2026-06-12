@@ -41,6 +41,10 @@ The mainline observation protocol is `mav_shared_geo` with the V2 adapter:
 
 The V2 adapter includes ego features, role one-hot information, ally entities, enemy entities, validity masks, alive masks, and enemy observed masks. MAV shared tracks are represented through observation fields such as enemy observed mask and track source.
 
+This is a BRMA-inspired entity/mask observation. It is not the full BRMA attention encoder: the current adapter preserves entity groups and masks but then flattens them to a fixed vector consumed by the current policy networks. No biased random masked attention or permutation-invariant entity encoder is implemented in the current mainline.
+
+The current zero-shot claim is fixed-capacity 3v2-to-5v4 scale transfer. It should not be described as arbitrary-scale generalization beyond the configured `max_red=5`, `max_blue=4` capacity.
+
 ## Role Reward Design
 
 There are three reward modes relevant to the current project state:
@@ -109,4 +113,3 @@ The current project state must not claim:
 - solved 5v4 heterogeneous transfer;
 - learned missile evasion;
 - combat effectiveness based only on timeout survival.
-
