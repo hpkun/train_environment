@@ -15,6 +15,12 @@ DEFAULT_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
 ]
 ZERO_SHOT_5V4_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml"
+F16_SURROGATE_5V4_CONFIG = (
+    "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4_happo_ref_v0_f16_mav_surrogate.yaml"
+)
+CONFIG_ALIASES = {
+    "5v4_zero_shot": F16_SURROGATE_5V4_CONFIG,
+}
 
 
 def _rel(path: str) -> Path:
@@ -42,6 +48,10 @@ def _default_configs_for(exp_dir: Path) -> list[str]:
         if cfg:
             return [cfg, ZERO_SHOT_5V4_CONFIG]
     return DEFAULT_CONFIGS
+
+
+def _resolve_config_aliases(configs: list[str]) -> list[str]:
+    return [CONFIG_ALIASES.get(cfg, cfg) for cfg in configs]
 
 
 def _run_eval(name: str, model: Path, args, out_dir: Path) -> list[dict]:
@@ -221,6 +231,7 @@ def main() -> int:
     try:
         if args.configs == DEFAULT_CONFIGS:
             args.configs = _default_configs_for(exp_dir)
+        args.configs = _resolve_config_aliases(args.configs)
         if args.fast:
             args.configs = [cfg for cfg in args.configs if "3v2" in cfg] or args.configs[:1]
         for name, model in _checkpoint_paths(exp_dir, args.checkpoint_mode):
