@@ -52,6 +52,17 @@ def _alive_counts(env) -> tuple[int, int, bool]:
     return red, blue, mav
 
 
+def _aircraft_name(env, aid: str) -> str:
+    """Produce Tacview-compatible name with role-appropriate visual label."""
+    role = env.agent_roles.get(aid, "")
+    if role == "mav":
+        # MAV role → visual label reflects F-22, even if dynamics use F-16 surrogate
+        return f"{aid}_MAV_F22_visual"
+    if role == "attack_uav":
+        return f"{aid}_UAV_F16"
+    return aid
+
+
 def _entries(env) -> list[dict]:
     entries = []
     for aid in env.red_ids + env.blue_ids:
@@ -67,10 +78,40 @@ def _entries(env) -> list[dict]:
             "roll": float(roll),
             "pitch": float(pitch),
             "yaw": float(yaw),
-            "name": f"{aid}_{env.agent_roles.get(aid, '')}_{env.agent_models.get(aid, '')}",
+            "name": _aircraft_name(env, aid),
             "color": "Red" if aid.startswith("red_") else "Blue",
             "alive": bool(sim.is_alive),
         })
+    return entries
+
+
+def _missile_entries(env, missile_id_map: dict[str, int]) -> list[dict]:
+    """Produce ACMI entries for in-flight missiles."""
+    entries = []
+    for mid, missile in env._missiles_in_flight.items():
+        if mid not in missile_id_map:
+            missile_id_map[mid] = 1000 + len(missile_id_map)
+        acmi_id = missile_id_map[mid]
+        if missile.is_alive:
+            lon, lat, alt = missile.get_geodetic()
+            roll, pitch, yaw = missile.get_rpy() * (180.0 / np.pi)
+            owner = getattr(missile, "parent_aircraft", None)
+            owner_id = str(owner.uid) if owner else "?"
+            target = getattr(missile, "target_aircraft", None)
+            target_id = str(target.uid) if target else "?"
+            entries.append({
+                "acmi_id": acmi_id,
+                "lon": float(lon),
+                "lat": float(lat),
+                "alt": float(alt),
+                "roll": float(roll),
+                "pitch": float(pitch),
+                "yaw": float(yaw),
+                "name": f"Missile_{owner_id}_to_{target_id}",
+                "color": missile.color,
+                "alive": True,
+                "type": "Weapon+Missile",
+            })
     return entries
 
 
@@ -117,6 +158,8 @@ def main() -> int:
     env = make_env(args.config, env_type="jsbsim_hetero")
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 33)
     logger = TacviewLogger(reference_time="2026-01-01T00:00:00Z")
+    missile_id_map: dict[str, int] = {}
+    red_missile_objects, blue_missile_objects = 0, 0
     death_order: list[str] = []
     prev_alive: dict[str, bool] = {}
     missile_stats = {"red_fired": 0, "blue_fired": 0, "red_hits": 0, "blue_hits": 0}
@@ -127,7 +170,7 @@ def main() -> int:
 
     try:
         obs, info = env.reset(seed=args.seed)
-        logger.record_frame(0.0, _entries(env), [])
+        logger.record_frame(0.0, _entries(env) + _missile_entries(env, missile_id_map), [])
         step = 0
         while True:
             adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
@@ -174,7 +217,19 @@ def main() -> int:
                 red0_roll.append(abs(math.degrees(float(r))))
                 red0_pitch.append(abs(math.degrees(float(p))))
                 red0_alt.append(float(red0.get_position()[2]))
-            logger.record_frame(step * float(env.env_dt), _entries(env), [])
+
+            # Count missile objects by side
+            for mid in env._missiles_in_flight:
+                if mid not in missile_id_map:
+                    owner = getattr(env._missiles_in_flight[mid], "parent_aircraft", None)
+                    if owner and owner.uid.startswith("red_"):
+                        red_missile_objects += 1
+                    else:
+                        blue_missile_objects += 1
+
+            # Render frame with both aircraft and missile entries
+            all_entries = _entries(env) + _missile_entries(env, missile_id_map)
+            logger.record_frame(step * float(env.env_dt), all_entries, [])
             if _team_done(terminated, truncated):
                 break
             if step > int(getattr(env, "max_steps", 1000)) + 5:
@@ -200,6 +255,16 @@ def main() -> int:
             "mav_alive": mav_alive,
             "death_order": death_order,
             "death_reason": "environment_info_not_explicit",
+            "aircraft_visual_labels": {
+                "red_0": _aircraft_name(env, "red_0"),
+                "red_1": _aircraft_name(env, "red_1") if len(env.red_ids) > 1 else "",
+                "blue_0": _aircraft_name(env, "blue_0"),
+            },
+            "red_0_visual_label": _aircraft_name(env, "red_0"),
+            "missile_objects_exported": len(missile_id_map),
+            "red_missile_objects_exported": red_missile_objects,
+            "blue_missile_objects_exported": blue_missile_objects,
+            "missile_visualization_mode": "real_missile_position_from_env",
             "missiles_fired": missile_stats["red_fired"] + missile_stats["blue_fired"],
             "missile_hits": missile_stats["red_hits"] + missile_stats["blue_hits"],
             "red_missiles_fired": missile_stats["red_fired"],
