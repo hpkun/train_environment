@@ -206,3 +206,21 @@ combat transfer or 5v4 zero-shot transfer.
 The regenerated `final_decision.json` marks `easy_task_success=true`. The
 general combat-pilot gate remains false because this evaluation only covers
 the easy 3v2 task and does not include 5v4 zero-shot.
+
+## 11. Return to normal geometry
+
+The next run returned to normal 3v2 geometry using the wrapped-heading normal
+oracle checkpoint and the same UAV imitation anchor:
+
+- output: `outputs/happo_normal_geometry_oracle_anchor_100k`;
+- total steps: `100000`;
+- normal 3v2 fast eval latest: `red_missiles_fired_mean=0.05`,
+  `red_missile_hits_mean=0.00`, `blue_dead_mean=0.00`,
+  `mav_survival_rate=1.00`;
+- 5v4 latest 20-episode check: `red_missiles_fired_mean=0.75`,
+  `red_missile_hits_mean=0.50`, `blue_dead_mean=0.50`,
+  `mav_survival_rate=0.00`.
+
+Conclusion: easy geometry is learnable, but direct transfer back to normal
+geometry is not yet successful. The next allowed step is a normal-geometry
+curriculum that gradually restores distance and heading from the easy spawn.

@@ -154,14 +154,24 @@ def main() -> int:
     parser.add_argument("--checkpoint", default=DEFAULT_CKPT)
     parser.add_argument("--output-json", default=DEFAULT_JSON)
     parser.add_argument("--output-md", default=DEFAULT_MD)
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory alias that writes action_match.json and action_match.md.",
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-samples", type=int, default=100000)
     parser.add_argument("--max-mse", type=float, default=0.2)
     args = parser.parse_args()
 
     result = evaluate(args)
-    out_json = _rel(args.output_json)
-    out_md = _rel(args.output_md)
+    if args.output_dir:
+        output_dir = _rel(args.output_dir)
+        out_json = output_dir / "action_match.json"
+        out_md = output_dir / "action_match.md"
+    else:
+        out_json = _rel(args.output_json)
+        out_md = _rel(args.output_md)
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
     _write_md(out_md, result)

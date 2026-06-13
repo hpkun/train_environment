@@ -24,7 +24,11 @@ def _rel(path: str) -> Path:
 
 def _checkpoint_paths(exp_dir: Path, mode: str) -> list[tuple[str, Path]]:
     names = ["best", "latest"] if mode == "all" else [mode.replace("_only", "")]
-    return [(name, exp_dir / name / "model.pt") for name in names]
+    return [
+        (name, path)
+        for name in names
+        if (path := exp_dir / name / "model.pt").exists()
+    ]
 
 
 def _load_meta(model: Path) -> dict:
@@ -102,16 +106,18 @@ def _write_final_decision(exp_dir: Path, records: list[dict]) -> None:
     best5 = find("best", "5v4")
     latest3 = find("latest", "3v2")
     latest5 = find("latest", "5v4")
+    primary3 = best3 or latest3
+    primary5 = best5 or latest5
     criteria = {
-        "3v2_red_missiles_fired_mean_gt_0_3": num(best3, "red_missiles_fired_mean") > 0.3,
+        "3v2_red_missiles_fired_mean_gt_0_3": num(primary3, "red_missiles_fired_mean") > 0.3,
         "3v2_hit_or_blue_dead_gt_0_1": (
-            num(best3, "red_missile_hits_mean") > 0.1
-            or num(best3, "blue_dead_mean") > 0.1
+            num(primary3, "red_missile_hits_mean") > 0.1
+            or num(primary3, "blue_dead_mean") > 0.1
         ),
-        "3v2_mav_survival_rate_ge_0_3": num(best3, "mav_survival_rate") >= 0.3,
-        "3v2_blue_win_rate_lt_0_9": num(best3, "blue_win_rate", 1.0) < 0.9,
-        "5v4_red_missiles_fired_mean_gt_0": num(best5, "red_missiles_fired_mean") > 0.0,
-        "5v4_not_complete_collapse": num(best5, "blue_win_rate", 1.0) < 1.0,
+        "3v2_mav_survival_rate_ge_0_3": num(primary3, "mav_survival_rate") >= 0.3,
+        "3v2_blue_win_rate_lt_0_9": num(primary3, "blue_win_rate", 1.0) < 0.9,
+        "5v4_red_missiles_fired_mean_gt_0": num(primary5, "red_missiles_fired_mean") > 0.0,
+        "5v4_not_complete_collapse": num(primary5, "blue_win_rate", 1.0) < 1.0,
     }
     usable = bool(all(criteria.values()))
     easy_candidates = [record for record in (best3, latest3) if record]
@@ -142,7 +148,9 @@ def _write_final_decision(exp_dir: Path, records: list[dict]) -> None:
     easy_task_success = any(v["easy_task_success"] for v in easy_per_checkpoint.values())
     decision = {
         "usable_as_combat_pilot": usable,
+        "normal_geometry_combat_success": usable,
         "recommend_1m": usable,
+        "recommend_normal_geometry_200k": usable,
         "easy_task_success": bool(easy_task_success),
         "recommend_easy_200k": bool(easy_task_success),
         "recommend_return_to_normal_geometry": bool(easy_task_success),
@@ -151,7 +159,7 @@ def _write_final_decision(exp_dir: Path, records: list[dict]) -> None:
             if easy_task_success else
             "run 1M oracle-pretrain fine-tune"
             if usable else
-            "build easy combat task by shortening initial distance and adjusting initial heading"
+            "normal geometry curriculum: gradually restore distance and heading from easy spawn"
         ),
         "criteria": criteria,
         "easy_task_criteria_by_checkpoint": easy_per_checkpoint,
@@ -167,7 +175,9 @@ def _write_final_decision(exp_dir: Path, records: list[dict]) -> None:
         "# Oracle-Pretrain Fine-Tune Final Decision",
         "",
         f"- usable_as_combat_pilot: {usable}",
+        f"- normal_geometry_combat_success: {usable}",
         f"- recommend_1m: {usable}",
+        f"- recommend_normal_geometry_200k: {usable}",
         f"- easy_task_success: {easy_task_success}",
         f"- recommend_easy_200k: {easy_task_success}",
         f"- recommend_return_to_normal_geometry: {easy_task_success}",

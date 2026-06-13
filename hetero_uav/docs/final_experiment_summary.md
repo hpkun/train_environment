@@ -153,6 +153,40 @@ Conclusion: the immediate no-fire failure after oracle pretrain was fixed on
 the easy-combat task. This remains a curriculum/easy-task result, not the final
 normal-geometry or 5v4 zero-shot result.
 
+### Normal-Geometry Oracle Anchor 100k
+
+The wrapped-heading oracle pretrain was also regenerated for the normal 3v2
+geometry:
+
+- dataset reused: `outputs/direct_chase_oracle_dataset/direct_chase_oracle_3v2.npz`;
+- wrapped action-match MSE: `0.028370`;
+- cosine similarity: `0.850247`.
+
+The 100k normal-geometry oracle-anchor run completed without NaN:
+
+- output: `outputs/happo_normal_geometry_oracle_anchor_100k`;
+- `total_env_steps_actual=100000`;
+- `num_envs=4`;
+- `init_checkpoint=outputs/oracle_pretrain/uav_actor_oracle_pretrained_wrapped_normal/model.pt`.
+
+Fast 3v2 eval failed the combat gate:
+
+- `red_missiles_fired_mean=0.05`;
+- `red_missile_hits_mean=0.00`;
+- `blue_dead_mean=0.00`;
+- `mav_survival_rate=1.00`;
+- all episodes timed out, with red wins coming from alive advantage.
+
+A 20-episode latest-only 3v2/5v4 check showed:
+
+- 3v2 latest: `red_missiles_fired_mean=0.05`, `red_missile_hits_mean=0.00`,
+  `blue_dead_mean=0.00`, `mav_survival_rate=1.00`;
+- 5v4 latest: `red_missiles_fired_mean=0.75`, `red_missile_hits_mean=0.50`,
+  `blue_dead_mean=0.50`, `mav_survival_rate=0.00`.
+
+Decision: `normal_geometry_combat_success=false`. The easy task is learnable,
+but normal geometry has not transferred successfully.
+
 Conclusion: HAPPO reference v0 with F-16 surrogate is mainly a survival baseline, not a reliable combat baseline.
 
 ### Red Direct Chase Oracle Sanity Check
@@ -202,6 +236,8 @@ In this Codex run, the real JSBSim collection and 200k fine-tune were not execut
 | BRMA observation alignment test | none | 3v2 / 5v4 contract | not aircraft-dependent | V2 adapter contract | none | not applicable | not applicable | not applicable | not applicable | not a combat test | unified observation contract verified |
 | Oracle-pretrain HAPPO 200k | 3v2 | 3v2 / 5v4 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO fine-tune | happo_ref_v0 | pending | pending | pending | pending | pending | implemented, real run pending |
 | Easy-combat oracle anchor 50k latest | easy 3v2 | easy 3v2 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO + imitation anchor | happo_ref_v0 | 1.00 | 1.50 | 1.48 | 1.48 | red win 1.00 | first learned easy-task combat result |
+| Normal-geometry oracle anchor 100k latest | normal 3v2 | normal 3v2 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO + imitation anchor | happo_ref_v0 | 1.00 | 0.05 | 0.00 | 0.00 | timeout red alive advantage | no normal-geometry combat transfer |
+| Normal-geometry oracle anchor 100k latest | normal 3v2 | 5v4 zero-shot | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO + imitation anchor | happo_ref_v0 | 0.00 | 0.75 | 0.50 | 0.50 | timeout draw/blue alive advantage | some attack signal but MAV survival fails |
 
 ## 6. Main Findings
 
@@ -214,6 +250,7 @@ In this Codex run, the real JSBSim collection and 200k fine-tune were not execut
 - The learned policy's key failure is tactical engagement: it does not reliably learn approach angle, alignment, and launch-envelope satisfaction.
 - The oracle-pretrain path revealed and fixed a heading-wrap loss issue.
 - A UAV imitation anchor restores red fire/hit behavior on the easy-combat task.
+- The same anchor does not yet transfer robustly to normal 3v2 geometry or 5v4 zero-shot.
 
 ## 7. What Can Be Claimed
 

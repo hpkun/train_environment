@@ -223,3 +223,37 @@ Follow-up 50-episode eval:
 - latest checkpoint: `red_win_rate=1.00`, `mav_survival_rate=1.00`,
   `red_missiles_fired_mean=1.50`, `red_missile_hits_mean=1.48`,
   `blue_dead_mean=1.48`.
+
+## 15. Normal-geometry oracle-anchor 100k
+
+After easy-combat 50k succeeded, the same wrapped-heading pretrain and UAV
+imitation anchor were tested on the normal 3v2 geometry:
+
+- config: `uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0_f16_mav_surrogate.yaml`;
+- dataset reused: `outputs/direct_chase_oracle_dataset/direct_chase_oracle_3v2.npz`;
+- wrapped-normal checkpoint:
+  `outputs/oracle_pretrain/uav_actor_oracle_pretrained_wrapped_normal/model.pt`;
+- action match: wrapped MSE `0.028370`, cosine similarity `0.850247`;
+- training: `outputs/happo_normal_geometry_oracle_anchor_100k`;
+- `total_env_steps_actual=100000`, `num_envs=4`, `nan_detected=false`.
+
+Fast 3v2 eval did not pass the attack-signal gate:
+
+- `red_missiles_fired_mean=0.05`;
+- `red_missile_hits_mean=0.00`;
+- `blue_dead_mean=0.00`;
+- `mav_survival_rate=1.00`;
+- wins were timeout alive advantage, not combat elimination.
+
+Because the fast gate failed, 50-episode formal evaluation and ACMI export were
+not run. A 20-episode latest-only 3v2/5v4 check was run to complete the
+normal-geometry decision:
+
+- 3v2 latest: `red_missiles_fired_mean=0.05`, `red_missile_hits_mean=0.00`,
+  `blue_dead_mean=0.00`, `mav_survival_rate=1.00`;
+- 5v4 latest: `red_missiles_fired_mean=0.75`, `red_missile_hits_mean=0.50`,
+  `blue_dead_mean=0.50`, `mav_survival_rate=0.00`.
+
+Decision: `normal_geometry_combat_success=false`,
+`recommend_normal_geometry_200k=false`. Easy geometry is learnable, but normal
+geometry has not transferred successfully.
