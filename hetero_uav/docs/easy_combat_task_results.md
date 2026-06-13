@@ -224,3 +224,58 @@ oracle checkpoint and the same UAV imitation anchor:
 Conclusion: easy geometry is learnable, but direct transfer back to normal
 geometry is not yet successful. The next allowed step is a normal-geometry
 curriculum that gradually restores distance and heading from the easy spawn.
+
+## 12. Geometry curriculum 100k
+
+The geometry curriculum inserts one medium 3v2 geometry between easy combat and
+normal geometry:
+
+- medium config: `uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_medium_combat_f16_mav_surrogate.yaml`;
+- blue latitude: `60.135`, halfway between easy `60.07` and normal `60.20`;
+- MAV initial latitude/altitude: `59.9725` / `6100 m`, halfway between easy
+  `59.965` / `6200 m` and normal `59.98` / `6000 m`;
+- red UAV and blue headings stay aligned with easy/normal because both source
+  configs already use the same headings.
+
+Run:
+
+```powershell
+python scripts/run_happo_geometry_curriculum_100k.py
+```
+
+The run completed two stages:
+
+- medium 50k from easy-combat oracle-anchor latest;
+- normal 50k from medium latest.
+
+Medium 20-episode fast eval:
+
+- best checkpoint: `red_win_rate=1.00`, `mav_survival_rate=0.90`,
+  `red_missiles_fired_mean=1.50`, `red_missile_hits_mean=1.30`,
+  `blue_dead_mean=1.30`;
+- latest checkpoint: `red_win_rate=0.65`, `mav_survival_rate=1.00`,
+  `red_missiles_fired_mean=0.70`, `red_missile_hits_mean=0.65`,
+  `blue_dead_mean=0.65`.
+
+Normal 20-episode fast eval:
+
+- best checkpoint: `red_win_rate=0.95`, `mav_survival_rate=0.90`,
+  `red_missiles_fired_mean=1.80`, `red_missile_hits_mean=1.55`,
+  `blue_dead_mean=1.50`;
+- latest checkpoint: `red_win_rate=0.00`, `mav_survival_rate=1.00`,
+  `red_missiles_fired_mean=0.00`, `red_missile_hits_mean=0.00`,
+  `blue_dead_mean=0.00`.
+
+Because the normal fast eval showed attack signal, a 50-episode normal eval was
+run for checkpoint selection:
+
+- best checkpoint: `red_win_rate=0.92`, `red_elimination_win_rate=0.52`,
+  `mav_survival_rate=0.94`, `red_missiles_fired_mean=1.82`,
+  `red_missile_hits_mean=1.56`, `blue_dead_mean=1.52`;
+- latest checkpoint: `red_win_rate=0.00`, `blue_win_rate=1.00`,
+  `mav_survival_rate=1.00`, `red_missiles_fired_mean=0.00`,
+  `red_missile_hits_mean=0.00`, `blue_dead_mean=0.00`.
+
+Decision: `geometry_curriculum_success=true` and
+`recommend_normal_geometry_200k=true`. The usable checkpoint is `best`, not
+`latest`.

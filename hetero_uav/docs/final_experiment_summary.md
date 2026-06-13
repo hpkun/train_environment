@@ -238,6 +238,9 @@ In this Codex run, the real JSBSim collection and 200k fine-tune were not execut
 | Easy-combat oracle anchor 50k latest | easy 3v2 | easy 3v2 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO + imitation anchor | happo_ref_v0 | 1.00 | 1.50 | 1.48 | 1.48 | red win 1.00 | first learned easy-task combat result |
 | Normal-geometry oracle anchor 100k latest | normal 3v2 | normal 3v2 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO + imitation anchor | happo_ref_v0 | 1.00 | 0.05 | 0.00 | 0.00 | timeout red alive advantage | no normal-geometry combat transfer |
 | Normal-geometry oracle anchor 100k latest | normal 3v2 | 5v4 zero-shot | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO + imitation anchor | happo_ref_v0 | 0.00 | 0.75 | 0.50 | 0.50 | timeout draw/blue alive advantage | some attack signal but MAV survival fails |
+| Geometry curriculum medium 50k best | easy to medium 3v2 | medium 3v2 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO + imitation anchor | happo_ref_v0 | 0.90 | 1.50 | 1.30 | 1.30 | red win 1.00 | medium geometry preserves attack behavior |
+| Geometry curriculum normal 50k best | medium to normal 3v2 | normal 3v2 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO + imitation anchor | happo_ref_v0 | 0.94 | 1.82 | 1.56 | 1.52 | red win 0.92 / red elimination 0.52 | first normal-geometry learned combat checkpoint |
+| Geometry curriculum normal 50k latest | medium to normal 3v2 | normal 3v2 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO + imitation anchor | happo_ref_v0 | 1.00 | 0.00 | 0.00 | 0.00 | blue alive advantage | latest still collapses; use best checkpoint |
 
 ## 6. Main Findings
 
@@ -251,6 +254,12 @@ In this Codex run, the real JSBSim collection and 200k fine-tune were not execut
 - The oracle-pretrain path revealed and fixed a heading-wrap loss issue.
 - A UAV imitation anchor restores red fire/hit behavior on the easy-combat task.
 - The same anchor does not yet transfer robustly to normal 3v2 geometry or 5v4 zero-shot.
+- A single medium-geometry curriculum stage restores normal 3v2 attack behavior
+  in the best checkpoint: `red_missiles_fired_mean=1.82`,
+  `red_missile_hits_mean=1.56`, `blue_dead_mean=1.52`,
+  `mav_survival_rate=0.94`.
+- The normal-geometry latest checkpoint can still collapse to no red fire, so
+  checkpoint selection is part of the current experimental protocol.
 
 ## 7. What Can Be Claimed
 
@@ -261,6 +270,8 @@ The current project can claim:
 - MAV actor and shared UAV actor can be used for heterogeneous policy structure;
 - current methods show survival-transfer behavior;
 - the red attack chain is verified by oracle sanity checks.
+- geometry curriculum can recover a learned normal-geometry 3v2 combat
+  checkpoint under the F-16 MAV surrogate setup.
 
 ## 8. What Cannot Be Claimed
 
@@ -270,9 +281,10 @@ The current project cannot claim:
 - full TAM-HAPPO reproduction;
 - biased random masked attention;
 - GRU or attention implementation;
-- solved combat zero-shot transfer;
-- a learned policy with stable kill ability.
+- solved 5v4 combat zero-shot transfer;
+- a latest-checkpoint learned policy with stable kill ability.
 
 ## 9. Recommended Next Step
 
-Use the red direct chase oracle as a minimal imitation/action-guidance source, or build an easy initial-geometry task, so the learned policy first acquires approach-and-fire behavior.
+Continue from the geometry-curriculum normal best checkpoint for a normal
+geometry 200k run, then evaluate 5v4 zero-shot transfer.

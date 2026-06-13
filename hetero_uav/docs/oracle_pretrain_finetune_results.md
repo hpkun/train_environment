@@ -257,3 +257,51 @@ normal-geometry decision:
 Decision: `normal_geometry_combat_success=false`,
 `recommend_normal_geometry_200k=false`. Easy geometry is learnable, but normal
 geometry has not transferred successfully.
+
+## 16. Geometry curriculum recovery
+
+The direct jump from easy combat to normal geometry failed, so the next run used
+a single medium geometry stage before returning to normal:
+
+- output: `outputs/happo_geometry_curriculum_100k`;
+- medium stage: 50k from `outputs/happo_easy_combat_oracle_anchor_50k/latest/model.pt`;
+- normal stage: 50k from `outputs/happo_geometry_curriculum_100k/medium_50k/latest/model.pt`;
+- reward, missile, PID, aircraft XML, action space, and observation dimensions
+  were unchanged.
+
+Medium 50k fast eval showed that the intermediate geometry still preserved
+attack behavior:
+
+- best checkpoint: `red_win_rate=1.00`, `mav_survival_rate=0.90`,
+  `red_missiles_fired_mean=1.50`, `red_missile_hits_mean=1.30`,
+  `blue_dead_mean=1.30`;
+- latest checkpoint: `red_win_rate=0.65`, `mav_survival_rate=1.00`,
+  `red_missiles_fired_mean=0.70`, `red_missile_hits_mean=0.65`,
+  `blue_dead_mean=0.65`.
+
+Normal 50k fast eval recovered a strong `best` checkpoint:
+
+- best checkpoint: `red_win_rate=0.95`, `mav_survival_rate=0.90`,
+  `red_missiles_fired_mean=1.80`, `red_missile_hits_mean=1.55`,
+  `blue_dead_mean=1.50`;
+- latest checkpoint collapsed back to no red fire, so checkpoint selection is
+  required.
+
+The follow-up normal 50-episode eval confirmed the best checkpoint:
+
+- `red_win_rate=0.92`;
+- `red_elimination_win_rate=0.52`;
+- `mav_survival_rate=0.94`;
+- `red_missiles_fired_mean=1.82`;
+- `red_missile_hits_mean=1.56`;
+- `blue_dead_mean=1.52`.
+
+The exported ACMI single episode for the normal best checkpoint ended with
+`red_win_elimination`.
+
+Decision:
+
+- `geometry_curriculum_success=true`;
+- `recommend_normal_geometry_200k=true`;
+- next step is normal-geometry 200k from the curriculum best checkpoint, then
+  5v4 zero-shot evaluation.
