@@ -63,6 +63,33 @@ def _role_ids(env) -> list[int]:
     return [0 if env.agent_roles.get(rid) == "mav" else 1 for rid in env.red_ids]
 
 
+def _rel(path: str | Path) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else ROOT / p
+
+
+def _load_uav_imitation_dataset(path: str | Path) -> dict[str, np.ndarray]:
+    data = np.load(_rel(path), allow_pickle=True)
+    obs = np.asarray(data["actor_obs"], dtype=np.float32)
+    action = np.asarray(data["oracle_action"], dtype=np.float32)
+    if obs.ndim != 2 or obs.shape[1] != 96:
+        raise ValueError(f"uav imitation actor_obs must have shape [N,96], got {obs.shape}")
+    if action.ndim != 2 or action.shape[1] != 3:
+        raise ValueError(f"uav imitation oracle_action must have shape [N,3], got {action.shape}")
+    return {"actor_obs": obs, "oracle_action": np.clip(action, -1.0, 1.0)}
+
+
+def _sample_uav_imitation_batch(data: dict[str, np.ndarray], batch_size: int,
+                                device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    n = int(data["actor_obs"].shape[0])
+    if n <= 0:
+        raise ValueError("uav imitation dataset is empty")
+    idx = np.random.randint(0, n, size=max(1, int(batch_size)))
+    obs = torch.as_tensor(data["actor_obs"][idx], dtype=torch.float32, device=device)
+    action = torch.as_tensor(data["oracle_action"][idx], dtype=torch.float32, device=device)
+    return obs, action
+
+
 def _episode_outcome(env, truncated: dict, length: int) -> dict:
     red_alive, blue_alive = _alive_counts(env)
     timeout = bool(all(truncated.values()) or length >= getattr(env, "max_steps", 0))
@@ -87,7 +114,7 @@ def _episode_outcome(env, truncated: dict, length: int) -> dict:
 
 def _run_eval(model_path: str, args, summary_json: str) -> list[dict] | None:
     cmd = [
-        "python", "-u", str(ROOT / "scripts" / "eval_happo_reference.py"),
+        sys.executable, "-u", str(ROOT / "scripts" / "eval_happo_reference.py"),
         "--model", model_path,
         "--episodes", str(args.train_eval_episodes),
         "--device", str(args.device),
@@ -144,6 +171,10 @@ def main() -> None:
     parser.add_argument("--train-eval-episodes", type=int, default=1)
     parser.add_argument("--eval-configs", nargs="*", default=None)
     parser.add_argument("--init-checkpoint", default=None)
+    parser.add_argument("--uav-imitation-dataset", default=None)
+    parser.add_argument("--uav-imitation-coef", type=float, default=0.0)
+    parser.add_argument("--uav-imitation-until-steps", type=int, default=0)
+    parser.add_argument("--uav-imitation-batch-size", type=int, default=1024)
     args = parser.parse_args()
     if args.device == "cuda" and not torch.cuda.is_available():
         args.device = "cpu"
@@ -181,6 +212,15 @@ def main() -> None:
         max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
         gamma=args.gamma, gae_lambda=args.gae_lambda,
     )
+    uav_imitation_data = None
+    if args.uav_imitation_dataset and args.uav_imitation_coef > 0.0:
+        uav_imitation_data = _load_uav_imitation_dataset(args.uav_imitation_dataset)
+        print(
+            f"Loaded uav_imitation_dataset: {_rel(args.uav_imitation_dataset)} "
+            f"samples={uav_imitation_data['actor_obs'].shape[0]} "
+            f"coef={args.uav_imitation_coef}",
+            flush=True,
+        )
     opponents = [
         OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17 + i)
         for i in range(NUM_ENVS)
@@ -210,7 +250,7 @@ def main() -> None:
             "missile_hits", "actor_loss_mav", "actor_loss_uav",
             "critic_loss", "entropy_mav", "entropy_uav",
             "mav_action_saturation_rate", "uav_action_saturation_rate",
-            "nan_detected",
+            "uav_imitation_loss", "nan_detected",
         ])
         eval_writer = None
         eval_f = None
@@ -315,7 +355,21 @@ def main() -> None:
                     break
             if nan_detected:
                 break
-            stats = trainer.update(buffer)
+            imitation_batch = None
+            imitation_active = (
+                uav_imitation_data is not None
+                and args.uav_imitation_coef > 0.0
+                and (args.uav_imitation_until_steps <= 0
+                     or total_steps <= args.uav_imitation_until_steps)
+            )
+            if imitation_active:
+                imitation_batch = _sample_uav_imitation_batch(
+                    uav_imitation_data, args.uav_imitation_batch_size, device)
+            stats = trainer.update(
+                buffer,
+                uav_imitation_batch=imitation_batch,
+                uav_imitation_coef=args.uav_imitation_coef if imitation_active else 0.0,
+            )
             rec = list(recent)
             n = max(len(rec), 1)
             avg_return = float(np.mean([r["return"] for r in rec])) if rec else 0.0
@@ -334,7 +388,8 @@ def main() -> None:
                 f"{stats['actor_loss_uav']:.6f}", f"{stats['critic_loss']:.6f}",
                 f"{stats['entropy_mav']:.6f}", f"{stats['entropy_uav']:.6f}",
                 f"{stats['mav_action_saturation_rate']:.6f}",
-                f"{stats['uav_action_saturation_rate']:.6f}", int(nan_detected),
+                f"{stats['uav_action_saturation_rate']:.6f}",
+                f"{stats.get('uav_imitation_loss', 0.0):.6f}", int(nan_detected),
             ])
             f.flush()
             print(
@@ -379,6 +434,9 @@ def main() -> None:
                             "rollout_length_per_env": args.rollout_length,
                             "transitions_per_rollout": transitions_per_rollout,
                             "init_checkpoint": args.init_checkpoint,
+                            "uav_imitation_dataset": args.uav_imitation_dataset,
+                            "uav_imitation_coef": args.uav_imitation_coef,
+                            "uav_imitation_until_steps": args.uav_imitation_until_steps,
                         }, indent=2), encoding="utf-8")
                 tmp_model.unlink(missing_ok=True)
                 (out_dir / "_tmp_eval.json").unlink(missing_ok=True)
@@ -406,6 +464,10 @@ def main() -> None:
         "rollout_length_per_env": args.rollout_length,
         "transitions_per_rollout": transitions_per_rollout,
         "init_checkpoint": args.init_checkpoint,
+        "uav_imitation_dataset": args.uav_imitation_dataset,
+        "uav_imitation_coef": args.uav_imitation_coef,
+        "uav_imitation_until_steps": args.uav_imitation_until_steps,
+        "uav_imitation_batch_size": args.uav_imitation_batch_size,
         "total_env_steps_actual": total_steps,
         "episodes": episodes,
         "nan_detected": nan_detected,

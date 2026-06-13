@@ -113,6 +113,46 @@ behavior in fast checkpoint evaluation:
 Conclusion: easy combat improved survival but did not make HAPPO reference v0
 transfer oracle imitation into closed-loop attack behavior.
 
+### Oracle-Pretrained Closed-Loop Diagnosis and 50k Anchor
+
+The original oracle-pretrained checkpoint was directly evaluated before
+fine-tuning and did not fire in easy combat. The checkpoint did load correctly,
+but the pretrain loss used plain MSE on circular heading actions. This has been
+fixed by using wrapped heading error for the heading dimension.
+
+An easy-combat oracle dataset and checkpoint were then generated:
+
+- dataset samples: `17988`;
+- easy oracle red fire mean: `2.16`;
+- easy oracle red hit mean: `2.00`;
+- easy oracle blue death mean: `2.00`;
+- wrapped action-match MSE: `0.010325`.
+
+The easy-combat oracle checkpoint can fire in closed loop with a fixed safe MAV
+action. A default-off UAV imitation anchor was added and run for 50k steps on
+the easy-combat task:
+
+- output: `outputs/happo_easy_combat_oracle_anchor_50k`;
+- latest eval: `red_win_rate=0.95`, `mav_survival_rate=1.00`,
+  `red_missiles_fired_mean=1.70`, `red_missile_hits_mean=1.55`,
+  `blue_dead_mean=1.50`;
+- best eval: `red_win_rate=0.85`, `mav_survival_rate=1.00`,
+  `red_missiles_fired_mean=1.45`, `red_missile_hits_mean=1.30`,
+  `blue_dead_mean=1.30`.
+
+50-episode confirmation:
+
+- latest eval: `red_win_rate=1.00`, `mav_survival_rate=1.00`,
+  `red_missiles_fired_mean=1.50`, `red_missile_hits_mean=1.48`,
+  `blue_dead_mean=1.48`;
+- best eval: `red_win_rate=0.86`, `mav_survival_rate=0.92`,
+  `red_missiles_fired_mean=1.32`, `red_missile_hits_mean=1.16`,
+  `blue_dead_mean=1.16`.
+
+Conclusion: the immediate no-fire failure after oracle pretrain was fixed on
+the easy-combat task. This remains a curriculum/easy-task result, not the final
+normal-geometry or 5v4 zero-shot result.
+
 Conclusion: HAPPO reference v0 with F-16 surrogate is mainly a survival baseline, not a reliable combat baseline.
 
 ### Red Direct Chase Oracle Sanity Check
@@ -161,6 +201,7 @@ In this Codex run, the real JSBSim collection and 200k fine-tune were not execut
 | Red direct chase oracle vs blue BRMA rule | none | 3v2 sanity | F-16 MAV surrogate + F-16 UAVs | scripted direct chase | environment fire-control | red team survives in sanity case | 2.25 | 2.00 | 2.00 | red elimination win 1.00 | learned policy lacks engagement behavior |
 | BRMA observation alignment test | none | 3v2 / 5v4 contract | not aircraft-dependent | V2 adapter contract | none | not applicable | not applicable | not applicable | not applicable | not a combat test | unified observation contract verified |
 | Oracle-pretrain HAPPO 200k | 3v2 | 3v2 / 5v4 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO fine-tune | happo_ref_v0 | pending | pending | pending | pending | pending | implemented, real run pending |
+| Easy-combat oracle anchor 50k latest | easy 3v2 | easy 3v2 | F-16 MAV surrogate + F-16 UAVs | UAV actor BC + HAPPO + imitation anchor | happo_ref_v0 | 1.00 | 1.50 | 1.48 | 1.48 | red win 1.00 | first learned easy-task combat result |
 
 ## 6. Main Findings
 
@@ -171,7 +212,8 @@ In this Codex run, the real JSBSim collection and 200k fine-tune were not execut
 - Current learned results are mainly survival baselines, not combat baselines.
 - The red attack pipeline is operational; the direct chase oracle can fire, hit, and destroy blue aircraft.
 - The learned policy's key failure is tactical engagement: it does not reliably learn approach angle, alignment, and launch-envelope satisfaction.
-- The oracle-pretrain path is the minimal next intervention, but its combat result is still pending a real brmamappo run.
+- The oracle-pretrain path revealed and fixed a heading-wrap loss issue.
+- A UAV imitation anchor restores red fire/hit behavior on the easy-combat task.
 
 ## 7. What Can Be Claimed
 

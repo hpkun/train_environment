@@ -88,6 +88,10 @@ def _write_md(path: Path, records: list[dict]) -> None:
 
 
 def _write_final_decision(exp_dir: Path, records: list[dict]) -> None:
+    def num(record: dict, key: str, default: float = 0.0) -> float:
+        value = record.get(key, default)
+        return float(default if value is None else value)
+
     def find(checkpoint: str, needle: str) -> dict:
         for record in records:
             if record.get("checkpoint") == checkpoint and needle in record.get("config", ""):
@@ -99,27 +103,27 @@ def _write_final_decision(exp_dir: Path, records: list[dict]) -> None:
     latest3 = find("latest", "3v2")
     latest5 = find("latest", "5v4")
     criteria = {
-        "3v2_red_missiles_fired_mean_gt_0_3": float(best3.get("red_missiles_fired_mean", 0.0) or 0.0) > 0.3,
+        "3v2_red_missiles_fired_mean_gt_0_3": num(best3, "red_missiles_fired_mean") > 0.3,
         "3v2_hit_or_blue_dead_gt_0_1": (
-            float(best3.get("red_missile_hits_mean", 0.0) or 0.0) > 0.1
-            or float(best3.get("blue_dead_mean", 0.0) or 0.0) > 0.1
+            num(best3, "red_missile_hits_mean") > 0.1
+            or num(best3, "blue_dead_mean") > 0.1
         ),
-        "3v2_mav_survival_rate_ge_0_3": float(best3.get("mav_survival_rate", 0.0) or 0.0) >= 0.3,
-        "3v2_blue_win_rate_lt_0_9": float(best3.get("blue_win_rate", 1.0) or 1.0) < 0.9,
-        "5v4_red_missiles_fired_mean_gt_0": float(best5.get("red_missiles_fired_mean", 0.0) or 0.0) > 0.0,
-        "5v4_not_complete_collapse": float(best5.get("blue_win_rate", 1.0) or 1.0) < 1.0,
+        "3v2_mav_survival_rate_ge_0_3": num(best3, "mav_survival_rate") >= 0.3,
+        "3v2_blue_win_rate_lt_0_9": num(best3, "blue_win_rate", 1.0) < 0.9,
+        "5v4_red_missiles_fired_mean_gt_0": num(best5, "red_missiles_fired_mean") > 0.0,
+        "5v4_not_complete_collapse": num(best5, "blue_win_rate", 1.0) < 1.0,
     }
     usable = bool(all(criteria.values()))
     easy_candidates = [record for record in (best3, latest3) if record]
     easy_per_checkpoint = {}
     for record in easy_candidates:
         name = record.get("checkpoint", "unknown")
-        fired = float(record.get("red_missiles_fired_mean", 0.0) or 0.0)
-        hits = float(record.get("red_missile_hits_mean", 0.0) or 0.0)
-        blue_dead = float(record.get("blue_dead_mean", 0.0) or 0.0)
-        mav_surv = float(record.get("mav_survival_rate", 0.0) or 0.0)
-        blue_win = float(record.get("blue_win_rate", 1.0) or 1.0)
-        red_elim = float(record.get("red_elimination_win_rate", 0.0) or 0.0)
+        fired = num(record, "red_missiles_fired_mean")
+        hits = num(record, "red_missile_hits_mean")
+        blue_dead = num(record, "blue_dead_mean")
+        mav_surv = num(record, "mav_survival_rate")
+        blue_win = num(record, "blue_win_rate", 1.0)
+        red_elim = num(record, "red_elimination_win_rate")
         not_timeout_only = red_elim > 0.0 or hits > 0.1 or blue_dead > 0.1
         easy_per_checkpoint[name] = {
             "red_missiles_fired_mean_gt_0_5": fired > 0.5,

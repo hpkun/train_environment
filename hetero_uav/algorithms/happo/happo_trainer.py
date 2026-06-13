@@ -25,6 +25,18 @@ def _compute_grouped_gae(team_reward, values, next_values, team_dones,
     return advantages, returns
 
 
+def _wrapped_heading_error(pred_heading: torch.Tensor, target_heading: torch.Tensor) -> torch.Tensor:
+    return torch.remainder(pred_heading - target_heading + 1.0, 2.0) - 1.0
+
+
+def _uav_imitation_loss(policy, actor_obs: torch.Tensor, oracle_actions: torch.Tensor) -> torch.Tensor:
+    pred = torch.clamp(policy.uav_actor(actor_obs), -0.999, 0.999)
+    error = pred - oracle_actions
+    error = error.clone()
+    error[..., 1] = _wrapped_heading_error(pred[..., 1], oracle_actions[..., 1])
+    return torch.mean(error ** 2)
+
+
 class HAPPOReferenceTrainer:
     """Simplified HAPPO-style trainer.
 
@@ -86,7 +98,7 @@ class HAPPOReferenceTrainer:
         approx_kl = ((old_log_probs - log_prob) * valid).sum() / valid.sum().clamp(min=1)
         return float(policy_loss.item()), float(entropy_mean.item()), float(approx_kl.item())
 
-    def update(self, buffer):
+    def update(self, buffer, uav_imitation_batch=None, uav_imitation_coef: float = 0.0):
         data = buffer.get(next(self.policy.parameters()).device)
         rewards = data["rewards"]
         active = data["active_masks"]
@@ -113,6 +125,7 @@ class HAPPOReferenceTrainer:
         entropy_mav, entropy_uav = [], []
         kl_mav, kl_uav = [], []
         critic_losses = []
+        imitation_losses = []
 
         for _ in range(self.ppo_epochs):
             self.critic_opt.zero_grad()
@@ -125,6 +138,21 @@ class HAPPOReferenceTrainer:
 
             m_loss, m_ent, m_kl = self._actor_update(data, advantages, MAV_ROLE_ID, self.mav_opt)
             u_loss, u_ent, u_kl = self._actor_update(data, advantages, UAV_ROLE_ID, self.uav_opt)
+            if uav_imitation_batch is not None and uav_imitation_coef > 0.0:
+                obs_batch, action_batch = uav_imitation_batch
+                self.uav_opt.zero_grad()
+                imitation_loss = _uav_imitation_loss(
+                    self.policy,
+                    obs_batch.to(next(self.policy.parameters()).device),
+                    action_batch.to(next(self.policy.parameters()).device),
+                )
+                (float(uav_imitation_coef) * imitation_loss).backward()
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.policy.uav_actor.parameters()) + [self.policy.action_log_std_uav],
+                    self.max_grad_norm,
+                )
+                self.uav_opt.step()
+                imitation_losses.append(float(imitation_loss.item()))
             actor_loss_mav.append(m_loss)
             actor_loss_uav.append(u_loss)
             entropy_mav.append(m_ent)
@@ -152,4 +180,5 @@ class HAPPOReferenceTrainer:
             "action_saturation_rate": float(sat.mean().item()),
             "mav_action_saturation_rate": mav_sat,
             "uav_action_saturation_rate": uav_sat,
+            "uav_imitation_loss": float(np.mean(imitation_losses)) if imitation_losses else 0.0,
         }

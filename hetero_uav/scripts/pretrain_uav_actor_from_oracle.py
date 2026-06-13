@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -37,6 +36,24 @@ def _load_dataset(path: Path) -> tuple[np.ndarray, np.ndarray]:
     if act.ndim != 2 or act.shape[1] != 3:
         raise ValueError(f"oracle_action must have shape [N,3], got {act.shape}")
     return obs, np.clip(act, -1.0, 1.0).astype(np.float32)
+
+
+def _wrapped_heading_error(pred_heading: torch.Tensor, target_heading: torch.Tensor) -> torch.Tensor:
+    """Shortest signed error for normalized absolute heading in [-1, 1].
+
+    The environment maps heading action to [-pi, pi].  Therefore -1 and +1 are
+    adjacent headings, not opposite targets.  Plain MSE would incorrectly push
+    wrap-boundary samples toward 0 and can destroy direct-chase behavior.
+    """
+
+    return torch.remainder(pred_heading - target_heading + 1.0, 2.0) - 1.0
+
+
+def _oracle_action_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    error = pred - target
+    error = error.clone()
+    error[..., 1] = _wrapped_heading_error(pred[..., 1], target[..., 1])
+    return torch.mean(error ** 2)
 
 
 def main() -> int:
@@ -99,7 +116,7 @@ def main() -> int:
         for start in range(0, len(train_idx), args.batch_size):
             batch_idx = train_idx[start:start + args.batch_size]
             pred = torch.clamp(policy.uav_actor(obs[batch_idx]), -0.999, 0.999)
-            loss = F.mse_loss(pred, action[batch_idx])
+            loss = _oracle_action_loss(pred, action[batch_idx])
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -107,7 +124,7 @@ def main() -> int:
         with torch.no_grad():
             val_idx = indices[split:] if split < n else indices[:split]
             val_pred = torch.clamp(policy.uav_actor(obs[val_idx]), -0.999, 0.999)
-            final_val_loss = float(F.mse_loss(val_pred, action[val_idx]).item())
+            final_val_loss = float(_oracle_action_loss(val_pred, action[val_idx]).item())
         if final_val_loss + 1e-12 < best_val_loss:
             best_val_loss = final_val_loss
             best_epoch = epoch
@@ -148,6 +165,7 @@ def main() -> int:
         "best_val_loss": float(best_val_loss),
         "best_epoch": int(best_epoch),
         "stopped_early": bool(stopped_early),
+        "loss": "wrapped_heading_mse",
         "device": str(device),
         "val_ratio": float(val_ratio),
         "max_train_samples": int(args.max_train_samples),

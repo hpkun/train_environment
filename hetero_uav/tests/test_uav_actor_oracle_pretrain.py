@@ -27,6 +27,17 @@ def test_pretrain_uav_actor_from_oracle_help_runs():
     assert "--epochs" in result.stdout
 
 
+def test_oracle_pretrain_action_loss_wraps_heading_error():
+    from scripts.pretrain_uav_actor_from_oracle import _oracle_action_loss
+
+    pred = torch.tensor([[0.0, -0.99, 0.8]], dtype=torch.float32)
+    target = torch.tensor([[0.0, 0.99, 0.8]], dtype=torch.float32)
+    wrapped = _oracle_action_loss(pred, target).item()
+    naive = torch.mean((pred - target) ** 2).item()
+    assert wrapped < 0.01
+    assert naive > 1.0
+
+
 def test_pretrain_uav_actor_from_oracle_fake_dataset_one_epoch():
     from algorithms.happo import HAPPOReferencePolicy
 
@@ -91,4 +102,3 @@ def test_pretrain_uav_actor_from_oracle_fake_dataset_one_epoch():
     assert meta["frozen_mav_actor"] is True
     assert meta["frozen_critic"] is True
     assert meta["num_samples"] == 16
-

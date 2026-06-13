@@ -1,34 +1,22 @@
-"""Run 100k HAPPO reference training on the easy-combat 3v2 task."""
+"""Run 50k easy-combat HAPPO with a UAV oracle imitation anchor."""
 from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_easy_combat_f16_mav_surrogate.yaml"
 ORACLE_INIT = "outputs/oracle_pretrain/uav_actor_oracle_pretrained_easy_combat/model.pt"
-HAPPO_BEST_INIT = "outputs/happo_3v2_reference_f16_mav_surrogate_1m_fast/best/model.pt"
-OUTPUT_DIR = "outputs/happo_easy_combat_100k"
-
-
-def _rel(path: str) -> Path:
-    p = Path(path)
-    return p if p.is_absolute() else ROOT / p
-
-
-def _init_checkpoint() -> str | None:
-    if _rel(ORACLE_INIT).exists():
-        return ORACLE_INIT
-    if _rel(HAPPO_BEST_INIT).exists():
-        return HAPPO_BEST_INIT
-    return None
+ORACLE_DATASET = "outputs/direct_chase_oracle_dataset/direct_chase_oracle_3v2_easy_combat.npz"
+OUTPUT_DIR = "outputs/happo_easy_combat_oracle_anchor_50k"
 
 
 def _train_cmd(args) -> list[str]:
-    cmd = [
-        "python", "-u", "scripts/train_happo_reference.py",
+    return [
+        sys.executable, "-u", "scripts/train_happo_reference.py",
         "--config", CONFIG,
         "--reward-mode", "happo_ref_v0",
         "--opponent-policy", "brma_rule",
@@ -43,18 +31,19 @@ def _train_cmd(args) -> list[str]:
         "--eval-interval-steps", "25000",
         "--train-eval-episodes", "2",
         "--eval-configs", CONFIG,
+        "--init-checkpoint", ORACLE_INIT,
+        "--uav-imitation-dataset", ORACLE_DATASET,
+        "--uav-imitation-coef", "0.1",
+        "--uav-imitation-until-steps", str(args.total_env_steps),
+        "--uav-imitation-batch-size", "1024",
         "--output-dir", args.output_dir,
         "--device", "cuda",
     ]
-    init = _init_checkpoint()
-    if init:
-        cmd.extend(["--init-checkpoint", init])
-    return cmd
 
 
 def _fast_eval_cmd(args) -> list[str]:
     return [
-        "python", "scripts/evaluate_happo_3v2_reference_checkpoints.py",
+        sys.executable, "scripts/evaluate_happo_3v2_reference_checkpoints.py",
         "--output-dir", args.output_dir,
         "--fast",
         "--checkpoint-mode", "all",
@@ -63,10 +52,10 @@ def _fast_eval_cmd(args) -> list[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run easy-combat HAPPO 100k training")
+    parser = argparse.ArgumentParser(description="Run easy-combat oracle-anchor HAPPO 50k")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-dir", default=OUTPUT_DIR)
-    parser.add_argument("--total-env-steps", type=int, default=100000)
+    parser.add_argument("--total-env-steps", type=int, default=50000)
     args = parser.parse_args()
 
     commands = [("train", _train_cmd(args)), ("fast_eval", _fast_eval_cmd(args))]

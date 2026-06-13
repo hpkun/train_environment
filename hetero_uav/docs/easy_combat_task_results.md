@@ -142,3 +142,67 @@ interface.
 
 Current result: `easy_task_success=false`. Do not run 200k from this checkpoint
 without changing the task or policy prior. Do not return to normal geometry yet.
+
+## 9. Oracle-pretrained closed-loop diagnosis
+
+The first 100k easy-combat run used the original oracle checkpoint trained from
+the normal-geometry direct-chase dataset. A direct closed-loop evaluation of
+that checkpoint in easy combat showed no red fire:
+
+- deterministic + fixed safe MAV: `red_missiles_fired_mean=0.00`;
+- stochastic + fixed safe MAV: `red_missiles_fired_mean=0.00`;
+- deterministic + MAV policy: `red_missiles_fired_mean=0.00`.
+
+The direct-chase oracle itself can fire and hit in easy combat, so the failure
+was in the learned imitation policy, not in the fire-control chain.
+
+The root cause was a pretrain/action-scaling issue: the oracle pretrain used
+plain MSE on absolute heading even though the heading action is circular.
+The loss now uses wrapped heading error for the heading dimension.
+
+## 10. Easy-combat oracle checkpoint and 50k anchor
+
+A new easy-combat oracle dataset and checkpoint were created:
+
+- dataset: `outputs/direct_chase_oracle_dataset/direct_chase_oracle_3v2_easy_combat.npz`;
+- samples: `17988`;
+- checkpoint: `outputs/oracle_pretrain/uav_actor_oracle_pretrained_easy_combat/model.pt`;
+- wrapped action-match MSE: `0.010325`.
+
+The new checkpoint can fire in closed loop when MAV is held to the fixed safe
+action:
+
+- deterministic: `red_missiles_fired_mean=1.10`;
+- stochastic: `red_missiles_fired_mean=0.25`.
+
+A default-off UAV imitation anchor was then used for a 50k easy-combat run:
+
+```powershell
+python scripts/run_happo_easy_combat_oracle_anchor_50k.py
+```
+
+Fast eval, 20 episodes:
+
+- best checkpoint: `red_win_rate=0.85`, `mav_survival_rate=1.00`,
+  `red_missiles_fired_mean=1.45`, `red_missile_hits_mean=1.30`,
+  `blue_dead_mean=1.30`;
+- latest checkpoint: `red_win_rate=0.95`, `mav_survival_rate=1.00`,
+  `red_missiles_fired_mean=1.70`, `red_missile_hits_mean=1.55`,
+  `blue_dead_mean=1.50`.
+
+This is the first learned-policy easy-combat result with consistent red fire,
+hits, blue deaths, and MAV survival. It does not yet prove normal-geometry
+combat transfer or 5v4 zero-shot transfer.
+
+50-episode eval was then run because fast eval showed attack signal:
+
+- best checkpoint: `red_win_rate=0.86`, `mav_survival_rate=0.92`,
+  `red_missiles_fired_mean=1.32`, `red_missile_hits_mean=1.16`,
+  `blue_dead_mean=1.16`;
+- latest checkpoint: `red_win_rate=1.00`, `mav_survival_rate=1.00`,
+  `red_missiles_fired_mean=1.50`, `red_missile_hits_mean=1.48`,
+  `blue_dead_mean=1.48`.
+
+The regenerated `final_decision.json` marks `easy_task_success=true`. The
+general combat-pilot gate remains false because this evaluation only covers
+the easy 3v2 task and does not include 5v4 zero-shot.
