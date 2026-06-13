@@ -36,8 +36,9 @@ class RichExperimentLogger:
         self.transitions_per_rollout = int(transitions_per_rollout)
         self.start_time = time.time()
         ensure_schema_files(directory)
-        self._train_file = (directory / "train_metrics.csv").open("a", newline="", encoding="utf-8")
+        self._train_file = (directory / "train_metrics.csv").open("w", newline="", encoding="utf-8")
         self._train_writer = csv.DictWriter(self._train_file, fieldnames=TRAIN_METRICS_COLUMNS)
+        self._train_writer.writeheader()
 
     def close(self) -> None:
         self._train_file.close()

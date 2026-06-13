@@ -54,3 +54,39 @@ python scripts/check_paper_plot_coverage.py --input-dir outputs/rich_logging_smo
 ```
 
 This validates schema and plotting with a short 1024-step run. It is not a training result.
+
+## 6. Rich Logging Audit Gate
+
+Before starting a complete experiment, run:
+
+```powershell
+python scripts/audit_rich_logging_outputs.py --input-dir outputs/rich_logging_smoke --figures-dir outputs/rich_logging_smoke/paper_style_figures
+```
+
+The latest smoke audit status is `pass_with_warnings`. This is acceptable for starting a full experiment because the warnings are explicit limitations rather than schema failures:
+
+- `policy_gradient_norm` and `value_gradient_norm` columns exist, but the current trainer does not expose values yet.
+- smoke has no missile events or missile timeseries rows; headers are present and full experiments can populate them.
+- explicit reward component columns are stable, but smoke component values are zero/empty placeholders.
+- `peak_gpu_memory_gb` and `peak_cpu_memory_gb` are currently not available.
+- perturbation rows are marked `schema_only`, not real perturbation results.
+
+## 7. Smoke-Only Versus Full-Experiment Figures
+
+Smoke can verify that these figures render from the correct files, but they should not be used as formal conclusions:
+
+- `zero_shot_transfer_bar`: requires full 3v2/5v4 evaluation.
+- `ablation_reward_win_curve`: requires multiple runs.
+- `perturbation_generalization_bar`: requires a real perturbation evaluation.
+
+The following are structurally available in smoke and become meaningful after a complete run:
+
+- reward curves
+- win-rate curves
+- RWR/KD
+- trajectory and attitude curves
+- reward component curves
+- loss/entropy curves
+- training efficiency table
+
+Attention-related plots remain `not_implemented_by_current_algorithm` until an attention module is actually implemented. Do not fabricate attention entropy or attention weights.

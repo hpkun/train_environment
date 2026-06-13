@@ -42,15 +42,18 @@ def _status(input_dir: Path, required_files: list[str], required_columns: dict[s
 
 
 def build_report(input_dir: Path) -> dict:
+    has_eval_summary = _exists(input_dir / "eval_summary_metrics.csv")
+    has_perturb = _exists(input_dir / "perturbation_eval_summary.csv")
+    has_train = _exists(input_dir / "train_metrics.csv")
     return {
         "BRMA-MAPPO": {
             "reward_curves": _status(input_dir, ["train_metrics.csv"], {"train_metrics.csv": ["avg_episode_return"]}),
             "win_rate_curves": _status(input_dir, ["train_metrics.csv"], {"train_metrics.csv": ["red_win_rate", "blue_win_rate"]}),
-            "scale_transfer": _status(input_dir, ["eval_summary_metrics.csv"]),
+            "scale_transfer": "requires_full_experiment" if has_eval_summary else "missing",
             "RWR": _status(input_dir, ["train_metrics.csv"], {"train_metrics.csv": ["relative_win_ratio"]}),
             "KD": _status(input_dir, ["train_metrics.csv"], {"train_metrics.csv": ["kill_death_ratio"]}),
             "training_efficiency": "available" if _exists(input_dir / "training_efficiency.json") else "missing",
-            "ablation_reward_win_curves": _status(input_dir, ["train_metrics.csv"], {"train_metrics.csv": ["avg_episode_return", "red_win_rate"]}),
+            "ablation_reward_win_curves": "requires_multiple_runs" if has_train else "missing",
             "attention_heatmap_metrics": "not_implemented_by_current_algorithm",
         },
         "TAM-HAPPO": {
@@ -59,8 +62,8 @@ def build_report(input_dir: Path) -> dict:
             "attitude_curves": _status(input_dir, ["aircraft_timeseries.csv"], {"aircraft_timeseries.csv": ["altitude", "speed", "yaw", "pitch"]}),
             "heterogeneous_reward_components": _status(input_dir, ["reward_components.csv"]),
             "loss_policy_gradient": _status(input_dir, ["train_metrics.csv"], {"train_metrics.csv": ["critic_loss", "policy_gradient_norm"]}),
-            "ablation_curves": _status(input_dir, ["train_metrics.csv"]),
-            "perturbation_generalization": _status(input_dir, ["perturbation_eval_summary.csv"]),
+            "ablation_curves": "requires_multiple_runs" if has_train else "missing",
+            "perturbation_generalization": "schema_only" if has_perturb else "missing",
         },
     }
 

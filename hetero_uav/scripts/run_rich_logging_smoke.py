@@ -128,19 +128,25 @@ def _postprocess(output_dir: Path) -> None:
     }
     _append_row(output_dir / "eval_summary_metrics.csv", FILE_SCHEMAS["eval_summary_metrics.csv"], summary)
     for step in range(5):
-        _append_row(output_dir / "aircraft_timeseries.csv", FILE_SCHEMAS["aircraft_timeseries.csv"], {
-            "run_id": run_id, "scenario": scenario, "episode_id": 0, "step": step,
-            "sim_time": step * 0.2, "agent_id": "red_0", "role": "mav", "team": "red",
-            "alive": 1, "lon": 120 + step * 0.001, "lat": 60 + step * 0.001,
-            "altitude": 6000 + step * 5, "roll": 0, "pitch": 0.1 * step,
-            "yaw": step, "heading": step, "velocity": 250, "speed": 250,
-            "is_mav": 1, "is_uav": 0,
-        })
-        _append_row(output_dir / "reward_components.csv", FILE_SCHEMAS["reward_components.csv"], {
-            "run_id": run_id, "scenario": scenario, "episode_id": 0, "step": step,
-            "sim_time": step * 0.2, "agent_id": "red_0", "role": "mav",
-            "total_reward": train.get("avg_episode_return", 0), "mav_survival_reward": 0.0,
-        })
+        for aid, role, offset in [("red_0", "mav", 0.0), ("red_1", "attack_uav", 0.01)]:
+            _append_row(output_dir / "aircraft_timeseries.csv", FILE_SCHEMAS["aircraft_timeseries.csv"], {
+                "run_id": run_id, "scenario": scenario, "episode_id": 0, "step": step,
+                "sim_time": step * 0.2, "agent_id": aid, "role": role, "team": "red",
+                "alive": 1, "lon": 120 + offset + step * 0.001, "lat": 60 + offset + step * 0.001,
+                "altitude": 6000 + step * 5, "roll": 0, "pitch": 0.1 * step,
+                "yaw": step, "heading": step, "velocity": 250, "speed": 250,
+                "action_pitch": 0.0, "action_heading": 0.0, "action_speed": 0.0,
+                "action_raw_0": 0.0, "action_raw_1": 0.0, "action_raw_2": 0.0,
+                "is_mav": 1 if role == "mav" else 0,
+                "is_uav": 1 if role != "mav" else 0,
+            })
+            _append_row(output_dir / "reward_components.csv", FILE_SCHEMAS["reward_components.csv"], {
+                "run_id": run_id, "scenario": scenario, "episode_id": 0, "step": step,
+                "sim_time": step * 0.2, "agent_id": aid, "role": role,
+                "total_reward": train.get("avg_episode_return", 0),
+                "mav_survival_reward": 0.0 if role == "mav" else "",
+                "uav_attack_reward": 0.0 if role != "mav" else "",
+            })
     _append_row(output_dir / "perturbation_eval_summary.csv", FILE_SCHEMAS["perturbation_eval_summary.csv"], {
         "perturbation_level": "none",
         "episodes": 1,
@@ -149,9 +155,26 @@ def _postprocess(output_dir: Path) -> None:
         "mav_survival_rate": train.get("mav_survival_rate", 0),
         "red_missile_hits_mean": train.get("red_missile_hits_mean", 0),
         "blue_dead_mean": train.get("blue_dead_mean", 0),
+        "availability": "schema_only",
     })
     if not (output_dir / "training_efficiency.json").exists():
         (output_dir / "training_efficiency.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+
+
+def _clean_smoke_outputs(output_dir: Path) -> None:
+    for name in list(FILE_SCHEMAS) + [
+        "training_efficiency.json",
+        "plot_coverage_report.json",
+        "plot_coverage_report.md",
+        "rich_logging_audit_report.json",
+        "rich_logging_audit_report.md",
+    ]:
+        (output_dir / name).unlink(missing_ok=True)
+    fig_dir = output_dir / "paper_style_figures"
+    if fig_dir.exists():
+        for path in fig_dir.iterdir():
+            if path.is_file():
+                path.unlink()
 
 
 def main() -> int:
@@ -166,6 +189,7 @@ def main() -> int:
     print(" ".join(cmd))
     if args.dry_run:
         return 0
+    _clean_smoke_outputs(_rel(args.output_dir))
     subprocess.run(cmd, cwd=ROOT, check=True)
     _postprocess(_rel(args.output_dir))
     print(f"rich_log_dir: {_rel(args.output_dir)}")

@@ -14,6 +14,7 @@ def test_paper_style_plot_and_coverage_help() -> None:
     for script in [
         "scripts/generate_paper_style_plots.py",
         "scripts/check_paper_plot_coverage.py",
+        "scripts/audit_rich_logging_outputs.py",
     ]:
         result = subprocess.run(
             [sys.executable, script, "--help"],

@@ -82,6 +82,7 @@ PERTURBATION_EVAL_COLUMNS = [
     "heading_delta", "velocity_delta", "episodes", "win_rate",
     "avg_cumulative_team_reward", "std_cumulative_team_reward",
     "mav_survival_rate", "red_missile_hits_mean", "blue_dead_mean",
+    "availability",
 ]
 
 ATTENTION_METRICS_COLUMNS = [
