@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from algorithms.happo import HAPPOReferencePolicy, HAPPORolloutBuffer, HAPPOReferenceTrainer
 from algorithms.mappo.opponent_policy import OpponentPolicy
+from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 
 
 DEFAULT_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml"
@@ -175,6 +176,10 @@ def main() -> None:
     parser.add_argument("--uav-imitation-coef", type=float, default=0.0)
     parser.add_argument("--uav-imitation-until-steps", type=int, default=0)
     parser.add_argument("--uav-imitation-batch-size", type=int, default=1024)
+    parser.add_argument("--enable-rich-logging", action="store_true")
+    parser.add_argument("--rich-log-dir", default=None)
+    parser.add_argument("--timeseries-episodes-limit", type=int, default=3)
+    parser.add_argument("--timeseries-step-stride", type=int, default=5)
     args = parser.parse_args()
     if args.device == "cuda" and not torch.cuda.is_available():
         args.device = "cpu"
@@ -230,6 +235,20 @@ def main() -> None:
     info_list = [state[1] for state in env_states]
     roles = _role_ids(env)
     transitions_per_rollout = int(args.rollout_length * NUM_ENVS)
+    rich_logger = None
+    if args.enable_rich_logging:
+        rich_dir = _rel(args.rich_log_dir) if args.rich_log_dir else out_dir
+        rich_logger = RichExperimentLogger(
+            rich_dir,
+            run_id=out_dir.name,
+            method_name="happo_reference_v0",
+            scenario_name=Path(args.config).stem,
+            device=str(args.device),
+            num_envs=NUM_ENVS,
+            rollout_length_per_env=args.rollout_length,
+            transitions_per_rollout=transitions_per_rollout,
+        )
+        write_not_available_attention(rich_dir, "happo_reference_v0", Path(args.config).stem)
     iterations = int(math.ceil(args.total_env_steps / transitions_per_rollout))
     total_steps = 0
     episodes = 0
@@ -391,6 +410,48 @@ def main() -> None:
                 f"{stats['uav_action_saturation_rate']:.6f}",
                 f"{stats.get('uav_imitation_loss', 0.0):.6f}", int(nan_detected),
             ])
+            if rich_logger is not None:
+                red_dead = max(0.0, float(len(env.red_ids)) - red_alive)
+                blue_dead = max(0.0, float(len(env.blue_ids)) - blue_alive)
+                rich_logger.write_train_metrics({
+                    "train_steps": iteration,
+                    "total_env_steps_actual": total_steps,
+                    "avg_episode_return": avg_return,
+                    "avg_team_reward": avg_return,
+                    "avg_mav_reward": "",
+                    "avg_uav_reward": "",
+                    "red_win_rate": red_win,
+                    "blue_win_rate": blue_win,
+                    "draw_rate": draw,
+                    "timeout_rate": timeout,
+                    "red_elimination_win_rate": sum(1 for r in rec if r["end_reason"] == "blue_eliminated") / n,
+                    "red_timeout_alive_advantage_rate": sum(
+                        1 for r in rec if r["winner"] == "red" and r["end_reason"] == "timeout"
+                    ) / n,
+                    "mav_survival_rate": mav_surv,
+                    "red_alive_final_mean": red_alive,
+                    "blue_alive_final_mean": blue_alive,
+                    "red_missiles_fired_mean": red_fired / max(NUM_ENVS, 1),
+                    "blue_missiles_fired_mean": blue_fired / max(NUM_ENVS, 1),
+                    "red_missile_hits_mean": hits / max(NUM_ENVS, 1),
+                    "blue_missile_hits_mean": "",
+                    "red_dead_mean": red_dead,
+                    "blue_dead_mean": blue_dead,
+                    "kill_death_ratio": blue_dead / max(red_dead, 1e-6),
+                    "relative_win_ratio": red_win / max(blue_win, 1e-6),
+                    "actor_loss": (stats["actor_loss_mav"] + stats["actor_loss_uav"]) / 2.0,
+                    "critic_loss": stats["critic_loss"],
+                    "entropy": (stats["entropy_mav"] + stats["entropy_uav"]) / 2.0,
+                    "policy_gradient_norm": "",
+                    "value_gradient_norm": "",
+                    "action_saturation_rate": max(
+                        stats["mav_action_saturation_rate"],
+                        stats["uav_action_saturation_rate"],
+                    ),
+                    "mav_action_saturation_rate": stats["mav_action_saturation_rate"],
+                    "uav_action_saturation_rate": stats["uav_action_saturation_rate"],
+                    "nan_detected": int(nan_detected),
+                })
             f.flush()
             print(
                 f"[happo] iter={iteration:04d} steps={total_steps}/{args.total_env_steps} "
@@ -474,6 +535,9 @@ def main() -> None:
     }
     (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    if rich_logger is not None:
+        rich_logger.write_training_efficiency(total_steps, nan_detected=nan_detected)
+        rich_logger.close()
     for rollout_env in envs:
         rollout_env.close()
     print(f"Saved {latest_model}", flush=True)

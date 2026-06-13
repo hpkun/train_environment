@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import subprocess
 import sys
@@ -9,6 +10,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.experiment_logging_schema import FILE_SCHEMAS, ensure_schema_files
+
 DEFAULT_DIR = "outputs/happo_3v2_reference_200k"
 DEFAULT_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml",
@@ -203,6 +209,34 @@ def _write_final_decision(exp_dir: Path, records: list[dict]) -> None:
     out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_rich_eval_summary(rich_dir: Path, records: list[dict]) -> None:
+    ensure_schema_files(rich_dir)
+    columns = FILE_SCHEMAS["eval_summary_metrics.csv"]
+    with (rich_dir / "eval_summary_metrics.csv").open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        for record in records:
+            writer.writerow({
+                "checkpoint_name": record.get("checkpoint"),
+                "eval_scenario": record.get("config"),
+                "episodes": record.get("episodes"),
+                "avg_episode_return_mean": record.get("avg_return"),
+                "red_win_rate": record.get("red_win_rate"),
+                "blue_win_rate": record.get("blue_win_rate"),
+                "draw_rate": record.get("draw_rate"),
+                "timeout_rate": record.get("timeout_rate"),
+                "red_elimination_win_rate": record.get("red_elimination_win_rate"),
+                "red_timeout_alive_advantage_rate": record.get("red_timeout_alive_advantage_rate"),
+                "mav_survival_rate": record.get("mav_survival_rate"),
+                "red_alive_final_mean": record.get("red_alive_final_mean"),
+                "blue_alive_final_mean": record.get("blue_alive_final_mean"),
+                "red_missile_hits_mean": record.get("red_missile_hits_mean"),
+                "blue_missile_hits_mean": record.get("blue_missile_hits_mean"),
+                "red_dead_mean": record.get("red_dead_mean"),
+                "blue_dead_mean": record.get("blue_dead_mean"),
+                "kill_death_ratio": record.get("kill_death_ratio"),
+            })
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate HAPPO 3v2 reference checkpoints")
     parser.add_argument("--experiment-dir", default=DEFAULT_DIR)
@@ -215,6 +249,8 @@ def main() -> int:
     parser.add_argument("--configs", nargs="*", default=DEFAULT_CONFIGS)
     parser.add_argument("--output-json", default=None)
     parser.add_argument("--output-md", default=None)
+    parser.add_argument("--enable-rich-logging", action="store_true")
+    parser.add_argument("--rich-log-dir", default=None)
     parser.add_argument("--fast", action="store_true",
                         help="Quick screening: 20 episodes and 3v2 seen config only.")
     args = parser.parse_args()
@@ -245,6 +281,9 @@ def main() -> int:
     out_json.write_text(json.dumps(records, indent=2), encoding="utf-8")
     _write_md(out_md, records)
     _write_final_decision(exp_dir, records)
+    if args.enable_rich_logging:
+        rich_dir = _rel(args.rich_log_dir) if args.rich_log_dir else exp_dir
+        _write_rich_eval_summary(rich_dir, records)
     print(f"output_json: {out_json}")
     print(f"output_md: {out_md}")
     print(f"final_decision_json: {exp_dir / 'final_decision.json'}")

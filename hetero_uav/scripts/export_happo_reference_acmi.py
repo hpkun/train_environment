@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import sys
@@ -16,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from algorithms.happo import HAPPOReferencePolicy
 from algorithms.mappo.opponent_policy import OpponentPolicy
+from scripts.experiment_logging_schema import FILE_SCHEMAS, ensure_schema_files
 
 
 DEFAULT_DIR = "outputs/happo_3v2_reference_200k"
@@ -157,6 +159,55 @@ def _team_done(terminated: dict, truncated: dict) -> bool:
     return all(terminated.values()) or all(truncated.values())
 
 
+def _append_schema_row(directory: Path, filename: str, row: dict) -> None:
+    ensure_schema_files(directory)
+    columns = FILE_SCHEMAS[filename]
+    with (directory / filename).open("a", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=columns).writerow({col: row.get(col, "") for col in columns})
+
+
+def _write_rich_export_rows(directory: Path, summary: dict) -> None:
+    scenario = Path(str(summary.get("config", "scenario"))).stem
+    run_id = Path(str(summary.get("model", "acmi_export"))).parents[1].name if summary.get("model") else "acmi_export"
+    red_alive = int(summary.get("red_alive_final", 0))
+    blue_alive = int(summary.get("blue_alive_final", 0))
+    red_dead = max(0, 3 - red_alive)
+    total_blue = 2 if "3v2" in scenario else 4
+    blue_dead = max(0, total_blue - blue_alive)
+    _append_schema_row(directory, "eval_episode_metrics.csv", {
+        "run_id": run_id,
+        "checkpoint_name": summary.get("checkpoint"),
+        "eval_scenario": scenario,
+        "episode_id": 0,
+        "outcome": summary.get("outcome"),
+        "episode_length": summary.get("steps"),
+        "red_win": 1 if str(summary.get("outcome", "")).startswith("red") else 0,
+        "blue_win": 1 if str(summary.get("outcome", "")).startswith("blue") else 0,
+        "timeout": 1 if summary.get("outcome") == "timeout" else 0,
+        "mav_alive": summary.get("mav_alive"),
+        "red_alive_final": red_alive,
+        "blue_alive_final": blue_alive,
+        "red_missiles_fired": summary.get("red_missiles_fired"),
+        "blue_missiles_fired": summary.get("blue_missiles_fired"),
+        "red_missile_hits": summary.get("red_missile_hits"),
+        "blue_missile_hits": summary.get("blue_missile_hits"),
+        "red_dead": red_dead,
+        "blue_dead": blue_dead,
+    })
+    _append_schema_row(directory, "aircraft_timeseries.csv", {
+        "run_id": run_id,
+        "scenario": scenario,
+        "episode_id": 0,
+        "step": summary.get("steps"),
+        "agent_id": "red_0",
+        "role": "mav",
+        "team": "red",
+        "alive": summary.get("mav_alive"),
+        "is_mav": 1,
+        "is_uav": 0,
+    })
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Export HAPPO reference checkpoint to ACMI")
     parser.add_argument("--experiment-dir", default=DEFAULT_DIR)
@@ -168,6 +219,8 @@ def main() -> int:
     parser.add_argument("--opponent-policy", default="brma_rule")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--enable-rich-logging", action="store_true")
+    parser.add_argument("--rich-log-dir", default=None)
     args = parser.parse_args()
 
     exp_dir = _rel(args.experiment_dir)
@@ -321,6 +374,9 @@ def main() -> int:
             "output_acmi": str(output),
         }
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        if args.enable_rich_logging:
+            rich_dir = _rel(args.rich_log_dir) if args.rich_log_dir else output.parent
+            _write_rich_export_rows(rich_dir, summary)
     finally:
         if hasattr(env, "close"):
             env.close()
