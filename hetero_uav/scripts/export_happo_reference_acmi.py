@@ -85,34 +85,72 @@ def _entries(env) -> list[dict]:
     return entries
 
 
+def _all_missiles(env) -> list:
+    """Collect all missiles from aircraft launch histories (same pattern as export_hetero_tacview_acmi.py)."""
+    seen = set()
+    missiles = []
+    for sim in list(env.red_planes.values()) + list(env.blue_planes.values()):
+        for missile in getattr(sim, "launch_missiles", []):
+            uid = getattr(missile, "uid", str(id(missile)))
+            if uid in seen:
+                continue
+            seen.add(uid)
+            missiles.append(missile)
+    return missiles
+
+
 def _missile_entries(env, missile_id_map: dict[str, int]) -> list[dict]:
-    """Produce ACMI entries for in-flight missiles."""
+    """Produce ACMI entries for alive missiles (matching original exporter pattern)."""
     entries = []
-    for mid, missile in env._missiles_in_flight.items():
-        if mid not in missile_id_map:
-            missile_id_map[mid] = 1000 + len(missile_id_map)
-        acmi_id = missile_id_map[mid]
-        if missile.is_alive:
+    for missile in _all_missiles(env):
+        uid = getattr(missile, "uid", str(id(missile)))
+        if uid not in missile_id_map:
+            missile_id_map[uid] = 1000 + len(missile_id_map)
+        if not bool(getattr(missile, "is_alive", False)):
+            continue
+        lon, lat, alt = missile.get_geodetic()
+        roll, pitch, yaw = np.asarray(missile.get_rpy(), dtype=np.float64) * (180.0 / np.pi)
+        entries.append({
+            "acmi_id": missile_id_map[uid],
+            "type": "Weapon+Missile",
+            "lon": float(lon),
+            "lat": float(lat),
+            "alt": float(alt),
+            "roll": float(roll),
+            "pitch": float(pitch),
+            "yaw": float(yaw),
+            "name": str(getattr(missile, "model", "AIM-9L")).upper(),
+            "color": str(getattr(missile, "color", "White")),
+            "alive": True,
+        })
+    return entries
+
+
+def _missile_explosions(
+    env, missile_id_map: dict[str, int], logged_explosions: set[str]
+) -> list[dict]:
+    """Yellow explosion at hit position (matching original exporter pattern)."""
+    explosions = []
+    for missile in _all_missiles(env):
+        uid = getattr(missile, "uid", str(id(missile)))
+        if uid in logged_explosions:
+            continue
+        if uid not in missile_id_map:
+            missile_id_map[uid] = 1000 + len(missile_id_map)
+        if bool(getattr(missile, "is_done", False)) and bool(
+            getattr(missile, "is_success", False)
+        ):
             lon, lat, alt = missile.get_geodetic()
-            roll, pitch, yaw = missile.get_rpy() * (180.0 / np.pi)
-            owner = getattr(missile, "parent_aircraft", None)
-            owner_id = str(owner.uid) if owner else "?"
-            target = getattr(missile, "target_aircraft", None)
-            target_id = str(target.uid) if target else "?"
-            entries.append({
-                "acmi_id": acmi_id,
+            explosions.append({
+                "acmi_id": missile_id_map[uid],
                 "lon": float(lon),
                 "lat": float(lat),
                 "alt": float(alt),
-                "roll": float(roll),
-                "pitch": float(pitch),
-                "yaw": float(yaw),
-                "name": f"Missile_{owner_id}_to_{target_id}",
-                "color": missile.color,
-                "alive": True,
-                "type": "Weapon+Missile",
+                "color": "Yellow",
+                "radius": float(getattr(missile, "_Rc", 300.0)),
             })
-    return entries
+            logged_explosions.add(uid)
+    return explosions
 
 
 def _team_done(terminated: dict, truncated: dict) -> bool:
@@ -159,6 +197,7 @@ def main() -> int:
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 33)
     logger = TacviewLogger(reference_time="2026-01-01T00:00:00Z")
     missile_id_map: dict[str, int] = {}
+    logged_explosions: set[str] = set()
     red_missile_objects, blue_missile_objects = 0, 0
     death_order: list[str] = []
     prev_alive: dict[str, bool] = {}
@@ -170,7 +209,8 @@ def main() -> int:
 
     try:
         obs, info = env.reset(seed=args.seed)
-        logger.record_frame(0.0, _entries(env) + _missile_entries(env, missile_id_map), [])
+        logger.record_frame(0.0, _entries(env) + _missile_entries(env, missile_id_map),
+                            _missile_explosions(env, missile_id_map, logged_explosions))
         step = 0
         while True:
             adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
@@ -219,17 +259,19 @@ def main() -> int:
                 red0_alt.append(float(red0.get_position()[2]))
 
             # Count missile objects by side
-            for mid in env._missiles_in_flight:
-                if mid not in missile_id_map:
-                    owner = getattr(env._missiles_in_flight[mid], "parent_aircraft", None)
+            for missile in _all_missiles(env):
+                uid = getattr(missile, "uid", str(id(missile)))
+                if uid not in missile_id_map:
+                    owner = getattr(missile, "parent_aircraft", None)
                     if owner and owner.uid.startswith("red_"):
                         red_missile_objects += 1
                     else:
                         blue_missile_objects += 1
 
-            # Render frame with both aircraft and missile entries
+            # Render frame with aircraft, missiles, and explosions
             all_entries = _entries(env) + _missile_entries(env, missile_id_map)
-            logger.record_frame(step * float(env.env_dt), all_entries, [])
+            explosions = _missile_explosions(env, missile_id_map, logged_explosions)
+            logger.record_frame(step * float(env.env_dt), all_entries, explosions)
             if _team_done(terminated, truncated):
                 break
             if step > int(getattr(env, "max_steps", 1000)) + 5:
