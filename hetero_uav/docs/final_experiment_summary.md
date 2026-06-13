@@ -260,6 +260,11 @@ In this Codex run, the real JSBSim collection and 200k fine-tune were not execut
   `mav_survival_rate=0.94`.
 - The normal-geometry latest checkpoint can still collapse to no red fire, so
   checkpoint selection is part of the current experimental protocol.
+- 5v4 zero-shot has reached the metric gate, but ACMI behavior shows the MAV
+  trajectory still needs interpretation: current MAV behavior is closer to
+  forward-survival / loose support than a strict rear-support trajectory from
+  the heterogeneous paper. This is a behavior-consistency limitation, not a
+  failure of the zero-shot attack-transfer metrics.
 
 ## 7. What Can Be Claimed
 
