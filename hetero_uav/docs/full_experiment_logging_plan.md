@@ -36,6 +36,37 @@ python scripts/train_happo_reference.py `
   --timeseries-step-stride 5
 ```
 
+For long runs after the 2048-step hang investigation, start conservatively:
+
+```powershell
+python scripts/train_happo_reference.py `
+  --config uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0_f16_mav_surrogate.yaml `
+  --output-dir outputs/full_10m_normal_geometry_oracle_anchor `
+  --total-env-steps 10000000 `
+  --rollout-length 256 `
+  --num-envs 1 `
+  --device cuda `
+  --init-checkpoint outputs/happo_geometry_curriculum_100k/normal_50k/best/model.pt `
+  --uav-imitation-dataset outputs/direct_chase_oracle_dataset/direct_chase_oracle_3v2.npz `
+  --uav-imitation-coef 0.03 `
+  --uav-imitation-until-steps 2000000 `
+  --eval-during-training `
+  --eval-interval-steps 500000 `
+  --train-eval-episodes 5 `
+  --enable-rich-logging `
+  --rich-log-dir outputs/full_10m_normal_geometry_oracle_anchor/rich_logs `
+  --timeseries-episodes-limit 3 `
+  --timeseries-step-stride 10 `
+  --heartbeat-log outputs/full_10m_normal_geometry_oracle_anchor/heartbeat.log `
+  --heartbeat-every-steps 50
+```
+
+`--num-envs` defaults to `1` for stability. If a single-env run is stable, try
+`--num-envs 2` before returning to `--num-envs 4`. Do not start a 10M run with
+4 envs until the shorter stability check passes. `--eval-at-start` is disabled
+by default, so `--eval-during-training` now follows `--eval-interval-steps`
+instead of forcing an evaluation after the first rollout.
+
 Then generate plots:
 
 ```powershell

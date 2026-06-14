@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from algorithms.happo.happo_buffer import HAPPORolloutBuffer
 from algorithms.happo.happo_trainer import _compute_grouped_gae
-from scripts.train_happo_reference import NUM_ENVS
+from scripts.train_happo_reference import _transitions_per_rollout
 
 
 def test_happo_buffer_records_env_id_and_next_value():
@@ -60,5 +60,5 @@ def test_grouped_gae_done_does_not_cross_envs():
 
 def test_rollout_length_accounting_constants():
     rollout_length_per_env = 64
-    assert NUM_ENVS == 4
-    assert rollout_length_per_env * NUM_ENVS == 256
+    assert _transitions_per_rollout(rollout_length_per_env, 1) == 64
+    assert _transitions_per_rollout(rollout_length_per_env, 4) == 256

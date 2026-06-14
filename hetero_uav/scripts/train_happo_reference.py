@@ -28,7 +28,48 @@ DEFAULT_EVAL_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml",
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
 ]
-NUM_ENVS = 4
+
+
+def _transitions_per_rollout(rollout_length: int, num_envs: int) -> int:
+    return int(rollout_length) * int(num_envs)
+
+
+class HeartbeatLogger:
+    def __init__(self, path: str | Path | None, every_steps: int = 50,
+                 enabled: bool = False, debug_all: bool = False) -> None:
+        self.enabled = bool(enabled)
+        self.every_steps = max(1, int(every_steps))
+        self.debug_all = bool(debug_all)
+        self.path = Path(path) if path is not None else None
+        self._file = None
+        if self.enabled and self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = self.path.open("a", encoding="utf-8")
+
+    def write(self, event: str, *, iteration: int, rollout_local_step: int,
+              env_idx: int | str, total_steps: int, episode_length: int | str = "",
+              alive_agents=None, done=None, truncated=None) -> None:
+        if not self.enabled or self._file is None:
+            return
+        if not self.debug_all and int(total_steps) % self.every_steps != 0:
+            return
+        alive_text = ""
+        if isinstance(alive_agents, dict):
+            alive_text = ",".join(f"{k}:{v}" for k, v in sorted(alive_agents.items()))
+        row = (
+            f"wall_time={__import__('time').time():.3f} "
+            f"iteration={iteration} rollout_local_step={rollout_local_step} "
+            f"env_idx={env_idx} event={event} "
+            f"total_env_steps_actual={total_steps} episode_length={episode_length} "
+            f"alive_agents={alive_text} done={done} truncated={truncated}\n"
+        )
+        self._file.write(row)
+        self._file.flush()
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
 
 def _build_red_alive_mask(info: dict, env, red_ids: list[str]) -> np.ndarray:
@@ -153,6 +194,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default="outputs/happo_reference")
     parser.add_argument("--total-env-steps", type=int, default=64)
     parser.add_argument("--rollout-length", type=int, default=16)
+    parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
@@ -169,6 +211,7 @@ def main() -> None:
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--eval-during-training", action="store_true")
     parser.add_argument("--eval-interval-steps", type=int, default=25000)
+    parser.add_argument("--eval-at-start", action="store_true")
     parser.add_argument("--train-eval-episodes", type=int, default=1)
     parser.add_argument("--eval-configs", nargs="*", default=None)
     parser.add_argument("--init-checkpoint", default=None)
@@ -178,9 +221,14 @@ def main() -> None:
     parser.add_argument("--uav-imitation-batch-size", type=int, default=1024)
     parser.add_argument("--enable-rich-logging", action="store_true")
     parser.add_argument("--rich-log-dir", default=None)
+    parser.add_argument("--heartbeat-log", default=None)
+    parser.add_argument("--heartbeat-every-steps", type=int, default=50)
+    parser.add_argument("--debug-rollout-heartbeat", action="store_true")
     parser.add_argument("--timeseries-episodes-limit", type=int, default=3)
     parser.add_argument("--timeseries-step-stride", type=int, default=5)
     args = parser.parse_args()
+    if args.num_envs < 1:
+        raise ValueError("--num-envs must be >= 1")
     if args.device == "cuda" and not torch.cuda.is_available():
         args.device = "cpu"
 
@@ -198,7 +246,7 @@ def main() -> None:
     envs = [
         make_env(args.config, env_type="jsbsim_hetero",
                  hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
-        for _ in range(NUM_ENVS)
+        for _ in range(args.num_envs)
     ]
     env = envs[0]
     adapter = HeteroObsAdapterV2()
@@ -228,13 +276,20 @@ def main() -> None:
         )
     opponents = [
         OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17 + i)
-        for i in range(NUM_ENVS)
+        for i in range(args.num_envs)
     ]
     env_states = [e.reset(seed=args.seed + i) for i, e in enumerate(envs)]
     obs_list = [state[0] for state in env_states]
     info_list = [state[1] for state in env_states]
     roles = _role_ids(env)
-    transitions_per_rollout = int(args.rollout_length * NUM_ENVS)
+    transitions_per_rollout = _transitions_per_rollout(args.rollout_length, args.num_envs)
+    heartbeat_path = _rel(args.heartbeat_log) if args.heartbeat_log else out_dir / "heartbeat.log"
+    heartbeat = HeartbeatLogger(
+        heartbeat_path,
+        every_steps=args.heartbeat_every_steps,
+        enabled=bool(args.heartbeat_log or args.debug_rollout_heartbeat),
+        debug_all=args.debug_rollout_heartbeat,
+    )
     rich_logger = None
     if args.enable_rich_logging:
         rich_dir = _rel(args.rich_log_dir) if args.rich_log_dir else out_dir
@@ -244,7 +299,7 @@ def main() -> None:
             method_name="happo_reference_v0",
             scenario_name=Path(args.config).stem,
             device=str(args.device),
-            num_envs=NUM_ENVS,
+            num_envs=args.num_envs,
             rollout_length_per_env=args.rollout_length,
             transitions_per_rollout=transitions_per_rollout,
         )
@@ -252,9 +307,9 @@ def main() -> None:
     iterations = int(math.ceil(args.total_env_steps / transitions_per_rollout))
     total_steps = 0
     episodes = 0
-    current_ep_return = [np.zeros(len(env.red_ids), dtype=np.float32) for _ in range(NUM_ENVS)]
-    current_ep_len = [0 for _ in range(NUM_ENVS)]
-    prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(NUM_ENVS)]
+    current_ep_return = [np.zeros(len(env.red_ids), dtype=np.float32) for _ in range(args.num_envs)]
+    current_ep_len = [0 for _ in range(args.num_envs)]
+    prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(args.num_envs)]
     recent = deque(maxlen=100)
     best_score = -float("inf")
     nan_detected = False
@@ -281,7 +336,7 @@ def main() -> None:
                 "blue_win_rate", "draw_rate", "timeout_rate",
                 "mav_survival_rate", "blue_dead_mean", "red_missile_hits_mean",
             ])
-        last_eval = -999999
+        last_eval = -999999 if args.eval_at_start else 0
         for iteration in range(1, iterations + 1):
             rollout_transitions = min(transitions_per_rollout, args.total_env_steps - total_steps)
             if rollout_transitions <= 0:
@@ -295,6 +350,16 @@ def main() -> None:
                         break
                     obs = obs_list[env_idx]
                     info = info_list[env_idx]
+                    rollout_local_step = len(buffer)
+                    heartbeat.write(
+                        "before_policy_act",
+                        iteration=iteration,
+                        rollout_local_step=rollout_local_step,
+                        env_idx=env_idx,
+                        total_steps=total_steps,
+                        episode_length=current_ep_len[env_idx],
+                        alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                    )
                     adapted = adapter.adapt_all(
                         obs, info=info, red_ids=rollout_env.red_ids, blue_ids=rollout_env.blue_ids)
                     actor_obs = np.stack([
@@ -310,6 +375,15 @@ def main() -> None:
                             critic_state=torch.as_tensor(critic, device=device),
                             deterministic=False,
                         )
+                    heartbeat.write(
+                        "after_policy_act",
+                        iteration=iteration,
+                        rollout_local_step=rollout_local_step,
+                        env_idx=env_idx,
+                        total_steps=total_steps,
+                        episode_length=current_ep_len[env_idx],
+                        alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                    )
                     actions = out["action"].cpu().numpy()
                     log_probs = out["log_prob"].cpu().numpy()
                     value = float(out["value"].item())
@@ -318,8 +392,46 @@ def main() -> None:
                         break
                     action_dict = {rid: actions[i].astype(np.float32)
                                    for i, rid in enumerate(rollout_env.red_ids)}
+                    heartbeat.write(
+                        "before_opponent_act",
+                        iteration=iteration,
+                        rollout_local_step=rollout_local_step,
+                        env_idx=env_idx,
+                        total_steps=total_steps,
+                        episode_length=current_ep_len[env_idx],
+                        alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                    )
                     action_dict.update(opponents[env_idx].act(obs, rollout_env.blue_ids, env=rollout_env))
+                    heartbeat.write(
+                        "after_opponent_act",
+                        iteration=iteration,
+                        rollout_local_step=rollout_local_step,
+                        env_idx=env_idx,
+                        total_steps=total_steps,
+                        episode_length=current_ep_len[env_idx],
+                        alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                    )
+                    heartbeat.write(
+                        "before_env_step",
+                        iteration=iteration,
+                        rollout_local_step=rollout_local_step,
+                        env_idx=env_idx,
+                        total_steps=total_steps,
+                        episode_length=current_ep_len[env_idx],
+                        alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                    )
                     next_obs, rewards, terminated, truncated, next_info = rollout_env.step(action_dict)
+                    heartbeat.write(
+                        "after_env_step",
+                        iteration=iteration,
+                        rollout_local_step=rollout_local_step,
+                        env_idx=env_idx,
+                        total_steps=total_steps,
+                        episode_length=current_ep_len[env_idx],
+                        alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                        done=_team_done(terminated, truncated),
+                        truncated=bool(all(truncated.values())) if truncated else False,
+                    )
                     reward_np = np.array([float(rewards.get(rid, 0.0)) for rid in rollout_env.red_ids], dtype=np.float32)
                     done = _team_done(terminated, truncated)
                     done_np = np.full((len(rollout_env.red_ids),), float(done), dtype=np.float32)
@@ -366,7 +478,29 @@ def main() -> None:
                         episodes += 1
                         current_ep_return[env_idx][:] = 0.0
                         current_ep_len[env_idx] = 0
+                        heartbeat.write(
+                            "before_reset",
+                            iteration=iteration,
+                            rollout_local_step=rollout_local_step,
+                            env_idx=env_idx,
+                            total_steps=total_steps,
+                            episode_length=0,
+                            alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                            done=done,
+                            truncated=bool(all(truncated.values())) if truncated else False,
+                        )
                         next_obs, next_info = rollout_env.reset(seed=args.seed + total_steps + env_idx)
+                        heartbeat.write(
+                            "after_reset",
+                            iteration=iteration,
+                            rollout_local_step=rollout_local_step,
+                            env_idx=env_idx,
+                            total_steps=total_steps,
+                            episode_length=0,
+                            alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                            done=done,
+                            truncated=bool(all(truncated.values())) if truncated else False,
+                        )
                         prev_hit_totals[env_idx] = {"red": 0, "blue": 0}
                     obs_list[env_idx] = next_obs
                     info_list[env_idx] = next_info
@@ -431,9 +565,9 @@ def main() -> None:
                     "mav_survival_rate": mav_surv,
                     "red_alive_final_mean": red_alive,
                     "blue_alive_final_mean": blue_alive,
-                    "red_missiles_fired_mean": red_fired / max(NUM_ENVS, 1),
-                    "blue_missiles_fired_mean": blue_fired / max(NUM_ENVS, 1),
-                    "red_missile_hits_mean": hits / max(NUM_ENVS, 1),
+                    "red_missiles_fired_mean": red_fired / max(args.num_envs, 1),
+                    "blue_missiles_fired_mean": blue_fired / max(args.num_envs, 1),
+                    "red_missile_hits_mean": hits / max(args.num_envs, 1),
                     "blue_missile_hits_mean": "",
                     "red_dead_mean": red_dead,
                     "blue_dead_mean": blue_dead,
@@ -453,6 +587,15 @@ def main() -> None:
                     "nan_detected": int(nan_detected),
                 })
             f.flush()
+            heartbeat.write(
+                "after_logging",
+                iteration=iteration,
+                rollout_local_step=len(buffer),
+                env_idx="all",
+                total_steps=total_steps,
+                episode_length="",
+                alive_agents=dict(zip(("red", "blue"), _alive_counts(env))),
+            )
             print(
                 f"[happo] iter={iteration:04d} steps={total_steps}/{args.total_env_steps} "
                 f"ret={avg_return:+.2f} red_win={red_win:.2f} blue_win={blue_win:.2f} "
@@ -465,7 +608,25 @@ def main() -> None:
                 tmp_model = out_dir / "_tmp_eval.pt"
                 policy.save(tmp_model)
                 tmp_json = str((out_dir / "_tmp_eval.json").relative_to(ROOT))
+                heartbeat.write(
+                    "before_eval",
+                    iteration=iteration,
+                    rollout_local_step=len(buffer),
+                    env_idx="all",
+                    total_steps=total_steps,
+                    episode_length="",
+                    alive_agents=dict(zip(("red", "blue"), _alive_counts(env))),
+                )
                 records = _run_eval(str(tmp_model), args, tmp_json)
+                heartbeat.write(
+                    "after_eval",
+                    iteration=iteration,
+                    rollout_local_step=len(buffer),
+                    env_idx="all",
+                    total_steps=total_steps,
+                    episode_length="",
+                    alive_agents=dict(zip(("red", "blue"), _alive_counts(env))),
+                )
                 if records and eval_writer is not None:
                     for r in records:
                         eval_writer.writerow([
@@ -491,7 +652,7 @@ def main() -> None:
                             "sequential_update": True,
                             "attention": False,
                             "recurrent": False,
-                            "num_envs": NUM_ENVS,
+                            "num_envs": args.num_envs,
                             "rollout_length_per_env": args.rollout_length,
                             "transitions_per_rollout": transitions_per_rollout,
                             "init_checkpoint": args.init_checkpoint,
@@ -521,7 +682,7 @@ def main() -> None:
         "recurrent": False,
         "missile_scripted": True,
         "evasion_scripted": True,
-        "num_envs": NUM_ENVS,
+        "num_envs": args.num_envs,
         "rollout_length_per_env": args.rollout_length,
         "transitions_per_rollout": transitions_per_rollout,
         "init_checkpoint": args.init_checkpoint,
@@ -538,6 +699,7 @@ def main() -> None:
     if rich_logger is not None:
         rich_logger.write_training_efficiency(total_steps, nan_detected=nan_detected)
         rich_logger.close()
+    heartbeat.close()
     for rollout_env in envs:
         rollout_env.close()
     print(f"Saved {latest_model}", flush=True)
