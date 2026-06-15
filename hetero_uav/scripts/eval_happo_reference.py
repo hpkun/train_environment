@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from algorithms.happo import HAPPOReferencePolicy
+from algorithms.happo import EntityHAPPOReferencePolicy, HAPPOReferencePolicy
 from algorithms.mappo.opponent_policy import OpponentPolicy
 from uav_env import make_env
 from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
@@ -35,6 +35,22 @@ def _load_meta(model_path: Path) -> dict:
 
 def _role_ids(env) -> list[int]:
     return [0 if env.agent_roles.get(rid) == "mav" else 1 for rid in env.red_ids]
+
+
+def _build_policy_from_meta(meta: dict, device: torch.device):
+    policy_arch = meta.get("policy_arch", "flat")
+    if policy_arch == "entity_attention":
+        return EntityHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+        ).to(device)
+    if policy_arch == "flat":
+        return HAPPOReferencePolicy(
+            actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+        ).to(device)
+    raise ValueError(f"unsupported checkpoint policy_arch: {policy_arch}")
 
 
 def _alive_counts(env) -> tuple[int, int]:
@@ -219,10 +235,7 @@ def main() -> None:
 
     device = torch.device(args.device)
     meta = _load_meta(Path(args.model))
-    policy = HAPPOReferencePolicy(
-        actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
-        critic_state_dim=int(meta.get("critic_state_dim", 480)),
-    ).to(device)
+    policy = _build_policy_from_meta(meta, device)
     policy.load(Path(args.model), map_location=device)
     policy.eval()
     adapter = HeteroObsAdapterV2()

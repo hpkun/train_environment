@@ -21,7 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from algorithms.happo import HAPPOReferencePolicy, HAPPORolloutBuffer, HAPPOReferenceTrainer
+from algorithms.happo import (
+    EntityHAPPOReferencePolicy,
+    HAPPOReferencePolicy,
+    HAPPORolloutBuffer,
+    HAPPOReferenceTrainer,
+)
 from algorithms.mappo.opponent_policy import OpponentPolicy
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 
@@ -217,6 +222,38 @@ def _rel(path: str | Path) -> Path:
     return p if p.is_absolute() else ROOT / p
 
 
+def _load_checkpoint_meta(model_path: str | Path | None) -> dict:
+    if model_path is None:
+        return {}
+    path = Path(model_path)
+    if not path.is_absolute():
+        path = ROOT / path
+    meta_path = path.parent / "meta.json"
+    if meta_path.exists():
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    return {}
+
+
+def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
+                  device: torch.device, init_checkpoint_meta: str | Path | None = None):
+    if policy_arch == "flat":
+        return HAPPOReferencePolicy(actor_dim, critic_dim).to(device)
+    if policy_arch == "entity_attention":
+        meta = {}
+        if init_checkpoint_meta is not None:
+            meta_path = Path(init_checkpoint_meta)
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("policy_arch", "flat") != "entity_attention":
+                raise ValueError(
+                    "entity_attention cannot load a flat checkpoint; use an "
+                    "entity_attention checkpoint or omit --init-checkpoint"
+                )
+        entity_dim = int(meta.get("entity_dim", 19))
+        return EntityHAPPOReferencePolicy(entity_dim=entity_dim, critic_state_dim=critic_dim).to(device)
+    raise ValueError(f"unsupported --policy-arch: {policy_arch}")
+
+
 def _load_uav_imitation_dataset(path: str | Path) -> dict[str, np.ndarray]:
     data = np.load(_rel(path), allow_pickle=True)
     obs = np.asarray(data["actor_obs"], dtype=np.float32)
@@ -304,6 +341,9 @@ def main() -> None:
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--policy-arch", default="flat",
+                        choices=["flat", "entity_attention"],
+                        help="Policy architecture. Default flat preserves legacy checkpoints.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
                         choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"])
@@ -361,7 +401,21 @@ def main() -> None:
     adapter = HeteroObsAdapterV2()
     actor_dim = adapter.flat_actor_obs_dim
     critic_dim = adapter.critic_state_dim
-    policy = HAPPOReferencePolicy(actor_dim, critic_dim).to(device)
+    if args.policy_arch == "entity_attention" and args.uav_imitation_dataset:
+        raise ValueError(
+            "entity_attention does not support --uav-imitation-dataset in P2.5; "
+            "omit imitation or use --policy-arch flat"
+        )
+    init_meta_path = None
+    if args.init_checkpoint:
+        init_path_for_meta = _rel(args.init_checkpoint)
+        init_meta_path = init_path_for_meta.parent / "meta.json"
+        if args.policy_arch == "entity_attention" and not init_meta_path.exists():
+            raise ValueError(
+                "entity_attention init checkpoint requires meta.json with policy_arch=entity_attention"
+            )
+    policy = _build_policy(args.policy_arch, actor_dim, critic_dim, device,
+                           init_checkpoint_meta=init_meta_path)
     if args.init_checkpoint:
         init_path = Path(args.init_checkpoint)
         if not init_path.is_absolute():
@@ -770,6 +824,20 @@ def main() -> None:
                 last_eval = total_steps
                 tmp_model = out_dir / "_tmp_eval.pt"
                 policy.save(tmp_model)
+                (out_dir / "_tmp_eval_meta.json").write_text(json.dumps({
+                    "algorithm": "happo_reference_v0",
+                    "policy_arch": args.policy_arch,
+                    "actor_obs_dim": actor_dim,
+                    "critic_state_dim": critic_dim,
+                    "entity_dim": getattr(policy, "entity_dim", None),
+                    "attention": args.policy_arch == "entity_attention",
+                    "recurrent": False,
+                }, indent=2), encoding="utf-8")
+                (out_dir / "meta.json").unlink(missing_ok=True)
+                (tmp_model.parent / "meta.json").write_text(
+                    (out_dir / "_tmp_eval_meta.json").read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
                 tmp_json = str((out_dir / "_tmp_eval.json").relative_to(ROOT))
                 heartbeat.write(
                     "before_eval",
@@ -805,15 +873,17 @@ def main() -> None:
                         policy.save(out_dir / "best" / "model.pt")
                         (out_dir / "best" / "meta.json").write_text(json.dumps({
                             "algorithm": "happo_reference_v0",
+                            "policy_arch": args.policy_arch,
                             "reward_mode": args.reward_mode,
                             "opponent_policy": args.opponent_policy,
                             "best_score": best_score,
                             "actor_obs_dim": actor_dim,
                             "critic_state_dim": critic_dim,
+                            "entity_dim": getattr(policy, "entity_dim", None),
                             "separate_actors": True,
                             "centralized_critic": True,
                             "sequential_update": True,
-                            "attention": False,
+                            "attention": args.policy_arch == "entity_attention",
                             "recurrent": False,
                             "num_envs": args.num_envs,
                             "rollout_length_per_env": args.rollout_length,
@@ -824,6 +894,8 @@ def main() -> None:
                             "uav_imitation_until_steps": args.uav_imitation_until_steps,
                         }, indent=2), encoding="utf-8")
                 tmp_model.unlink(missing_ok=True)
+                (out_dir / "_tmp_eval_meta.json").unlink(missing_ok=True)
+                (out_dir / "meta.json").unlink(missing_ok=True)
                 (out_dir / "_tmp_eval.json").unlink(missing_ok=True)
         if eval_f is not None:
             eval_f.close()
@@ -832,16 +904,18 @@ def main() -> None:
     policy.save(latest_model)
     meta = {
         "algorithm": "happo_reference_v0",
+        "policy_arch": args.policy_arch,
         "config": args.config,
         "reward_mode": args.reward_mode,
         "opponent_policy": args.opponent_policy,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
+        "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
         "centralized_critic": True,
         "sequential_update": True,
         "sequential_update_detail": "simplified HAPPO-style v0 role-wise PPO",
-        "attention": False,
+        "attention": args.policy_arch == "entity_attention",
         "recurrent": False,
         "missile_scripted": True,
         "evasion_scripted": True,
