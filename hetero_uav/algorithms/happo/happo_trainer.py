@@ -92,8 +92,11 @@ class HAPPOReferenceTrainer:
 
         optimizer.zero_grad()
         repeated_roles = role_ids.view(1, N).expand(T, N)
+        eval_kwargs = {}
+        if "rnn_hidden" in data and data["rnn_hidden"] is not None:
+            eval_kwargs["rnn_hidden"] = data["rnn_hidden"]
         log_prob, entropy, _values, _mean, _roles = self.policy.evaluate_actions(
-            actor_obs, repeated_roles, data["critic_state"], actions)
+            actor_obs, repeated_roles, data["critic_state"], actions, **eval_kwargs)
         ratio = torch.exp(log_prob - old_log_probs)
         adv = advantages.unsqueeze(-1)
         surr1 = ratio * adv

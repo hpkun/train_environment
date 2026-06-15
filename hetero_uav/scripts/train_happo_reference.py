@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 
 from algorithms.happo import (
     BRMAEntityHAPPOReferencePolicy,
+    BRMARecurrentHAPPOReferencePolicy,
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
     HAPPORolloutBuffer,
@@ -269,6 +270,25 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
             critic_state_dim=critic_dim,
             action_dim=3,
         ).to(device)
+    if policy_arch == "brma_recurrent":
+        meta = {}
+        if init_checkpoint_meta is not None:
+            meta_path = Path(init_checkpoint_meta)
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("policy_arch", "flat") not in ("brma_recurrent", "brma_entity"):
+                raise ValueError(
+                    "brma_recurrent cannot load a flat or entity_attention checkpoint; "
+                    "use a brma_recurrent or brma_entity checkpoint or omit --init-checkpoint"
+                )
+        entity_dim = int(meta.get("entity_dim", 19))
+        rnn_hidden_size = int(meta.get("rnn_hidden_size", 128))
+        return BRMARecurrentHAPPOReferencePolicy(
+            entity_dim=entity_dim,
+            critic_state_dim=critic_dim,
+            action_dim=3,
+            rnn_hidden_size=rnn_hidden_size,
+        ).to(device)
     raise ValueError(f"unsupported --policy-arch: {policy_arch}")
 
 
@@ -360,7 +380,7 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention", "brma_entity"],
+                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent"],
                         help="Policy architecture. Default flat preserves legacy checkpoints.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
@@ -423,7 +443,7 @@ def main() -> None:
     if args.init_checkpoint:
         init_path_for_meta = _rel(args.init_checkpoint)
         init_meta_path = init_path_for_meta.parent / "meta.json"
-        if args.policy_arch in {"entity_attention", "brma_entity"} and not init_meta_path.exists():
+        if args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent"} and not init_meta_path.exists():
             raise ValueError(
                 f"{args.policy_arch} init checkpoint requires meta.json with policy_arch={args.policy_arch}"
             )
@@ -498,6 +518,13 @@ def main() -> None:
     recent = deque(maxlen=100)
     best_score = -float("inf")
     nan_detected = False
+    _rnn_hidden_size = getattr(policy, "rnn_hidden_size", 0)
+    rnn_hidden = None
+    if _rnn_hidden_size > 0:
+        rnn_hidden = [
+            np.zeros((len(env.red_ids), _rnn_hidden_size), dtype=np.float32)
+            for _ in range(args.num_envs)
+        ]
 
     train_log = out_dir / "train_log.csv"
     with train_log.open("w", newline="", encoding="utf-8") as f:
@@ -533,7 +560,8 @@ def main() -> None:
             if rollout_transitions <= 0:
                 break
             buffer = HAPPORolloutBuffer(rollout_transitions, len(env.red_ids), actor_dim,
-                                        critic_dim, 3, roles)
+                                        critic_dim, 3, roles,
+                                        rnn_hidden_size=getattr(policy, 'rnn_hidden_size', 0))
             red_fired = blue_fired = hits = 0
             while len(buffer) < rollout_transitions and total_steps < args.total_env_steps:
                 for env_idx, rollout_env in enumerate(envs):
@@ -562,12 +590,17 @@ def main() -> None:
                     ])
                     critic = adapted["critic_state"]
                     active = _build_red_alive_mask(info, rollout_env, rollout_env.red_ids)
+                    act_kwargs = {}
+                    if rnn_hidden is not None:
+                        act_kwargs["rnn_hidden"] = torch.as_tensor(
+                            rnn_hidden[env_idx], device=device)
                     with torch.no_grad():
                         out = policy.act(
                             torch.as_tensor(actor_obs, device=device),
                             roles=roles,
                             critic_state=torch.as_tensor(critic, device=device),
                             deterministic=False,
+                            **act_kwargs,
                         )
                     heartbeat.write(
                         "after_policy_act",
@@ -584,6 +617,8 @@ def main() -> None:
                     actions = out["action"].cpu().numpy()
                     log_probs = out["log_prob"].cpu().numpy()
                     value = float(out["value"].item())
+                    if rnn_hidden is not None and "rnn_hidden" in out:
+                        rnn_hidden[env_idx] = out["rnn_hidden"].cpu().numpy()
                     if np.isnan(actions).any() or np.isnan(value):
                         nan_detected = True
                         break
@@ -654,9 +689,13 @@ def main() -> None:
                             next_value = float(policy.value(
                                 torch.as_tensor(next_adapted["critic_state"], device=device).unsqueeze(0)
                             ).item())
+                    store_kwargs = {}
+                    if rnn_hidden is not None:
+                        store_kwargs["rnn_hidden"] = rnn_hidden[env_idx]
                     buffer.store(
                         actor_obs, critic, actions, log_probs, reward_np, done_np,
-                        value, active, next_value=next_value, env_id=env_idx)
+                        value, active, next_value=next_value, env_id=env_idx,
+                        **store_kwargs)
                     current_ep_return[env_idx] += reward_np
                     current_ep_len[env_idx] += 1
                     total_steps += 1
@@ -713,6 +752,8 @@ def main() -> None:
                         )
                         next_obs, next_info = rollout_env.reset(seed=args.seed + total_steps + env_idx)
                         current_ep_id[env_idx] += 1
+                        if rnn_hidden is not None:
+                            rnn_hidden[env_idx][:] = 0.0
                         heartbeat.write(
                             "after_reset",
                             iteration=iteration,
@@ -851,9 +892,10 @@ def main() -> None:
                     "actor_obs_dim": actor_dim,
                     "critic_state_dim": critic_dim,
                     "entity_dim": getattr(policy, "entity_dim", None),
-                    "attention": args.policy_arch in {"entity_attention", "brma_entity"},
-                    "brma_entity_encoder": args.policy_arch == "brma_entity",
-                    "recurrent": False,
+                    "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent"},
+                    "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent"},
+                    "recurrent": args.policy_arch == "brma_recurrent",
+                    "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
                 }, indent=2), encoding="utf-8")
                 (out_dir / "meta.json").unlink(missing_ok=True)
                 (tmp_model.parent / "meta.json").write_text(
@@ -905,9 +947,10 @@ def main() -> None:
                             "separate_actors": True,
                             "centralized_critic": True,
                             "sequential_update": True,
-                            "attention": args.policy_arch in {"entity_attention", "brma_entity"},
-                            "brma_entity_encoder": args.policy_arch == "brma_entity",
-                            "recurrent": False,
+                            "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent"},
+                            "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent"},
+                            "recurrent": args.policy_arch == "brma_recurrent",
+                            "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
                             "num_envs": args.num_envs,
                             "rollout_length_per_env": args.rollout_length,
                             "transitions_per_rollout": transitions_per_rollout,
@@ -938,9 +981,10 @@ def main() -> None:
         "centralized_critic": True,
         "sequential_update": True,
         "sequential_update_detail": "simplified HAPPO-style v0 role-wise PPO",
-        "attention": args.policy_arch in {"entity_attention", "brma_entity"},
-        "brma_entity_encoder": args.policy_arch == "brma_entity",
-        "recurrent": False,
+        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent"},
+        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent"},
+        "recurrent": args.policy_arch == "brma_recurrent",
+        "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
         "missile_scripted": True,
         "evasion_scripted": True,
         "num_envs": args.num_envs,

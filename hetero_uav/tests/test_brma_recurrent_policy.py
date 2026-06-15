@@ -1,0 +1,151 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_brma_recurrent_policy_forward_shapes():
+    from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
+
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    actor_obs = torch.zeros((3, 96), dtype=torch.float32)
+    out = policy.act(actor_obs, roles=[0, 1, 1], deterministic=True)
+
+    assert out["action"].shape == (3, 3)
+    assert out["log_prob"].shape == (3,)
+    assert out["entropy"].shape == (3,)
+    assert out["mean"].shape == (3, 3)
+    assert "rnn_hidden" in out
+    assert out["rnn_hidden"].shape == (3, 128)
+    assert torch.isfinite(out["action"]).all()
+    assert torch.isfinite(out["rnn_hidden"]).all()
+
+
+def test_brma_recurrent_policy_hidden_state_shapes():
+    from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
+
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    actor_obs = torch.zeros((2, 96), dtype=torch.float32)
+
+    # Zero hidden init
+    h0 = policy.init_hidden(2)
+    assert h0.shape == (2, 128)
+    assert (h0 == 0).all()
+
+    out1 = policy.act(actor_obs, roles=[0, 1], deterministic=True, rnn_hidden=h0)
+    h1 = out1["rnn_hidden"]
+    assert h1.shape == (2, 128)
+
+    # Chain with returned hidden state
+    out2 = policy.act(actor_obs, roles=[0, 1], deterministic=True, rnn_hidden=h1)
+    assert out2["rnn_hidden"].shape == (2, 128)
+
+
+def test_brma_recurrent_done_reset_hidden_state():
+    from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
+
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    actor_obs = torch.randn((2, 96), dtype=torch.float32)
+
+    h0 = policy.init_hidden(2)
+    out1 = policy.act(actor_obs, roles=[0, 1], deterministic=True, rnn_hidden=h0)
+    h1 = out1["rnn_hidden"].detach()
+
+    # Done reset for agent 0: zero its hidden state
+    h1_reset = h1.clone()
+    h1_reset[0, :] = 0.0
+
+    # Fresh input to make the difference visible
+    actor_obs2 = torch.randn((2, 96), dtype=torch.float32)
+    out2_reset = policy.act(actor_obs2, roles=[0, 1], deterministic=True, rnn_hidden=h1_reset)
+    out2_noreset = policy.act(actor_obs2, roles=[0, 1], deterministic=True, rnn_hidden=h1)
+
+    # Agent 0's action should differ because hidden state was reset
+    assert not torch.allclose(out2_reset["action"][0], out2_noreset["action"][0])
+
+
+def test_brma_recurrent_evaluate_actions_batch():
+    from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
+
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    actor_obs = torch.zeros((4, 3, 96), dtype=torch.float32)
+    roles = torch.tensor([[0, 1, 1]] * 4)
+    critic = torch.zeros((4, 480), dtype=torch.float32)
+    actions = torch.zeros((4, 3, 3), dtype=torch.float32)
+    h0 = policy.init_hidden(12).reshape(4, 3, 128)
+
+    log_prob, entropy, value, mean, role_ids = policy.evaluate_actions(
+        actor_obs, roles, critic, actions, rnn_hidden=h0)
+
+    assert log_prob.shape == (4, 3)
+    assert entropy.shape == (4, 3)
+    assert value.shape == (4,)
+    assert mean.shape == (4, 3, 3)
+    assert role_ids.shape == (4, 3)
+    assert torch.isfinite(log_prob).all()
+
+
+def test_brma_recurrent_policy_save_load_roundtrip(tmp_path):
+    from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
+
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    path = tmp_path / "model.pt"
+    policy.save(path)
+    loaded = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    loaded.load(path, map_location="cpu")
+    h0 = loaded.init_hidden(3)
+    out = loaded.act(torch.zeros((3, 96)), roles=[0, 1, 1], deterministic=True, rnn_hidden=h0)
+    assert out["action"].shape == (3, 3)
+    assert "rnn_hidden" in out
+
+
+def test_train_and_eval_help_include_brma_recurrent():
+    result = subprocess.run(
+        [sys.executable, "scripts/train_happo_reference.py", "--help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert "brma_recurrent" in result.stdout
+
+
+def test_run_brma_recurrent_smoke_dry_run():
+    result = subprocess.run(
+        [sys.executable, "scripts/run_brma_recurrent_smoke.py", "--dry-run"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert "--policy-arch" in result.stdout
+    assert "brma_recurrent" in result.stdout
+    assert "debug_brma_recurrent_smoke" in result.stdout
+
+
+def test_brma_entity_tests_still_pass():
+    """Verify brma_entity policy is unaffected."""
+    from algorithms.happo.brma_entity_policy import BRMAEntityHAPPOReferencePolicy
+    policy = BRMAEntityHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3)
+    actor_obs = torch.zeros((3, 96), dtype=torch.float32)
+    out = policy.act(actor_obs, roles=[0, 1, 1], deterministic=True)
+    assert out["action"].shape == (3, 3)
+    assert "rnn_hidden" not in out  # non-recurrent should not have rnn_hidden
+
+
+def test_flat_policy_tests_still_pass():
+    """Verify flat policy is unaffected."""
+    from algorithms.happo.happo_policy import HAPPOReferencePolicy
+    policy = HAPPOReferencePolicy(96, 480)
+    actor_obs = torch.zeros((3, 96), dtype=torch.float32)
+    out = policy.act(actor_obs, roles=[0, 1, 1], deterministic=True)
+    assert out["action"].shape == (3, 3)
+    assert "rnn_hidden" not in out

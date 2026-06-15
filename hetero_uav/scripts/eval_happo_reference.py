@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from algorithms.happo import (
     BRMAEntityHAPPOReferencePolicy,
+    BRMARecurrentHAPPOReferencePolicy,
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
 )
@@ -54,6 +55,13 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
             entity_dim=int(meta.get("entity_dim", 19)),
             critic_state_dim=int(meta.get("critic_state_dim", 480)),
             action_dim=3,
+        ).to(device)
+    if policy_arch == "brma_recurrent":
+        return BRMARecurrentHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+            rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
         ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(
@@ -139,6 +147,8 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device) -> dict:
     mav_sat_values, uav_sat_values = [], []
     roles = _role_ids(env)
 
+    _rnn_hidden_size = getattr(policy, "rnn_hidden_size", 0)
+
     for ep in range(args.episodes):
         obs, info = env.reset(seed=args.seed + ep)
         ep_ret = 0.0
@@ -147,6 +157,9 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device) -> dict:
         truncated = {aid: False for aid in env.agent_ids}
         mstats = _empty_stats()
         prev_hits = {"red": 0, "blue": 0}
+        eval_rnn_hidden = None
+        if _rnn_hidden_size > 0:
+            eval_rnn_hidden = np.zeros((len(env.red_ids), _rnn_hidden_size), dtype=np.float32)
         while True:
             adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
             actor_obs = np.stack([
@@ -157,13 +170,19 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device) -> dict:
             if np.isnan(actor_obs).any() or np.isnan(critic).any():
                 nan_detected = True
                 break
+            act_kwargs = {}
+            if eval_rnn_hidden is not None:
+                act_kwargs["rnn_hidden"] = torch.as_tensor(eval_rnn_hidden, device=device)
             with torch.no_grad():
                 out = policy.act(
                     torch.as_tensor(actor_obs, device=device),
                     roles=roles,
                     critic_state=torch.as_tensor(critic, device=device),
                     deterministic=True,
+                    **act_kwargs,
                 )
+            if eval_rnn_hidden is not None and "rnn_hidden" in out:
+                eval_rnn_hidden = out["rnn_hidden"].detach().cpu().numpy()
             actions = out["action"].detach().cpu().numpy()
             if np.isnan(actions).any():
                 nan_detected = True
