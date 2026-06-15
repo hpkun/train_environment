@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -35,9 +34,9 @@ def main() -> None:
 
     output_dir = _safe_output_dir(args.output_dir)
     cmd = [
-        sys.executable,
+        "python",
         "-u",
-        str(ROOT / "scripts" / "train_happo_reference.py"),
+        str((ROOT / "scripts" / "train_happo_reference.py").relative_to(ROOT)),
         "--config",
         args.config,
         "--output-dir",

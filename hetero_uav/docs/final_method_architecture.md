@@ -13,6 +13,25 @@ complexity without breaking earlier checkpoints.
 | `brma_recurrent` | BRMA-style EntityObservationEncoder | GRUCell | No | MAV head + shared UAV head | 480-dim MLP |
 | `brma_recurrent_masked` | BRMA-style EntityObservationEncoder | GRUCell | Random scale mask and/or biased mask | MAV head + shared UAV head | 480-dim MLP |
 
+## Recommended Paper Method
+
+The recommended main method for the final paper experiment is:
+
+```text
+BRMA-style recurrent masked entity-attention actor
+```
+
+Use `--policy-arch brma_recurrent_masked` with either:
+
+- `--brma-random-scale-mask` for the primary masked probe;
+- `--brma-biased-mask` for the biased-mask probe or ablation.
+
+The recommended baselines are:
+
+- `flat`: weak MLP baseline and compatibility baseline;
+- `brma_entity`: non-recurrent entity encoder ablation;
+- `brma_recurrent`: recurrent entity encoder ablation without masks.
+
 ## Method Diagram
 
 The most complete opt-in path can be drawn as:
@@ -46,6 +65,7 @@ Not fully implemented:
 - full BRMA mask KL/objective training;
 - strict biased random masked attention training loop;
 - arbitrary-size attention generalization beyond configured capacity.
+- biased mask objective is simplified to forward mask generation and logging.
 
 ## Relation To HAPPO
 
@@ -59,6 +79,8 @@ Not fully implemented:
 
 - strict HAPPO sequential correction;
 - formal multi-agent advantage decomposition.
+- GRU replay is a practical one-step hidden-state integration, not full TBPTT
+  recurrent PPO.
 
 ## Non-Method Diagnostics
 
@@ -71,4 +93,8 @@ modules.
 Safe: "We implement an opt-in BRMA-style recurrent masked entity-attention
 actor for the heterogeneous MAV/UAV setting."
 
-Avoid: "This is a full BRMA-MAPPO or full TAM-HAPPO reproduction."
+Avoid:
+
+- "This is a full BRMA-MAPPO or full TAM-HAPPO reproduction."
+- "The biased mask objective exactly matches the original paper."
+- "The GRU uses a full TBPTT recurrent PPO implementation."
