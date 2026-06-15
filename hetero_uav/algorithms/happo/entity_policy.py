@@ -243,6 +243,15 @@ class EntityHAPPOReferencePolicy(nn.Module):
             role_ids.view(*leading_shape),
         )
 
+    def uav_imitation_loss_from_flat(self, actor_obs: torch.Tensor, oracle_actions: torch.Tensor) -> torch.Tensor:
+        pooled, _leading_shape = self.encode(actor_obs)
+        roles = torch.full((pooled.shape[0],), UAV_ROLE_ID, dtype=torch.long, device=pooled.device)
+        mean, _std = self._means_and_stds(pooled, roles)
+        error = mean - oracle_actions.to(mean.device)
+        error = error.clone()
+        error[..., 1] = torch.remainder(mean[..., 1] - oracle_actions.to(mean.device)[..., 1] + 1.0, 2.0) - 1.0
+        return torch.mean(error ** 2)
+
     def value(self, critic_state):
         critic_t = torch.as_tensor(critic_state, dtype=torch.float32, device=next(self.parameters()).device)
         if critic_t.ndim == 1:

@@ -401,11 +401,6 @@ def main() -> None:
     adapter = HeteroObsAdapterV2()
     actor_dim = adapter.flat_actor_obs_dim
     critic_dim = adapter.critic_state_dim
-    if args.policy_arch == "entity_attention" and args.uav_imitation_dataset:
-        raise ValueError(
-            "entity_attention does not support --uav-imitation-dataset in P2.5; "
-            "omit imitation or use --policy-arch flat"
-        )
     init_meta_path = None
     if args.init_checkpoint:
         init_path_for_meta = _rel(args.init_checkpoint)

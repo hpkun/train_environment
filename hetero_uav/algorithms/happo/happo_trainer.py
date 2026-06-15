@@ -30,6 +30,8 @@ def _wrapped_heading_error(pred_heading: torch.Tensor, target_heading: torch.Ten
 
 
 def _uav_imitation_loss(policy, actor_obs: torch.Tensor, oracle_actions: torch.Tensor) -> torch.Tensor:
+    if hasattr(policy, "uav_imitation_loss_from_flat"):
+        return policy.uav_imitation_loss_from_flat(actor_obs, oracle_actions)
     pred = torch.clamp(policy.uav_actor(actor_obs), -0.999, 0.999)
     error = pred - oracle_actions
     error = error.clone()

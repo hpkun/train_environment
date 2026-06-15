@@ -50,6 +50,18 @@ def test_entity_policy_evaluate_actions_and_checkpoint_roundtrip(tmp_path):
     assert loaded_out["action"].shape == (3, 3)
 
 
+def test_entity_policy_uav_imitation_loss_accepts_flat_obs():
+    from algorithms.happo.entity_policy import EntityHAPPOReferencePolicy
+
+    policy = EntityHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3)
+    actor_obs = torch.zeros((8, 96), dtype=torch.float32)
+    oracle_actions = torch.zeros((8, 3), dtype=torch.float32)
+    loss = policy.uav_imitation_loss_from_flat(actor_obs, oracle_actions)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert policy.uav_actor[0].weight.grad is not None
+
+
 def test_policy_factory_rejects_flat_checkpoint_for_entity_policy(tmp_path):
     from scripts.train_happo_reference import _build_policy
 
