@@ -75,8 +75,9 @@ class HAPPOReferenceTrainer:
         T, N = active_masks.shape
         role_mask = (role_ids.view(1, N).expand(T, N) == role_id).float()
         valid = active_masks * role_mask
-        if valid.sum().item() <= 0:
-            return 0.0, 0.0, 0.0
+        valid_sample_count = float(valid.sum().item())
+        if valid_sample_count <= 0:
+            return 0.0, 0.0, 0.0, 0.0
 
         optimizer.zero_grad()
         repeated_roles = role_ids.view(1, N).expand(T, N)
@@ -96,7 +97,12 @@ class HAPPOReferenceTrainer:
         torch.nn.utils.clip_grad_norm_(params, self.max_grad_norm)
         optimizer.step()
         approx_kl = ((old_log_probs - log_prob) * valid).sum() / valid.sum().clamp(min=1)
-        return float(policy_loss.item()), float(entropy_mean.item()), float(approx_kl.item())
+        return (
+            float(policy_loss.item()),
+            float(entropy_mean.item()),
+            float(approx_kl.item()),
+            valid_sample_count,
+        )
 
     def update(self, buffer, uav_imitation_batch=None, uav_imitation_coef: float = 0.0):
         data = buffer.get(next(self.policy.parameters()).device)
@@ -124,6 +130,7 @@ class HAPPOReferenceTrainer:
         actor_loss_mav, actor_loss_uav = [], []
         entropy_mav, entropy_uav = [], []
         kl_mav, kl_uav = [], []
+        valid_mav, valid_uav = [], []
         critic_losses = []
         imitation_losses = []
 
@@ -136,8 +143,10 @@ class HAPPOReferenceTrainer:
             self.critic_opt.step()
             critic_losses.append(float(critic_loss.item()))
 
-            m_loss, m_ent, m_kl = self._actor_update(data, advantages, MAV_ROLE_ID, self.mav_opt)
-            u_loss, u_ent, u_kl = self._actor_update(data, advantages, UAV_ROLE_ID, self.uav_opt)
+            m_loss, m_ent, m_kl, m_valid = self._actor_update(
+                data, advantages, MAV_ROLE_ID, self.mav_opt)
+            u_loss, u_ent, u_kl, u_valid = self._actor_update(
+                data, advantages, UAV_ROLE_ID, self.uav_opt)
             if uav_imitation_batch is not None and uav_imitation_coef > 0.0:
                 obs_batch, action_batch = uav_imitation_batch
                 self.uav_opt.zero_grad()
@@ -159,6 +168,8 @@ class HAPPOReferenceTrainer:
             entropy_uav.append(u_ent)
             kl_mav.append(m_kl)
             kl_uav.append(u_kl)
+            valid_mav.append(m_valid)
+            valid_uav.append(u_valid)
 
         actions = data["actions"].detach()
         roles = data["role_ids"].detach().cpu().numpy()
@@ -169,12 +180,24 @@ class HAPPOReferenceTrainer:
         mav_sat = float(sat.masked_select(mav_mask.expand_as(sat)).mean().item()) if mav_mask.any() else 0.0
         uav_sat = float(sat.masked_select(uav_mask.expand_as(sat)).mean().item()) if uav_mask.any() else 0.0
 
+        mav_log_std = self.policy.action_log_std_mav.detach()
+        uav_log_std = self.policy.action_log_std_uav.detach()
         return {
             "actor_loss_mav": float(np.mean(actor_loss_mav)),
             "actor_loss_uav": float(np.mean(actor_loss_uav)),
             "critic_loss": float(np.mean(critic_losses)),
             "entropy_mav": float(np.mean(entropy_mav)),
             "entropy_uav": float(np.mean(entropy_uav)),
+            "entropy_mav_valid_count": float(np.mean(valid_mav)),
+            "entropy_uav_valid_count": float(np.mean(valid_uav)),
+            "mav_active_sample_count": float(np.mean(valid_mav)),
+            "uav_active_sample_count": float(np.mean(valid_uav)),
+            "action_log_std_mav_min": float(mav_log_std.min().item()),
+            "action_log_std_mav_max": float(mav_log_std.max().item()),
+            "action_log_std_mav_mean": float(mav_log_std.mean().item()),
+            "action_log_std_uav_min": float(uav_log_std.min().item()),
+            "action_log_std_uav_max": float(uav_log_std.max().item()),
+            "action_log_std_uav_mean": float(uav_log_std.mean().item()),
             "approx_kl_mav": float(np.mean(kl_mav)),
             "approx_kl_uav": float(np.mean(kl_uav)),
             "action_saturation_rate": float(sat.mean().item()),

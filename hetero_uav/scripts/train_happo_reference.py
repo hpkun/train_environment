@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import faulthandler
 import json
 import math
 import os
 import subprocess
 import sys
+import threading
+import time
 from collections import deque
 from pathlib import Path
 
@@ -36,11 +39,17 @@ def _transitions_per_rollout(rollout_length: int, num_envs: int) -> int:
 
 class HeartbeatLogger:
     def __init__(self, path: str | Path | None, every_steps: int = 50,
-                 enabled: bool = False, debug_all: bool = False) -> None:
+                 enabled: bool = False, debug_all: bool = False,
+                 static_fields: dict | None = None) -> None:
         self.enabled = bool(enabled)
         self.every_steps = max(1, int(every_steps))
         self.debug_all = bool(debug_all)
         self.path = Path(path) if path is not None else None
+        self.static_fields = static_fields or {}
+        self.last_write_time = time.time()
+        self.last_entries: deque[str] = deque(maxlen=20)
+        self.last_event: dict = {}
+        self._lock = threading.Lock()
         self._file = None
         if self.enabled and self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,7 +57,9 @@ class HeartbeatLogger:
 
     def write(self, event: str, *, iteration: int, rollout_local_step: int,
               env_idx: int | str, total_steps: int, episode_length: int | str = "",
-              alive_agents=None, done=None, truncated=None) -> None:
+              alive_agents=None, done=None, terminated=None, truncated=None,
+              env_episode_id: int | str = "", missile_count: int | str = "",
+              sim_time: float | str = "") -> None:
         if not self.enabled or self._file is None:
             return
         if not self.debug_all and int(total_steps) % self.every_steps != 0:
@@ -56,20 +67,103 @@ class HeartbeatLogger:
         alive_text = ""
         if isinstance(alive_agents, dict):
             alive_text = ",".join(f"{k}:{v}" for k, v in sorted(alive_agents.items()))
-        row = (
-            f"wall_time={__import__('time').time():.3f} "
-            f"iteration={iteration} rollout_local_step={rollout_local_step} "
-            f"env_idx={env_idx} event={event} "
-            f"total_env_steps_actual={total_steps} episode_length={episode_length} "
-            f"alive_agents={alive_text} done={done} truncated={truncated}\n"
-        )
-        self._file.write(row)
-        self._file.flush()
+        fields = {
+            "wall_time": f"{time.time():.3f}",
+            "iteration": iteration,
+            "rollout_local_step": rollout_local_step,
+            "env_idx": env_idx,
+            "event": event,
+            "total_env_steps_actual": total_steps,
+            "env_episode_step": episode_length,
+            "env_episode_id": env_episode_id,
+            "alive_agents": alive_text,
+            "red_alive_count": alive_agents.get("red", "") if isinstance(alive_agents, dict) else "",
+            "blue_alive_count": alive_agents.get("blue", "") if isinstance(alive_agents, dict) else "",
+            "missile_count": missile_count,
+            "sim_time": sim_time,
+            "done": done,
+            "terminated": terminated,
+            "truncated": truncated,
+            **self.static_fields,
+        }
+        row = " ".join(f"{key}={value}" for key, value in fields.items()) + "\n"
+        with self._lock:
+            self._file.write(row)
+            self._file.flush()
+            self.last_write_time = time.time()
+            self.last_entries.append(row.rstrip("\n"))
+            self.last_event = fields.copy()
 
     def close(self) -> None:
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+        with self._lock:
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+
+
+class HeartbeatStallWatchdog:
+    def __init__(self, logger: HeartbeatLogger, output_dir: Path,
+                 timeout_sec: float, exit_on_stall: bool = False) -> None:
+        self.logger = logger
+        self.output_dir = output_dir
+        self.timeout_sec = float(timeout_sec)
+        self.exit_on_stall = bool(exit_on_stall)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="heartbeat-stall-watchdog", daemon=True)
+        self.triggered = False
+
+    def start(self) -> None:
+        if self.timeout_sec > 0:
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(min(5.0, max(0.5, self.timeout_sec / 10.0))):
+            elapsed = time.time() - self.logger.last_write_time
+            if elapsed < self.timeout_sec:
+                continue
+            self.triggered = True
+            self._write_report(elapsed)
+            if self.exit_on_stall:
+                os._exit(88)
+            return
+
+    def _write_report(self, elapsed: float) -> None:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        with self.logger._lock:
+            last_entries = list(self.logger.last_entries)
+            last_event = dict(self.logger.last_event)
+        report = {
+            "stall_timeout_sec": self.timeout_sec,
+            "elapsed_since_last_heartbeat_sec": elapsed,
+            "last_event": last_event,
+            "last_heartbeat_entries": last_entries,
+            "exit_on_heartbeat_stall": self.exit_on_stall,
+        }
+        (self.output_dir / "heartbeat_stall_report.json").write_text(
+            json.dumps(report, indent=2), encoding="utf-8")
+        md = [
+            "# Heartbeat Stall Report",
+            "",
+            f"- timeout_sec: {self.timeout_sec}",
+            f"- elapsed_since_last_heartbeat_sec: {elapsed:.1f}",
+            f"- last_event: `{last_event.get('event', 'unknown')}`",
+            f"- env_idx: `{last_event.get('env_idx', '')}`",
+            f"- rollout_local_step: `{last_event.get('rollout_local_step', '')}`",
+            "",
+            "## Last Heartbeats",
+            "",
+            "```text",
+            *last_entries,
+            "```",
+        ]
+        (self.output_dir / "heartbeat_stall_report.md").write_text("\n".join(md), encoding="utf-8")
+        with (self.output_dir / "heartbeat_stall_stack.txt").open("w", encoding="utf-8") as f:
+            faulthandler.dump_traceback(file=f, all_threads=True)
 
 
 def _build_red_alive_mask(info: dict, env, red_ids: list[str]) -> np.ndarray:
@@ -99,6 +193,19 @@ def _alive_counts(env) -> tuple[int, int]:
 def _mav_alive(env) -> bool:
     sim = env.red_planes.get("red_0")
     return bool(sim is not None and sim.is_alive)
+
+
+def _missile_count(env) -> int:
+    missiles = getattr(env, "missiles", None)
+    if isinstance(missiles, list):
+        return len(missiles)
+    if isinstance(missiles, dict):
+        return sum(len(v) if isinstance(v, list) else 1 for v in missiles.values())
+    return 0
+
+
+def _sim_time(env) -> float:
+    return float(getattr(env, "current_step", 0)) * float(getattr(env, "env_dt", 0.0))
 
 
 def _role_ids(env) -> list[int]:
@@ -224,6 +331,8 @@ def main() -> None:
     parser.add_argument("--heartbeat-log", default=None)
     parser.add_argument("--heartbeat-every-steps", type=int, default=50)
     parser.add_argument("--debug-rollout-heartbeat", action="store_true")
+    parser.add_argument("--heartbeat-stall-timeout-sec", type=float, default=0.0)
+    parser.add_argument("--exit-on-heartbeat-stall", action="store_true")
     parser.add_argument("--timeseries-episodes-limit", type=int, default=3)
     parser.add_argument("--timeseries-step-stride", type=int, default=5)
     args = parser.parse_args()
@@ -289,7 +398,15 @@ def main() -> None:
         every_steps=args.heartbeat_every_steps,
         enabled=bool(args.heartbeat_log or args.debug_rollout_heartbeat),
         debug_all=args.debug_rollout_heartbeat,
+        static_fields={"max_steps": args.max_steps, "num_envs": args.num_envs},
     )
+    watchdog = HeartbeatStallWatchdog(
+        heartbeat,
+        out_dir,
+        timeout_sec=args.heartbeat_stall_timeout_sec,
+        exit_on_stall=args.exit_on_heartbeat_stall,
+    )
+    watchdog.start()
     rich_logger = None
     if args.enable_rich_logging:
         rich_dir = _rel(args.rich_log_dir) if args.rich_log_dir else out_dir
@@ -309,6 +426,7 @@ def main() -> None:
     episodes = 0
     current_ep_return = [np.zeros(len(env.red_ids), dtype=np.float32) for _ in range(args.num_envs)]
     current_ep_len = [0 for _ in range(args.num_envs)]
+    current_ep_id = [0 for _ in range(args.num_envs)]
     prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(args.num_envs)]
     recent = deque(maxlen=100)
     best_score = -float("inf")
@@ -324,7 +442,13 @@ def main() -> None:
             "missile_hits", "actor_loss_mav", "actor_loss_uav",
             "critic_loss", "entropy_mav", "entropy_uav",
             "mav_action_saturation_rate", "uav_action_saturation_rate",
-            "uav_imitation_loss", "nan_detected",
+            "uav_imitation_loss",
+            "entropy_mav_valid_count", "entropy_uav_valid_count",
+            "mav_active_sample_count", "uav_active_sample_count",
+            "action_log_std_mav_min", "action_log_std_mav_max",
+            "action_log_std_mav_mean", "action_log_std_uav_min",
+            "action_log_std_uav_max", "action_log_std_uav_mean",
+            "nan_detected",
         ])
         eval_writer = None
         eval_f = None
@@ -358,7 +482,10 @@ def main() -> None:
                         env_idx=env_idx,
                         total_steps=total_steps,
                         episode_length=current_ep_len[env_idx],
+                        env_episode_id=current_ep_id[env_idx],
                         alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                        missile_count=_missile_count(rollout_env),
+                        sim_time=_sim_time(rollout_env),
                     )
                     adapted = adapter.adapt_all(
                         obs, info=info, red_ids=rollout_env.red_ids, blue_ids=rollout_env.blue_ids)
@@ -382,7 +509,10 @@ def main() -> None:
                         env_idx=env_idx,
                         total_steps=total_steps,
                         episode_length=current_ep_len[env_idx],
+                        env_episode_id=current_ep_id[env_idx],
                         alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                        missile_count=_missile_count(rollout_env),
+                        sim_time=_sim_time(rollout_env),
                     )
                     actions = out["action"].cpu().numpy()
                     log_probs = out["log_prob"].cpu().numpy()
@@ -399,7 +529,10 @@ def main() -> None:
                         env_idx=env_idx,
                         total_steps=total_steps,
                         episode_length=current_ep_len[env_idx],
+                        env_episode_id=current_ep_id[env_idx],
                         alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                        missile_count=_missile_count(rollout_env),
+                        sim_time=_sim_time(rollout_env),
                     )
                     action_dict.update(opponents[env_idx].act(obs, rollout_env.blue_ids, env=rollout_env))
                     heartbeat.write(
@@ -409,7 +542,10 @@ def main() -> None:
                         env_idx=env_idx,
                         total_steps=total_steps,
                         episode_length=current_ep_len[env_idx],
+                        env_episode_id=current_ep_id[env_idx],
                         alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                        missile_count=_missile_count(rollout_env),
+                        sim_time=_sim_time(rollout_env),
                     )
                     heartbeat.write(
                         "before_env_step",
@@ -418,7 +554,10 @@ def main() -> None:
                         env_idx=env_idx,
                         total_steps=total_steps,
                         episode_length=current_ep_len[env_idx],
+                        env_episode_id=current_ep_id[env_idx],
                         alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                        missile_count=_missile_count(rollout_env),
+                        sim_time=_sim_time(rollout_env),
                     )
                     next_obs, rewards, terminated, truncated, next_info = rollout_env.step(action_dict)
                     heartbeat.write(
@@ -428,8 +567,12 @@ def main() -> None:
                         env_idx=env_idx,
                         total_steps=total_steps,
                         episode_length=current_ep_len[env_idx],
+                        env_episode_id=current_ep_id[env_idx],
                         alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                        missile_count=_missile_count(rollout_env),
+                        sim_time=_sim_time(rollout_env),
                         done=_team_done(terminated, truncated),
+                        terminated=bool(all(terminated.values())) if terminated else False,
                         truncated=bool(all(truncated.values())) if truncated else False,
                     )
                     reward_np = np.array([float(rewards.get(rid, 0.0)) for rid in rollout_env.red_ids], dtype=np.float32)
@@ -485,11 +628,16 @@ def main() -> None:
                             env_idx=env_idx,
                             total_steps=total_steps,
                             episode_length=0,
+                            env_episode_id=current_ep_id[env_idx],
                             alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                            missile_count=_missile_count(rollout_env),
+                            sim_time=_sim_time(rollout_env),
                             done=done,
+                            terminated=bool(all(terminated.values())) if terminated else False,
                             truncated=bool(all(truncated.values())) if truncated else False,
                         )
                         next_obs, next_info = rollout_env.reset(seed=args.seed + total_steps + env_idx)
+                        current_ep_id[env_idx] += 1
                         heartbeat.write(
                             "after_reset",
                             iteration=iteration,
@@ -497,8 +645,12 @@ def main() -> None:
                             env_idx=env_idx,
                             total_steps=total_steps,
                             episode_length=0,
+                            env_episode_id=current_ep_id[env_idx],
                             alive_agents=dict(zip(("red", "blue"), _alive_counts(rollout_env))),
+                            missile_count=_missile_count(rollout_env),
+                            sim_time=_sim_time(rollout_env),
                             done=done,
+                            terminated=bool(all(terminated.values())) if terminated else False,
                             truncated=bool(all(truncated.values())) if truncated else False,
                         )
                         prev_hit_totals[env_idx] = {"red": 0, "blue": 0}
@@ -542,7 +694,18 @@ def main() -> None:
                 f"{stats['entropy_mav']:.6f}", f"{stats['entropy_uav']:.6f}",
                 f"{stats['mav_action_saturation_rate']:.6f}",
                 f"{stats['uav_action_saturation_rate']:.6f}",
-                f"{stats.get('uav_imitation_loss', 0.0):.6f}", int(nan_detected),
+                f"{stats.get('uav_imitation_loss', 0.0):.6f}",
+                f"{stats.get('entropy_mav_valid_count', 0.0):.1f}",
+                f"{stats.get('entropy_uav_valid_count', 0.0):.1f}",
+                f"{stats.get('mav_active_sample_count', 0.0):.1f}",
+                f"{stats.get('uav_active_sample_count', 0.0):.1f}",
+                f"{stats.get('action_log_std_mav_min', 0.0):.6f}",
+                f"{stats.get('action_log_std_mav_max', 0.0):.6f}",
+                f"{stats.get('action_log_std_mav_mean', 0.0):.6f}",
+                f"{stats.get('action_log_std_uav_min', 0.0):.6f}",
+                f"{stats.get('action_log_std_uav_max', 0.0):.6f}",
+                f"{stats.get('action_log_std_uav_mean', 0.0):.6f}",
+                int(nan_detected),
             ])
             if rich_logger is not None:
                 red_dead = max(0.0, float(len(env.red_ids)) - red_alive)
@@ -699,6 +862,7 @@ def main() -> None:
     if rich_logger is not None:
         rich_logger.write_training_efficiency(total_steps, nan_detected=nan_detected)
         rich_logger.close()
+    watchdog.stop()
     heartbeat.close()
     for rollout_env in envs:
         rollout_env.close()

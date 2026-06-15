@@ -67,6 +67,28 @@ python scripts/train_happo_reference.py `
 by default, so `--eval-during-training` now follows `--eval-interval-steps`
 instead of forcing an evaluation after the first rollout.
 
+The env1 10M run can continue in the background. Do not overwrite or delete its
+output directory while debugging parallel sampling.
+
+For 4-env runs, note that this is single-process synchronous sampling. One
+blocked JSBSim environment blocks the entire rollout. Long runs must explicitly
+pass `--max-steps 1000`; the training script default `--max-steps 64` is useful
+for fast smoke tests but creates high-frequency resets and is not suitable for
+long air-combat training. Until 4-env long-run stability is proven, use 4-env
+only for debug/stability validation and keep env1 as the formal stable path.
+
+For 4-env debugging, add:
+
+```powershell
+--debug-rollout-heartbeat `
+--heartbeat-stall-timeout-sec 300 `
+--exit-on-heartbeat-stall
+```
+
+This writes every transition event to `heartbeat.log` and writes
+`heartbeat_stall_report.json`, `heartbeat_stall_report.md`, and
+`heartbeat_stall_stack.txt` if heartbeat output stalls.
+
 Then generate plots:
 
 ```powershell
