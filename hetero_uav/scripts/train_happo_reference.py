@@ -642,6 +642,14 @@ def main() -> None:
                     current_ep_return[env_idx] += reward_np
                     current_ep_len[env_idx] += 1
                     total_steps += 1
+                    if rich_logger is not None:
+                        rich_logger.write_missile_events(
+                            next_info,
+                            scenario=Path(args.config).stem,
+                            episode_id=current_ep_id[env_idx],
+                            step=total_steps,
+                            sim_time=_sim_time(rollout_env),
+                        )
                     for aid in rollout_env.agent_ids:
                         fired = int(next_info.get(aid, {}).get("missiles_fired_this_step", 0))
                         if aid.startswith("red_"):

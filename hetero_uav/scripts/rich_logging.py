@@ -9,6 +9,7 @@ from typing import Any
 
 from scripts.experiment_logging_schema import (
     FILE_SCHEMAS,
+    MISSILE_EVENTS_COLUMNS,
     TRAIN_METRICS_COLUMNS,
     ensure_schema_files,
 )
@@ -39,9 +40,12 @@ class RichExperimentLogger:
         self._train_file = (directory / "train_metrics.csv").open("w", newline="", encoding="utf-8")
         self._train_writer = csv.DictWriter(self._train_file, fieldnames=TRAIN_METRICS_COLUMNS)
         self._train_writer.writeheader()
+        self._missile_file = (directory / "missile_events.csv").open("a", newline="", encoding="utf-8")
+        self._missile_writer = csv.DictWriter(self._missile_file, fieldnames=MISSILE_EVENTS_COLUMNS)
 
     def close(self) -> None:
         self._train_file.close()
+        self._missile_file.close()
 
     def write_train_metrics(self, row: dict[str, Any]) -> None:
         elapsed = max(time.time() - self.start_time, 1e-9)
@@ -58,6 +62,78 @@ class RichExperimentLogger:
         payload.update(row)
         self._train_writer.writerow(payload)
         self._train_file.flush()
+
+    def write_missile_events(
+        self,
+        info: dict[str, Any],
+        *,
+        scenario: str,
+        episode_id: int | str,
+        step: int | str,
+        sim_time: float | str = "",
+    ) -> None:
+        """Write launch and termination records exposed by env info.
+
+        The environment already decides launch and hit/miss outcomes. This
+        method only persists those diagnostics to the rich logging schema.
+        """
+
+        rows = []
+        for record in info.get("__launch_quality_step__", []) or []:
+            rows.append(self._missile_row(
+                record,
+                scenario=scenario,
+                episode_id=episode_id,
+                step=step,
+                sim_time=sim_time,
+                event_type="launch",
+            ))
+        for record in info.get("__launch_quality_done__", []) or []:
+            reason = str(record.get("termination_reason") or "termination")
+            rows.append(self._missile_row(
+                record,
+                scenario=scenario,
+                episode_id=episode_id,
+                step=step,
+                sim_time=sim_time,
+                event_type=reason,
+            ))
+        if not rows:
+            return
+        for row in rows:
+            self._missile_writer.writerow(row)
+        self._missile_file.flush()
+
+    def _missile_row(
+        self,
+        record: dict[str, Any],
+        *,
+        scenario: str,
+        episode_id: int | str,
+        step: int | str,
+        sim_time: float | str,
+        event_type: str,
+    ) -> dict[str, Any]:
+        hit = bool(record.get("is_success")) or event_type == "hit"
+        return {
+            "run_id": self.run_id,
+            "scenario": scenario,
+            "episode_id": episode_id,
+            "step": step,
+            "sim_time": sim_time,
+            "event_type": event_type,
+            "missile_id": record.get("missile_id", ""),
+            "owner_id": record.get("shooter_id", ""),
+            "owner_team": record.get("shooter_team") or record.get("team", ""),
+            "target_id": record.get("target_id", ""),
+            "target_team": record.get("target_team", ""),
+            "lon": "",
+            "lat": "",
+            "altitude": record.get("shooter_alt_m", ""),
+            "distance_to_target": record.get("range_m", ""),
+            "hit_success": int(hit) if event_type != "launch" else "",
+            "death_caused": int(hit) if event_type != "launch" else "",
+        }
 
     def write_training_efficiency(self, total_steps: int, nan_detected: bool = False) -> None:
         elapsed = max(time.time() - self.start_time, 1e-9)
