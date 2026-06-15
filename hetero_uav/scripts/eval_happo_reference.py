@@ -14,7 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from algorithms.happo import EntityHAPPOReferencePolicy, HAPPOReferencePolicy
+from algorithms.happo import (
+    BRMAEntityHAPPOReferencePolicy,
+    EntityHAPPOReferencePolicy,
+    HAPPOReferencePolicy,
+)
 from algorithms.mappo.opponent_policy import OpponentPolicy
 from uav_env import make_env
 from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
@@ -41,6 +45,12 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
     policy_arch = meta.get("policy_arch", "flat")
     if policy_arch == "entity_attention":
         return EntityHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+        ).to(device)
+    if policy_arch == "brma_entity":
+        return BRMAEntityHAPPOReferencePolicy(
             entity_dim=int(meta.get("entity_dim", 19)),
             critic_state_dim=int(meta.get("critic_state_dim", 480)),
             action_dim=3,

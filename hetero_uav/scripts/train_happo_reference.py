@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from algorithms.happo import (
+    BRMAEntityHAPPOReferencePolicy,
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
     HAPPORolloutBuffer,
@@ -251,6 +252,23 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                 )
         entity_dim = int(meta.get("entity_dim", 19))
         return EntityHAPPOReferencePolicy(entity_dim=entity_dim, critic_state_dim=critic_dim).to(device)
+    if policy_arch == "brma_entity":
+        meta = {}
+        if init_checkpoint_meta is not None:
+            meta_path = Path(init_checkpoint_meta)
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("policy_arch", "flat") != "brma_entity":
+                raise ValueError(
+                    "brma_entity cannot load a flat or entity_attention checkpoint; "
+                    "use a brma_entity checkpoint or omit --init-checkpoint"
+                )
+        entity_dim = int(meta.get("entity_dim", 19))
+        return BRMAEntityHAPPOReferencePolicy(
+            entity_dim=entity_dim,
+            critic_state_dim=critic_dim,
+            action_dim=3,
+        ).to(device)
     raise ValueError(f"unsupported --policy-arch: {policy_arch}")
 
 
@@ -342,7 +360,7 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention"],
+                        choices=["flat", "entity_attention", "brma_entity"],
                         help="Policy architecture. Default flat preserves legacy checkpoints.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
@@ -405,9 +423,9 @@ def main() -> None:
     if args.init_checkpoint:
         init_path_for_meta = _rel(args.init_checkpoint)
         init_meta_path = init_path_for_meta.parent / "meta.json"
-        if args.policy_arch == "entity_attention" and not init_meta_path.exists():
+        if args.policy_arch in {"entity_attention", "brma_entity"} and not init_meta_path.exists():
             raise ValueError(
-                "entity_attention init checkpoint requires meta.json with policy_arch=entity_attention"
+                f"{args.policy_arch} init checkpoint requires meta.json with policy_arch={args.policy_arch}"
             )
     policy = _build_policy(args.policy_arch, actor_dim, critic_dim, device,
                            init_checkpoint_meta=init_meta_path)
@@ -833,7 +851,8 @@ def main() -> None:
                     "actor_obs_dim": actor_dim,
                     "critic_state_dim": critic_dim,
                     "entity_dim": getattr(policy, "entity_dim", None),
-                    "attention": args.policy_arch == "entity_attention",
+                    "attention": args.policy_arch in {"entity_attention", "brma_entity"},
+                    "brma_entity_encoder": args.policy_arch == "brma_entity",
                     "recurrent": False,
                 }, indent=2), encoding="utf-8")
                 (out_dir / "meta.json").unlink(missing_ok=True)
@@ -886,7 +905,8 @@ def main() -> None:
                             "separate_actors": True,
                             "centralized_critic": True,
                             "sequential_update": True,
-                            "attention": args.policy_arch == "entity_attention",
+                            "attention": args.policy_arch in {"entity_attention", "brma_entity"},
+                            "brma_entity_encoder": args.policy_arch == "brma_entity",
                             "recurrent": False,
                             "num_envs": args.num_envs,
                             "rollout_length_per_env": args.rollout_length,
@@ -918,7 +938,8 @@ def main() -> None:
         "centralized_critic": True,
         "sequential_update": True,
         "sequential_update_detail": "simplified HAPPO-style v0 role-wise PPO",
-        "attention": args.policy_arch == "entity_attention",
+        "attention": args.policy_arch in {"entity_attention", "brma_entity"},
+        "brma_entity_encoder": args.policy_arch == "brma_entity",
         "recurrent": False,
         "missile_scripted": True,
         "evasion_scripted": True,

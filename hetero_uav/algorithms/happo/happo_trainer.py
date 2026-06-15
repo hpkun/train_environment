@@ -51,12 +51,21 @@ class HAPPOReferenceTrainer:
                  max_grad_norm=10.0, ppo_epochs=4, gamma=0.99,
                  gae_lambda=0.95):
         self.policy = policy
+        self.actor_shared_params = (
+            list(policy.actor_shared_parameters())
+            if hasattr(policy, "actor_shared_parameters")
+            else []
+        )
         self.mav_opt = torch.optim.Adam(
-            list(policy.mav_actor.parameters()) + [policy.action_log_std_mav],
+            self.actor_shared_params
+            + list(policy.mav_actor.parameters())
+            + [policy.action_log_std_mav],
             lr=actor_lr,
         )
         self.uav_opt = torch.optim.Adam(
-            list(policy.uav_actor.parameters()) + [policy.action_log_std_uav],
+            self.actor_shared_params
+            + list(policy.uav_actor.parameters())
+            + [policy.action_log_std_uav],
             lr=actor_lr,
         )
         self.critic_opt = torch.optim.Adam(policy.critic.parameters(), lr=critic_lr)
@@ -93,9 +102,9 @@ class HAPPOReferenceTrainer:
         entropy_mean = (entropy * valid).sum() / valid.sum().clamp(min=1)
         loss = policy_loss - self.entropy_coef * entropy_mean
         loss.backward()
-        params = (list(self.policy.mav_actor.parameters()) + [self.policy.action_log_std_mav]
+        params = (self.actor_shared_params + list(self.policy.mav_actor.parameters()) + [self.policy.action_log_std_mav]
                   if role_id == MAV_ROLE_ID
-                  else list(self.policy.uav_actor.parameters()) + [self.policy.action_log_std_uav])
+                  else self.actor_shared_params + list(self.policy.uav_actor.parameters()) + [self.policy.action_log_std_uav])
         torch.nn.utils.clip_grad_norm_(params, self.max_grad_norm)
         optimizer.step()
         approx_kl = ((old_log_probs - log_prob) * valid).sum() / valid.sum().clamp(min=1)
@@ -159,7 +168,9 @@ class HAPPOReferenceTrainer:
                 )
                 (float(uav_imitation_coef) * imitation_loss).backward()
                 torch.nn.utils.clip_grad_norm_(
-                    list(self.policy.uav_actor.parameters()) + [self.policy.action_log_std_uav],
+                    self.actor_shared_params
+                    + list(self.policy.uav_actor.parameters())
+                    + [self.policy.action_log_std_uav],
                     self.max_grad_norm,
                 )
                 self.uav_opt.step()

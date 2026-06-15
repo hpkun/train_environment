@@ -121,11 +121,21 @@ def _load_meta(model_path: Path) -> dict[str, Any]:
 
 
 def _build_policy(meta: dict[str, Any], device: torch.device):
-    from algorithms.happo import EntityHAPPOReferencePolicy, HAPPOReferencePolicy
+    from algorithms.happo import (
+        BRMAEntityHAPPOReferencePolicy,
+        EntityHAPPOReferencePolicy,
+        HAPPOReferencePolicy,
+    )
 
     arch = str(meta.get("policy_arch", "flat"))
     if arch == "entity_attention":
         return EntityHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+        ).to(device)
+    if arch == "brma_entity":
+        return BRMAEntityHAPPOReferencePolicy(
             entity_dim=int(meta.get("entity_dim", 19)),
             critic_state_dim=int(meta.get("critic_state_dim", 480)),
             action_dim=3,
