@@ -123,6 +123,8 @@ def _load_meta(model_path: Path) -> dict[str, Any]:
 def _build_policy(meta: dict[str, Any], device: torch.device):
     from algorithms.happo import (
         BRMAEntityHAPPOReferencePolicy,
+        BRMARecurrentMaskedHAPPOReferencePolicy,
+        BRMARecurrentHAPPOReferencePolicy,
         EntityHAPPOReferencePolicy,
         HAPPOReferencePolicy,
     )
@@ -139,6 +141,23 @@ def _build_policy(meta: dict[str, Any], device: torch.device):
             entity_dim=int(meta.get("entity_dim", 19)),
             critic_state_dim=int(meta.get("critic_state_dim", 480)),
             action_dim=3,
+        ).to(device)
+    if arch == "brma_recurrent":
+        return BRMARecurrentHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+            rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+        ).to(device)
+    if arch == "brma_recurrent_masked":
+        return BRMARecurrentMaskedHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+            rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+            random_scale_mask=bool(meta.get("random_scale_mask", False)),
+            random_mask_prob=float(meta.get("random_mask_prob", 0.25)),
+            biased_mask=bool(meta.get("biased_mask", False)),
         ).to(device)
     if arch == "flat":
         return HAPPOReferencePolicy(

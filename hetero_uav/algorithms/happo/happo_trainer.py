@@ -198,6 +198,11 @@ class HAPPOReferenceTrainer:
 
         mav_log_std = self.policy.action_log_std_mav.detach()
         uav_log_std = self.policy.action_log_std_uav.detach()
+        mask_stats = (
+            dict(getattr(self.policy, "last_mask_stats", {}))
+            if hasattr(self.policy, "last_mask_stats")
+            else {}
+        )
         return {
             "actor_loss_mav": float(np.mean(actor_loss_mav)),
             "actor_loss_uav": float(np.mean(actor_loss_uav)),
@@ -220,4 +225,7 @@ class HAPPOReferenceTrainer:
             "mav_action_saturation_rate": mav_sat,
             "uav_action_saturation_rate": uav_sat,
             "uav_imitation_loss": float(np.mean(imitation_losses)) if imitation_losses else 0.0,
+            "mask_keep_ratio": float(mask_stats.get("mask_keep_ratio", 1.0)),
+            "mask_entropy": float(mask_stats.get("mask_entropy", 0.0)),
+            "masked_entity_count": float(mask_stats.get("masked_entity_count", 0.0)),
         }

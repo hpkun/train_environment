@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 
 from algorithms.happo import (
     BRMAEntityHAPPOReferencePolicy,
+    BRMARecurrentMaskedHAPPOReferencePolicy,
     BRMARecurrentHAPPOReferencePolicy,
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
@@ -237,7 +238,10 @@ def _load_checkpoint_meta(model_path: str | Path | None) -> dict:
 
 
 def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
-                  device: torch.device, init_checkpoint_meta: str | Path | None = None):
+                  device: torch.device, init_checkpoint_meta: str | Path | None = None,
+                  brma_random_scale_mask: bool = False,
+                  brma_biased_mask: bool = False,
+                  brma_random_mask_prob: float = 0.25):
     if policy_arch == "flat":
         return HAPPOReferencePolicy(actor_dim, critic_dim).to(device)
     if policy_arch == "entity_attention":
@@ -288,6 +292,28 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
             critic_state_dim=critic_dim,
             action_dim=3,
             rnn_hidden_size=rnn_hidden_size,
+        ).to(device)
+    if policy_arch == "brma_recurrent_masked":
+        meta = {}
+        if init_checkpoint_meta is not None:
+            meta_path = Path(init_checkpoint_meta)
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("policy_arch", "flat") != "brma_recurrent_masked":
+                raise ValueError(
+                    "brma_recurrent_masked cannot load flat, entity_attention, brma_entity, "
+                    "or brma_recurrent checkpoints; use a masked checkpoint or omit --init-checkpoint"
+                )
+        entity_dim = int(meta.get("entity_dim", 19))
+        rnn_hidden_size = int(meta.get("rnn_hidden_size", 128))
+        return BRMARecurrentMaskedHAPPOReferencePolicy(
+            entity_dim=entity_dim,
+            critic_state_dim=critic_dim,
+            action_dim=3,
+            rnn_hidden_size=rnn_hidden_size,
+            random_scale_mask=bool(meta.get("random_scale_mask", brma_random_scale_mask)),
+            random_mask_prob=float(meta.get("random_mask_prob", brma_random_mask_prob)),
+            biased_mask=bool(meta.get("biased_mask", brma_biased_mask)),
         ).to(device)
     raise ValueError(f"unsupported --policy-arch: {policy_arch}")
 
@@ -380,8 +406,14 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent"],
+                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"],
                         help="Policy architecture. Default flat preserves legacy checkpoints.")
+    parser.add_argument("--brma-random-scale-mask", action="store_true",
+                        help="Enable BRMA random scale mask for brma_recurrent_masked.")
+    parser.add_argument("--brma-biased-mask", action="store_true",
+                        help="Enable learned BRMA biased mask generator for brma_recurrent_masked.")
+    parser.add_argument("--brma-random-mask-prob", type=float, default=0.25,
+                        help="Non-self entity drop probability for BRMA random scale mask.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
                         choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"])
@@ -443,12 +475,15 @@ def main() -> None:
     if args.init_checkpoint:
         init_path_for_meta = _rel(args.init_checkpoint)
         init_meta_path = init_path_for_meta.parent / "meta.json"
-        if args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent"} and not init_meta_path.exists():
+        if args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"} and not init_meta_path.exists():
             raise ValueError(
                 f"{args.policy_arch} init checkpoint requires meta.json with policy_arch={args.policy_arch}"
             )
     policy = _build_policy(args.policy_arch, actor_dim, critic_dim, device,
-                           init_checkpoint_meta=init_meta_path)
+                           init_checkpoint_meta=init_meta_path,
+                           brma_random_scale_mask=args.brma_random_scale_mask,
+                           brma_biased_mask=args.brma_biased_mask,
+                           brma_random_mask_prob=args.brma_random_mask_prob)
     if args.init_checkpoint:
         init_path = Path(args.init_checkpoint)
         if not init_path.is_absolute():
@@ -542,6 +577,7 @@ def main() -> None:
             "action_log_std_mav_min", "action_log_std_mav_max",
             "action_log_std_mav_mean", "action_log_std_uav_min",
             "action_log_std_uav_max", "action_log_std_uav_mean",
+            "mask_keep_ratio", "mask_entropy", "masked_entity_count",
             "nan_detected",
         ])
         eval_writer = None
@@ -821,6 +857,9 @@ def main() -> None:
                 f"{stats.get('action_log_std_uav_min', 0.0):.6f}",
                 f"{stats.get('action_log_std_uav_max', 0.0):.6f}",
                 f"{stats.get('action_log_std_uav_mean', 0.0):.6f}",
+                f"{stats.get('mask_keep_ratio', 1.0):.6f}",
+                f"{stats.get('mask_entropy', 0.0):.6f}",
+                f"{stats.get('masked_entity_count', 0.0):.2f}",
                 int(nan_detected),
             ])
             if rich_logger is not None:
@@ -863,6 +902,9 @@ def main() -> None:
                     ),
                     "mav_action_saturation_rate": stats["mav_action_saturation_rate"],
                     "uav_action_saturation_rate": stats["uav_action_saturation_rate"],
+                    "mask_keep_ratio": stats.get("mask_keep_ratio", 1.0),
+                    "mask_entropy": stats.get("mask_entropy", 0.0),
+                    "masked_entity_count": stats.get("masked_entity_count", 0.0),
                     "nan_detected": int(nan_detected),
                 })
             f.flush()
@@ -892,10 +934,13 @@ def main() -> None:
                     "actor_obs_dim": actor_dim,
                     "critic_state_dim": critic_dim,
                     "entity_dim": getattr(policy, "entity_dim", None),
-                    "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent"},
-                    "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent"},
-                    "recurrent": args.policy_arch == "brma_recurrent",
+                    "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
+                    "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
+                    "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
                     "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
+                    "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
+                    "biased_mask": bool(getattr(policy, "biased_mask", False)),
+                    "random_mask_prob": float(getattr(policy, "random_mask_prob", 0.0)),
                 }, indent=2), encoding="utf-8")
                 (out_dir / "meta.json").unlink(missing_ok=True)
                 (tmp_model.parent / "meta.json").write_text(
@@ -947,10 +992,13 @@ def main() -> None:
                             "separate_actors": True,
                             "centralized_critic": True,
                             "sequential_update": True,
-                            "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent"},
-                            "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent"},
-                            "recurrent": args.policy_arch == "brma_recurrent",
+                            "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
+                            "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
+                            "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
                             "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
+                            "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
+                            "biased_mask": bool(getattr(policy, "biased_mask", False)),
+                            "random_mask_prob": float(getattr(policy, "random_mask_prob", 0.0)),
                             "num_envs": args.num_envs,
                             "rollout_length_per_env": args.rollout_length,
                             "transitions_per_rollout": transitions_per_rollout,
@@ -981,10 +1029,13 @@ def main() -> None:
         "centralized_critic": True,
         "sequential_update": True,
         "sequential_update_detail": "simplified HAPPO-style v0 role-wise PPO",
-        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent"},
-        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent"},
-        "recurrent": args.policy_arch == "brma_recurrent",
+        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
+        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
+        "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
         "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
+        "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
+        "biased_mask": bool(getattr(policy, "biased_mask", False)),
+        "random_mask_prob": float(getattr(policy, "random_mask_prob", 0.0)),
         "missile_scripted": True,
         "evasion_scripted": True,
         "num_envs": args.num_envs,

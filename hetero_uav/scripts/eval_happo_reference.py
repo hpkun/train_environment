@@ -16,13 +16,19 @@ if str(ROOT) not in sys.path:
 
 from algorithms.happo import (
     BRMAEntityHAPPOReferencePolicy,
+    BRMARecurrentMaskedHAPPOReferencePolicy,
     BRMARecurrentHAPPOReferencePolicy,
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
 )
-from algorithms.mappo.opponent_policy import OpponentPolicy
-from uav_env import make_env
-from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
+try:
+    from algorithms.mappo.opponent_policy import OpponentPolicy
+    from uav_env import make_env
+    from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
+except ModuleNotFoundError:
+    OpponentPolicy = None
+    make_env = None
+    HeteroObsAdapterV2 = None
 
 
 DEFAULT_CONFIGS = [
@@ -62,6 +68,16 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
             critic_state_dim=int(meta.get("critic_state_dim", 480)),
             action_dim=3,
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+        ).to(device)
+    if policy_arch == "brma_recurrent_masked":
+        return BRMARecurrentMaskedHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+            rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+            random_scale_mask=bool(meta.get("random_scale_mask", False)),
+            random_mask_prob=float(meta.get("random_mask_prob", 0.25)),
+            biased_mask=bool(meta.get("biased_mask", False)),
         ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(
