@@ -397,6 +397,66 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _write_runner_status(out_dir: Path, *, worker_restart_count: int,
+                         rollout_aborted_count: int,
+                         consecutive_rollout_abort_count: int,
+                         last_worker_timeout_info: dict,
+                         exit_reason: str, total_steps: int,
+                         latest_iteration: int,
+                         exception_type: str = "",
+                         exception_message: str = "") -> None:
+    """Write runner_status.json with structured exit information."""
+    payload = {
+        "worker_restart_count": worker_restart_count,
+        "rollout_aborted_count": rollout_aborted_count,
+        "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
+        "last_worker_timeout_info": last_worker_timeout_info,
+        "runner_completed_normally": exit_reason == "normal",
+        "exit_reason": exit_reason,
+        "total_env_steps_actual": total_steps,
+        "latest_iteration": latest_iteration,
+    }
+    if exception_type:
+        payload["exception_type"] = exception_type
+    if exception_message:
+        payload["exception_message"] = exception_message
+    try:
+        (out_dir / "runner_status.json").write_text(
+            json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _cleanup_runner(*, vec_env, heartbeat, watchdog, rich_logger,
+                    env_rich_loggers) -> None:
+    """Close all runner resources; each step is independently fault-tolerant."""
+    for logger in env_rich_loggers:
+        try:
+            logger.close()
+        except Exception:
+            pass
+    if rich_logger is not None:
+        try:
+            rich_logger.close()
+        except Exception:
+            pass
+    if watchdog is not None:
+        try:
+            watchdog.stop()
+        except Exception:
+            pass
+    if heartbeat is not None:
+        try:
+            heartbeat.close()
+        except Exception:
+            pass
+    if vec_env is not None:
+        try:
+            vec_env.close()
+        except Exception:
+            pass
+
+
 def main() -> None:
     args = _parse_args()
     if args.num_envs < 1:
@@ -725,38 +785,20 @@ def main() -> None:
                             "reason": "consecutive_worker_timeout",
                             "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
                         })
-                        # Write runner_status before exiting
-                        emergency_status = {
-                            "worker_restart_count": getattr(vec_env, "worker_restart_count", 0),
-                            "rollout_aborted_count": rollout_aborted_count,
-                            "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
-                            "last_worker_timeout_info": last_worker_timeout_info,
-                            "runner_completed_normally": False,
-                            "exit_reason": "consecutive_worker_timeout",
-                            "total_env_steps_actual": total_steps,
-                            "latest_iteration": iteration,
-                        }
-                        try:
-                            (out_dir / "runner_status.json").write_text(
-                                json.dumps(emergency_status, indent=2, default=str), encoding="utf-8")
-                        except Exception:
-                            pass
-                        # Close workers cleanly before exit
-                        for logger in env_rich_loggers:
-                            try: logger.close()
-                            except Exception: pass
-                        if rich_logger is not None:
-                            try: rich_logger.close()
-                            except Exception: pass
-                        if watchdog is not None:
-                            try: watchdog.stop()
-                            except Exception: pass
-                        if heartbeat is not None:
-                            try: heartbeat.close()
-                            except Exception: pass
-                        if vec_env is not None:
-                            try: vec_env.close()
-                            except Exception: pass
+                        _write_runner_status(
+                            out_dir,
+                            worker_restart_count=getattr(vec_env, "worker_restart_count", 0),
+                            rollout_aborted_count=rollout_aborted_count,
+                            consecutive_rollout_abort_count=consecutive_rollout_abort_count,
+                            last_worker_timeout_info=last_worker_timeout_info,
+                            exit_reason="consecutive_worker_timeout",
+                            total_steps=total_steps,
+                            latest_iteration=iteration,
+                        )
+                        _cleanup_runner(
+                            vec_env=vec_env, heartbeat=heartbeat, watchdog=watchdog,
+                            rich_logger=rich_logger, env_rich_loggers=env_rich_loggers,
+                        )
                         raise SystemExit(1)
                     env_states = vec_env.reset_all(args.seed + total_steps)
                     obs_list[:] = [s[0] for s in env_states]
@@ -1093,46 +1135,20 @@ def main() -> None:
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     if rich_logger is not None:
         rich_logger.write_training_efficiency(total_steps, nan_detected=nan_detected)
-    recovery_meta = {
-        "worker_restart_count": getattr(vec_env, "worker_restart_count", 0),
-        "rollout_aborted_count": rollout_aborted_count,
-        "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
-        "last_worker_timeout_info": last_worker_timeout_info,
-        "runner_completed_normally": True,
-        "exit_reason": "normal",
-        "total_env_steps_actual": total_steps,
-        "latest_iteration": iteration if 'iteration' in dir() else 0,
-    }
-    try:
-        (out_dir / "runner_status.json").write_text(
-            json.dumps(recovery_meta, indent=2, default=str), encoding="utf-8")
-    except Exception:
-        pass
-    for logger in env_rich_loggers:
-        try:
-            logger.close()
-        except Exception:
-            pass
-    if rich_logger is not None:
-        try:
-            rich_logger.close()
-        except Exception:
-            pass
-    if watchdog is not None:
-        try:
-            watchdog.stop()
-        except Exception:
-            pass
-    if heartbeat is not None:
-        try:
-            heartbeat.close()
-        except Exception:
-            pass
-    if vec_env is not None:
-        try:
-            vec_env.close()
-        except Exception:
-            pass
+    _write_runner_status(
+        out_dir,
+        worker_restart_count=getattr(vec_env, "worker_restart_count", 0),
+        rollout_aborted_count=rollout_aborted_count,
+        consecutive_rollout_abort_count=consecutive_rollout_abort_count,
+        last_worker_timeout_info=last_worker_timeout_info,
+        exit_reason="normal",
+        total_steps=total_steps,
+        latest_iteration=iteration,
+    )
+    _cleanup_runner(
+        vec_env=vec_env, heartbeat=heartbeat, watchdog=watchdog,
+        rich_logger=rich_logger, env_rich_loggers=env_rich_loggers,
+    )
     print(f"Saved {latest_model}", flush=True)
 
 

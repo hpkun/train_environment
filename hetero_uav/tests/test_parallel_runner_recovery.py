@@ -144,6 +144,27 @@ def test_runner_status_written():
     assert status_path.exists()
     status = json.loads(status_path.read_text())
     for key in ("worker_restart_count", "rollout_aborted_count",
-                "runner_completed_normally"):
+                "runner_completed_normally", "exit_reason",
+                "total_env_steps_actual", "latest_iteration"):
         assert key in status, f"missing key {key}"
     assert status["runner_completed_normally"] is True
+    assert status["exit_reason"] == "normal"
+
+
+def test_helper_functions_exist():
+    """_write_runner_status and _cleanup_runner are defined."""
+    source = (ROOT / "scripts" / "train_happo_reference_parallel.py").read_text(encoding="utf-8")
+    assert "def _write_runner_status(" in source
+    assert "def _cleanup_runner(" in source
+
+
+def test_emergency_path_uses_helpers():
+    """Emergency exit path calls _write_runner_status and _cleanup_runner."""
+    source = (ROOT / "scripts" / "train_happo_reference_parallel.py").read_text(encoding="utf-8")
+    # After "consecutive_worker_timeout" string, helpers must be called before SystemExit
+    idx_timeout = source.find("consecutive_worker_timeout")
+    idx_sysexit = source.find("raise SystemExit(1)", idx_timeout)
+    assert idx_timeout > 0 and idx_sysexit > idx_timeout
+    between = source[idx_timeout:idx_sysexit]
+    assert "_write_runner_status(" in between
+    assert "_cleanup_runner(" in between
