@@ -15,14 +15,14 @@ def _yaml(path: str) -> dict:
 
 
 def test_paper_aligned_configs_enable_mav_trim_only():
-    for path in [
-        "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml",
-        "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
-    ]:
-        cfg = _yaml(path)
-        assert cfg["action_trim_by_role"]["mav"]["pitch"] == 0.10
-        assert cfg["action_trim_by_role"]["mav"]["heading"] == 0.0
-        assert cfg["action_trim_by_role"]["mav"]["speed"] == 0.0
+    cfg = _yaml("uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml")
+    assert cfg["action_trim_by_role"]["mav"]["pitch"] == 0.10
+    assert cfg["action_trim_by_role"]["mav"]["heading"] == 0.0
+    assert cfg["action_trim_by_role"]["mav"]["speed"] == 0.0
+
+    cfg_5v4 = _yaml("uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml")
+    cfg_3v2_no_trim = _yaml("uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_no_mav_trim.yaml")
+    assert cfg_5v4["action_trim_by_role"]["mav"] == cfg_3v2_no_trim["action_trim_by_role"]["mav"]
 
     for path in [
         "uav_env/JSBSim/configs/hetero_balanced_mav_shared_geo_3v3.yaml",

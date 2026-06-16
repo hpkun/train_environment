@@ -4,7 +4,7 @@ uav_direct_observation_range_m: 10000.0
 mav_observation_range_m: 80000.0
 action_trim_by_role:
   mav:
-    pitch: 0.10
+    pitch: 0.0
     heading: 0.0
     speed: 0.0
 max_num_red: 5
