@@ -209,6 +209,9 @@ def _mav_alive(env) -> bool:
 
 
 def _missile_count(env) -> int:
+    inflight = getattr(env, "_missiles_in_flight", None)
+    if inflight is not None:
+        return len(inflight)
     missiles = getattr(env, "missiles", None)
     if isinstance(missiles, list):
         return len(missiles)

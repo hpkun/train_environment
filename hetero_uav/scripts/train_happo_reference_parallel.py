@@ -76,7 +76,7 @@ def _worker_diag(env) -> dict:
         "red_alive": int(red_alive),
         "blue_alive": int(blue_alive),
         "mav_alive": bool(env.red_planes.get("red_0") and env.red_planes["red_0"].is_alive),
-        "missile_count": int(len(getattr(env, "missiles", []))),
+        "missile_count": int(len(getattr(env, "_missiles_in_flight", {}))),
         "sim_time": float(getattr(env, "current_time", 0.0)),
         "engaged_targets": list(engaged_targets or []),
         "blue_own_positions": blue_positions or {},
@@ -517,6 +517,9 @@ def main() -> None:
     best_score = -float("inf")
     eval_best_scores = {"best_3v2": -float("inf"), "best_5v4": -float("inf"), "best_combined": -float("inf")}
     last_eval = -999999 if args.eval_at_start else 0
+    worker_restart_count = 0
+    rollout_aborted_count = 0
+    last_worker_timeout_info: dict = {}
 
     rnn_hidden = None
     if getattr(policy, "rnn_hidden_size", 0):
@@ -539,6 +542,7 @@ def main() -> None:
             "action_log_std_uav_min", "action_log_std_uav_max",
             "action_log_std_uav_mean", "approx_kl_mav", "approx_kl_uav",
             "mask_keep_ratio", "mask_entropy", "masked_entity_count",
+            "worker_restart_count", "rollout_aborted_count",
             "nan_detected",
         ])
         eval_writer = None
@@ -666,7 +670,32 @@ def main() -> None:
                 if nan_detected or not batch_records:
                     break
 
-                step_results = vec_env.step_all(action_dicts)
+                try:
+                    step_results = vec_env.step_all(action_dicts)
+                except TimeoutError:
+                    rollout_aborted_count += 1
+                    last_worker_timeout_info = {
+                        "total_steps": total_steps,
+                        "iteration": iteration,
+                        "command": "step",
+                    }
+                    print(
+                        f"[happo-parallel] iter={iteration:04d} worker timeout during step; "
+                        f"discarding rollout buffer, resetting all envs, continuing",
+                        flush=True,
+                    )
+                    env_states = vec_env.reset_all(args.seed + total_steps)
+                    obs_list[:] = [s[0] for s in env_states]
+                    info_list[:] = [s[1] for s in env_states]
+                    for proxy, state in zip(proxies, env_states):
+                        proxy.update_diag(state[2])
+                    if rnn_hidden is not None:
+                        rnn_hidden[:] = 0.0
+                    prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(args.num_envs)]
+                    for i in range(args.num_envs):
+                        current_ep_return[i][:] = 0.0
+                        current_ep_len[i] = 0
+                    break  # restart while loop with fresh buffer
                 for record, result in zip(batch_records, step_results):
                     env_idx = record["env_idx"]
                     proxy = proxies[env_idx]
@@ -825,6 +854,7 @@ def main() -> None:
                 f"{stats.get('mask_keep_ratio', 1.0):.6f}",
                 f"{stats.get('mask_entropy', 0.0):.6f}",
                 f"{stats.get('masked_entity_count', 0.0):.2f}",
+                worker_restart_count, rollout_aborted_count,
                 int(nan_detected),
             ])
             if rich_logger is not None:
@@ -984,12 +1014,42 @@ def main() -> None:
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     if rich_logger is not None:
         rich_logger.write_training_efficiency(total_steps, nan_detected=nan_detected)
-        rich_logger.close()
+    recovery_meta = {
+        "worker_restart_count": worker_restart_count,
+        "rollout_aborted_count": rollout_aborted_count,
+        "last_worker_timeout_info": last_worker_timeout_info,
+        "runner_completed_normally": True,
+    }
+    try:
+        (out_dir / "runner_status.json").write_text(
+            json.dumps(recovery_meta, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
     for logger in env_rich_loggers:
-        logger.close()
-    watchdog.stop()
-    heartbeat.close()
-    vec_env.close()
+        try:
+            logger.close()
+        except Exception:
+            pass
+    if rich_logger is not None:
+        try:
+            rich_logger.close()
+        except Exception:
+            pass
+    if watchdog is not None:
+        try:
+            watchdog.stop()
+        except Exception:
+            pass
+    if heartbeat is not None:
+        try:
+            heartbeat.close()
+        except Exception:
+            pass
+    if vec_env is not None:
+        try:
+            vec_env.close()
+        except Exception:
+            pass
     print(f"Saved {latest_model}", flush=True)
 
 
