@@ -31,6 +31,11 @@ from algorithms.happo import (
     HAPPOReferenceTrainer,
 )
 from algorithms.mappo.opponent_policy import OpponentPolicy
+from eval_checkpoint_selection import (
+    best_metric_name,
+    build_eval_checkpoint_meta,
+    compute_eval_scores,
+)
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 
 
@@ -385,6 +390,7 @@ def _run_eval(model_path: str, args, summary_json: str) -> list[dict] | None:
 
 
 def _score_eval(records: list[dict]) -> float:
+    scores = compute_eval_scores(records)
     for record in records:
         if "3v2" in record.get("config", ""):
             return (
@@ -393,7 +399,55 @@ def _score_eval(records: list[dict]) -> float:
                 + 0.05 * record.get("blue_dead_mean", 0.0)
                 + 0.05 * record.get("red_missile_hits_mean", 0.0)
             )
-    return 0.0
+    return scores["score_combined"]
+
+
+def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int,
+                           transitions_per_rollout: int) -> dict:
+    return {
+        "algorithm": "happo_reference_v0",
+        "reward_mode": args.reward_mode,
+        "opponent_policy": args.opponent_policy,
+        "actor_obs_dim": actor_dim,
+        "critic_state_dim": critic_dim,
+        "entity_dim": getattr(policy, "entity_dim", None),
+        "separate_actors": True,
+        "centralized_critic": True,
+        "sequential_update": True,
+        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
+        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
+        "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+        "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
+        "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
+        "biased_mask": bool(getattr(policy, "biased_mask", False)),
+        "random_mask_prob": float(getattr(policy, "random_mask_prob", 0.0)),
+        "num_envs": args.num_envs,
+        "rollout_length_per_env": args.rollout_length,
+        "transitions_per_rollout": transitions_per_rollout,
+        "init_checkpoint": args.init_checkpoint,
+        "uav_imitation_dataset": args.uav_imitation_dataset,
+        "uav_imitation_coef": args.uav_imitation_coef,
+        "uav_imitation_until_steps": args.uav_imitation_until_steps,
+    }
+
+
+def _save_policy_checkpoint(policy, directory: Path, meta: dict) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    policy.save(directory / "model.pt")
+    (directory / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
+def _prune_eval_checkpoints(eval_dir: Path, keep: int) -> None:
+    if keep <= 0 or not eval_dir.exists():
+        return
+    checkpoints = sorted(
+        (p for p in eval_dir.glob("step_*") if p.is_dir()),
+        key=lambda p: p.name,
+    )
+    for path in checkpoints[:-keep]:
+        for child in path.iterdir():
+            child.unlink()
+        path.rmdir()
 
 
 def main() -> None:
@@ -431,6 +485,13 @@ def main() -> None:
     parser.add_argument("--eval-at-start", action="store_true")
     parser.add_argument("--train-eval-episodes", type=int, default=1)
     parser.add_argument("--eval-configs", nargs="*", default=None)
+    parser.add_argument("--save-eval-checkpoints", action="store_true",
+                        help="Save every eval checkpoint and maintain best_3v2/best_5v4/best_combined.")
+    parser.add_argument("--eval-checkpoint-metric", default="combined",
+                        choices=["combined", "3v2", "5v4"],
+                        help="Reference metric for eval checkpoint summaries; all best dirs are still maintained.")
+    parser.add_argument("--keep-eval-checkpoints", type=int, default=20,
+                        help="Maximum number of per-eval checkpoint directories to keep when enabled.")
     parser.add_argument("--init-checkpoint", default=None)
     parser.add_argument("--uav-imitation-dataset", default=None)
     parser.add_argument("--uav-imitation-coef", type=float, default=0.0)
@@ -552,6 +613,11 @@ def main() -> None:
     prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(args.num_envs)]
     recent = deque(maxlen=100)
     best_score = -float("inf")
+    eval_best_scores = {
+        "best_3v2": -float("inf"),
+        "best_5v4": -float("inf"),
+        "best_combined": -float("inf"),
+    }
     nan_detected = False
     _rnn_hidden_size = getattr(policy, "rnn_hidden_size", 0)
     rnn_hidden = None
@@ -979,6 +1045,36 @@ def main() -> None:
                             r["red_missile_hits_mean"],
                         ])
                     eval_f.flush()
+                    if args.save_eval_checkpoints:
+                        meta = build_eval_checkpoint_meta(
+                            step=total_steps,
+                            iteration=iteration,
+                            policy_arch=args.policy_arch,
+                            records=records,
+                            extra={
+                                **_eval_checkpoint_extra(
+                                    args,
+                                    policy,
+                                    actor_dim,
+                                    critic_dim,
+                                    transitions_per_rollout,
+                                ),
+                                "eval_checkpoint_metric": args.eval_checkpoint_metric,
+                            },
+                        )
+                        eval_ckpt_dir = out_dir / "eval_checkpoints" / f"step_{total_steps:06d}"
+                        _save_policy_checkpoint(policy, eval_ckpt_dir, meta)
+                        _prune_eval_checkpoints(out_dir / "eval_checkpoints", args.keep_eval_checkpoints)
+                        for best_name in ("best_3v2", "best_5v4", "best_combined"):
+                            metric_name = best_metric_name(best_name)
+                            metric_score = float(meta["scores"].get(metric_name, 0.0))
+                            if metric_score > eval_best_scores[best_name]:
+                                eval_best_scores[best_name] = metric_score
+                                best_meta = dict(meta)
+                                best_meta["best_kind"] = best_name
+                                best_meta["best_score"] = metric_score
+                                best_meta["best_score_metric"] = metric_name
+                                _save_policy_checkpoint(policy, out_dir / best_name, best_meta)
                     score = _score_eval(records)
                     if score > best_score:
                         best_score = score
