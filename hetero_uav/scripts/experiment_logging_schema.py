@@ -22,7 +22,9 @@ TRAIN_METRICS_COLUMNS = [
     "red_dead_mean", "blue_dead_mean", "kill_death_ratio",
     "relative_win_ratio", "actor_loss", "critic_loss", "entropy",
     "policy_gradient_norm", "value_gradient_norm", "action_saturation_rate",
-    "mav_action_saturation_rate", "uav_action_saturation_rate", "nan_detected",
+    "mav_action_saturation_rate", "uav_action_saturation_rate",
+    "mask_keep_ratio", "mask_entropy", "masked_entity_count",
+    "nan_detected",
 ]
 
 EVAL_EPISODE_COLUMNS = [
