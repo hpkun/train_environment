@@ -36,6 +36,29 @@ class _WorkerTimeout(Exception):
         )
 
 
+class _ConsecutiveWorkerTimeout(Exception):
+    """Raised after repeated worker timeouts force emergency shutdown."""
+
+
+_RUNNER_RESOURCES = {
+    "vec_env": None,
+    "heartbeat": None,
+    "watchdog": None,
+    "rich_logger": None,
+    "env_rich_loggers": [],
+}
+
+_RUNNER_PROGRESS = {
+    "out_dir": None,
+    "total_steps": 0,
+    "latest_iteration": 0,
+    "worker_restart_count": 0,
+    "rollout_aborted_count": 0,
+    "consecutive_rollout_abort_count": 0,
+    "last_worker_timeout_info": {},
+}
+
+
 from algorithms.happo import HAPPORolloutBuffer, HAPPOReferenceTrainer
 from algorithms.mappo.opponent_policy import OpponentPolicy
 from eval_checkpoint_selection import (
@@ -457,8 +480,7 @@ def _cleanup_runner(*, vec_env, heartbeat, watchdog, rich_logger,
             pass
 
 
-def main() -> None:
-    args = _parse_args()
+def _run_training(args: argparse.Namespace) -> None:
     if args.num_envs < 1:
         raise ValueError("--num-envs must be >= 1")
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -473,6 +495,15 @@ def main() -> None:
     (out_dir / "latest").mkdir(parents=True, exist_ok=True)
     (out_dir / "best").mkdir(parents=True, exist_ok=True)
     (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+    _RUNNER_PROGRESS.update({
+        "out_dir": out_dir,
+        "total_steps": 0,
+        "latest_iteration": 0,
+        "worker_restart_count": 0,
+        "rollout_aborted_count": 0,
+        "consecutive_rollout_abort_count": 0,
+        "last_worker_timeout_info": {},
+    })
 
     vec_env = ParallelEnv(
         args.num_envs,
@@ -485,6 +516,7 @@ def main() -> None:
         step_timeout=args.step_timeout_sec,
         startup_delay=args.worker_startup_delay_sec,
     )
+    _RUNNER_RESOURCES["vec_env"] = vec_env
     proxies = [RemoteEnvProxy(meta, diag) for meta, diag in zip(vec_env.metas, vec_env.diags)]
     env = proxies[0]
     adapter = HeteroObsAdapterV2()
@@ -553,6 +585,8 @@ def main() -> None:
         exit_on_stall=args.exit_on_heartbeat_stall,
     )
     watchdog.start()
+    _RUNNER_RESOURCES["heartbeat"] = heartbeat
+    _RUNNER_RESOURCES["watchdog"] = watchdog
 
     rich_logger = None
     env_rich_loggers = []
@@ -569,6 +603,7 @@ def main() -> None:
             transitions_per_rollout=transitions_per_rollout,
         )
         write_not_available_attention(rich_dir, "happo_reference_v0_parallel", Path(args.config).stem)
+        _RUNNER_RESOURCES["rich_logger"] = rich_logger
         for idx in range(args.num_envs):
             env_dir = rich_dir / f"env_{idx:02d}"
             env_rich_loggers.append(RichExperimentLogger(
@@ -581,6 +616,7 @@ def main() -> None:
                 rollout_length_per_env=args.rollout_length,
                 transitions_per_rollout=args.rollout_length,
             ))
+        _RUNNER_RESOURCES["env_rich_loggers"] = env_rich_loggers
 
     iterations = int(math.ceil(args.total_env_steps / transitions_per_rollout))
     total_steps = 0
@@ -636,6 +672,7 @@ def main() -> None:
             ])
 
         for iteration in range(1, iterations + 1):
+            _RUNNER_PROGRESS["latest_iteration"] = iteration
             rollout_transitions = min(transitions_per_rollout, args.total_env_steps - total_steps)
             if rollout_transitions <= 0:
                 break
@@ -763,6 +800,14 @@ def main() -> None:
                         "iteration": iteration,
                         "total_steps": total_steps,
                     }
+                    _RUNNER_PROGRESS.update({
+                        "total_steps": total_steps,
+                        "latest_iteration": iteration,
+                        "worker_restart_count": getattr(vec_env, "worker_restart_count", 0),
+                        "rollout_aborted_count": rollout_aborted_count,
+                        "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
+                        "last_worker_timeout_info": last_worker_timeout_info,
+                    })
                     print(
                         f"[happo-parallel] iter={iteration:04d} worker timeout during step; "
                         f"discarding rollout buffer, resetting all envs, continuing "
@@ -784,22 +829,11 @@ def main() -> None:
                             "iteration": iteration,
                             "reason": "consecutive_worker_timeout",
                             "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
+                            "last_worker_timeout_info": last_worker_timeout_info,
                         })
-                        _write_runner_status(
-                            out_dir,
-                            worker_restart_count=getattr(vec_env, "worker_restart_count", 0),
-                            rollout_aborted_count=rollout_aborted_count,
-                            consecutive_rollout_abort_count=consecutive_rollout_abort_count,
-                            last_worker_timeout_info=last_worker_timeout_info,
-                            exit_reason="consecutive_worker_timeout",
-                            total_steps=total_steps,
-                            latest_iteration=iteration,
+                        raise _ConsecutiveWorkerTimeout(
+                            "consecutive worker timeout limit reached"
                         )
-                        _cleanup_runner(
-                            vec_env=vec_env, heartbeat=heartbeat, watchdog=watchdog,
-                            rich_logger=rich_logger, env_rich_loggers=env_rich_loggers,
-                        )
-                        raise SystemExit(1)
                     env_states = vec_env.reset_all(args.seed + total_steps)
                     obs_list[:] = [s[0] for s in env_states]
                     info_list[:] = [s[1] for s in env_states]
@@ -856,6 +890,7 @@ def main() -> None:
                     current_ep_return[env_idx] += reward_np
                     current_ep_len[env_idx] += 1
                     total_steps += 1
+                    _RUNNER_PROGRESS["total_steps"] = total_steps
                     if env_rich_loggers:
                         env_rich_loggers[env_idx].write_missile_events(
                             next_info,
@@ -924,6 +959,14 @@ def main() -> None:
 
             # Successful rollout — reset consecutive abort counter
             consecutive_rollout_abort_count = 0
+            _RUNNER_PROGRESS.update({
+                "total_steps": total_steps,
+                "latest_iteration": iteration,
+                "worker_restart_count": getattr(vec_env, "worker_restart_count", 0),
+                "rollout_aborted_count": rollout_aborted_count,
+                "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
+                "last_worker_timeout_info": last_worker_timeout_info,
+            })
 
             imitation_batch = None
             imitation_active = (
@@ -1135,21 +1178,83 @@ def main() -> None:
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     if rich_logger is not None:
         rich_logger.write_training_efficiency(total_steps, nan_detected=nan_detected)
-    _write_runner_status(
-        out_dir,
-        worker_restart_count=getattr(vec_env, "worker_restart_count", 0),
-        rollout_aborted_count=rollout_aborted_count,
-        consecutive_rollout_abort_count=consecutive_rollout_abort_count,
-        last_worker_timeout_info=last_worker_timeout_info,
-        exit_reason="normal",
-        total_steps=total_steps,
-        latest_iteration=iteration,
-    )
-    _cleanup_runner(
-        vec_env=vec_env, heartbeat=heartbeat, watchdog=watchdog,
-        rich_logger=rich_logger, env_rich_loggers=env_rich_loggers,
-    )
+    _RUNNER_PROGRESS.update({
+        "total_steps": total_steps,
+        "latest_iteration": iteration,
+        "worker_restart_count": getattr(vec_env, "worker_restart_count", 0),
+        "rollout_aborted_count": rollout_aborted_count,
+        "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
+        "last_worker_timeout_info": last_worker_timeout_info,
+    })
     print(f"Saved {latest_model}", flush=True)
+
+
+def main() -> None:
+    args = _parse_args()
+    out_dir = ROOT / args.output_dir
+    _RUNNER_RESOURCES.update({
+        "vec_env": None,
+        "heartbeat": None,
+        "watchdog": None,
+        "rich_logger": None,
+        "env_rich_loggers": [],
+    })
+    _RUNNER_PROGRESS["out_dir"] = out_dir
+    exit_reason = "normal"
+    exception_type = ""
+    exception_message = ""
+    exit_code = 0
+    try:
+        _run_training(args)
+    except _ConsecutiveWorkerTimeout as exc:
+        exit_reason = "consecutive_worker_timeout"
+        exception_type = type(exc).__name__
+        exception_message = str(exc)
+        exit_code = 1
+    except KeyboardInterrupt as exc:
+        exit_reason = "keyboard_interrupt"
+        exception_type = type(exc).__name__
+        exception_message = str(exc)
+        exit_code = 130
+    except Exception as exc:
+        exit_reason = "exception"
+        exception_type = type(exc).__name__
+        exception_message = str(exc)
+        exit_code = 1
+    finally:
+        status_out_dir = _RUNNER_PROGRESS.get("out_dir") or out_dir
+        vec_env = _RUNNER_RESOURCES.get("vec_env")
+        worker_restart_count = int(_RUNNER_PROGRESS.get("worker_restart_count", 0))
+        if vec_env is not None:
+            worker_restart_count = int(getattr(vec_env, "worker_restart_count", worker_restart_count))
+        try:
+            Path(status_out_dir).mkdir(parents=True, exist_ok=True)
+            _write_runner_status(
+                Path(status_out_dir),
+                worker_restart_count=worker_restart_count,
+                rollout_aborted_count=int(_RUNNER_PROGRESS.get("rollout_aborted_count", 0)),
+                consecutive_rollout_abort_count=int(
+                    _RUNNER_PROGRESS.get("consecutive_rollout_abort_count", 0)
+                ),
+                last_worker_timeout_info=dict(
+                    _RUNNER_PROGRESS.get("last_worker_timeout_info", {})
+                ),
+                exit_reason=exit_reason,
+                total_steps=int(_RUNNER_PROGRESS.get("total_steps", 0)),
+                latest_iteration=int(_RUNNER_PROGRESS.get("latest_iteration", 0)),
+                exception_type=exception_type,
+                exception_message=exception_message,
+            )
+        finally:
+            _cleanup_runner(
+                vec_env=_RUNNER_RESOURCES.get("vec_env"),
+                heartbeat=_RUNNER_RESOURCES.get("heartbeat"),
+                watchdog=_RUNNER_RESOURCES.get("watchdog"),
+                rich_logger=_RUNNER_RESOURCES.get("rich_logger"),
+                env_rich_loggers=_RUNNER_RESOURCES.get("env_rich_loggers") or [],
+            )
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

@@ -159,12 +159,69 @@ def test_helper_functions_exist():
 
 
 def test_emergency_path_uses_helpers():
-    """Emergency exit path calls _write_runner_status and _cleanup_runner."""
+    """Emergency path is routed to outer status/cleanup handling."""
     source = (ROOT / "scripts" / "train_happo_reference_parallel.py").read_text(encoding="utf-8")
-    # After "consecutive_worker_timeout" string, helpers must be called before SystemExit
-    idx_timeout = source.find("consecutive_worker_timeout")
-    idx_sysexit = source.find("raise SystemExit(1)", idx_timeout)
-    assert idx_timeout > 0 and idx_sysexit > idx_timeout
-    between = source[idx_timeout:idx_sysexit]
-    assert "_write_runner_status(" in between
-    assert "_cleanup_runner(" in between
+    # After the consecutive timeout trigger, the inner path should save the
+    # emergency checkpoint and raise for the outer wrapper.  It must not run
+    # duplicate cleanup/status writes in the inner rollout loop.
+    idx_timeout = source.find("consecutive timeout limit")
+    idx_raise = source.find("raise _ConsecutiveWorkerTimeout", idx_timeout)
+    assert idx_timeout > 0 and idx_raise > idx_timeout
+    between = source[idx_timeout:idx_raise]
+    assert "_save_policy_checkpoint(" in between
+    assert "_write_runner_status(" not in between
+    assert "_cleanup_runner(" not in between
+
+
+def test_main_wrapper_has_outer_finally():
+    """main wrapper must funnel all exits through finally cleanup."""
+    source = (ROOT / "scripts" / "train_happo_reference_parallel.py").read_text(encoding="utf-8")
+    assert "def _run_training(" in source
+    assert "def main() -> None:" in source
+    wrapper = source[source.find("def main() -> None:"):]
+    assert "try:" in wrapper
+    assert "except KeyboardInterrupt" in wrapper
+    assert "except Exception as exc" in wrapper
+    assert "finally:" in wrapper
+    assert "_write_runner_status(" in wrapper
+    assert "_cleanup_runner(" in wrapper
+
+
+def test_status_helper_marks_exception_paths_not_normal(tmp_path):
+    from scripts.train_happo_reference_parallel import _write_runner_status
+
+    _write_runner_status(
+        tmp_path,
+        worker_restart_count=2,
+        rollout_aborted_count=3,
+        consecutive_rollout_abort_count=4,
+        last_worker_timeout_info={"env_idx": 1},
+        exit_reason="exception",
+        total_steps=99,
+        latest_iteration=7,
+        exception_type="RuntimeError",
+        exception_message="boom",
+    )
+    status = json.loads((tmp_path / "runner_status.json").read_text())
+    assert status["runner_completed_normally"] is False
+    assert status["exit_reason"] == "exception"
+    assert status["exception_type"] == "RuntimeError"
+    assert status["exception_message"] == "boom"
+
+
+def test_status_helper_marks_keyboard_interrupt_not_normal(tmp_path):
+    from scripts.train_happo_reference_parallel import _write_runner_status
+
+    _write_runner_status(
+        tmp_path,
+        worker_restart_count=0,
+        rollout_aborted_count=0,
+        consecutive_rollout_abort_count=0,
+        last_worker_timeout_info={},
+        exit_reason="keyboard_interrupt",
+        total_steps=12,
+        latest_iteration=1,
+    )
+    status = json.loads((tmp_path / "runner_status.json").read_text())
+    assert status["runner_completed_normally"] is False
+    assert status["exit_reason"] == "keyboard_interrupt"
