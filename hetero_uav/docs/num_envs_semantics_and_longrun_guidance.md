@@ -150,8 +150,17 @@ Evidence from the script:
 - The parent loop calls `vec_env.step(actions_list)`, receives batched results,
   and then increments `total_steps += config.num_envs`.
 
-So the parent project has true multiprocessing parallelism and process-level
-worker timeout handling. `hetero_uav` currently does not.
+The parent project has true multiprocessing parallelism with `SubprocVecEnv`
+and per-step worker timeout detection (`reset(timeout=300)` / `step(timeout=60)`).
+It does not have automatic worker restart or rollout-abort recovery on timeout;
+a single timed-out worker terminates the training run.
+
+The `hetero_uav` parallel runner (`train_happo_reference_parallel.py`) provides
+both worker timeout/restart AND rollout-abort recovery: a timed-out worker is
+terminated and restarted, the partial rollout buffer is discarded (no PPO update
+on broken data), all workers are reset, and training continues from the next
+iteration.  Consecutive aborts exceeding a configurable threshold trigger an
+emergency checkpoint save and clean shutdown.
 
 ## BRMA-MAPPO rollout thread alignment
 
@@ -181,9 +190,11 @@ The parent `SubprocVecEnv` can identify a worker that fails to respond to reset
 or step. The old `hetero_uav` serial loop could not isolate a single env hang:
 the entire trainer blocked inside the current call.
 
-Current `hetero_uav` mitigations are heartbeat and stall-watchdog logging. These
-help locate the last stage before a stall, but they do not provide process
-isolation or automatic worker restart.
+Current `hetero_uav` mitigations are:
+- Legacy runner: heartbeat and stall-watchdog logging (diagnostic only).
+- Parallel runner: multiprocessing worker isolation with per-step timeouts,
+  automatic worker restart, rollout-abort recovery, consecutive abort limit,
+  emergency checkpoint, and runner_status.json for post-mortem analysis.
 
 ### 10M long training
 

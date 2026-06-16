@@ -25,6 +25,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+class _WorkerTimeout(Exception):
+    """Raised when a worker does not respond within the timeout window."""
+    def __init__(self, env_idx: int, command: str, timeout_sec: float):
+        self.env_idx = int(env_idx)
+        self.command = str(command)
+        self.timeout_sec = float(timeout_sec)
+        super().__init__(
+            f"[env_idx={env_idx}] {command} timed out after {timeout_sec:.1f}s"
+        )
+
+
 from algorithms.happo import HAPPORolloutBuffer, HAPPOReferenceTrainer
 from algorithms.mappo.opponent_policy import OpponentPolicy
 from eval_checkpoint_selection import (
@@ -182,6 +193,7 @@ class ParallelEnv:
         self.metas = []
         self.diags = []
         self.worker_restart_count = 0
+        self.last_timeout_info: dict = {}
         for idx in range(self.num_envs):
             self._start_worker(idx)
             if idx < self.num_envs - 1 and self.startup_delay > 0:
@@ -234,10 +246,13 @@ class ParallelEnv:
                 raise RuntimeError(f"worker {idx} {command} failed: {msg[1]}")
             return msg
         self._restart_worker(idx)
-        raise TimeoutError(
-            f"[env_idx={idx}] worker did not respond to {command!r} "
-            f"within {timeout:.1f}s; restarted, aborting current rollout"
-        )
+        exc = _WorkerTimeout(idx, command, timeout)
+        self.last_timeout_info = {
+            "env_idx": idx,
+            "command": command,
+            "timeout_sec": timeout,
+        }
+        raise exc
 
     def reset_all(self, seed: int):
         states = []
@@ -677,15 +692,16 @@ def main() -> None:
 
                 try:
                     step_results = vec_env.step_all(action_dicts)
-                except TimeoutError:
+                except _WorkerTimeout as exc:
                     rollout_aborted = True
                     rollout_aborted_count += 1
                     consecutive_rollout_abort_count += 1
                     last_worker_timeout_info = {
-                        "total_steps": total_steps,
+                        "env_idx": exc.env_idx,
+                        "command": exc.command,
+                        "timeout_sec": exc.timeout_sec,
                         "iteration": iteration,
-                        "command": "step",
-                        "timeout_sec": vec_env.step_timeout,
+                        "total_steps": total_steps,
                     }
                     print(
                         f"[happo-parallel] iter={iteration:04d} worker timeout during step; "
@@ -709,6 +725,38 @@ def main() -> None:
                             "reason": "consecutive_worker_timeout",
                             "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
                         })
+                        # Write runner_status before exiting
+                        emergency_status = {
+                            "worker_restart_count": getattr(vec_env, "worker_restart_count", 0),
+                            "rollout_aborted_count": rollout_aborted_count,
+                            "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
+                            "last_worker_timeout_info": last_worker_timeout_info,
+                            "runner_completed_normally": False,
+                            "exit_reason": "consecutive_worker_timeout",
+                            "total_env_steps_actual": total_steps,
+                            "latest_iteration": iteration,
+                        }
+                        try:
+                            (out_dir / "runner_status.json").write_text(
+                                json.dumps(emergency_status, indent=2, default=str), encoding="utf-8")
+                        except Exception:
+                            pass
+                        # Close workers cleanly before exit
+                        for logger in env_rich_loggers:
+                            try: logger.close()
+                            except Exception: pass
+                        if rich_logger is not None:
+                            try: rich_logger.close()
+                            except Exception: pass
+                        if watchdog is not None:
+                            try: watchdog.stop()
+                            except Exception: pass
+                        if heartbeat is not None:
+                            try: heartbeat.close()
+                            except Exception: pass
+                        if vec_env is not None:
+                            try: vec_env.close()
+                            except Exception: pass
                         raise SystemExit(1)
                     env_states = vec_env.reset_all(args.seed + total_steps)
                     obs_list[:] = [s[0] for s in env_states]
@@ -1051,6 +1099,9 @@ def main() -> None:
         "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
         "last_worker_timeout_info": last_worker_timeout_info,
         "runner_completed_normally": True,
+        "exit_reason": "normal",
+        "total_env_steps_actual": total_steps,
+        "latest_iteration": iteration if 'iteration' in dir() else 0,
     }
     try:
         (out_dir / "runner_status.json").write_text(

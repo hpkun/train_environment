@@ -43,18 +43,26 @@ def test_parallel_flat_smoke_completes():
 
 
 def test_old_runner_num_envs_2_still_errors():
-    """Single-process runner still rejects --num-envs > 1."""
+    """Single-process runner rejects --num-envs 2 with clear error."""
     result = subprocess.run(
         [sys.executable, "-u", str(ROOT / "scripts" / "train_happo_reference.py"),
-         "--num-envs", "2", "--help"],
+         "--config", "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0_f16_mav_surrogate.yaml",
+         "--output-dir", "outputs/_test_old_runner_reject",
+         "--num-envs", "2", "--total-env-steps", "256",
+         "--device", "cpu"],
         cwd=ROOT,
         text=True,
         capture_output=True,
-        timeout=30,
+        timeout=60,
     )
-    # The single-process runner should either reject --num-envs 2 or at least
-    # not crash silently.
-    assert result.returncode == 0
+    assert result.returncode != 0, (
+        f"Old runner should reject --num-envs 2, but returned 0. "
+        f"stderr={result.stderr[:500]}"
+    )
+    combined = (result.stderr or "") + (result.stdout or "")
+    assert "serial num_envs" in combined.lower() or "parallel" in combined.lower(), (
+        f"Error should mention serial/parallel, got: {combined[:500]}"
+    )
 
 
 def test_parallel_runner_help_includes_timeout_args():
