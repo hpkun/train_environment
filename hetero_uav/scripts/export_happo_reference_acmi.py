@@ -15,7 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from algorithms.happo import HAPPOReferencePolicy
+from algorithms.happo import (
+    BRMAEntityHAPPOReferencePolicy,
+    BRMARecurrentHAPPOReferencePolicy,
+    BRMARecurrentMaskedHAPPOReferencePolicy,
+    EntityHAPPOReferencePolicy,
+    HAPPOReferencePolicy,
+)
 from algorithms.mappo.opponent_policy import OpponentPolicy
 from scripts.experiment_logging_schema import FILE_SCHEMAS, ensure_schema_files
 
@@ -36,6 +42,45 @@ def _model_path(exp_dir: Path, checkpoint: str) -> Path:
 def _load_meta(model: Path) -> dict:
     meta = model.parent / "meta.json"
     return json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else {}
+
+
+def _build_policy_from_meta(meta: dict, device: torch.device):
+    policy_arch = meta.get("policy_arch", "flat")
+    if policy_arch == "entity_attention":
+        return EntityHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+        ).to(device)
+    if policy_arch == "brma_entity":
+        return BRMAEntityHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+        ).to(device)
+    if policy_arch == "brma_recurrent":
+        return BRMARecurrentHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+            rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+        ).to(device)
+    if policy_arch == "brma_recurrent_masked":
+        return BRMARecurrentMaskedHAPPOReferencePolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+            rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+            random_scale_mask=bool(meta.get("random_scale_mask", False)),
+            random_mask_prob=float(meta.get("random_mask_prob", 0.25)),
+            biased_mask=bool(meta.get("biased_mask", False)),
+        ).to(device)
+    if policy_arch == "flat":
+        return HAPPOReferencePolicy(
+            int(meta.get("actor_obs_dim", 96)),
+            int(meta.get("critic_state_dim", 480)),
+        ).to(device)
+    raise ValueError(f"unsupported checkpoint policy_arch: {policy_arch}")
 
 
 def _acmi_id(agent_id: str) -> int:
@@ -239,10 +284,7 @@ def main() -> int:
 
     meta = _load_meta(model)
     device = torch.device(args.device)
-    policy = HAPPOReferencePolicy(
-        int(meta.get("actor_obs_dim", 96)),
-        int(meta.get("critic_state_dim", 480)),
-    ).to(device)
+    policy = _build_policy_from_meta(meta, device)
     policy.load(model, map_location=device)
     policy.eval()
     adapter = HeteroObsAdapterV2()
