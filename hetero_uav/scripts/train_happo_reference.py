@@ -509,6 +509,13 @@ def main() -> None:
     args = parser.parse_args()
     if args.num_envs < 1:
         raise ValueError("--num-envs must be >= 1")
+    if args.num_envs > 1:
+        raise ValueError(
+            "train_happo_reference.py does not support true parallel envs. "
+            "The previous serial --num-envs rollout batching path is disabled "
+            "because it was misleading. Use scripts/train_happo_reference_parallel.py "
+            "for multiprocessing rollout workers."
+        )
     if args.device == "cuda" and not torch.cuda.is_available():
         args.device = "cpu"
 
@@ -523,12 +530,9 @@ def main() -> None:
     (out_dir / "best").mkdir(parents=True, exist_ok=True)
     (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
 
-    envs = [
-        make_env(args.config, env_type="jsbsim_hetero",
-                 hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
-        for _ in range(args.num_envs)
-    ]
-    env = envs[0]
+    env = make_env(args.config, env_type="jsbsim_hetero",
+                   hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
+    envs = [env]
     adapter = HeteroObsAdapterV2()
     actor_dim = adapter.flat_actor_obs_dim
     critic_dim = adapter.critic_state_dim

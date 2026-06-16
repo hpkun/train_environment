@@ -36,6 +36,32 @@ def test_transitions_per_rollout_uses_configured_num_envs():
     assert _transitions_per_rollout(256, 4) == 1024
 
 
+def test_train_happo_rejects_serial_multi_env_entrypoint():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/train_happo_reference.py",
+            "--num-envs",
+            "2",
+            "--total-env-steps",
+            "1",
+            "--output-dir",
+            "outputs/test_reject_serial_num_envs",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "serial --num-envs rollout batching path is disabled" in combined
+    assert "train_happo_reference_parallel.py" in combined
+
+
 def test_heartbeat_logger_writes_env_step_markers(tmp_path: Path):
     path = tmp_path / "heartbeat.log"
     logger = HeartbeatLogger(path, every_steps=1, enabled=True)

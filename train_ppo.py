@@ -61,11 +61,11 @@ def _cleanup_rotating_checkpoints(directory: str, prefix: str, keep: int = 5):
 #  配置 (严格对齐论文参数)
 # ==============================================================================
 class Config:
-    # ---- 环境 (对标论文 6v6) ----
-    num_envs: int = 32          # 论文原版 Rollout threads
-    num_red: int = 6            # 6v6 训练场景
-    num_blue: int = 6
-    max_episode_length: int = 1400  # 论文一致
+    # ---- 环境 (2v2 快速验证) ----
+    num_envs: int = 8
+    num_red: int = 2
+    num_blue: int = 2
+    max_episode_length: int = 1000
     action_dim: int = 3
 
     # ---- PPO (适配大规模数据) ----
@@ -93,7 +93,7 @@ class Config:
     num_heads: int = 4
 
     # ---- 训练总步数 ----
-    total_env_steps: int = 10_000_000
+    total_env_steps: int = 2_000_000
 
 
 # ==============================================================================
@@ -109,34 +109,27 @@ def _worker(remote: mp.connection.Connection,
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
     os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    # Allow Intel + LLVM OpenMP runtimes to coexist (JSBSim vs numpy/torch).
+    # Without this, FGFDMExec() aborts the worker process with OMP Error #15.
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-    # ---- Permanently silence all C / C++ / Win32 stdout/stderr ----
-    sys.stdout.flush()
-    sys.stderr.flush()
-    if sys.platform == "win32":
-        import ctypes
-        _crt = ctypes.CDLL("msvcrt")
-        _crt._dup2.restype = ctypes.c_int
-        _nul_fd = os.open(os.devnull, os.O_WRONLY)
-        _crt._dup2(_nul_fd, 1)
-        _crt._dup2(_nul_fd, 2)
-        os.close(_nul_fd)
-        _krn = ctypes.WinDLL("kernel32", use_last_error=True)
-        _h_nul = _krn.CreateFileW("NUL", 0x40000000, 3, None, 3, 0x80, None)
-        if _h_nul not in (-1, None):
-            _krn.SetStdHandle(-11, _h_nul)
-            _krn.SetStdHandle(-12, _h_nul)
-    else:
-        _devnull_fd = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(_devnull_fd, 1)
-        os.dup2(_devnull_fd, 2)
-        os.close(_devnull_fd)
+    # Suppress JSBSim C++ banner: redirect Python stdout/stderr only.
+    # Do NOT use CRT _dup2 / SetStdHandle — those permanently break the
+    # console handle on some Windows configurations and cause worker death.
+    _saved_out = sys.stdout
+    _saved_err = sys.stderr
     sys.stdout = open(os.devnull, "w")
     sys.stderr = open(os.devnull, "w")
 
     # Lazy import after silence — JSBSim C++ banner is suppressed
     from my_uav_env import UavCombatEnv
     env = UavCombatEnv(**env_kwargs)
+
+    # Restore stdout/stderr after construction
+    sys.stdout.close()
+    sys.stderr.close()
+    sys.stdout = _saved_out
+    sys.stderr = _saved_err
     while True:
         try:
             cmd, data = remote.recv()
