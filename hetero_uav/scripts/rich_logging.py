@@ -114,7 +114,14 @@ class RichExperimentLogger:
         sim_time: float | str,
         event_type: str,
     ) -> dict[str, Any]:
+        is_launch = event_type == "launch"
         hit = bool(record.get("is_success")) or event_type == "hit"
+        death_caused = int(hit) if not is_launch else ""
+        # For kill_cooldown_blocked / multi_kill_blocked, is_success is False
+        # because the status was overridden.  The target was NOT killed.
+        raw_reason = record.get("raw_termination_reason") or record.get("termination_reason", "")
+        if raw_reason in ("kill_cooldown_blocked", "multi_kill_blocked"):
+            death_caused = 0
         return {
             "run_id": self.run_id,
             "scenario": scenario,
@@ -131,8 +138,24 @@ class RichExperimentLogger:
             "lat": "",
             "altitude": record.get("shooter_alt_m", ""),
             "distance_to_target": record.get("range_m", ""),
-            "hit_success": int(hit) if event_type != "launch" else "",
-            "death_caused": int(hit) if event_type != "launch" else "",
+            "hit_success": int(hit) if not is_launch else "",
+            "death_caused": death_caused,
+            "raw_termination_reason": raw_reason if not is_launch else "",
+            "AO_rad": record.get("AO_rad", ""),
+            "AO_deg": record.get("AO_deg", ""),
+            "TA_rad": record.get("TA_rad", ""),
+            "TA_deg": record.get("TA_deg", ""),
+            "flight_time_sec": record.get("flight_time_sec", ""),
+            "launch_step": record.get("launch_step", record.get("current_step", "")),
+            "termination_step": record.get("termination_step", ""),
+            "step_delta": record.get("step_delta", ""),
+            "target_alive_at_launch": record.get("target_alive_at_launch", ""),
+            "target_alive_at_termination": record.get("target_alive_at_termination", ""),
+            "shooter_speed_mps": record.get("shooter_speed_mps", ""),
+            "target_speed_mps": record.get("target_speed_mps", ""),
+            "closing_speed_mps": record.get("closing_speed_mps", ""),
+            "shooter_alt_m": record.get("shooter_alt_m", ""),
+            "target_alt_m": record.get("target_alt_m", ""),
         }
 
     def write_training_efficiency(self, total_steps: int, nan_detected: bool = False) -> None:

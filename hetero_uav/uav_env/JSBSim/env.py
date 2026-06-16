@@ -935,12 +935,6 @@ class UavCombatEnv(gymnasium.Env):
         if record is None or record.get("termination_reason"):
             return
         raw_reason = missile._termination_reason or ("hit" if missile.is_success else "unknown")
-        if raw_reason in ("hit", "timeout", "kill_cooldown_blocked", "multi_kill_blocked"):
-            reason = raw_reason
-        elif raw_reason in ("p_hit_fail", "low_speed", "overshoot", "target_dead"):
-            reason = "miss"
-        else:
-            reason = "unknown"
         target_alive = ""
         if missile.target_aircraft is not None:
             target_alive = bool(missile.target_aircraft.is_alive)
@@ -950,7 +944,8 @@ class UavCombatEnv(gymnasium.Env):
         except Exception:
             step_delta = ""
         record.update({
-            "termination_reason": reason,
+            "raw_termination_reason": raw_reason,
+            "termination_reason": raw_reason,          # no longer folded to generic "miss"
             "is_success": bool(missile.is_success),
             "flight_time_sec": float(getattr(missile, "_t", _nan_float())),
             "termination_step": int(self.current_step),
@@ -973,12 +968,7 @@ class UavCombatEnv(gymnasium.Env):
             was_done_before = missile.is_done
             if not missile.is_done:
                 missile.run()
-            # Record termination reason on first frame the missile becomes done
-            if missile.is_done and not was_done_before:
-                team = "red" if missile._parent_id.startswith("red") else "blue"
-                reason = missile._termination_reason or "unknown"
-                self._missile_term_reasons[team][reason] = \
-                    self._missile_term_reasons[team].get(reason, 0) + 1
+
             if missile.is_success and not missile._kill_rewarded:
                 shooter_id = missile._parent_id
 
@@ -1015,6 +1005,12 @@ class UavCombatEnv(gymnasium.Env):
                     self._death_reasons[target_id] = "Missile_Kill"
             if missile.is_done and not was_done_before:
                 self._finalize_launch_quality_record(missile)
+                # Record FINAL termination reason AFTER kill_cooldown / multi_kill
+                # gates have potentially overridden the status.
+                team = "red" if missile._parent_id.startswith("red") else "blue"
+                reason = missile._termination_reason or "unknown"
+                self._missile_term_reasons[team][reason] = \
+                    self._missile_term_reasons[team].get(reason, 0) + 1
 
     def _update_overload_timers(self):
         """Track how long each aircraft has been above the G-limit."""

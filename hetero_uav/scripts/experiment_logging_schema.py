@@ -23,6 +23,7 @@ TRAIN_METRICS_COLUMNS = [
     "relative_win_ratio", "actor_loss", "critic_loss", "entropy",
     "policy_gradient_norm", "value_gradient_norm", "action_saturation_rate",
     "mav_action_saturation_rate", "uav_action_saturation_rate",
+    "approx_kl_mav", "approx_kl_uav",
     "mask_keep_ratio", "mask_entropy", "masked_entity_count",
     "nan_detected",
 ]
@@ -66,6 +67,14 @@ MISSILE_EVENTS_COLUMNS = [
     "missile_id", "owner_id", "owner_team", "target_id", "target_team",
     "lon", "lat", "altitude", "distance_to_target", "hit_success",
     "death_caused",
+    "raw_termination_reason",
+    "AO_rad", "AO_deg",
+    "TA_rad", "TA_deg",
+    "flight_time_sec",
+    "launch_step", "termination_step", "step_delta",
+    "target_alive_at_launch", "target_alive_at_termination",
+    "shooter_speed_mps", "target_speed_mps", "closing_speed_mps",
+    "shooter_alt_m", "target_alt_m",
 ]
 
 MISSILE_TIMESERIES_COLUMNS = [
