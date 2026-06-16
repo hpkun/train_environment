@@ -173,6 +173,52 @@ def test_brma_entity_tests_still_pass():
     assert "rnn_hidden" not in out  # non-recurrent should not have rnn_hidden
 
 
+def test_recurrent_replay_hidden_is_pre_action():
+    """evaluate_actions with pre-action hidden must reproduce rollout log_prob."""
+    from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
+
+    torch.manual_seed(42)
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    policy.eval()
+
+    actor_obs = torch.randn((2, 96), dtype=torch.float32)
+    roles = [0, 1]
+    critic = torch.randn((480,), dtype=torch.float32)
+    actions = torch.randn((2, 3), dtype=torch.float32)
+
+    # Simulate rollout: act with h0 → h1
+    h0 = policy.init_hidden(2)
+    out = policy.act(actor_obs, roles=roles, critic_state=critic, deterministic=False, rnn_hidden=h0)
+    rollout_log_prob = out["log_prob"].detach().clone()
+    rollout_action = out["action"].detach().clone()
+
+    # Simulate PPO replay with pre-action hidden h0
+    log_prob_ppo, _, _, _, _ = policy.evaluate_actions(
+        actor_obs.unsqueeze(0),
+        torch.tensor(roles).unsqueeze(0),
+        critic.unsqueeze(0),
+        rollout_action.unsqueeze(0),
+        rnn_hidden=h0.unsqueeze(0),
+    )
+    assert torch.allclose(log_prob_ppo.squeeze(0), rollout_log_prob, atol=1e-5), (
+        "PPO replay with pre-action hidden must reproduce rollout log_prob"
+    )
+
+    # Simulate PPO replay with post-action hidden h1 (this was the bug)
+    h1 = out["rnn_hidden"].detach()
+    log_prob_bug, _, _, _, _ = policy.evaluate_actions(
+        actor_obs.unsqueeze(0),
+        torch.tensor(roles).unsqueeze(0),
+        critic.unsqueeze(0),
+        rollout_action.unsqueeze(0),
+        rnn_hidden=h1.unsqueeze(0),
+    )
+    assert not torch.allclose(log_prob_bug.squeeze(0), rollout_log_prob, atol=1e-5), (
+        "PPO replay with post-action hidden must NOT match rollout log_prob "
+        "(this would mean the buffer stored the wrong hidden state)"
+    )
+
+
 def test_flat_policy_tests_still_pass():
     """Verify flat policy is unaffected."""
     from algorithms.happo.happo_policy import HAPPOReferencePolicy

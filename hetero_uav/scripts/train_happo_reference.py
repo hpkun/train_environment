@@ -626,6 +626,9 @@ def main() -> None:
                     ])
                     critic = adapted["critic_state"]
                     active = _build_red_alive_mask(info, rollout_env, rollout_env.red_ids)
+                    rnn_hidden_pre = None
+                    if rnn_hidden is not None:
+                        rnn_hidden_pre = rnn_hidden[env_idx].copy()
                     act_kwargs = {}
                     if rnn_hidden is not None:
                         act_kwargs["rnn_hidden"] = torch.as_tensor(
@@ -726,8 +729,8 @@ def main() -> None:
                                 torch.as_tensor(next_adapted["critic_state"], device=device).unsqueeze(0)
                             ).item())
                     store_kwargs = {}
-                    if rnn_hidden is not None:
-                        store_kwargs["rnn_hidden"] = rnn_hidden[env_idx]
+                    if rnn_hidden_pre is not None:
+                        store_kwargs["rnn_hidden"] = rnn_hidden_pre
                     buffer.store(
                         actor_obs, critic, actions, log_probs, reward_np, done_np,
                         value, active, next_value=next_value, env_id=env_idx,
