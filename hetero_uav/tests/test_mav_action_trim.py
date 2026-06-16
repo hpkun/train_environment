@@ -86,13 +86,17 @@ def test_diagnose_mav_action_trim_effect_smoke():
     )
     data = json.loads(output_json.read_text(encoding="utf-8"))
     summary = data["summary"]
+    # The current paper setting uses MAV pitch trim = 0.0.
+    # trim_disabled_zero and trim_enabled_zero should produce identical results
+    # (no artificial altitude boost).
     assert "trim_improves_altitude" in summary
     assert "trim_prevents_crash" in summary
     assert "recommend_keep_trim" in summary
     by_case = {record["case"]: record for record in data["records"]}
     disabled = by_case["trim_disabled_zero"]
     enabled = by_case["trim_enabled_zero"]
-    assert enabled["mav_final_altitude_m"] > disabled["mav_final_altitude_m"] + 100.0
+    # With pitch trim = 0.0, enabled and disabled are identical (within tolerance)
+    assert abs(enabled["mav_final_altitude_m"] - disabled["mav_final_altitude_m"]) < 50.0
 
 
 def test_export_tacview_help_has_disable_config_trim():

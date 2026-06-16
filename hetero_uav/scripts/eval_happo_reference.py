@@ -21,6 +21,7 @@ from algorithms.happo import (
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
 )
+from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 try:
     from algorithms.mappo.opponent_policy import OpponentPolicy
     from uav_env import make_env
@@ -151,7 +152,9 @@ def _update_missile_stats(stats: dict, info: dict, env, prev_hits: dict) -> None
         prev_hits["blue"] = blue_total
 
 
-def evaluate_config(policy, cfg_path: str, args, adapter, device) -> dict:
+def evaluate_config(policy, cfg_path: str, args, adapter, device,
+                    rich_logger=None) -> dict:
+    cfg_name = Path(cfg_path).stem
     env = make_env(cfg_path, env_type="jsbsim_hetero")
     if args.max_steps_override is not None:
         env.max_steps = args.max_steps_override
@@ -210,6 +213,10 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device) -> dict:
             action_dict.update(opponent.act(obs, env.blue_ids, env=env))
             obs, rewards, terminated, truncated, info = env.step(action_dict)
             _update_missile_stats(mstats, info, env, prev_hits)
+            if rich_logger is not None:
+                rich_logger.write_missile_events(
+                    info, scenario=cfg_name, episode_id=ep,
+                    step=ep_len, sim_time=_sim_time(env))
             ep_ret += sum(float(rewards.get(rid, 0.0)) for rid in env.red_ids)
             ep_len += 1
             if _team_done(terminated, truncated):
@@ -265,6 +272,13 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device) -> dict:
     }
 
 
+def _sim_time(env) -> float:
+    try:
+        return float(env.jsbsim_exec.get_sim_time()) if hasattr(env, "jsbsim_exec") else 0.0
+    except Exception:
+        return 0.0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -276,6 +290,8 @@ def main() -> None:
     parser.add_argument("--configs", nargs="*", default=None)
     parser.add_argument("--summary-json", default=None)
     parser.add_argument("--max-steps-override", type=int, default=None)
+    parser.add_argument("--enable-rich-logging", action="store_true")
+    parser.add_argument("--rich-log-dir", default=None)
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -284,18 +300,33 @@ def main() -> None:
     policy.load(Path(args.model), map_location=device)
     policy.eval()
     adapter = HeteroObsAdapterV2()
+    rich_logger = None
+    if args.enable_rich_logging:
+        rich_dir = Path(args.rich_log_dir) if args.rich_log_dir else Path(args.model).parent / "eval_rich_logs"
+        rich_logger = RichExperimentLogger(
+            rich_dir,
+            run_id=Path(args.model).parent.name,
+            method_name="happo_reference_v0",
+            scenario_name="eval",
+            device=str(args.device),
+            num_envs=1,
+            rollout_length_per_env=0,
+            transitions_per_rollout=0,
+        )
     configs = args.configs or DEFAULT_CONFIGS
     records = []
     print("algorithm: happo_reference_v0", flush=True)
     print(f"episodes: {args.episodes}", flush=True)
     for cfg in configs:
-        record = evaluate_config(policy, cfg, args, adapter, device)
+        record = evaluate_config(policy, cfg, args, adapter, device, rich_logger=rich_logger)
         records.append(record)
         print(f"=== {cfg} ===", flush=True)
         for key in ["avg_return", "avg_length", "red_win_rate", "blue_win_rate",
                     "draw_rate", "timeout_rate", "mav_survival_rate",
                     "red_missile_hits_mean", "blue_missile_hits_mean"]:
             print(f"{key}: {record[key]}", flush=True)
+    if rich_logger is not None:
+        rich_logger.close()
     if args.summary_json:
         out = ROOT / args.summary_json
         out.parent.mkdir(parents=True, exist_ok=True)
