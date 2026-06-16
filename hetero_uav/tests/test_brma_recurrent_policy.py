@@ -107,6 +107,38 @@ def test_brma_recurrent_policy_save_load_roundtrip(tmp_path):
     assert "rnn_hidden" in out
 
 
+def test_rollout_buffer_preserves_recurrent_hidden_state():
+    from algorithms.happo.happo_buffer import HAPPORolloutBuffer
+
+    buffer = HAPPORolloutBuffer(
+        max_len=2,
+        num_red=3,
+        actor_dim=96,
+        critic_dim=480,
+        action_dim=3,
+        role_ids=[0, 1, 1],
+        rnn_hidden_size=128,
+    )
+    hidden = np.ones((3, 128), dtype=np.float32)
+    buffer.store(
+        actor_obs=np.zeros((3, 96), dtype=np.float32),
+        critic_state=np.zeros(480, dtype=np.float32),
+        actions=np.zeros((3, 3), dtype=np.float32),
+        log_probs=np.zeros(3, dtype=np.float32),
+        rewards=np.zeros(3, dtype=np.float32),
+        dones=np.zeros(3, dtype=np.float32),
+        value=0.0,
+        active_masks=np.ones(3, dtype=np.float32),
+        next_value=0.0,
+        env_id=0,
+        rnn_hidden=hidden,
+    )
+
+    data = buffer.get(torch.device("cpu"))
+    assert data["rnn_hidden"].shape == (1, 3, 128)
+    assert torch.allclose(data["rnn_hidden"], torch.ones((1, 3, 128)))
+
+
 def test_train_and_eval_help_include_brma_recurrent():
     result = subprocess.run(
         [sys.executable, "scripts/train_happo_reference.py", "--help"],

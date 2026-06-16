@@ -170,7 +170,9 @@ class BRMARecurrentMaskedHAPPOReferencePolicy(BRMARecurrentHAPPOReferencePolicy)
 
     def _apply_masks(self, entities: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
         stats = {"mask_keep_ratio": 1.0, "mask_entropy": 0.0, "masked_entity_count": 0.0}
-        masked = keep_mask.bool()
+        original_keep = keep_mask.bool()
+        masked = original_keep.clone()
+        biased_entropy = None
         if self.random_scale_mask:
             masked, stats = apply_random_scale_mask(
                 masked,
@@ -188,7 +190,12 @@ class BRMARecurrentMaskedHAPPOReferencePolicy(BRMARecurrentHAPPOReferencePolicy)
                 max_allies=self.max_allies,
                 max_enemies=self.max_enemies,
             )
+            biased_entropy = torch.as_tensor(biased_stats.get("mask_entropy", 0.0), device=entities.device)
             stats = biased_stats
+        # Report final keep/drop statistics against the original alive/padding mask.
+        # When random and biased masks are combined, this keeps the log fields from
+        # under-reporting entities dropped by the first masking stage.
+        stats = _stats_from_keep_mask(original_keep, masked, biased_entropy)
         self.last_mask_stats = stats
         return masked
 
