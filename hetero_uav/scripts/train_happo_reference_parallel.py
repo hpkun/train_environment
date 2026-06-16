@@ -181,6 +181,7 @@ class ParallelEnv:
         self.processes = []
         self.metas = []
         self.diags = []
+        self.worker_restart_count = 0
         for idx in range(self.num_envs):
             self._start_worker(idx)
             if idx < self.num_envs - 1 and self.startup_delay > 0:
@@ -214,6 +215,7 @@ class ParallelEnv:
             self.diags.append(status[2])
 
     def _restart_worker(self, idx: int) -> None:
+        self.worker_restart_count += 1
         try:
             self.remotes[idx].close()
         except Exception:
@@ -233,8 +235,8 @@ class ParallelEnv:
             return msg
         self._restart_worker(idx)
         raise TimeoutError(
-            f"worker {idx} did not respond to {command!r} within {timeout:.1f}s; "
-            "worker was terminated and restarted, aborting current rollout"
+            f"[env_idx={idx}] worker did not respond to {command!r} "
+            f"within {timeout:.1f}s; restarted, aborting current rollout"
         )
 
     def reset_all(self, seed: int):
@@ -519,6 +521,8 @@ def main() -> None:
     last_eval = -999999 if args.eval_at_start else 0
     worker_restart_count = 0
     rollout_aborted_count = 0
+    consecutive_rollout_abort_count = 0
+    max_consecutive_rollout_abort = max(3, args.num_envs * 2)
     last_worker_timeout_info: dict = {}
 
     rnn_hidden = None
@@ -565,6 +569,7 @@ def main() -> None:
                 roles, rnn_hidden_size=getattr(policy, "rnn_hidden_size", 0),
             )
             red_fired = blue_fired = hits = 0
+            rollout_aborted = False
 
             while len(buffer) < rollout_transitions and total_steps < args.total_env_steps:
                 batch_records = []
@@ -673,17 +678,38 @@ def main() -> None:
                 try:
                     step_results = vec_env.step_all(action_dicts)
                 except TimeoutError:
+                    rollout_aborted = True
                     rollout_aborted_count += 1
+                    consecutive_rollout_abort_count += 1
                     last_worker_timeout_info = {
                         "total_steps": total_steps,
                         "iteration": iteration,
                         "command": "step",
+                        "timeout_sec": vec_env.step_timeout,
                     }
                     print(
                         f"[happo-parallel] iter={iteration:04d} worker timeout during step; "
-                        f"discarding rollout buffer, resetting all envs, continuing",
+                        f"discarding rollout buffer, resetting all envs, continuing "
+                        f"(consecutive aborts: {consecutive_rollout_abort_count})",
                         flush=True,
                     )
+                    if consecutive_rollout_abort_count >= max_consecutive_rollout_abort:
+                        print(
+                            f"[happo-parallel] consecutive timeout limit "
+                            f"({max_consecutive_rollout_abort}) reached; saving emergency "
+                            "checkpoint and exiting",
+                            flush=True,
+                        )
+                        _save_policy_checkpoint(policy, out_dir / "emergency", {
+                            "algorithm": "happo_reference_v0",
+                            "runner": "multiprocessing_parallel",
+                            "policy_arch": args.policy_arch,
+                            "total_steps": total_steps,
+                            "iteration": iteration,
+                            "reason": "consecutive_worker_timeout",
+                            "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
+                        })
+                        raise SystemExit(1)
                     env_states = vec_env.reset_all(args.seed + total_steps)
                     obs_list[:] = [s[0] for s in env_states]
                     info_list[:] = [s[1] for s in env_states]
@@ -803,6 +829,11 @@ def main() -> None:
 
             if nan_detected:
                 break
+            if rollout_aborted:
+                continue  # skip PPO update, restart for loop with new buffer
+
+            # Successful rollout — reset consecutive abort counter
+            consecutive_rollout_abort_count = 0
 
             imitation_batch = None
             imitation_active = (
@@ -854,7 +885,7 @@ def main() -> None:
                 f"{stats.get('mask_keep_ratio', 1.0):.6f}",
                 f"{stats.get('mask_entropy', 0.0):.6f}",
                 f"{stats.get('masked_entity_count', 0.0):.2f}",
-                worker_restart_count, rollout_aborted_count,
+                getattr(vec_env, "worker_restart_count", 0), rollout_aborted_count,
                 int(nan_detected),
             ])
             if rich_logger is not None:
@@ -1015,8 +1046,9 @@ def main() -> None:
     if rich_logger is not None:
         rich_logger.write_training_efficiency(total_steps, nan_detected=nan_detected)
     recovery_meta = {
-        "worker_restart_count": worker_restart_count,
+        "worker_restart_count": getattr(vec_env, "worker_restart_count", 0),
         "rollout_aborted_count": rollout_aborted_count,
+        "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
         "last_worker_timeout_info": last_worker_timeout_info,
         "runner_completed_normally": True,
     }
