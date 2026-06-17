@@ -45,6 +45,21 @@ DEFAULT_EVAL_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
 ]
 
+UNSAFE_RANDOM_SCALE_MASK_ERROR = (
+    "brma_random_scale_mask is disabled for main training. The current "
+    "random_scale_mask path resamples entity masks independently during "
+    "rollout policy.act and PPO update evaluate_actions, which breaks "
+    "old/new log_prob alignment. Use the no-random-mask "
+    "brma_recurrent_masked path for current main experiments; re-enable this "
+    "only after implementing rollout mask replay or the full BRMA biased "
+    "mask objective."
+)
+
+
+def _reject_unsafe_random_scale_mask(args) -> None:
+    if getattr(args, "brma_random_scale_mask", False):
+        raise SystemExit(UNSAFE_RANDOM_SCALE_MASK_ERROR)
+
 
 def _transitions_per_rollout(rollout_length: int, num_envs: int) -> int:
     return int(rollout_length) * int(num_envs)
@@ -466,7 +481,7 @@ def main() -> None:
                         choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"],
                         help="Policy architecture. Default flat preserves legacy checkpoints.")
     parser.add_argument("--brma-random-scale-mask", action="store_true",
-                        help="Enable BRMA random scale mask for brma_recurrent_masked.")
+                        help="Accepted for compatibility but rejected: unsafe without rollout mask replay.")
     parser.add_argument("--brma-biased-mask", action="store_true",
                         help="Enable learned BRMA biased mask generator for brma_recurrent_masked.")
     parser.add_argument("--brma-random-mask-prob", type=float, default=0.25,
@@ -510,6 +525,7 @@ def main() -> None:
     parser.add_argument("--timeseries-episodes-limit", type=int, default=3)
     parser.add_argument("--timeseries-step-stride", type=int, default=5)
     args = parser.parse_args()
+    _reject_unsafe_random_scale_mask(args)
     if args.num_envs < 1:
         raise ValueError("--num-envs must be >= 1")
     if args.num_envs > 1:

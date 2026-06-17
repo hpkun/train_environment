@@ -74,6 +74,7 @@ from scripts.train_happo_reference import (
     _build_policy,
     _eval_checkpoint_extra,
     _load_uav_imitation_dataset,
+    _reject_unsafe_random_scale_mask,
     _rel,
     _run_eval,
     _sample_uav_imitation_batch,
@@ -1191,6 +1192,7 @@ def _run_training(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = _parse_args()
+    _reject_unsafe_random_scale_mask(args)
     out_dir = ROOT / args.output_dir
     _RUNNER_RESOURCES.update({
         "vec_env": None,

@@ -77,18 +77,24 @@ observation, not a verbatim full BRMA-MAPPO reproduction.
 
 ### Mask Module
 
-The method supports two opt-in mask mechanisms:
+The main method uses masks decoded from the observation:
 
-- random scale mask: randomly drops valid non-self entities during training;
-- biased mask generator: predicts keep probabilities and masks selected
-  low-keep-probability entities.
+- dead/padding masks;
+- observed-entity masks;
+- self-entity preservation.
 
 Self entities are not masked. Dead and padded entities are never reintroduced.
-Random scale masking is disabled during evaluation, so evaluation uses the full
-available observation.
 
-The biased mask path currently implements forward mask generation and logging.
-It does not implement the full BRMA biased mask KL/objective training loop.
+The internal random scale mask path is disabled in the training entrypoints
+because it re-samples masks between rollout action sampling and PPO
+`evaluate_actions`, which breaks old/new log-probability alignment. Existing
+random-mask outputs should be treated as diagnostic unsafe-mask runs. The two
+acceptable future recovery routes are rollout mask replay or a full
+paper-aligned BRMA biased-mask objective.
+
+The biased mask path currently implements forward mask generation and logging
+when explicitly enabled. It does not implement the full BRMA biased mask
+KL/objective training loop and should not be described as a final main method.
 
 ### GRU Recurrent Actor
 
@@ -145,4 +151,3 @@ Do not claim:
 - strict HAPPO sequential correction;
 - proof that each module independently improves performance;
 - arbitrary-size zero-shot generalization beyond the configured fixed capacity.
-

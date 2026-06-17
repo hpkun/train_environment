@@ -26,9 +26,10 @@ def main() -> None:
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--output-dir", default="outputs/debug_brma_random_mask_smoke")
+    parser.add_argument("--output-dir", default="outputs/debug_brma_nomask_smoke")
     parser.add_argument("--biased-mask", action="store_true")
-    parser.add_argument("--random-scale-mask", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--random-scale-mask", action=argparse.BooleanOptionalAction, default=False,
+                        help="Deprecated unsafe path; training entrypoints reject this flag.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 

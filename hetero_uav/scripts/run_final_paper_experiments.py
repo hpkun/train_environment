@@ -51,18 +51,17 @@ def _base_cmd(output_dir: str, total_env_steps: int) -> list[str]:
 
 
 def build_commands(total_env_steps: int = 500000) -> dict[str, list[str]]:
-    random_cmd = _base_cmd(
-        "outputs/final_brma_recurrent_random_mask_500k_probe",
+    nomask_cmd = _base_cmd(
+        "outputs/final_brma_recurrent_nomask_500k_probe",
         total_env_steps,
     )
-    random_cmd.append("--brma-random-scale-mask")
     biased_cmd = _base_cmd(
         "outputs/final_brma_recurrent_biased_mask_500k_probe",
         total_env_steps,
     )
     biased_cmd.extend(["--brma-biased-mask"])
     return {
-        "B_brma_recurrent_masked_500k_probe": random_cmd,
+        "B_brma_recurrent_masked_nomask_500k_probe": nomask_cmd,
         "C_brma_recurrent_masked_biased_500k_probe": biased_cmd,
     }
 

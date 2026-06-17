@@ -8,10 +8,11 @@ new environment mechanics, reward terms, missile logic, or aircraft changes.
 | ID | Experiment | Policy Arch | Mask | Total Env Steps | Purpose |
 |---|---|---|---|---:|---|
 | A | `flat_baseline_long` | `flat` | none | existing run | Existing weak MLP baseline: `outputs/full_10m_normal_geometry_max1000_env1`. |
-| B | `brma_recurrent_masked_500k_probe` | `brma_recurrent_masked` | random scale mask | 500000 | Primary BRMA-style recurrent masked entity-attention probe. |
-| C | `brma_recurrent_masked_biased_500k_probe` | `brma_recurrent_masked` | biased mask | 500000 | Biased-mask probe. Run after B if time allows. |
+| B | `brma_recurrent_masked_nomask_500k_probe` | `brma_recurrent_masked` | dead/padding/observed mask only | 500000 | Primary BRMA-style recurrent entity-attention probe with safe PPO log-prob replay. |
+| C | `brma_recurrent_masked_biased_500k_probe` | `brma_recurrent_masked` | biased mask forward path | 500000 | Optional diagnostic only; not a full BRMA biased-mask objective. |
 
-If time is limited, run B first and postpone C.
+If time is limited, run B first and postpone C. Do not use
+`--brma-random-scale-mask` for the main experiment.
 
 ## Shared Settings For B/C
 
@@ -25,6 +26,7 @@ If time is limited, run B first and postpone C.
 - train eval episodes: `5`
 - no imitation/pretrain/heading loss
 - no reward or environment changes
+- no `--brma-random-scale-mask`
 
 ## Evaluation
 
@@ -52,6 +54,10 @@ Core metrics:
 
 ## Interpretation Boundary
 
-The masked policy can be used as a BRMA-style architecture in method figures.
-It should not be claimed as a full BRMA-MAPPO reproduction because the complete
-mask objective and strict BRMA training loop are simplified.
+The masked policy can be used as a BRMA-style architecture in method figures
+because it uses entity construction, attention, GRU, role-wise actor heads, and
+dead/padding/observed masks. It should not be claimed as a full BRMA-MAPPO
+reproduction because the complete mask objective and strict BRMA training loop
+are simplified. Existing random-scale-mask runs are diagnostic unsafe-mask runs:
+they re-sampled masks between rollout and PPO update and are not final main
+results.

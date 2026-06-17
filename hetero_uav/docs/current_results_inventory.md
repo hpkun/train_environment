@@ -30,6 +30,9 @@ Do not use for:
 
 ## 2. `brma_recurrent_masked` Partial 479k Probe
 
+This run used the now-disabled random scale mask. Treat it as a diagnostic
+unsafe-mask run, not as a final main-method result.
+
 | Field | Value |
 |---|---|
 | Output directory | `outputs/brma_recurrent_masked_500k_probe` |
@@ -43,16 +46,20 @@ Do not use for:
 
 Use for:
 
-- evidence that `brma_recurrent_masked` can train, log masks, and produce some
-  attack events;
+- diagnostic evidence that the implementation can train, log mask statistics,
+  and produce some attack events;
 - identifying early good / later degradation behavior.
 
 Do not use for:
 
 - final 500k result;
 - final paper main result without rerun or checkpoint selection.
+- final evidence for the random scale mask path.
 
 ## 3. `brma_recurrent_masked` Best Checkpoint Eval
+
+These evals come from the partial random-mask probe above. They are useful for
+diagnosis but should not be used as final no-random-mask method results.
 
 | Field | 3v2 seen | 5v4 zero-shot |
 |---|---:|---:|
@@ -92,11 +99,14 @@ Do not use for:
 
 Use for:
 
-- proving random scale mask path can run, save, and log.
+- proving the retained internal random mask path can run, save, and log in a
+  smoke setting.
 
 Do not use for:
 
 - performance claims.
+- final method claims, because main training rejects `--brma-random-scale-mask`
+  until mask replay or the full BRMA mask objective is implemented.
 
 ## 5. Biased Mask Smoke
 
@@ -167,4 +177,3 @@ Do not use for:
 
 - final method comparison;
 - adding non-paper imitation/heading losses as the main method.
-

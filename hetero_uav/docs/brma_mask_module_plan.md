@@ -16,12 +16,12 @@ It does not replace the flat baseline, `entity_attention`, `brma_entity`, or
 
 ## Current Minimal Adaptation
 
-The active masked path is:
+The active main-training masked path is:
 
 ```text
 96-dim actor obs
 -> flat-to-entity decoder
--> random scale mask and/or biased mask
+-> alive / padding / observed mask
 -> BRMA EntityObservationEncoder
 -> GRUCell
 -> MAV actor head / shared UAV actor head
@@ -32,17 +32,34 @@ The critic remains the centralized 480-dim MLP critic.
 
 ## Runtime Semantics
 
-- Random scale mask is enabled by `--brma-random-scale-mask`.
+- Random scale mask code is retained internally, but `--brma-random-scale-mask`
+  is rejected by both training entrypoints.
 - Biased mask generator is enabled by `--brma-biased-mask`.
 - Both are only available for `--policy-arch brma_recurrent_masked`.
-- Random masking follows `policy.training`; evaluation uses the full valid observation unless biased mask is explicitly part of the checkpoint behavior.
+- Random masking is not a valid main-experiment setting because the current
+  implementation can re-sample masks independently during rollout `policy.act`
+  and PPO update `evaluate_actions`, breaking old/new log-probability
+  alignment.
 - The self entity is never masked by random or biased masks.
 - Invalid, dead, or padded entities remain masked.
 - Checkpoint metadata records `random_scale_mask`, `biased_mask`, and `random_mask_prob`.
 
+## Random Mask Recovery Routes
+
+The only acceptable routes to restore random/entity mask training are:
+
+1. **Rollout mask replay:** save the exact rollout-time effective entity mask in
+   the buffer and force `evaluate_actions` to reuse it during PPO update.
+2. **Full BRMA biased mask objective:** implement the paper-aligned mask
+   generator objective, including the policy-consistency and entropy terms.
+
+Existing random-mask 500k/2M outputs are therefore diagnostic unsafe-mask runs,
+not final main-method results.
+
 ## Conservative Paper Wording
 
-This pass implements a BRMA-style masked entity-attention path. It should not be
-described as a full BRMA-MAPPO reproduction because the mask KL/objective and
-strict BRMA training loop are not fully connected. It is suitable for method
-diagrams as an opt-in architecture component, with the above limitation stated.
+This pass implements a BRMA-style entity-attention recurrent path with
+dead/padding/observed masks. It should not be described as a full BRMA-MAPPO
+reproduction because the mask KL/objective and strict BRMA training loop are
+not fully connected. Random scale mask is disabled for main training until one
+of the recovery routes above is implemented.

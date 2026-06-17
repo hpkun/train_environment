@@ -16,7 +16,8 @@ Entity set construction
   |
   v
 Mask module
-  - random scale mask [train only]
+  - dead / padding / observed masks
+  - random scale mask disabled for main training
   - biased mask generator [opt-in]
   - self entity always kept
   - dead / padding entities remain masked
@@ -68,8 +69,8 @@ Use these labels in the figure:
 - Role-specific module:
   - MAV actor head;
   - shared UAV actor head.
-- Train-only module:
-  - random scale mask.
+- Main mask source:
+  - dead / padding / observed masks.
 - Opt-in module:
   - biased mask generator.
 - Evaluation path:
@@ -78,10 +79,9 @@ Use these labels in the figure:
 
 ## Suggested Caption
 
-> BRMA-style recurrent masked entity-attention actor for heterogeneous MAV/UAV
+> BRMA-style recurrent entity-attention actor for heterogeneous MAV/UAV
 > air combat. The actor decodes the fixed 96-dimensional observation into an
-> entity set, applies optional training-time masking, encodes entities through
+> entity set, applies dead/padding/observed masks, encodes entities through
 > multi-head attention, updates a GRU actor state, and dispatches actions through
 > role-wise MAV/UAV policy heads. The critic remains centralized over the
 > 480-dimensional global state.
-
