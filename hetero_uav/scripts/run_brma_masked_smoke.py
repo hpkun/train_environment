@@ -32,6 +32,11 @@ def main() -> None:
                         help="Deprecated unsafe path; training entrypoints reject this flag.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.random_scale_mask:
+        raise SystemExit(
+            "--random-scale-mask is disabled for main training smoke runs; "
+            "use no-random-mask, or implement rollout mask replay / full BRMA mask objective first."
+        )
 
     output_dir = _safe_output_dir(args.output_dir)
     cmd = [
@@ -62,8 +67,6 @@ def main() -> None:
         "--train-eval-episodes",
         "2",
     ]
-    if args.random_scale_mask:
-        cmd.append("--brma-random-scale-mask")
     if args.biased_mask:
         cmd.append("--brma-biased-mask")
     print(" ".join(cmd), flush=True)

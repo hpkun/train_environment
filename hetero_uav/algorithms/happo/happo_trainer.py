@@ -39,6 +39,18 @@ def _uav_imitation_loss(policy, actor_obs: torch.Tensor, oracle_actions: torch.T
     return torch.mean(error ** 2)
 
 
+def _unique_params(params):
+    seen = set()
+    out = []
+    for param in params:
+        ident = id(param)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(param)
+    return out
+
+
 class HAPPOReferenceTrainer:
     """Simplified HAPPO-style trainer.
 
@@ -56,18 +68,16 @@ class HAPPOReferenceTrainer:
             if hasattr(policy, "actor_shared_parameters")
             else []
         )
-        self.mav_opt = torch.optim.Adam(
-            self.actor_shared_params
-            + list(policy.mav_actor.parameters())
-            + [policy.action_log_std_mav],
-            lr=actor_lr,
+        self.actor_shared_params = _unique_params(self.actor_shared_params)
+        self.mav_actor_params = _unique_params(list(policy.mav_actor.parameters()) + [policy.action_log_std_mav])
+        self.uav_actor_params = _unique_params(list(policy.uav_actor.parameters()) + [policy.action_log_std_uav])
+        self.shared_actor_opt = (
+            torch.optim.Adam(self.actor_shared_params, lr=actor_lr)
+            if self.actor_shared_params
+            else None
         )
-        self.uav_opt = torch.optim.Adam(
-            self.actor_shared_params
-            + list(policy.uav_actor.parameters())
-            + [policy.action_log_std_uav],
-            lr=actor_lr,
-        )
+        self.mav_opt = torch.optim.Adam(self.mav_actor_params, lr=actor_lr)
+        self.uav_opt = torch.optim.Adam(self.uav_actor_params, lr=actor_lr)
         self.critic_opt = torch.optim.Adam(policy.critic.parameters(), lr=critic_lr)
         self.clip_param = clip_param
         self.entropy_coef = entropy_coef
@@ -76,6 +86,19 @@ class HAPPOReferenceTrainer:
         self.ppo_epochs = ppo_epochs
         self.gamma = gamma
         self.gae_lambda = gae_lambda
+
+    def _zero_actor_optimizers(self, role_optimizer):
+        if self.shared_actor_opt is not None:
+            self.shared_actor_opt.zero_grad()
+        role_optimizer.zero_grad()
+
+    def _step_actor_optimizers(self, role_optimizer):
+        role_optimizer.step()
+        if self.shared_actor_opt is not None:
+            self.shared_actor_opt.step()
+
+    def _role_actor_params(self, role_id: int):
+        return self.mav_actor_params if role_id == MAV_ROLE_ID else self.uav_actor_params
 
     def _actor_update(self, data, advantages, role_id: int, optimizer):
         actor_obs = data["actor_obs"]
@@ -90,7 +113,7 @@ class HAPPOReferenceTrainer:
         if valid_sample_count <= 0:
             return 0.0, 0.0, 0.0, 0.0
 
-        optimizer.zero_grad()
+        self._zero_actor_optimizers(optimizer)
         repeated_roles = role_ids.view(1, N).expand(T, N)
         eval_kwargs = {}
         if "rnn_hidden" in data and data["rnn_hidden"] is not None:
@@ -105,11 +128,9 @@ class HAPPOReferenceTrainer:
         entropy_mean = (entropy * valid).sum() / valid.sum().clamp(min=1)
         loss = policy_loss - self.entropy_coef * entropy_mean
         loss.backward()
-        params = (self.actor_shared_params + list(self.policy.mav_actor.parameters()) + [self.policy.action_log_std_mav]
-                  if role_id == MAV_ROLE_ID
-                  else self.actor_shared_params + list(self.policy.uav_actor.parameters()) + [self.policy.action_log_std_uav])
+        params = self.actor_shared_params + self._role_actor_params(role_id)
         torch.nn.utils.clip_grad_norm_(params, self.max_grad_norm)
-        optimizer.step()
+        self._step_actor_optimizers(optimizer)
         approx_kl = ((old_log_probs - log_prob) * valid).sum() / valid.sum().clamp(min=1)
         return (
             float(policy_loss.item()),
@@ -163,7 +184,7 @@ class HAPPOReferenceTrainer:
                 data, advantages, UAV_ROLE_ID, self.uav_opt)
             if uav_imitation_batch is not None and uav_imitation_coef > 0.0:
                 obs_batch, action_batch = uav_imitation_batch
-                self.uav_opt.zero_grad()
+                self._zero_actor_optimizers(self.uav_opt)
                 imitation_loss = _uav_imitation_loss(
                     self.policy,
                     obs_batch.to(next(self.policy.parameters()).device),
@@ -171,12 +192,10 @@ class HAPPOReferenceTrainer:
                 )
                 (float(uav_imitation_coef) * imitation_loss).backward()
                 torch.nn.utils.clip_grad_norm_(
-                    self.actor_shared_params
-                    + list(self.policy.uav_actor.parameters())
-                    + [self.policy.action_log_std_uav],
+                    self.actor_shared_params + self.uav_actor_params,
                     self.max_grad_norm,
                 )
-                self.uav_opt.step()
+                self._step_actor_optimizers(self.uav_opt)
                 imitation_losses.append(float(imitation_loss.item()))
             actor_loss_mav.append(m_loss)
             actor_loss_uav.append(u_loss)

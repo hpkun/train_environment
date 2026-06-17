@@ -39,6 +39,11 @@ Observation
 -> Centralized 480-dim MLP critic for PPO update
 ```
 
+The actor update uses one optimizer for shared actor parameters and separate
+optimizers for MAV and UAV actor heads. This avoids maintaining two Adam states
+for the same encoder/GRU parameters while preserving the existing role-wise
+update order and team-advantage logic.
+
 ## `brma_recurrent_masked` Code Path Audit
 
 | Stage | Current implementation | Correctness boundary |
@@ -52,6 +57,7 @@ Observation
 | Entity encoder | Shared entity MLP plus PyTorch multi-head attention with key padding mask. | BRMA-style encoder, not a verbatim full BRMA-MAPPO training stack. |
 | GRU | `nn.GRUCell` processes pooled entity embedding before actor heads. | PPO update replays one-step stored hidden states; it is not full TBPTT recurrent PPO. |
 | Actor heads | Separate MAV head and shared UAV head. | Heterogeneous role-wise actor structure is implemented. |
+| Actor optimizers | Shared encoder/GRU parameters use `shared_actor_opt`; MAV and UAV heads/log-std use separate role optimizers. | The same shared parameter is no longer placed in both MAV and UAV Adam optimizers. This remains simplified role-wise PPO, not strict HAPPO advantage decomposition. |
 | Critic | Centralized MLP critic over 480-dim global state. | Critic is not entity-attention or recurrent. |
 | Rollout buffer | Stores flat obs, critic state, actions, log probs, active masks, env id, next value, and optional recurrent hidden state. | Hidden state is grouped by env and reset on episode done during rollout. |
 | Checkpoint | `meta.json` stores `policy_arch`, entity dim, critic dim, recurrent size, random mask flag, biased mask flag, and mask probability. | Meta is sufficient to rebuild the implemented opt-in policy. |

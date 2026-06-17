@@ -61,6 +61,26 @@ def _reject_unsafe_random_scale_mask(args) -> None:
         raise SystemExit(UNSAFE_RANDOM_SCALE_MASK_ERROR)
 
 
+UNSAFE_RANDOM_SCALE_MASK_CHECKPOINT_ERROR = (
+    "unsafe random_scale_mask checkpoint is disabled for main training. This "
+    "init checkpoint was saved with random_scale_mask=true; the current main "
+    "training path rejects it because rollout and PPO update masks were not "
+    "replayed. Use it only for diagnostic eval, or re-enable training after "
+    "implementing rollout mask replay or the full BRMA biased mask objective."
+)
+
+
+def _reject_unsafe_random_scale_mask_checkpoint(policy_arch: str, init_checkpoint_meta: str | Path | None) -> None:
+    if policy_arch != "brma_recurrent_masked" or init_checkpoint_meta is None:
+        return
+    meta_path = Path(init_checkpoint_meta)
+    if not meta_path.exists():
+        return
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if bool(meta.get("random_scale_mask", False)):
+        raise SystemExit(UNSAFE_RANDOM_SCALE_MASK_CHECKPOINT_ERROR)
+
+
 def _transitions_per_rollout(rollout_length: int, num_envs: int) -> int:
     return int(rollout_length) * int(num_envs)
 
@@ -563,6 +583,7 @@ def main() -> None:
             raise ValueError(
                 f"{args.policy_arch} init checkpoint requires meta.json with policy_arch={args.policy_arch}"
             )
+        _reject_unsafe_random_scale_mask_checkpoint(args.policy_arch, init_meta_path)
     policy = _build_policy(args.policy_arch, actor_dim, critic_dim, device,
                            init_checkpoint_meta=init_meta_path,
                            brma_random_scale_mask=args.brma_random_scale_mask,

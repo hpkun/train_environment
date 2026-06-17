@@ -75,6 +75,7 @@ from scripts.train_happo_reference import (
     _eval_checkpoint_extra,
     _load_uav_imitation_dataset,
     _reject_unsafe_random_scale_mask,
+    _reject_unsafe_random_scale_mask_checkpoint,
     _rel,
     _run_eval,
     _sample_uav_imitation_batch,
@@ -535,6 +536,7 @@ def _run_training(args: argparse.Namespace) -> None:
             raise ValueError(
                 f"{args.policy_arch} init checkpoint requires meta.json with policy_arch={args.policy_arch}"
             )
+        _reject_unsafe_random_scale_mask_checkpoint(args.policy_arch, init_meta_path)
     policy = _build_policy(
         args.policy_arch, actor_dim, critic_dim, device,
         init_checkpoint_meta=init_meta_path,

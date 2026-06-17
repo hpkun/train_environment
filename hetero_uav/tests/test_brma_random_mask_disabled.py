@@ -40,6 +40,36 @@ def _run_script(script: str, output_dir: str) -> subprocess.CompletedProcess:
     )
 
 
+def _run_script_with_init_checkpoint(script: str, output_dir: str, checkpoint: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-u",
+            str(ROOT / "scripts" / script),
+            "--config",
+            CONFIG,
+            "--output-dir",
+            output_dir,
+            "--total-env-steps",
+            "0",
+            "--rollout-length",
+            "1",
+            "--max-steps",
+            "1",
+            "--device",
+            "cpu",
+            "--policy-arch",
+            "brma_recurrent_masked",
+            "--init-checkpoint",
+            str(checkpoint),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+
+
 def test_single_runner_rejects_brma_random_scale_mask():
     result = _run_script(
         "train_happo_reference.py",
@@ -61,6 +91,50 @@ def test_parallel_runner_rejects_brma_random_scale_mask():
     assert result.returncode != 0
     assert "random_scale_mask" in combined
     assert "old/new log_prob" in combined
+    assert "mask replay" in combined
+
+
+def test_single_runner_rejects_unsafe_random_scale_mask_checkpoint(tmp_path):
+    ckpt_dir = tmp_path / "unsafe"
+    ckpt_dir.mkdir()
+    checkpoint = ckpt_dir / "model.pt"
+    checkpoint.write_bytes(b"not used before meta validation")
+    (ckpt_dir / "meta.json").write_text(
+        '{"policy_arch":"brma_recurrent_masked","random_scale_mask":true}',
+        encoding="utf-8",
+    )
+
+    result = _run_script_with_init_checkpoint(
+        "train_happo_reference.py",
+        "outputs/_test_reject_random_mask_checkpoint_single",
+        checkpoint,
+    )
+    combined = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode != 0
+    assert "unsafe random_scale_mask checkpoint" in combined
+    assert "diagnostic eval" in combined
+    assert "mask replay" in combined
+
+
+def test_parallel_runner_rejects_unsafe_random_scale_mask_checkpoint(tmp_path):
+    ckpt_dir = tmp_path / "unsafe"
+    ckpt_dir.mkdir()
+    checkpoint = ckpt_dir / "model.pt"
+    checkpoint.write_bytes(b"not used before meta validation")
+    (ckpt_dir / "meta.json").write_text(
+        '{"policy_arch":"brma_recurrent_masked","random_scale_mask":true}',
+        encoding="utf-8",
+    )
+
+    result = _run_script_with_init_checkpoint(
+        "train_happo_reference_parallel.py",
+        "outputs/_test_reject_random_mask_checkpoint_parallel",
+        checkpoint,
+    )
+    combined = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode != 0
+    assert "unsafe random_scale_mask checkpoint" in combined
+    assert "diagnostic eval" in combined
     assert "mask replay" in combined
 
 

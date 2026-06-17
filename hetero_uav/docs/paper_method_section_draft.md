@@ -125,6 +125,15 @@ implementation.
 
 Training uses a HAPPO-style role-wise PPO framework:
 
+- shared encoder/GRU parameters are optimized by a shared actor optimizer;
+- the MAV actor head and UAV actor head are optimized by role-specific
+  optimizers;
+- the same shared encoder/GRU parameter is not maintained by two independent
+  Adam optimizer states.
+
+This is still a simplified role-wise PPO implementation. It does not implement
+strict HAPPO sequential advantage decomposition.
+
 - decentralized actor execution;
 - centralized critic for value estimation;
 - separate MAV and UAV actor heads;
