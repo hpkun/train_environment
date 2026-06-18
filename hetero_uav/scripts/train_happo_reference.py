@@ -30,6 +30,11 @@ from algorithms.happo import (
     HAPPORolloutBuffer,
     HAPPOReferenceTrainer,
 )
+from algorithms.happo.rollout_safety import (
+    sanitize_policy_inputs,
+    zero_inactive_actions,
+    zero_inactive_hidden,
+)
 from algorithms.mappo.opponent_policy import OpponentPolicy
 from eval_checkpoint_selection import (
     best_metric_name,
@@ -737,29 +742,21 @@ def main() -> None:
                     ])
                     critic = adapted["critic_state"]
                     active = _build_red_alive_mask(info, rollout_env, rollout_env.red_ids)
-                    # ---- Sanitize inactive-agent inputs before policy forward ----
-                    # Dead agents must not feed non-finite / stale observations or
-                    # recurrent hidden state into the network.  Their contributions
-                    # are already masked in the PPO loss via active_mask, but a
-                    # forward pass on dead-agent data can still produce NaN in the
-                    # policy output (especially for GRU-based actors).
-                    inactive_rows = active <= 0.5
-                    inactive_count = int(inactive_rows.sum())
-                    if inactive_count > 0:
-                        actor_obs[inactive_rows] = 0.0
-                        if rnn_hidden is not None:
-                            rnn_hidden[env_idx][inactive_rows] = 0.0
-                    # ---- Finite guard on active-agent inputs ----
-                    if active.any():
-                        act_fin = np.isfinite(actor_obs[active > 0.5]).all()
-                        crit_fin = np.isfinite(critic).all()
-                        if not act_fin or not crit_fin:
-                            raise ValueError(
-                                f"Non-finite observation for active agent: "
-                                f"iter={iteration} env={env_idx} "
-                                f"step={total_steps} ep={current_ep_id[env_idx]} "
-                                f"actor_obs_finite={act_fin} critic_finite={crit_fin}"
-                            )
+                    san_ctx = {
+                        "iteration": iteration, "env_idx": env_idx,
+                        "total_steps": total_steps, "episode_id": current_ep_id[env_idx],
+                    }
+                    _sh = rnn_hidden[env_idx] if rnn_hidden is not None else None
+                    san = sanitize_policy_inputs(
+                        actor_obs, active,
+                        critic_state=critic,
+                        rnn_hidden=_sh,
+                        context=san_ctx,
+                    )
+                    actor_obs = san["actor_obs"]
+                    critic = san["critic_state"] if san["critic_state"] is not None else critic
+                    if rnn_hidden is not None and san["rnn_hidden"] is not None:
+                        rnn_hidden[env_idx] = san["rnn_hidden"]
                     rnn_hidden_pre = None
                     if rnn_hidden is not None:
                         rnn_hidden_pre = rnn_hidden[env_idx].copy()
@@ -776,10 +773,13 @@ def main() -> None:
                             **act_kwargs,
                         )
                     # ---- Zero out actions for inactive agents ----
-                    if inactive_count > 0:
-                        out_np = out["action"].cpu().numpy()
-                        out_np[inactive_rows] = 0.0
-                        out["action"] = torch.as_tensor(out_np, device=device)
+                    actions_np = zero_inactive_actions(
+                        out["action"].cpu().numpy(), active)
+                    out["action"] = torch.as_tensor(actions_np, device=device)
+                    # ---- Zero out returned rnn_hidden for inactive agents ----
+                    if rnn_hidden is not None and "rnn_hidden" in out:
+                        rnn_hidden[env_idx] = zero_inactive_hidden(
+                            out["rnn_hidden"].cpu().numpy(), active)
                     heartbeat.write(
                         "after_policy_act",
                         iteration=iteration,
@@ -795,8 +795,6 @@ def main() -> None:
                     actions = out["action"].cpu().numpy()
                     log_probs = out["log_prob"].cpu().numpy()
                     value = float(out["value"].item())
-                    if rnn_hidden is not None and "rnn_hidden" in out:
-                        rnn_hidden[env_idx] = out["rnn_hidden"].cpu().numpy()
                     if np.isnan(actions).any() or np.isnan(value):
                         nan_detected = True
                         break

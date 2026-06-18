@@ -21,6 +21,11 @@ from algorithms.happo import (
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
 )
+from algorithms.happo.rollout_safety import (
+    sanitize_policy_inputs,
+    zero_inactive_actions,
+    zero_inactive_hidden,
+)
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 try:
     from algorithms.mappo.opponent_policy import OpponentPolicy
@@ -186,9 +191,33 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
                 for rid in env.red_ids
             ])
             critic = adapted["critic_state"]
-            if np.isnan(actor_obs).any() or np.isnan(critic).any():
-                nan_detected = True
-                break
+            # Build active mask from info dict (same logic as training)
+            active = np.zeros(len(env.red_ids), dtype=np.float32)
+            for i, rid in enumerate(env.red_ids):
+                agent_info = info.get(rid, {}) if isinstance(info, dict) else {}
+                if isinstance(agent_info, dict) and "alive" in agent_info:
+                    alive = bool(agent_info["alive"])
+                else:
+                    sim = env.red_planes.get(rid)
+                    alive = bool(sim is not None and sim.is_alive)
+                active[i] = 1.0 if alive else 0.0
+            san_ctx = {"env_idx": "eval", "episode_id": ep, "total_steps": ep_len}
+            san = sanitize_policy_inputs(
+                actor_obs, active, critic_state=critic,
+                rnn_hidden=eval_rnn_hidden, context=san_ctx,
+            )
+            actor_obs = san["actor_obs"]
+            critic = san["critic_state"] if san["critic_state"] is not None else critic
+            eval_rnn_hidden = san["rnn_hidden"] if san["rnn_hidden"] is not None else eval_rnn_hidden
+            # Only flag NaN for active-agent obs/critic
+            active_rows = active > 0.5
+            if active_rows.any():
+                if not np.isfinite(actor_obs[active_rows]).all():
+                    nan_detected = True
+                    break
+                if not np.isfinite(critic).all():
+                    nan_detected = True
+                    break
             act_kwargs = {}
             if eval_rnn_hidden is not None:
                 act_kwargs["rnn_hidden"] = torch.as_tensor(eval_rnn_hidden, device=device)
@@ -201,8 +230,10 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
                     **act_kwargs,
                 )
             if eval_rnn_hidden is not None and "rnn_hidden" in out:
-                eval_rnn_hidden = out["rnn_hidden"].detach().cpu().numpy()
-            actions = out["action"].detach().cpu().numpy()
+                eval_rnn_hidden = zero_inactive_hidden(
+                    out["rnn_hidden"].detach().cpu().numpy(), active)
+            actions = zero_inactive_actions(
+                out["action"].detach().cpu().numpy(), active)
             if np.isnan(actions).any():
                 nan_detected = True
                 break
