@@ -737,6 +737,29 @@ def main() -> None:
                     ])
                     critic = adapted["critic_state"]
                     active = _build_red_alive_mask(info, rollout_env, rollout_env.red_ids)
+                    # ---- Sanitize inactive-agent inputs before policy forward ----
+                    # Dead agents must not feed non-finite / stale observations or
+                    # recurrent hidden state into the network.  Their contributions
+                    # are already masked in the PPO loss via active_mask, but a
+                    # forward pass on dead-agent data can still produce NaN in the
+                    # policy output (especially for GRU-based actors).
+                    inactive_rows = active <= 0.5
+                    inactive_count = int(inactive_rows.sum())
+                    if inactive_count > 0:
+                        actor_obs[inactive_rows] = 0.0
+                        if rnn_hidden is not None:
+                            rnn_hidden[env_idx][inactive_rows] = 0.0
+                    # ---- Finite guard on active-agent inputs ----
+                    if active.any():
+                        act_fin = np.isfinite(actor_obs[active > 0.5]).all()
+                        crit_fin = np.isfinite(critic).all()
+                        if not act_fin or not crit_fin:
+                            raise ValueError(
+                                f"Non-finite observation for active agent: "
+                                f"iter={iteration} env={env_idx} "
+                                f"step={total_steps} ep={current_ep_id[env_idx]} "
+                                f"actor_obs_finite={act_fin} critic_finite={crit_fin}"
+                            )
                     rnn_hidden_pre = None
                     if rnn_hidden is not None:
                         rnn_hidden_pre = rnn_hidden[env_idx].copy()
@@ -752,6 +775,11 @@ def main() -> None:
                             deterministic=False,
                             **act_kwargs,
                         )
+                    # ---- Zero out actions for inactive agents ----
+                    if inactive_count > 0:
+                        out_np = out["action"].cpu().numpy()
+                        out_np[inactive_rows] = 0.0
+                        out["action"] = torch.as_tensor(out_np, device=device)
                     heartbeat.write(
                         "after_policy_act",
                         iteration=iteration,
@@ -1045,6 +1073,14 @@ def main() -> None:
             if total_steps - last_eval >= args.eval_interval_steps and args.eval_during_training:
                 last_eval = total_steps
                 tmp_model = out_dir / "_tmp_eval.pt"
+                _ckpt_finite = all(
+                    torch.isfinite(p).all() for _n, p in policy.named_parameters()
+                )
+                if not _ckpt_finite:
+                    raise RuntimeError(
+                        "Refusing to save non-finite checkpoint at "
+                        f"iter={iteration} steps={total_steps}"
+                    )
                 policy.save(tmp_model)
                 (out_dir / "_tmp_eval_meta.json").write_text(json.dumps({
                     "algorithm": "happo_reference_v0",

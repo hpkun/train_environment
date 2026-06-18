@@ -206,6 +206,16 @@ class HAPPOReferenceTrainer:
             valid_mav.append(m_valid)
             valid_uav.append(u_valid)
 
+        # ---- Parameter finite guard ----
+        _bad_params = []
+        for _name, _p in self.policy.named_parameters():
+            if not torch.isfinite(_p).all():
+                _bad_params.append(_name)
+        if _bad_params:
+            raise ValueError(
+                f"Non-finite policy parameters after update: {_bad_params[:5]}"
+            )
+
         actions = data["actions"].detach()
         roles = data["role_ids"].detach().cpu().numpy()
         abs_actions = torch.abs(actions)
