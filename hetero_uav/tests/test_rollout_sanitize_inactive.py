@@ -73,6 +73,34 @@ def test_active_critic_nan_raises():
         sanitize_policy_inputs(actor_obs, active, critic_state=critic)
 
 
+def test_inactive_actor_and_critic_chunk_nan_are_zeroed():
+    from algorithms.happo.rollout_safety import sanitize_policy_inputs
+
+    actor_obs = np.random.randn(3, 96).astype(np.float32)
+    actor_obs[0, :] = np.nan
+    active = np.array([0.0, 1.0, 1.0], dtype=np.float32)
+    critic = np.random.randn(480).astype(np.float32)
+    critic[:96] = np.nan
+
+    san = sanitize_policy_inputs(actor_obs, active, critic_state=critic)
+
+    assert np.all(san["actor_obs"][0] == 0.0)
+    assert np.all(san["critic_state"][:96] == 0.0)
+    assert np.isfinite(san["critic_state"]).all()
+
+
+def test_active_critic_chunk_nan_still_raises():
+    from algorithms.happo.rollout_safety import sanitize_policy_inputs
+
+    actor_obs = np.random.randn(3, 96).astype(np.float32)
+    active = np.array([0.0, 1.0, 1.0], dtype=np.float32)
+    critic = np.random.randn(480).astype(np.float32)
+    critic[96 + 7] = np.nan
+
+    with pytest.raises(ValueError, match="Non-finite critic_state for active agent"):
+        sanitize_policy_inputs(actor_obs, active, critic_state=critic)
+
+
 def test_active_rnn_hidden_nan_fail_fast():
     from algorithms.happo.rollout_safety import sanitize_policy_inputs
 

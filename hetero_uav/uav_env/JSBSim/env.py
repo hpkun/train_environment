@@ -119,6 +119,26 @@ def _signed_ao_from_unsigned_and_side(ao_unsigned: float, side_flag: float) -> f
     return float(ao_unsigned)
 
 
+def collect_aircraft_state_finiteness(sim) -> tuple[bool, tuple[str, ...]]:
+    """Return whether the externally consumed aircraft state is finite."""
+
+    bad_fields: list[str] = []
+    getters = (
+        ("geodetic", sim.get_geodetic),
+        ("position", sim.get_position),
+        ("velocity", sim.get_velocity),
+        ("rpy", sim.get_rpy),
+    )
+    for name, getter in getters:
+        try:
+            values = np.asarray(getter(), dtype=np.float64)
+            if values.size == 0 or not np.isfinite(values).all():
+                bad_fields.append(name)
+        except Exception:
+            bad_fields.append(name)
+    return not bad_fields, tuple(bad_fields)
+
+
 class UavCombatEnv(gymnasium.Env):
     """
     Multi-agent UAV combat environment (paper BRMA-MAPPO baseline).
@@ -1039,6 +1059,14 @@ class UavCombatEnv(gymnasium.Env):
         for aid in self.agent_ids:
             sim = self._get_sim(aid)
             if sim is None or not sim.is_alive:
+                continue
+
+            state_finite, _bad_fields = collect_aircraft_state_finiteness(sim)
+            if not state_finite:
+                sim.crash()
+                self._crashed_this_step.add(aid)
+                if aid not in self._death_reasons:
+                    self._death_reasons[aid] = "Crash_NonFiniteState"
                 continue
 
             crashed = False

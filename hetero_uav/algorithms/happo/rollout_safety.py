@@ -47,6 +47,7 @@ def sanitize_policy_inputs(
     diag: dict = {
         "inactive_count": inactive_count,
         "inactive_nonfinite_count": 0,
+        "inactive_critic_nonfinite_count": 0,
         "active_obs_nonfinite_count": 0,
         "active_hidden_nonfinite_count": 0,
     }
@@ -58,6 +59,38 @@ def sanitize_policy_inputs(
         actor_obs[inactive_rows] = 0.0
         if rnn_hidden is not None:
             rnn_hidden[inactive_rows] = 0.0
+
+    # ---- Centralized critic chunks mirror fixed-width actor observations ----
+    if critic_state is not None:
+        critic_flat = critic_state.reshape(-1)
+        actor_dim = int(actor_obs.shape[-1])
+        if actor_obs.ndim != 2 or actor_dim <= 0 or critic_flat.size % actor_dim != 0:
+            raise ValueError(
+                f"critic_state cannot be partitioned into actor chunks: "
+                f"{_ctx_str(ctx)} critic_dim={critic_flat.size} actor_dim={actor_dim}"
+            )
+        critic_chunks = critic_flat.reshape(-1, actor_dim)
+        for row_idx in range(critic_chunks.shape[0]):
+            inactive_or_padding = row_idx >= active.shape[0] or inactive_rows[row_idx]
+            if inactive_or_padding:
+                diag["inactive_critic_nonfinite_count"] += int(
+                    (~np.isfinite(critic_chunks[row_idx])).sum()
+                )
+                critic_chunks[row_idx] = 0.0
+
+        bad_active_chunks = []
+        for row_idx in np.where(active_rows)[0]:
+            row_fin = np.isfinite(critic_chunks[row_idx])
+            if not row_fin.all():
+                bad_cols = np.where(~row_fin)[0]
+                bad_active_chunks.append(
+                    f"row={int(row_idx)} cols={[int(c) for c in bad_cols[:8]]}"
+                )
+        if bad_active_chunks:
+            raise ValueError(
+                f"Non-finite critic_state for active agent: "
+                f"{_ctx_str(ctx)} {'; '.join(bad_active_chunks[:4])}"
+            )
 
     # ---- Active actor_obs: must be finite ----
     if active_rows.any():
