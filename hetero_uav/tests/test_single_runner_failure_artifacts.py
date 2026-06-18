@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import torch
 
 
@@ -67,3 +68,30 @@ def test_normal_runner_status_contains_completion_fields(tmp_path):
     assert status["iteration"] == 1954
     assert status["exception_type"] == ""
     assert status["nonfinite_detected"] is False
+
+
+def test_main_wrapper_preserves_failure_artifacts(monkeypatch, tmp_path):
+    import scripts.train_happo_reference as runner
+
+    runner._SINGLE_RUNNER_STATE.update({
+        "policy": TinyPolicy(),
+        "output_dir": tmp_path,
+        "total_steps": 41,
+        "iteration": 3,
+        "episode_id": 2,
+        "meta": {"policy_arch": "brma_recurrent_masked"},
+    })
+    monkeypatch.setattr(
+        runner,
+        "_run_training_main",
+        lambda: (_ for _ in ()).throw(ValueError("Non-finite actor_obs")),
+    )
+
+    with pytest.raises(ValueError, match="Non-finite actor_obs"):
+        runner.main()
+
+    status = json.loads((tmp_path / "runner_status.json").read_text())
+    assert status["status"] == "failed"
+    assert status["failed_step"] == 41
+    assert status["failed_episode_id"] == 2
+    assert (tmp_path / "latest_failure/model.pt").exists()

@@ -207,6 +207,11 @@ def test_status_helper_marks_exception_paths_not_normal(tmp_path):
     assert status["exit_reason"] == "exception"
     assert status["exception_type"] == "RuntimeError"
     assert status["exception_message"] == "boom"
+    assert status["status"] == "failed"
+    assert status["iteration"] == status["latest_iteration"]
+    assert status["failed_step"] == status["total_env_steps_actual"]
+    assert "failed_episode_id" in status
+    assert status["nonfinite_detected"] is False
 
 
 def test_status_helper_marks_keyboard_interrupt_not_normal(tmp_path):

@@ -1,0 +1,14 @@
+{
+  "worker_restart_count": 2,
+  "rollout_aborted_count": 3,
+  "consecutive_rollout_abort_count": 4,
+  "last_worker_timeout_info": {
+    "env_idx": 1
+  },
+  "runner_completed_normally": false,
+  "exit_reason": "exception",
+  "total_env_steps_actual": 99,
+  "latest_iteration": 7,
+  "exception_type": "RuntimeError",
+  "exception_message": "boom"
+}

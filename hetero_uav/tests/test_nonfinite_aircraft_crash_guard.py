@@ -9,8 +9,9 @@ from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
 
 
 class FakeAircraft:
-    def __init__(self, bad_field: str | None = None):
+    def __init__(self, bad_field: str | None = None, bad_value: float = np.nan):
         self.bad_field = bad_field
+        self.bad_value = bad_value
         self.is_alive = True
         self.num_left_missiles = 0
         self.crash_called = False
@@ -18,7 +19,7 @@ class FakeAircraft:
     def _state(self, field: str, size: int, values: list[float]) -> np.ndarray:
         out = np.asarray(values, dtype=np.float64)
         if self.bad_field == field:
-            out[0] = np.nan
+            out[0] = self.bad_value
         assert out.shape == (size,)
         return out
 
@@ -82,6 +83,16 @@ def test_finite_alive_aircraft_is_not_crashed():
 
     assert not sim.crash_called
     assert "red_0" not in env._crashed_this_step
+
+
+def test_infinite_alive_aircraft_is_crashed():
+    sim = FakeAircraft("position", np.inf)
+    env = _bare_env(sim)
+
+    env._check_crash_terminations()
+
+    assert sim.crash_called
+    assert env._death_reasons["red_0"] == "Crash_NonFiniteState"
 
 
 def test_nonfinite_crash_flows_to_info_active_mask_and_zero_ego_observation():

@@ -50,6 +50,19 @@ DEFAULT_EVAL_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
 ]
 
+_SINGLE_RUNNER_STATE = {
+    "policy": None,
+    "output_dir": None,
+    "total_steps": 0,
+    "iteration": 0,
+    "episode_id": 0,
+    "meta": {},
+    "envs": [],
+    "heartbeat": None,
+    "watchdog": None,
+    "rich_logger": None,
+}
+
 UNSAFE_RANDOM_SCALE_MASK_ERROR = (
     "brma_random_scale_mask is disabled for main training. The current "
     "random_scale_mask path resamples entity masks independently during "
@@ -480,6 +493,87 @@ def _save_policy_checkpoint(policy, directory: Path, meta: dict) -> None:
     (directory / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
+def _exception_is_nonfinite(exc: BaseException | None) -> bool:
+    text = str(exc or "").lower().replace("-", "")
+    return "nonfinite" in text or "nan" in text or "inf" in text
+
+
+def _write_runner_status(
+    out_dir: Path,
+    *,
+    status: str,
+    total_steps: int,
+    iteration: int,
+    exception: BaseException | None = None,
+    failed_episode_id: int | str = "",
+    failure_checkpoint_saved: bool = False,
+) -> dict:
+    nonfinite = _exception_is_nonfinite(exception)
+    payload = {
+        "status": status,
+        "runner_completed_normally": status == "normal",
+        "total_env_steps_actual": int(total_steps),
+        "iteration": int(iteration),
+        "exception_type": type(exception).__name__ if exception is not None else "",
+        "exception_message": str(exception) if exception is not None else "",
+        "failed_step": int(total_steps) if status != "normal" else None,
+        "failed_episode_id": failed_episode_id if status != "normal" else None,
+        "output_dir": str(out_dir),
+        "nan_detected": bool(nonfinite),
+        "nonfinite_detected": bool(nonfinite),
+        "failure_checkpoint_saved": bool(failure_checkpoint_saved),
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "runner_status.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    return payload
+
+
+def _write_failure_artifacts(policy, state: dict, exc: BaseException) -> None:
+    out_dir = Path(state["output_dir"])
+    checkpoint_saved = False
+    if policy is not None and all(torch.isfinite(p).all() for p in policy.parameters()):
+        try:
+            failure_dir = out_dir / "latest_failure"
+            failure_meta = {
+                **dict(state.get("meta", {})),
+                "status": "failed",
+                "total_env_steps_actual": int(state.get("total_steps", 0)),
+                "iteration": int(state.get("iteration", 0)),
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+            }
+            _save_policy_checkpoint(policy, failure_dir, failure_meta)
+            checkpoint_saved = True
+        except Exception:
+            checkpoint_saved = False
+    _write_runner_status(
+        out_dir,
+        status="failed",
+        total_steps=int(state.get("total_steps", 0)),
+        iteration=int(state.get("iteration", 0)),
+        exception=exc,
+        failed_episode_id=state.get("episode_id", ""),
+        failure_checkpoint_saved=checkpoint_saved,
+    )
+
+
+def _cleanup_single_runner() -> None:
+    for env in _SINGLE_RUNNER_STATE.get("envs", []):
+        try:
+            env.close()
+        except Exception:
+            pass
+    for key, method in (("rich_logger", "close"), ("watchdog", "stop"), ("heartbeat", "close")):
+        resource = _SINGLE_RUNNER_STATE.get(key)
+        if resource is not None:
+            try:
+                getattr(resource, method)()
+            except Exception:
+                pass
+
+
 def _prune_eval_checkpoints(eval_dir: Path, keep: int) -> None:
     if keep <= 0 or not eval_dir.exists():
         return
@@ -493,7 +587,12 @@ def _prune_eval_checkpoints(eval_dir: Path, keep: int) -> None:
         path.rmdir()
 
 
-def main() -> None:
+def _run_training_main() -> None:
+    _SINGLE_RUNNER_STATE.update({
+        "policy": None, "output_dir": None, "total_steps": 0,
+        "iteration": 0, "episode_id": 0, "meta": {}, "envs": [],
+        "heartbeat": None, "watchdog": None, "rich_logger": None,
+    })
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--output-dir", default="outputs/happo_reference")
@@ -570,6 +669,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     out_dir = ROOT / args.output_dir
+    _SINGLE_RUNNER_STATE["output_dir"] = out_dir
     (out_dir / "latest").mkdir(parents=True, exist_ok=True)
     (out_dir / "best").mkdir(parents=True, exist_ok=True)
     (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
@@ -577,6 +677,7 @@ def main() -> None:
     env = make_env(args.config, env_type="jsbsim_hetero",
                    hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
     envs = [env]
+    _SINGLE_RUNNER_STATE["envs"] = envs
     adapter = HeteroObsAdapterV2()
     actor_dim = adapter.flat_actor_obs_dim
     critic_dim = adapter.critic_state_dim
@@ -594,6 +695,14 @@ def main() -> None:
                            brma_random_scale_mask=args.brma_random_scale_mask,
                            brma_biased_mask=args.brma_biased_mask,
                            brma_random_mask_prob=args.brma_random_mask_prob)
+    _SINGLE_RUNNER_STATE["policy"] = policy
+    _SINGLE_RUNNER_STATE["meta"] = {
+        "algorithm": "happo_reference_v0",
+        "policy_arch": args.policy_arch,
+        "config": args.config,
+        "actor_obs_dim": actor_dim,
+        "critic_state_dim": critic_dim,
+    }
     if args.init_checkpoint:
         init_path = Path(args.init_checkpoint)
         if not init_path.is_absolute():
@@ -632,6 +741,7 @@ def main() -> None:
         debug_all=args.debug_rollout_heartbeat,
         static_fields={"max_steps": args.max_steps, "num_envs": args.num_envs},
     )
+    _SINGLE_RUNNER_STATE["heartbeat"] = heartbeat
     watchdog = HeartbeatStallWatchdog(
         heartbeat,
         out_dir,
@@ -639,6 +749,7 @@ def main() -> None:
         exit_on_stall=args.exit_on_heartbeat_stall,
     )
     watchdog.start()
+    _SINGLE_RUNNER_STATE["watchdog"] = watchdog
     rich_logger = None
     if args.enable_rich_logging:
         rich_dir = _rel(args.rich_log_dir) if args.rich_log_dir else out_dir
@@ -652,6 +763,7 @@ def main() -> None:
             rollout_length_per_env=args.rollout_length,
             transitions_per_rollout=transitions_per_rollout,
         )
+        _SINGLE_RUNNER_STATE["rich_logger"] = rich_logger
         write_not_available_attention(rich_dir, "happo_reference_v0", Path(args.config).stem)
     iterations = int(math.ceil(args.total_env_steps / transitions_per_rollout))
     total_steps = 0
@@ -708,6 +820,7 @@ def main() -> None:
             ])
         last_eval = -999999 if args.eval_at_start else 0
         for iteration in range(1, iterations + 1):
+            _SINGLE_RUNNER_STATE["iteration"] = iteration
             rollout_transitions = min(transitions_per_rollout, args.total_env_steps - total_steps)
             if rollout_transitions <= 0:
                 break
@@ -898,6 +1011,8 @@ def main() -> None:
                     current_ep_return[env_idx] += reward_np
                     current_ep_len[env_idx] += 1
                     total_steps += 1
+                    _SINGLE_RUNNER_STATE["total_steps"] = total_steps
+                    _SINGLE_RUNNER_STATE["episode_id"] = current_ep_id[env_idx]
                     if rich_logger is not None:
                         rich_logger.write_missile_events(
                             next_info,
@@ -951,6 +1066,7 @@ def main() -> None:
                         )
                         next_obs, next_info = rollout_env.reset(seed=args.seed + total_steps + env_idx)
                         current_ep_id[env_idx] += 1
+                        _SINGLE_RUNNER_STATE["episode_id"] = current_ep_id[env_idx]
                         if rnn_hidden is not None:
                             rnn_hidden[env_idx][:] = 0.0
                         heartbeat.write(
@@ -1257,6 +1373,12 @@ def main() -> None:
     }
     (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    _write_runner_status(
+        out_dir,
+        status="normal",
+        total_steps=total_steps,
+        iteration=iteration,
+    )
     if rich_logger is not None:
         rich_logger.write_training_efficiency(total_steps, nan_detected=nan_detected)
         rich_logger.close()
@@ -1265,6 +1387,20 @@ def main() -> None:
     for rollout_env in envs:
         rollout_env.close()
     print(f"Saved {latest_model}", flush=True)
+
+
+def main() -> None:
+    try:
+        _run_training_main()
+    except (KeyboardInterrupt, Exception) as exc:
+        out_dir = _SINGLE_RUNNER_STATE.get("output_dir")
+        if out_dir is not None:
+            _write_failure_artifacts(
+                _SINGLE_RUNNER_STATE.get("policy"), _SINGLE_RUNNER_STATE, exc
+            )
+        raise
+    finally:
+        _cleanup_single_runner()
 
 
 if __name__ == "__main__":

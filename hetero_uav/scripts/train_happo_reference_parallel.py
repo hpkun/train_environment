@@ -46,6 +46,7 @@ _RUNNER_RESOURCES = {
     "watchdog": None,
     "rich_logger": None,
     "env_rich_loggers": [],
+    "policy": None,
 }
 
 _RUNNER_PROGRESS = {
@@ -84,6 +85,7 @@ from scripts.train_happo_reference import (
     _team_done,
     _transitions_per_rollout,
     _prune_eval_checkpoints,
+    _write_failure_artifacts,
 )
 
 
@@ -429,9 +431,11 @@ def _write_runner_status(out_dir: Path, *, worker_restart_count: int,
                          exit_reason: str, total_steps: int,
                          latest_iteration: int,
                          exception_type: str = "",
-                         exception_message: str = "") -> None:
+                         exception_message: str = "",
+                         failure_checkpoint_saved: bool = False) -> None:
     """Write runner_status.json with structured exit information."""
     payload = {
+        "status": "normal" if exit_reason == "normal" else "failed",
         "worker_restart_count": worker_restart_count,
         "rollout_aborted_count": rollout_aborted_count,
         "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
@@ -440,6 +444,13 @@ def _write_runner_status(out_dir: Path, *, worker_restart_count: int,
         "exit_reason": exit_reason,
         "total_env_steps_actual": total_steps,
         "latest_iteration": latest_iteration,
+        "iteration": latest_iteration,
+        "failed_step": total_steps if exit_reason != "normal" else None,
+        "failed_episode_id": "",
+        "output_dir": str(out_dir),
+        "nan_detected": _exception_is_nonfinite_message(exception_message),
+        "nonfinite_detected": _exception_is_nonfinite_message(exception_message),
+        "failure_checkpoint_saved": bool(failure_checkpoint_saved),
     }
     if exception_type:
         payload["exception_type"] = exception_type
@@ -450,6 +461,11 @@ def _write_runner_status(out_dir: Path, *, worker_restart_count: int,
             json.dumps(payload, indent=2, default=str), encoding="utf-8")
     except Exception:
         pass
+
+
+def _exception_is_nonfinite_message(message: str) -> bool:
+    text = str(message).lower().replace("-", "")
+    return "nonfinite" in text or "nan" in text or "inf" in text
 
 
 def _cleanup_runner(*, vec_env, heartbeat, watchdog, rich_logger,
@@ -544,6 +560,7 @@ def _run_training(args: argparse.Namespace) -> None:
         brma_biased_mask=args.brma_biased_mask,
         brma_random_mask_prob=args.brma_random_mask_prob,
     )
+    _RUNNER_RESOURCES["policy"] = policy
     if args.init_checkpoint:
         init_path = Path(args.init_checkpoint)
         if not init_path.is_absolute():
@@ -1202,6 +1219,7 @@ def main() -> None:
         "watchdog": None,
         "rich_logger": None,
         "env_rich_loggers": [],
+        "policy": None,
     })
     _RUNNER_PROGRESS["out_dir"] = out_dir
     exit_reason = "normal"
@@ -1231,6 +1249,30 @@ def main() -> None:
         worker_restart_count = int(_RUNNER_PROGRESS.get("worker_restart_count", 0))
         if vec_env is not None:
             worker_restart_count = int(getattr(vec_env, "worker_restart_count", worker_restart_count))
+        failure_checkpoint_saved = False
+        if exit_reason != "normal" and _RUNNER_RESOURCES.get("policy") is not None:
+            failure_state = {
+                "output_dir": Path(status_out_dir),
+                "total_steps": int(_RUNNER_PROGRESS.get("total_steps", 0)),
+                "iteration": int(_RUNNER_PROGRESS.get("latest_iteration", 0)),
+                "episode_id": "",
+                "meta": {
+                    "algorithm": "happo_reference_v0",
+                    "policy_arch": args.policy_arch,
+                    "config": args.config,
+                    "num_envs": args.num_envs,
+                },
+            }
+            failure_exc = RuntimeError(exception_message or exit_reason)
+            try:
+                _write_failure_artifacts(
+                    _RUNNER_RESOURCES["policy"], failure_state, failure_exc
+                )
+            except Exception:
+                pass
+            failure_checkpoint_saved = (
+                Path(status_out_dir) / "latest_failure" / "model.pt"
+            ).exists()
         try:
             Path(status_out_dir).mkdir(parents=True, exist_ok=True)
             _write_runner_status(
@@ -1248,6 +1290,7 @@ def main() -> None:
                 latest_iteration=int(_RUNNER_PROGRESS.get("latest_iteration", 0)),
                 exception_type=exception_type,
                 exception_message=exception_message,
+                failure_checkpoint_saved=failure_checkpoint_saved,
             )
         finally:
             _cleanup_runner(
