@@ -795,9 +795,32 @@ def main() -> None:
                     actions = out["action"].cpu().numpy()
                     log_probs = out["log_prob"].cpu().numpy()
                     value = float(out["value"].item())
-                    if np.isnan(actions).any() or np.isnan(value):
-                        nan_detected = True
-                        break
+                    # Check finite for active agents only (inactive were zeroed)
+                    active_mask_np = active > 0.5
+                    if active_mask_np.any():
+                        if not np.isfinite(actions[active_mask_np]).all():
+                            raise ValueError(
+                                f"Non-finite action for active agent: "
+                                f"iter={iteration} env={env_idx} step={total_steps}"
+                            )
+                        if not np.isfinite(value):
+                            raise ValueError(
+                                f"Non-finite value: "
+                                f"iter={iteration} env={env_idx} step={total_steps} value={value}"
+                            )
+                        if not np.isfinite(log_probs[active_mask_np]).all():
+                            raise ValueError(
+                                f"Non-finite log_prob for active agent: "
+                                f"iter={iteration} env={env_idx} step={total_steps}"
+                            )
+                    # Check finite for returned rnn_hidden (active agents)
+                    if rnn_hidden is not None and "rnn_hidden" in out and active_mask_np.any():
+                        rh = out["rnn_hidden"].cpu().numpy()
+                        if not np.isfinite(rh[active_mask_np]).all():
+                            raise ValueError(
+                                f"Non-finite returned rnn_hidden for active agent: "
+                                f"iter={iteration} env={env_idx} step={total_steps}"
+                            )
                     action_dict = {rid: actions[i].astype(np.float32)
                                    for i, rid in enumerate(rollout_env.red_ids)}
                     heartbeat.write(

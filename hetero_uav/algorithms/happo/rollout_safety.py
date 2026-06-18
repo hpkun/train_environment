@@ -9,6 +9,20 @@ from __future__ import annotations
 import numpy as np
 
 
+def _ctx_str(ctx: dict | None, extra: str = "") -> str:
+    if ctx is None:
+        return ""
+    parts = [
+        f"iter={ctx.get('iteration','?')}",
+        f"env={ctx.get('env_idx','?')}",
+        f"step={ctx.get('total_steps','?')}",
+        f"ep={ctx.get('episode_id','?')}",
+    ]
+    if extra:
+        parts.append(extra)
+    return " ".join(parts)
+
+
 def sanitize_policy_inputs(
     actor_obs: np.ndarray,
     active: np.ndarray,
@@ -33,10 +47,11 @@ def sanitize_policy_inputs(
     diag: dict = {
         "inactive_count": inactive_count,
         "inactive_nonfinite_count": 0,
-        "active_nonfinite_count": 0,
+        "active_obs_nonfinite_count": 0,
+        "active_hidden_nonfinite_count": 0,
     }
 
-    # ---- Inactive rows: zero out (NaN/Inf allowed → zeroed safely) ----
+    # ---- Inactive rows: zero out (NaN/Inf allowed — zeroed safely) ----
     if inactive_count > 0:
         inactive_nonfin = int((~np.isfinite(actor_obs[inactive_rows])).sum())
         diag["inactive_nonfinite_count"] = inactive_nonfin
@@ -44,31 +59,51 @@ def sanitize_policy_inputs(
         if rnn_hidden is not None:
             rnn_hidden[inactive_rows] = 0.0
 
-    # ---- Active rows: must be finite ----
+    # ---- Active actor_obs: must be finite ----
     if active_rows.any():
-        act_fin = np.isfinite(actor_obs[active_rows]).all()
-        crit_fin = np.isfinite(critic_state).all() if critic_state is not None else True
-        if not act_fin:
-            bad_rows = np.where(active_rows)[0]
-            for row_idx in bad_rows:
-                row = actor_obs[row_idx]
-                if not np.isfinite(row).all():
-                    bad_cols = np.where(~np.isfinite(row))[0]
-                    diag["active_nonfinite_count"] += len(bad_cols)
+        obs_fin = np.isfinite(actor_obs[active_rows])
+        if not obs_fin.all():
+            bad_detail = []
+            active_indices = np.where(active_rows)[0]
+            for i, row_idx in enumerate(active_indices):
+                row_fin = obs_fin[i]
+                if not row_fin.all():
+                    bad_cols = np.where(~row_fin)[0]
+                    diag["active_obs_nonfinite_count"] += len(bad_cols)
+                    bad_detail.append(
+                        f"row={int(row_idx)} cols={[int(c) for c in bad_cols[:8]]}"
+                    )
             raise ValueError(
                 f"Non-finite actor_obs for active agent: "
-                f"iter={ctx.get('iteration','?')} env={ctx.get('env_idx','?')} "
-                f"step={ctx.get('total_steps','?')} ep={ctx.get('episode_id','?')} "
-                f"bad_rows={[int(r) for r in bad_rows]} "
-                f"first_bad_cols={[int(c) for c in bad_cols[:8]]}"
+                f"{_ctx_str(ctx)} "
+                f"{'; '.join(bad_detail[:4])}"
             )
-        if not crit_fin:
+        if critic_state is not None and not np.isfinite(critic_state).all():
             bad_positions = np.where(~np.isfinite(critic_state))
             raise ValueError(
                 f"Non-finite critic_state: "
-                f"iter={ctx.get('iteration','?')} env={ctx.get('env_idx','?')} "
-                f"step={ctx.get('total_steps','?')} "
-                f"first_bad_idx={[int(p[0]) for p in zip(*bad_positions)][:8]}"
+                f"{_ctx_str(ctx)} "
+                f"bad_idx={[int(p[0]) for p in zip(*bad_positions)][:8]}"
+            )
+
+    # ---- Active rnn_hidden: must be finite (inactive already zeroed) ----
+    if rnn_hidden is not None and active_rows.any():
+        hid_fin = np.isfinite(rnn_hidden[active_rows])
+        if not hid_fin.all():
+            bad_detail = []
+            active_indices = np.where(active_rows)[0]
+            for i, row_idx in enumerate(active_indices):
+                row_fin = hid_fin[i]
+                if not row_fin.all():
+                    bad_cols = np.where(~row_fin)[0]
+                    diag["active_hidden_nonfinite_count"] += len(bad_cols)
+                    bad_detail.append(
+                        f"row={int(row_idx)} hidden_idx={[int(c) for c in bad_cols[:8]]}"
+                    )
+            raise ValueError(
+                f"Non-finite rnn_hidden for active agent: "
+                f"{_ctx_str(ctx)} "
+                f"{'; '.join(bad_detail[:4])}"
             )
 
     return {

@@ -234,9 +234,14 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
                     out["rnn_hidden"].detach().cpu().numpy(), active)
             actions = zero_inactive_actions(
                 out["action"].detach().cpu().numpy(), active)
-            if np.isnan(actions).any():
-                nan_detected = True
-                break
+            active_mask_np = active > 0.5
+            if active_mask_np.any():
+                if not np.isfinite(actions[active_mask_np]).all():
+                    nan_detected = True
+                    break
+                if not np.isfinite(float(out["value"].item())):
+                    nan_detected = True
+                    break
             mav_sat_values.append(float(np.mean(np.abs(actions[0:1]) >= 0.999)))
             if actions.shape[0] > 1:
                 uav_sat_values.append(float(np.mean(np.abs(actions[1:]) >= 0.999)))

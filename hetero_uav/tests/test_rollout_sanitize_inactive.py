@@ -7,34 +7,22 @@ import torch
 
 
 # ---------------------------------------------------------------------------
-# Test data helpers
-# ---------------------------------------------------------------------------
-def _make_obs(num_agents: int = 3, dead_agent: int = 0) -> tuple:
-    actor_obs = np.zeros((num_agents, 96), dtype=np.float32)
-    for i in range(num_agents):
-        actor_obs[i] = np.random.randn(96).astype(np.float32)
-    active = np.ones(num_agents, dtype=np.float32)
-    if dead_agent is not None and 0 <= dead_agent < num_agents:
-        actor_obs[dead_agent] = np.nan
-        active[dead_agent] = 0.0
-    return actor_obs, active
-
-
-# ---------------------------------------------------------------------------
 # sanitize_policy_inputs tests
 # ---------------------------------------------------------------------------
 def test_inactive_nan_obs_zeroed_by_sanitize():
-    """Inactive MAV with NaN obs → sanitized, policy.act does not crash."""
     from algorithms.happo.rollout_safety import sanitize_policy_inputs
     from algorithms.happo.happo_policy import HAPPOReferencePolicy
 
-    actor_obs, active = _make_obs(3, dead_agent=0)
-    san = sanitize_policy_inputs(actor_obs, active, context={"env_idx": 0})
+    actor_obs = np.random.randn(3, 96).astype(np.float32)
+    actor_obs[0, :] = np.nan
+    active = np.array([0.0, 1.0, 1.0], dtype=np.float32)
 
+    san = sanitize_policy_inputs(actor_obs, active, context={"env_idx": 0})
     assert san["diagnostics"]["inactive_count"] == 1
     assert not np.isnan(san["actor_obs"]).any()
     assert np.all(san["actor_obs"][0] == 0.0)
     assert np.any(san["actor_obs"][1] != 0.0)
+    assert np.any(san["actor_obs"][2] != 0.0)
 
     policy = HAPPOReferencePolicy(96, 480)
     policy.eval()
@@ -43,40 +31,72 @@ def test_inactive_nan_obs_zeroed_by_sanitize():
     assert torch.isfinite(out["action"]).all()
 
 
-def test_inactive_rnn_hidden_zeroed_by_sanitize():
-    """Inactive hidden rows (even with random values) must be zeroed."""
+def test_active_nan_obs_raises_with_specific_row_and_col():
     from algorithms.happo.rollout_safety import sanitize_policy_inputs
 
-    actor_obs, active = _make_obs(3, dead_agent=0)
-    actor_obs[0] = 0.0  # assume already zeroed by prior sanitization
-    h = np.random.randn(3, 128).astype(np.float32)
-    h[0] = np.nan  # simulate stale hidden for dead MAV
+    actor_obs = np.random.randn(3, 96).astype(np.float32)
+    actor_obs[1, 5] = np.nan   # row=1, col=5
+    active = np.ones(3, dtype=np.float32)
 
-    san = sanitize_policy_inputs(actor_obs, active, rnn_hidden=h)
-    assert np.all(san["rnn_hidden"][0] == 0.0)
+    with pytest.raises(ValueError) as exc_info:
+        sanitize_policy_inputs(actor_obs, active)
+    msg = str(exc_info.value)
+    assert "Non-finite actor_obs" in msg
+    assert "row=1" in msg
+    assert "cols=[5" in msg
 
 
-def test_active_nan_obs_raises_value_error():
-    """Active agent obs with NaN must raise ValueError with row info."""
+def test_active_nan_obs_two_rows_reports_both():
     from algorithms.happo.rollout_safety import sanitize_policy_inputs
 
-    actor_obs, active = _make_obs(3, dead_agent=None)  # all alive
-    actor_obs[1, 5] = np.nan  # UAV 1 has NaN
+    actor_obs = np.random.randn(3, 96).astype(np.float32)
+    actor_obs[0, 3] = np.nan
+    actor_obs[2, 7] = np.inf
+    active = np.ones(3, dtype=np.float32)
 
-    with pytest.raises(ValueError, match="Non-finite actor_obs for active agent"):
-        sanitize_policy_inputs(actor_obs, active, context={"env_idx": 0})
+    with pytest.raises(ValueError) as exc_info:
+        sanitize_policy_inputs(actor_obs, active)
+    msg = str(exc_info.value)
+    assert "row=0" in msg and "cols=[3" in msg
+    assert "row=2" in msg and "cols=[7" in msg
 
 
-def test_active_critic_nan_raises_value_error():
-    """Active critic_state with NaN must raise ValueError."""
+def test_active_critic_nan_raises():
     from algorithms.happo.rollout_safety import sanitize_policy_inputs
 
-    actor_obs, active = _make_obs(3, dead_agent=None)
+    actor_obs = np.random.randn(3, 96).astype(np.float32)
+    active = np.ones(3, dtype=np.float32)
     critic = np.random.randn(480).astype(np.float32)
     critic[10] = np.nan
 
     with pytest.raises(ValueError, match="Non-finite critic_state"):
         sanitize_policy_inputs(actor_obs, active, critic_state=critic)
+
+
+def test_active_rnn_hidden_nan_fail_fast():
+    from algorithms.happo.rollout_safety import sanitize_policy_inputs
+
+    actor_obs = np.random.randn(3, 96).astype(np.float32)
+    active = np.ones(3, dtype=np.float32)
+    hidden = np.random.randn(3, 128).astype(np.float32)
+    hidden[1, 42] = np.nan
+
+    with pytest.raises(ValueError, match="Non-finite rnn_hidden for active agent"):
+        sanitize_policy_inputs(actor_obs, active, rnn_hidden=hidden)
+
+
+def test_inactive_rnn_hidden_nan_zeroed_not_raised():
+    from algorithms.happo.rollout_safety import sanitize_policy_inputs
+
+    actor_obs = np.random.randn(3, 96).astype(np.float32)
+    actor_obs[0, :] = np.nan  # dead MAV
+    active = np.array([0.0, 1.0, 1.0], dtype=np.float32)
+    hidden = np.random.randn(3, 128).astype(np.float32)
+    hidden[0, :] = np.nan  # dead MAV has NaN hidden
+
+    san = sanitize_policy_inputs(actor_obs, active, rnn_hidden=hidden)
+    assert np.all(san["rnn_hidden"][0] == 0.0)
+    assert np.any(san["rnn_hidden"][1] != 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +125,7 @@ def test_zero_inactive_hidden_zeros_inactive():
 
 
 # ---------------------------------------------------------------------------
-# End-to-end: recurrent policy survives sanitized dead-agent forward
+# End-to-end recurrent
 # ---------------------------------------------------------------------------
 def test_recurrent_policy_survives_dead_agent_loop():
     from algorithms.happo.rollout_safety import (
@@ -118,7 +138,9 @@ def test_recurrent_policy_survives_dead_agent_loop():
     rnn_hidden = np.zeros((3, 128), dtype=np.float32)
 
     for step in range(5):
-        actor_obs, active = _make_obs(3, dead_agent=0)
+        actor_obs = np.random.randn(3, 96).astype(np.float32)
+        actor_obs[0, :] = np.nan
+        active = np.array([0.0, 1.0, 1.0], dtype=np.float32)
         san = sanitize_policy_inputs(actor_obs, active, rnn_hidden=rnn_hidden)
         rnn_hidden = san["rnn_hidden"]
         with torch.no_grad():
