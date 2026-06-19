@@ -4,3 +4,4 @@ outputs/
 *.ckpt
 __pycache__/
 .pytest_cache/
+.pytest_tmp_*/
