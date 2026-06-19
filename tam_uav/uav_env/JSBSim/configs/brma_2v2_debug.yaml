@@ -1,0 +1,9 @@
+env_type: jsbsim_brma
+max_num_red: 2
+max_num_blue: 2
+num_missiles_per_plane: 2
+sim_freq: 60
+agent_interaction_steps: 12
+max_steps: 20
+enable_gcas_for_blue: true
+suppress_jsbsim_output: true

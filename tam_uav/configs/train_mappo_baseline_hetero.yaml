@@ -1,0 +1,14 @@
+env_config: uav_env/JSBSim/configs/hetero_train_2v2_mav_attack.yaml
+iterations: 2
+rollout_length: 32
+seed: 0
+device: cpu
+gamma: 0.99
+gae_lambda: 0.95
+lr_actor: 0.0005
+lr_critic: 0.0005
+clip_param: 0.2
+entropy_coef: 0.01
+value_loss_coef: 0.5
+max_grad_norm: 10
+ppo_epochs: 4
