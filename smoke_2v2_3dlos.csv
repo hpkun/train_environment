@@ -1,2 +1,0 @@
-Iteration,Step,ActorLoss,CriticLoss,Entropy,RedMeanReward,RedWinRate,RedRewardStd,WinRateRecent,RedMissiles,BlueMissiles,Episodes,RedWins,BlueWins,Draws,RedAliveMean,BlueAliveMean,RedDeathsMissile,RedDeathsCrash,BlueDeathsMissile,BlueDeathsCrash,RedMissileHits,BlueMissileHits,RedMissileHitRate,BlueMissileHitRate,KD_Red,RWR,RewardVersion
-1,2000,-0.020867,9.884935,0.216169,-74.0826,0.000000,0.4745,0.000000,0.0,2.0,4,0,4,0,0.0000,2.0000,8,0,0,0,0,8,0.000000,0.333333,0.000000,0.000000,fixed_ta_alt_eq17_3dlos_v1
