@@ -205,14 +205,31 @@ class OpponentPolicy:
 
     @classmethod
     def _tam_direct_action(cls, obs: dict) -> np.ndarray:
+        # mav_shared_geo enemy_geo_states layout:
+        #   [0]=rel_speed/600, [1]=delta_h/10000, [2]=distance/40000,
+        #   [3]=ATA/π, [4]=AA/π
         target, _target_index = cls._select_nearest_target(obs)
         if target is None:
-            return np.array([0.6, 0.0, 0.0, 0.0], dtype=np.float32)
+            # No target: max-throttle + slight climb to survive cold-start spool-up
+            altitude = cls._altitude_value(obs)
+            elevator = -0.3  # aggressive climb to survive F16 cold-start spool-up at 6000m
+            throttle = 1.0
+            if altitude is not None and altitude < 0.3:
+                elevator = -0.4
+            return np.array([throttle, 0.0, elevator, 0.0], dtype=np.float32)
 
         distance = cls._distance(target)
-        throttle = 1.0 if distance > 0.6 else 0.8 if distance > 0.25 else 0.6
-        aileron = float(target[1]) * 2.0 if target.size >= 2 else 0.0
-        elevator = float(target[2]) * 2.0 if target.size >= 3 else 0.0
+        # Throttle: high when far or cold-start phase, moderate only when very close
+        throttle = 0.9 if distance > 0.2 else 0.7
+        # Aileron: proportional to ATA (Angle-Off) for lateral pursuit
+        aileron = float(np.clip(target[3] * 0.5, -0.5, 0.5)) if target.size >= 4 else 0.0
+        # Elevator: NEGATIVE = nose up for F16 JSBSim; target[1]>0 means target above blue → climb
+        elevator = float(np.clip(-target[1] * 2.0, -0.4, 0.4)) if target.size >= 2 else 0.0
+        # Altitude safety: pull up when low
+        altitude = cls._altitude_value(obs)
+        if altitude is not None and altitude < 0.25:
+            elevator = -0.35  # NEGATIVE = nose up for F16 JSBSim
+            throttle = 1.0
         return cls._clip_action([throttle, aileron, elevator, 0.0])
 
     LOST_TARGET_TURN_BACK_LIMIT = 50  # env steps before giving up
