@@ -101,8 +101,9 @@ role, not a specific aircraft model**. The MAV has:
 ### Conclusion
 
 **F22 is NOT a paper requirement.** It is our implementation choice. The paper
-does not specify F22. The project's own documentation already recommends F16
-surrogate as the main experimental path.
+does not specify F22. The F22 was selected as the MAV implementation for the
+heterogeneous scenario; F16 surrogate is an engineering diagnostic baseline,
+not the default mainline replacement.
 
 ## 6. Engine Startup Evidence
 
@@ -171,21 +172,19 @@ Therefore:
 
 ## 9. Recommended Next Action
 
-1. **Add `--config` parameter to `check_f22_action_path.py`** so it uses the
-   official `happo_ref_v0` config (not legacy `hetero_mav_shared_geo_3v2.yaml`).
+1. **Aircraft model admissibility audit** ✅ COMPLETED — see
+   `outputs/environment_audit/aircraft_model_admissibility.md`.
+   Result: **F16 ADMISSIBLE, F22 NOT ADMISSIBLE** under parent JSBSim init.
 
-2. **Run an F16 vs F22 thrust diagnostic** using the official configs, comparing
-   engine thrust at frame 60 for both models under identical fixed actions.
+2. **F22 main line paused** pending human decision on:
+   - Investigate F22 JSBSim model (F119 engines at 6000m may need different
+     throttle/engine management than the generic `init_running()` provides)
+   - Or adopt a different MAV aircraft model that meets the admissibility criteria
+   - **F16 surrogate remains a diagnostic baseline, not the default mainline**
 
-3. **If F22 thrust is confirmed low relative to F16 under identical conditions:**
-   - This is a JSBSim model issue, not a code bug
-   - Options: use F16 surrogate (paper-supported), or investigate F22 JSBSim model
-   - Do NOT patch engine startup without explicit review
+3. **Do NOT modify engine startup** without explicit approval and paper/parent
+   project evidence.
 
-4. **If F22 thrust is comparable to F16:**
-   - The original "F22 uncontrollable" diagnosis was based on wrong config
-   - Re-run F22 training with the sanitize fix
-
-5. **Regardless of thrust findings:**
-   - Update `paper_experiment_setup.md` to remove any implication that F22 is required
-   - Document that the paper does not mandate a specific aircraft model
+4. **Update `paper_experiment_setup.md`** to clarify that the paper does not
+   mandate a specific aircraft model, and that F22 is our current implementation
+   choice under investigation.
