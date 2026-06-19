@@ -215,6 +215,8 @@ class UavCombatEnv(gymnasium.Env):
                  sim_freq=60, agent_interaction_steps=12, max_steps=1000,
                  enable_gcas_for_blue: bool = True,
                  suppress_jsbsim_output: bool = True,
+                 control_mode_by_role: dict | None = None,
+                 direct_fcs_trim_by_role: dict | None = None,
                  render_mode=None):
         super().__init__()
         self.max_num_blue = max_num_blue
@@ -225,6 +227,8 @@ class UavCombatEnv(gymnasium.Env):
         self.agent_interaction_steps = agent_interaction_steps
         self.max_steps = max_steps
         self.suppress_jsbsim_output = suppress_jsbsim_output
+        self.control_mode_by_role = dict(control_mode_by_role or {})
+        self.direct_fcs_trim_by_role = dict(direct_fcs_trim_by_role or {})
         self.physics_dt = 1.0 / sim_freq
         self.env_dt = agent_interaction_steps * self.physics_dt
         self.missile_cooldown_frames = int(round(0.5 * self.sim_freq))
@@ -620,6 +624,15 @@ class UavCombatEnv(gymnasium.Env):
                                 (vn * dn + ve * de) / (vh * rh))
                 turn_dir = 1.0 if ao > 0 else -1.0
 
+                if self._control_mode_for(aid) == "direct_fcs_3d":
+                    # Direct-FCS evade: pull up + break turn + full throttle
+                    elevator_sign_chosen = 1.0
+                    elevator_cmd = float(np.clip(elevator_sign_chosen * 0.3, -1.0, 1.0))
+                    aileron_cmd = float(np.clip(turn_dir * 0.5, -1.0, 1.0))
+                    throttle_cmd = 0.9
+                    targets[aid] = (elevator_cmd, aileron_cmd, throttle_cmd)
+                    continue
+
                 if alt_m > 5000.0:
                     # High altitude: break turn with ~60° bank.
                     # Pull 25° pitch while executing a ~60° heading break.
@@ -677,6 +690,16 @@ class UavCombatEnv(gymnasium.Env):
             #    target_heading = act[1] * 180°            ∈ [−180°, +180°]  (absolute)
             #    target_velocity ∈ [102, 408] m/s
             # =================================================================
+            # ---- Direct-FCS path (F22 MAV, paper-aligned) ----
+            if self._control_mode_for(aid) == "direct_fcs_3d":
+                elevator_cmd = float(np.clip(act[0], -1.0, 1.0))
+                aileron_cmd = float(np.clip(act[1], -1.0, 1.0))
+                # TAM-HAPPO throttle Ct ∈ [0.4, 0.9]
+                throttle_cmd = 0.4 + (float(act[2]) + 1.0) / 2.0 * 0.5
+                throttle_cmd = float(np.clip(throttle_cmd, 0.4, 0.9))
+                targets[aid] = (elevator_cmd, aileron_cmd, throttle_cmd)
+                continue
+
             target_velocity = self.VELOCITY_MIN + (float(act[2]) + 1.0) / 2.0 * (
                 self.VELOCITY_MAX - self.VELOCITY_MIN)
             target_pitch = float(act[0]) * np.deg2rad(self.PITCH_DEG)
@@ -689,13 +712,49 @@ class UavCombatEnv(gymnasium.Env):
     #  PID control application (per physics frame)
     # ------------------------------------------------------------------
 
+    def _control_mode_for(self, agent_id: str) -> str:
+        """Return control mode for an agent from config (default: pid_target)."""
+        # Resolve role: check HeteroUavCombatEnv attributes first, fallback to agent_id
+        role = getattr(self, "agent_roles", {}).get(agent_id, "")
+        if not role and agent_id.startswith("red_"):
+            role = "mav" if agent_id == "red_0" else "attack_uav"
+        return str(self.control_mode_by_role.get(role, "pid_target"))
+
+    def _direct_fcs_trim_for(self, agent_id: str) -> dict | None:
+        role = getattr(self, "agent_roles", {}).get(agent_id, "")
+        if not role and agent_id.startswith("red_"):
+            role = "mav" if agent_id == "red_0" else "attack_uav"
+        return self.direct_fcs_trim_by_role.get(role)
+
     def _apply_pid_controls(self, targets: dict):
-        """Read current flight state, compute BTT PID, write to JSBSim."""
+        """Read current flight state, compute BTT PID, write to JSBSim.
+
+        For agents with control_mode = "direct_fcs_3d", the target tuple
+        carries pre-mapped FCS commands directly — no PID computation.
+        """
         for aid, target in targets.items():
             if target is None:
                 continue
             sim = self._get_sim(aid)
             if sim is None or not sim.is_alive:
+                continue
+
+            control_mode = self._control_mode_for(aid)
+            if control_mode == "direct_fcs_3d":
+                # target = (elevator_cmd, aileron_cmd, throttle_cmd)
+                elevator, aileron, throttle_cmd = target
+                rudder = 0.0
+                # Apply direct-FCS trim if configured
+                trim = self._direct_fcs_trim_for(aid)
+                if trim is not None:
+                    elevator += trim.get("elevator", 0.0)
+                elevator = float(np.clip(elevator, -1.0, 1.0))
+                aileron = float(np.clip(aileron, -1.0, 1.0))
+                throttle_cmd = float(np.clip(throttle_cmd, 0.0, 1.0))
+                sim.set_property_value("fcs/aileron-cmd-norm", aileron)
+                sim.set_property_value("fcs/elevator-cmd-norm", elevator)
+                sim.set_property_value("fcs/rudder-cmd-norm", rudder)
+                sim.set_property_value("fcs/throttle-cmd-norm", throttle_cmd)
                 continue
 
             target_pitch, target_heading, target_velocity = target
