@@ -544,7 +544,6 @@
 
             <actuator name="fcs/aileron-act">
                 <input> fcs/roll-reg-scale</input>
-                <lag> 0.00 </lag>
                 <rate_limit> 2.29 </rate_limit>
                 <clipto>
                     <min> -1 </min>
@@ -682,7 +681,6 @@
         
             <actuator name="fcs/rudder-act">
                 <input> fcs/yaw-reg-scale</input>
-                <lag> 0 </lag>
                 <rate_limit> 2.673 </rate_limit>
                 
                 <clipto>
@@ -1006,7 +1004,6 @@
 
             <actuator name="fcs/elevator-act">
                 <input> fcs/el-reg-scale</input>
-                <lag> 0.0 </lag>
                 <rate_limit> 2 </rate_limit>
                 <clipto>
                     <min> -1 </min>
