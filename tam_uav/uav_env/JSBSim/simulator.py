@@ -392,133 +392,111 @@ class AircraftSimulator(BaseSimulator):
         for key, value in self.init_state.items():
             self.set_property_value(Catalog[key], value)
 
+        # ---- Airborne initial-state stabilization (pre-run_ic FCS) ----
+        stab = self._initial_state_stabilization or getattr(self, "_initial_state_stabilization", None) or {}
+        _stab_enabled = (stab.get("enabled") and self.model in stab.get("apply_to_models", []))
+        _stab_report: dict = {"enabled": _stab_enabled, "model": self.model}
+        _missing = []
+        def _ss(prop, val):
+            try: self.jsbsim_exec.set_property_value(prop, float(val))
+            except Exception:
+                if prop not in _missing: _missing.append(prop)
+        def _sg(prop):
+            try: return float(self.jsbsim_exec.get_property_value(prop))
+            except Exception: return 0.0
+
+        # Normalize FCS keys once
+        _FCS = ["fcs/throttle-cmd-norm","fcs/throttle-pos-norm","fcs/aileron-cmd-norm",
+                "fcs/elevator-cmd-norm","fcs/rudder-cmd-norm"]
+        _FCS_MAP = {"throttle_cmd_norm":"fcs/throttle-cmd-norm","throttle_pos_norm":"fcs/throttle-pos-norm",
+                    "aileron_cmd_norm":"fcs/aileron-cmd-norm","elevator_cmd_norm":"fcs/elevator-cmd-norm",
+                    "rudder_cmd_norm":"fcs/rudder-cmd-norm"}
+        _fcs: dict = {}
+        raw_fcs = stab.get("fcs_command", {}) if _stab_enabled else {}
+        for s,p in _FCS_MAP.items():
+            if s in raw_fcs: _fcs[p] = float(raw_fcs[s])
+        for p in _FCS:
+            if p in raw_fcs: _fcs[p] = float(raw_fcs[p])
+
+        if _stab_enabled:
+            for p, v in _fcs.items():
+                _ss(p, v)
+            _stab_report["fcs_before_run_ic"] = {p: _sg(p) for p in _FCS}
+
         success = self.jsbsim_exec.run_ic()
         if not success:
             raise RuntimeError("JSBSim failed to init simulation conditions.")
+
+        if _stab_enabled:
+            # Re-apply FCS after run_ic (IC may reset them)
+            for p, v in _fcs.items():
+                _ss(p, v)
+            _stab_report["fcs_after_run_ic"] = {p: _sg(p) for p in _FCS}
 
         # Restart propulsion
         propulsion = self.jsbsim_exec.get_propulsion()
         n = propulsion.get_num_engines()
         for j in range(n):
             propulsion.get_engine(j).init_running()
+
+        if _stab_enabled:
+            for p, v in _fcs.items():
+                _ss(p, v)
+            _stab_report["fcs_before_steady_state"] = {p: _sg(p) for p in _FCS}
+
         propulsion.get_steady_state()
 
-        # ---- Airborne initial-state stabilization ----
-        stab = self._initial_state_stabilization or getattr(self, "_initial_state_stabilization", None) or {}
-        if (stab.get("enabled") and self.model in stab.get("apply_to_models", [])):
-            report: dict = {"enabled": True, "model": self.model, "mode": stab.get("mode")}
-            missing = []
+        if _stab_enabled:
+            # ---- Warmup ----
             warmup_s = float(stab.get("warmup_seconds", 35.0))
-
-            def _safe_set(prop, val):
-                try:
-                    self.jsbsim_exec.set_property_value(prop, float(val))
-                except Exception:
-                    if prop not in missing:
-                        missing.append(prop)
-
-            def _safe_get(prop):
-                try:
-                    return float(self.jsbsim_exec.get_property_value(prop))
-                except Exception:
-                    return 0.0
-
-            # ---- Normalize FCS command keys (short → JSBSim path) ----
-            _JSBSIM_FCS_PROPS = [
-                "fcs/throttle-cmd-norm", "fcs/throttle-pos-norm",
-                "fcs/aileron-cmd-norm", "fcs/elevator-cmd-norm",
-                "fcs/rudder-cmd-norm",
-            ]
-            _SHORT_TO_JSBSIM = {
-                "throttle_cmd_norm": "fcs/throttle-cmd-norm",
-                "throttle_pos_norm": "fcs/throttle-pos-norm",
-                "aileron_cmd_norm": "fcs/aileron-cmd-norm",
-                "elevator_cmd_norm": "fcs/elevator-cmd-norm",
-                "rudder_cmd_norm": "fcs/rudder-cmd-norm",
-            }
-            raw_fcs = stab.get("fcs_command", {})
-            norm_fcs: dict[str, float] = {}
-            for short, path in _SHORT_TO_JSBSIM.items():
-                if short in raw_fcs:
-                    norm_fcs[path] = float(raw_fcs[short])
-            for path in _JSBSIM_FCS_PROPS:
-                if path in raw_fcs:
-                    norm_fcs[path] = float(raw_fcs[path])
-            report["requested_fcs_command"] = dict(raw_fcs)
-            report["normalized_fcs_command"] = dict(norm_fcs)
-
-            # ---- Target velocity from init_state (body-frame U,V,W + yaw → NED) ----
-            target_u_fps = float(self.init_state.get("ic/u-fps", 820.21))
-            target_v_fps = float(self.init_state.get("ic/v-fps", 0.0))
-            target_w_fps = float(self.init_state.get("ic/w-fps", 0.0))
-            target_yaw_rad = float(np.deg2rad(self.init_state.get("ic/psi-true-deg", 0.0)))
-            # Body→NED rotation
-            cos_y = np.cos(target_yaw_rad)
-            sin_y = np.sin(target_yaw_rad)
-            target_vn_fps = target_u_fps * cos_y - target_v_fps * sin_y
-            target_ve_fps = target_u_fps * sin_y + target_v_fps * cos_y
-            target_vd_fps = -target_w_fps  # body W-up → NED D-up
-            # Also store body-frame targets for direct velocity properties
-            report["target_u_fps"] = target_u_fps
-            report["target_vn_fps"] = target_vn_fps
-            report["target_ve_fps"] = target_ve_fps
-            report["target_speed_mps"] = float(np.linalg.norm(
-                [target_u_fps * 0.3048, target_v_fps * 0.3048, target_w_fps * 0.3048]))
-
-            # Cache geodetic/attitude targets from init_state
-            target_lon = float(self.init_state.get("ic/long-gc-deg", 120.0))
-            target_lat = float(self.init_state.get("ic/lat-geod-deg", 60.0))
-            target_alt_ft = float(self.init_state.get("ic/h-sl-ft", 19685.0))
-            target_roll = float(self.init_state.get("ic/phi-rad", 0.0))
-            target_pitch = float(self.init_state.get("ic/theta-rad", 0.0))
-
-            # Apply FCS commands before warmup
-            for path, val in norm_fcs.items():
-                _safe_set(path, val)
-            report["fcs_command_before_warmup_actual"] = {
-                p: _safe_get(p) for p in _JSBSIM_FCS_PROPS
-            }
-
-            # Run warmup physics frames
             n_frames = int(round(warmup_s / self.dt))
             for _ in range(n_frames):
                 self.jsbsim_exec.run()
-
             self._update_properties()
-            report["speed_after_warmup_before_recenter"] = float(
-                np.linalg.norm(self.get_velocity()))
+            _stab_report["speed_after_warmup"] = float(np.linalg.norm(self.get_velocity()))
 
-            # Recenter: restore config-specified initial state
+            # ---- Final IC-based recenter ----
             if stab.get("recenter_after_warmup"):
-                if stab.get("restore_initial_geodetic"):
-                    _safe_set("position/long-gc-deg", target_lon)
-                    _safe_set("position/lat-geod-deg", target_lat)
-                    _safe_set("position/h-sl-ft", target_alt_ft)
-                if stab.get("restore_initial_attitude"):
-                    _safe_set("attitude/roll-rad", target_roll)
-                    _safe_set("attitude/pitch-rad", target_pitch)
-                    _safe_set("attitude/heading-true-rad", target_yaw_rad)
-                if stab.get("restore_initial_velocity"):
-                    # Set body-frame velocity (primary JSBSim representation)
-                    _safe_set("velocities/u-fps", target_u_fps)
-                    _safe_set("velocities/v-fps", target_v_fps)
-                    _safe_set("velocities/w-fps", target_w_fps)
-
-            # Re-apply FCS after recenter, then one frame to propagate state
-            for path, val in norm_fcs.items():
-                _safe_set(path, val)
-            self.jsbsim_exec.run()
-            # Read actual FCS values back
-            report["fcs_command_after_recenter_actual"] = {
-                p: _safe_get(p) for p in _JSBSIM_FCS_PROPS
-            }
+                self._clear_default_condition()
+                for key, value in self.init_state.items():
+                    self.set_property_value(Catalog[key], value)
+                for p, v in _fcs.items():
+                    _ss(p, v)
+                # run_ic() restores the config-specified IC state
+                self.jsbsim_exec.run_ic()
+                # Re-apply FCS after run_ic
+                for p, v in _fcs.items():
+                    _ss(p, v)
+                # NO extra self.jsbsim_exec.run() — reset must return clean state
+                _stab_report["fcs_after_final_recenter"] = {p: _sg(p) for p in _FCS}
 
             self._update_properties()
-            report["missing_properties"] = missing
-            report["speed_after_recenter"] = float(np.linalg.norm(self.get_velocity()))
-            report["altitude_after_recenter"] = float(self.get_geodetic()[2])
-            report["heading_after_recenter"] = float(np.rad2deg(self.get_rpy()[2]))
-            self._initial_stabilization_report = report
+            spd = float(np.linalg.norm(self.get_velocity()))
+            alt = float(self.get_geodetic()[2])
+            yaw = float(np.rad2deg(self.get_rpy()[2]))
+            target_spd = float(np.linalg.norm(
+                [float(self.init_state.get("ic/u-fps",820))*0.3048,
+                 float(self.init_state.get("ic/v-fps",0))*0.3048,
+                 float(self.init_state.get("ic/w-fps",0))*0.3048]))
+            target_yaw = float(self.init_state.get("ic/psi-true-deg", 0))
+            target_alt = float(self.init_state.get("ic/h-sl-ft", 19685)) * 0.3048
+            _stab_report.update({
+                "target_speed_mps": target_spd,
+                "target_yaw_deg": target_yaw,
+                "target_altitude_m": target_alt,
+                "speed_after_final_recenter": spd,
+                "yaw_after_final_recenter": yaw,
+                "altitude_after_final_recenter": alt,
+                "speed_error_mps": spd - target_spd,
+                "yaw_error_deg": yaw - target_yaw,
+                "altitude_error_m": alt - target_alt,
+                "missing_properties": _missing,
+                "passed_reset_contract": (
+                    abs(spd - target_spd) <= 10.0 and
+                    abs(alt - target_alt) <= 50.0 and
+                    abs(abs(yaw - target_yaw) % 360) <= 2.0),
+            })
+            self._initial_stabilization_report = _stab_report
 
         self._update_properties()
 
