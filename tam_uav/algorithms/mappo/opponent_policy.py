@@ -111,10 +111,14 @@ class OpponentPolicy:
         if self.mode == "brma_rule":
             return self._brma_rule_actions(obs_dict, blue_ids, env)
         if self.mode == "tam_direct_fsm":
-            return {
-                bid: self._tam_direct_action(obs_dict.get(bid, {}))
-                for bid in blue_ids
-            }
+            actions = {}
+            for index, bid in enumerate(blue_ids):
+                ownship = self._ownship_context(bid, own_kinematics, own_positions)
+                actions[bid] = self._tam_direct_action(
+                    obs_dict.get(bid, {}), blue_id=bid, env=env,
+                    ownship=ownship, agent_index=index,
+                )
+            return actions
         return {
             bid: self._rule_nearest_action(obs_dict.get(bid, {}))
             for bid in blue_ids
@@ -204,33 +208,137 @@ class OpponentPolicy:
         return np.clip(action, -1.0, 1.0).astype(np.float32)
 
     @classmethod
-    def _tam_direct_action(cls, obs: dict) -> np.ndarray:
-        # mav_shared_geo enemy_geo_states layout:
-        #   [0]=rel_speed/600, [1]=delta_h/10000, [2]=distance/40000,
-        #   [3]=ATA/π, [4]=AA/π
-        target, _target_index = cls._select_nearest_target(obs)
-        if target is None:
-            # No target: max-throttle + slight climb to survive cold-start spool-up
-            altitude = cls._altitude_value(obs)
-            elevator = -0.3  # aggressive climb to survive F16 cold-start spool-up at 6000m
-            throttle = 1.0
-            if altitude is not None and altitude < 0.3:
-                elevator = -0.4
-            return np.array([throttle, 0.0, elevator, 0.0], dtype=np.float32)
+    def _tam_obs_source_and_target(cls, obs: dict):
+        """Return (source_name, target_state_or_None, nearest_target_idx_or_None)."""
+        # Check enemy_states first (11-dim body-frame)
+        es = np.asarray(obs.get("enemy_states", []), dtype=np.float32)
+        if es.ndim == 2 and es.shape[0] > 0:
+            target, tidx = cls._select_nearest_target(obs)
+            return ("enemy_states", target, tidx)
+        # Check enemy_geo_states (5-dim geometric)
+        egs = np.asarray(obs.get("enemy_geo_states", []), dtype=np.float32)
+        if egs.ndim == 2 and egs.shape[0] > 0:
+            target, tidx = cls._select_nearest_target(obs)
+            return ("enemy_geo_states", target, tidx)
+        return ("none", None, None)
 
-        distance = cls._distance(target)
-        # Throttle: high when far or cold-start phase, moderate only when very close
-        throttle = 0.9 if distance > 0.2 else 0.7
-        # Aileron: proportional to ATA (Angle-Off) for lateral pursuit
-        aileron = float(np.clip(target[3] * 0.5, -0.5, 0.5)) if target.size >= 4 else 0.0
-        # Elevator: NEGATIVE = nose up for F16 JSBSim; target[1]>0 means target above blue → climb
-        elevator = float(np.clip(-target[1] * 2.0, -0.4, 0.4)) if target.size >= 2 else 0.0
-        # Altitude safety: pull up when low
-        altitude = cls._altitude_value(obs)
-        if altitude is not None and altitude < 0.25:
-            elevator = -0.35  # NEGATIVE = nose up for F16 JSBSim
-            throttle = 1.0
-        return cls._clip_action([throttle, aileron, elevator, 0.0])
+    @classmethod
+    def _tam_blue_altitude_m(cls, obs: dict, env=None, blue_id: str = "") -> float:
+        """Return blue altitude in meters. Prefer env sim, then obs."""
+        if env is not None and blue_id and hasattr(env, "blue_planes"):
+            sim = env.blue_planes.get(blue_id)
+            if sim is not None and sim.is_alive:
+                return float(sim.get_geodetic()[2])
+        alt_arr = np.asarray(obs.get("altitude", []), dtype=np.float32).reshape(-1)
+        if alt_arr.size > 0 and alt_arr[0] > 100:
+            return float(alt_arr[0])
+        ego = np.asarray(obs.get("ego_geo_state", []), dtype=np.float32).reshape(-1)
+        if ego.size >= 3:
+            return float(ego[2]) * 10000.0
+        return 6000.0
+
+    @classmethod
+    def _tam_blue_speed_ms(cls, obs: dict, env=None, blue_id: str = "") -> float:
+        if env is not None and blue_id and hasattr(env, "blue_planes"):
+            sim = env.blue_planes.get(blue_id)
+            if sim is not None and sim.is_alive:
+                return float(np.linalg.norm(sim.get_velocity()))
+        vel = np.asarray(obs.get("velocity", []), dtype=np.float32).reshape(-1)
+        if vel.size >= 3:
+            return float(np.linalg.norm(vel))
+        return 250.0
+
+    @classmethod
+    def _tam_blue_rpy_rad(cls, obs: dict, env=None, blue_id: str = ""):
+        if env is not None and blue_id and hasattr(env, "blue_planes"):
+            sim = env.blue_planes.get(blue_id)
+            if sim is not None and sim.is_alive:
+                return sim.get_rpy()
+        ego = np.asarray(obs.get("ego_geo_state", []), dtype=np.float32).reshape(-1)
+        if ego.size >= 7:
+            return np.array([float(ego[6])*np.pi, float(ego[4])*np.pi, float(ego[5])*np.pi], dtype=np.float64)
+        return np.zeros(3, dtype=np.float64)
+
+    @classmethod
+    def _tam_direct_action(cls, obs: dict, blue_id: str = "", env=None,
+                           ownship: dict | None = None, agent_index: int = 0) -> np.ndarray:
+        # ---- Read blue state from env or obs ----
+        alt_m = cls._tam_blue_altitude_m(obs, env, blue_id)
+        speed_ms = cls._tam_blue_speed_ms(obs, env, blue_id)
+        rpy = cls._tam_blue_rpy_rad(obs, env, blue_id)
+        roll_deg = float(np.rad2deg(rpy[0]))
+        pitch_deg = float(np.rad2deg(rpy[1]))
+        # Estimate vertical speed from env sim if available
+        vs_ms = 0.0
+        if env is not None and blue_id and hasattr(env, "blue_planes"):
+            sim = env.blue_planes.get(blue_id)
+            if sim is not None and sim.is_alive:
+                vs_ms = float(sim.get_velocity()[2])
+        sim_time = 0.0
+        if env is not None:
+            sim_time = float(getattr(env, "current_step", 0)) * float(getattr(env, "env_dt", 0.2))
+
+        # ---- Source-aware target acquisition ----
+        source_name, target, _tidx = cls._tam_obs_source_and_target(obs)
+
+        # ---- Stability gate conditions ----
+        cold_start = sim_time < 40.0
+        speed_low = speed_ms < 180.0
+        alt_low = alt_m < 3500.0
+        roll_high = abs(roll_deg) > 45.0
+        pitch_high = abs(pitch_deg) > 30.0
+        descending_fast = vs_ms < -20.0
+        in_stability = cold_start or speed_low or alt_low or roll_high or pitch_high or descending_fast
+
+        throttle = 1.0  # always max during stability; pursuit may reduce
+        aileron = 0.0
+        elevator = 0.0
+        rudder = 0.0
+
+        if in_stability:
+            # ---- L1: Flight-stability controller ----
+            # Target pitch: climb to survive
+            if cold_start or speed_low:
+                target_pitch_deg = 10.0
+            elif alt_low or descending_fast:
+                target_pitch_deg = 15.0
+            else:
+                target_pitch_deg = 5.0
+            pitch_error_rad = np.deg2rad(target_pitch_deg) - rpy[1]
+            # F16: negative elevator = nose up
+            # Damping: descending → need more nose-up (more negative elevator)
+            damping = 0.1 * vs_ms if vs_ms < 0 else 0.0
+            elevator = float(np.clip(-0.5 * pitch_error_rad + damping, -0.35, 0.35))
+            # Roll leveling: negative aileron for positive roll in F16?
+            # From calibration: F16 positive aileron → positive roll
+            if abs(roll_deg) > 10.0:
+                aileron = float(np.clip(-0.02 * roll_deg, -0.25, 0.25))
+        else:
+            # ---- L2: Combat pursuit controller ----
+            throttle = 0.9
+            if target is not None:
+                if source_name == "enemy_geo_states":
+                    # Layout: [0]=rel_speed, [1]=delta_h/10000, [2]=dist/40000, [3]=ATA/π, [4]=AA/π
+                    distance = cls._distance(target)
+                    throttle = 1.0 if distance > 0.3 else 0.8
+                    # ATA → lateral pursuit (limited)
+                    if target.size >= 4:
+                        aileron = float(np.clip(target[3] * 0.4, -0.25, 0.25))
+                    # delta_h → elevator (negative = nose up, positive target[1] = target above)
+                    if target.size >= 2:
+                        elevator = float(np.clip(-target[1] * 1.5, -0.25, 0.25))
+                elif source_name == "enemy_states":
+                    # 11-dim body-frame: [dx,dy,dz_body, AO,TA,R, Vtgt, sin(roll),cos(roll),sin(pitch),cos(pitch)]
+                    distance = cls._distance(target)
+                    throttle = 1.0 if distance > 0.3 else 0.8
+                    if target.size >= 3:
+                        aileron = float(np.clip(target[1] * 0.3, -0.25, 0.25))
+                    if target.size >= 3:
+                        elevator = float(np.clip(-target[2] * 0.3, -0.25, 0.25))
+            # Small pitch-up bias for safety
+            elevator = float(np.clip(elevator - 0.02, -0.30, 0.30))
+
+        return cls._clip_action([throttle, aileron, elevator, rudder])
 
     LOST_TARGET_TURN_BACK_LIMIT = 50  # env steps before giving up
 
