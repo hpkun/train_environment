@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 from uav_env import make_env
 
-MAIN_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml"
+DEFAULT_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml"
 
 SCENARIOS = [
     ("level",       np.array([ 0.0,  0.0,  0.0], dtype=np.float32)),
@@ -76,10 +76,10 @@ def _actions(env, red0_action: np.ndarray) -> dict:
     return out
 
 
-def run_check(steps: int, disable_mav_trim: bool) -> dict:
+def run_check(config: str, steps: int, disable_mav_trim: bool) -> dict:
     records: dict[str, dict] = {}
     for name, action in SCENARIOS:
-        env = make_env(MAIN_CONFIG, env_type="jsbsim_hetero", suppress_jsbsim_output=False)
+        env = make_env(config, env_type="jsbsim_hetero", suppress_jsbsim_output=False)
         try:
             if disable_mav_trim:
                 env.action_trim_by_role.pop("mav", None)
@@ -294,6 +294,8 @@ def _markdown(data: dict) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=DEFAULT_CONFIG,
+                        help="Path to environment config YAML")
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--disable-mav-trim", action="store_true")
     parser.add_argument(
@@ -308,14 +310,15 @@ def main() -> None:
 
     # Read trim value from config
     import yaml
-    cfg = yaml.safe_load(
-        (ROOT / MAIN_CONFIG).read_text(encoding="utf-8")
-    ) or {}
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = ROOT / config_path
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     trim_pitch = float(
         cfg.get("action_trim_by_role", {}).get("mav", {}).get("pitch", 0.0)
     )
 
-    scenarios = run_check(args.steps, args.disable_mav_trim)
+    scenarios = run_check(args.config, args.steps, args.disable_mav_trim)
     summary = assess(scenarios, trim_pitch)
 
     data = {"scenarios": scenarios, "summary": summary}
