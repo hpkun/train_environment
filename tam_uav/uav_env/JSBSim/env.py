@@ -223,6 +223,7 @@ class UavCombatEnv(gymnasium.Env):
                  tam_throttle_max: float = 0.9,
                  scripted_evasion_red: bool = True,
                  scripted_evasion_blue: bool = False,
+                 airborne_initial_state_stabilization=None,
                  render_mode=None):
         super().__init__()
         self.max_num_blue = max_num_blue
@@ -233,6 +234,7 @@ class UavCombatEnv(gymnasium.Env):
         self.agent_interaction_steps = agent_interaction_steps
         self.max_steps = max_steps
         self.suppress_jsbsim_output = suppress_jsbsim_output
+        self.airborne_initial_state_stabilization = airborne_initial_state_stabilization or {}
         self.control_mode_by_role = dict(control_mode_by_role or {})
         self.direct_fcs_trim_by_role = dict(direct_fcs_trim_by_role or {})
         if action_interface not in {"legacy_pid_3d", "tam_direct_fcs_4d"}:
@@ -395,12 +397,14 @@ class UavCombatEnv(gymnasium.Env):
             init_state = self._make_init_state("Blue", i)
             model = self._aircraft_model_for(aid, "Blue", i)
             num_missiles = self._num_missiles_for(aid)
+            stab = self.airborne_initial_state_stabilization
             if first_reset:
                 sim = AircraftSimulator(
                     uid=aid, color="Blue", model=model,
                     sim_freq=self.sim_freq, num_missiles=num_missiles,
                     init_state=init_state,
                     suppress_jsbsim_output=self.suppress_jsbsim_output,
+                    initial_state_stabilization=stab,
                 )
                 self.blue_planes[aid] = sim
             else:
@@ -418,6 +422,7 @@ class UavCombatEnv(gymnasium.Env):
                     sim_freq=self.sim_freq, num_missiles=num_missiles,
                     init_state=init_state,
                     suppress_jsbsim_output=self.suppress_jsbsim_output,
+                    initial_state_stabilization=stab,
                 )
                 self.red_planes[aid] = sim
             else:

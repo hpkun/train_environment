@@ -50,3 +50,27 @@ initial_states:
   blue_1: {lon: 120.02, lat: 60.15, altitude_m: 6000, speed_mps: 250, yaw_deg: 180.0}
   blue_2: {lon: 119.99, lat: 60.19, altitude_m: 6000, speed_mps: 250, yaw_deg: 180.0}
   blue_3: {lon: 120.01, lat: 60.19, altitude_m: 6000, speed_mps: 250, yaw_deg: 180.0}
+
+
+airborne_initial_state_stabilization:
+  enabled: true
+  mode: engine_warm_recenter
+  apply_to_models:
+  - f22
+  - f16
+  warmup_seconds: 35.0
+  recenter_after_warmup: true
+  restore_initial_geodetic: true
+  restore_initial_attitude: true
+  restore_initial_velocity: true
+  fcs_command:
+    throttle_cmd_norm: 0.9
+    throttle_pos_norm: 0.9
+    aileron_cmd_norm: 0.0
+    elevator_cmd_norm: 0.0
+    rudder_cmd_norm: 0.0
+  validation:
+    min_speed_mps_after_reset: 180.0
+    max_position_drift_m: 50.0
+    max_altitude_drift_m: 50.0
+    max_heading_drift_deg: 2.0

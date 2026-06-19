@@ -307,6 +307,7 @@ class AircraftSimulator(BaseSimulator):
                  sim_freq: int = 60,
                  num_missiles: int = 0,
                  suppress_jsbsim_output: bool = True,
+                 initial_state_stabilization=None,
                  **kwargs):
         super().__init__(uid, color, 1 / sim_freq)
         self.model = model
@@ -316,6 +317,8 @@ class AircraftSimulator(BaseSimulator):
         self._status = AircraftSimulator.ALIVE
         self.num_missiles = num_missiles
         self.num_left_missiles = num_missiles
+        self._initial_state_stabilization = initial_state_stabilization
+        self._initial_stabilization_report: dict = {}
 
         # Linked simulators
         self.partners: List[AircraftSimulator] = []
@@ -363,6 +366,7 @@ class AircraftSimulator(BaseSimulator):
             self.lon0, self.lat0, self.alt0 = new_origin
 
         self._reload_total += 1
+        self._initial_stabilization_report = {}
 
         # First-time: create JSBSim instance. Subsequent: reuse (avoids C++ memory leak).
         if self.jsbsim_exec is None:
@@ -399,7 +403,87 @@ class AircraftSimulator(BaseSimulator):
             propulsion.get_engine(j).init_running()
         propulsion.get_steady_state()
 
+        # ---- Airborne initial-state stabilization ----
+        stab = self._initial_state_stabilization or getattr(self, "_initial_state_stabilization", None) or {}
+        if (stab.get("enabled") and self.model in stab.get("apply_to_models", [])):
+            report: dict = {"enabled": True, "model": self.model, "mode": stab.get("mode")}
+            missing = []
+            warmup_s = float(stab.get("warmup_seconds", 35.0))
+            fcs = stab.get("fcs_command", {})
+
+            def _safe_set(prop, val):
+                try:
+                    self.jsbsim_exec.set_property_value(prop, float(val))
+                except Exception:
+                    if prop not in missing:
+                        missing.append(prop)
+
+            # Cache initial state for later restoration
+            cache_lon = self._safe_get_prop("position/long-gc-deg")
+            cache_lat = self._safe_get_prop("position/lat-geod-deg")
+            cache_alt_ft = self._safe_get_prop("position/h-sl-ft")
+            cache_roll = self._safe_get_prop("attitude/roll-rad")
+            cache_pitch = self._safe_get_prop("attitude/pitch-rad")
+            cache_yaw = self._safe_get_prop("attitude/heading-true-rad")
+            cache_vn = self._safe_get_prop("velocities/v-north-fps")
+            cache_ve = self._safe_get_prop("velocities/v-east-fps")
+            cache_vd = self._safe_get_prop("velocities/v-down-fps")
+            report["speed_before_warmup"] = float(np.linalg.norm(
+                [cache_vn*0.3048, cache_ve*0.3048, -cache_vd*0.3048]))
+
+            # Apply FCS commands
+            for prop in ("fcs/throttle-cmd-norm", "fcs/throttle-pos-norm",
+                         "fcs/aileron-cmd-norm", "fcs/elevator-cmd-norm",
+                         "fcs/rudder-cmd-norm"):
+                if prop in fcs:
+                    _safe_set(prop, fcs[prop])
+            report["throttle_cmd_before_warmup"] = fcs.get("fcs/throttle-cmd-norm", 0.9)
+
+            # Run warmup physics frames (NO env.step, NO missile, NO reward)
+            n_frames = int(round(warmup_s / self.dt))
+            for _ in range(n_frames):
+                self.jsbsim_exec.run()
+
+            self._update_properties()
+            speed_after = float(np.linalg.norm(self.get_velocity()))
+            report["speed_after_warmup_before_recenter"] = speed_after
+
+            # Restore initial geometric state (recenter)
+            if stab.get("recenter_after_warmup"):
+                if stab.get("restore_initial_geodetic"):
+                    _safe_set("position/long-gc-deg", cache_lon)
+                    _safe_set("position/lat-geod-deg", cache_lat)
+                    _safe_set("position/h-sl-ft", cache_alt_ft)
+                if stab.get("restore_initial_attitude"):
+                    _safe_set("attitude/roll-rad", cache_roll)
+                    _safe_set("attitude/pitch-rad", cache_pitch)
+                    _safe_set("attitude/heading-true-rad", cache_yaw)
+                if stab.get("restore_initial_velocity"):
+                    _safe_set("velocities/v-north-fps", cache_vn)
+                    _safe_set("velocities/v-east-fps", cache_ve)
+                    _safe_set("velocities/v-down-fps", cache_vd)
+
+            # Re-apply FCS after recenter (keep engines warm)
+            for prop in ("fcs/throttle-cmd-norm", "fcs/throttle-pos-norm",
+                         "fcs/aileron-cmd-norm", "fcs/elevator-cmd-norm",
+                         "fcs/rudder-cmd-norm"):
+                if prop in fcs:
+                    _safe_set(prop, fcs[prop])
+
+            self._update_properties()
+            report["missing_properties"] = missing
+            report["speed_after_recenter"] = float(np.linalg.norm(self.get_velocity()))
+            report["altitude_after_recenter"] = float(self.get_geodetic()[2])
+            report["heading_after_recenter"] = float(np.rad2deg(self.get_rpy()[2]))
+            self._initial_stabilization_report = report
+
         self._update_properties()
+
+    def _safe_get_prop(self, path: str) -> float:
+        try:
+            return float(self.jsbsim_exec.get_property_value(path))
+        except Exception:
+            return 0.0
 
     def _clear_default_condition(self):
         """Reset JSBSim initial condition properties to defaults."""
