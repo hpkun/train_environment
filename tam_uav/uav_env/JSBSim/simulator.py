@@ -409,7 +409,6 @@ class AircraftSimulator(BaseSimulator):
             report: dict = {"enabled": True, "model": self.model, "mode": stab.get("mode")}
             missing = []
             warmup_s = float(stab.get("warmup_seconds", 35.0))
-            fcs = stab.get("fcs_command", {})
 
             def _safe_set(prop, val):
                 try:
@@ -418,57 +417,101 @@ class AircraftSimulator(BaseSimulator):
                     if prop not in missing:
                         missing.append(prop)
 
-            # Cache initial state for later restoration
-            cache_lon = self._safe_get_prop("position/long-gc-deg")
-            cache_lat = self._safe_get_prop("position/lat-geod-deg")
-            cache_alt_ft = self._safe_get_prop("position/h-sl-ft")
-            cache_roll = self._safe_get_prop("attitude/roll-rad")
-            cache_pitch = self._safe_get_prop("attitude/pitch-rad")
-            cache_yaw = self._safe_get_prop("attitude/heading-true-rad")
-            cache_vn = self._safe_get_prop("velocities/v-north-fps")
-            cache_ve = self._safe_get_prop("velocities/v-east-fps")
-            cache_vd = self._safe_get_prop("velocities/v-down-fps")
-            report["speed_before_warmup"] = float(np.linalg.norm(
-                [cache_vn*0.3048, cache_ve*0.3048, -cache_vd*0.3048]))
+            def _safe_get(prop):
+                try:
+                    return float(self.jsbsim_exec.get_property_value(prop))
+                except Exception:
+                    return 0.0
 
-            # Apply FCS commands
-            for prop in ("fcs/throttle-cmd-norm", "fcs/throttle-pos-norm",
-                         "fcs/aileron-cmd-norm", "fcs/elevator-cmd-norm",
-                         "fcs/rudder-cmd-norm"):
-                if prop in fcs:
-                    _safe_set(prop, fcs[prop])
-            report["throttle_cmd_before_warmup"] = fcs.get("fcs/throttle-cmd-norm", 0.9)
+            # ---- Normalize FCS command keys (short → JSBSim path) ----
+            _JSBSIM_FCS_PROPS = [
+                "fcs/throttle-cmd-norm", "fcs/throttle-pos-norm",
+                "fcs/aileron-cmd-norm", "fcs/elevator-cmd-norm",
+                "fcs/rudder-cmd-norm",
+            ]
+            _SHORT_TO_JSBSIM = {
+                "throttle_cmd_norm": "fcs/throttle-cmd-norm",
+                "throttle_pos_norm": "fcs/throttle-pos-norm",
+                "aileron_cmd_norm": "fcs/aileron-cmd-norm",
+                "elevator_cmd_norm": "fcs/elevator-cmd-norm",
+                "rudder_cmd_norm": "fcs/rudder-cmd-norm",
+            }
+            raw_fcs = stab.get("fcs_command", {})
+            norm_fcs: dict[str, float] = {}
+            for short, path in _SHORT_TO_JSBSIM.items():
+                if short in raw_fcs:
+                    norm_fcs[path] = float(raw_fcs[short])
+            for path in _JSBSIM_FCS_PROPS:
+                if path in raw_fcs:
+                    norm_fcs[path] = float(raw_fcs[path])
+            report["requested_fcs_command"] = dict(raw_fcs)
+            report["normalized_fcs_command"] = dict(norm_fcs)
 
-            # Run warmup physics frames (NO env.step, NO missile, NO reward)
+            # ---- Target velocity from init_state (body-frame U,V,W + yaw → NED) ----
+            target_u_fps = float(self.init_state.get("ic/u-fps", 820.21))
+            target_v_fps = float(self.init_state.get("ic/v-fps", 0.0))
+            target_w_fps = float(self.init_state.get("ic/w-fps", 0.0))
+            target_yaw_rad = float(np.deg2rad(self.init_state.get("ic/psi-true-deg", 0.0)))
+            # Body→NED rotation
+            cos_y = np.cos(target_yaw_rad)
+            sin_y = np.sin(target_yaw_rad)
+            target_vn_fps = target_u_fps * cos_y - target_v_fps * sin_y
+            target_ve_fps = target_u_fps * sin_y + target_v_fps * cos_y
+            target_vd_fps = -target_w_fps  # body W-up → NED D-up
+            # Also store body-frame targets for direct velocity properties
+            report["target_u_fps"] = target_u_fps
+            report["target_vn_fps"] = target_vn_fps
+            report["target_ve_fps"] = target_ve_fps
+            report["target_speed_mps"] = float(np.linalg.norm(
+                [target_u_fps * 0.3048, target_v_fps * 0.3048, target_w_fps * 0.3048]))
+
+            # Cache geodetic/attitude targets from init_state
+            target_lon = float(self.init_state.get("ic/long-gc-deg", 120.0))
+            target_lat = float(self.init_state.get("ic/lat-geod-deg", 60.0))
+            target_alt_ft = float(self.init_state.get("ic/h-sl-ft", 19685.0))
+            target_roll = float(self.init_state.get("ic/phi-rad", 0.0))
+            target_pitch = float(self.init_state.get("ic/theta-rad", 0.0))
+
+            # Apply FCS commands before warmup
+            for path, val in norm_fcs.items():
+                _safe_set(path, val)
+            report["fcs_command_before_warmup_actual"] = {
+                p: _safe_get(p) for p in _JSBSIM_FCS_PROPS
+            }
+
+            # Run warmup physics frames
             n_frames = int(round(warmup_s / self.dt))
             for _ in range(n_frames):
                 self.jsbsim_exec.run()
 
             self._update_properties()
-            speed_after = float(np.linalg.norm(self.get_velocity()))
-            report["speed_after_warmup_before_recenter"] = speed_after
+            report["speed_after_warmup_before_recenter"] = float(
+                np.linalg.norm(self.get_velocity()))
 
-            # Restore initial geometric state (recenter)
+            # Recenter: restore config-specified initial state
             if stab.get("recenter_after_warmup"):
                 if stab.get("restore_initial_geodetic"):
-                    _safe_set("position/long-gc-deg", cache_lon)
-                    _safe_set("position/lat-geod-deg", cache_lat)
-                    _safe_set("position/h-sl-ft", cache_alt_ft)
+                    _safe_set("position/long-gc-deg", target_lon)
+                    _safe_set("position/lat-geod-deg", target_lat)
+                    _safe_set("position/h-sl-ft", target_alt_ft)
                 if stab.get("restore_initial_attitude"):
-                    _safe_set("attitude/roll-rad", cache_roll)
-                    _safe_set("attitude/pitch-rad", cache_pitch)
-                    _safe_set("attitude/heading-true-rad", cache_yaw)
+                    _safe_set("attitude/roll-rad", target_roll)
+                    _safe_set("attitude/pitch-rad", target_pitch)
+                    _safe_set("attitude/heading-true-rad", target_yaw_rad)
                 if stab.get("restore_initial_velocity"):
-                    _safe_set("velocities/v-north-fps", cache_vn)
-                    _safe_set("velocities/v-east-fps", cache_ve)
-                    _safe_set("velocities/v-down-fps", cache_vd)
+                    # Set body-frame velocity (primary JSBSim representation)
+                    _safe_set("velocities/u-fps", target_u_fps)
+                    _safe_set("velocities/v-fps", target_v_fps)
+                    _safe_set("velocities/w-fps", target_w_fps)
 
-            # Re-apply FCS after recenter (keep engines warm)
-            for prop in ("fcs/throttle-cmd-norm", "fcs/throttle-pos-norm",
-                         "fcs/aileron-cmd-norm", "fcs/elevator-cmd-norm",
-                         "fcs/rudder-cmd-norm"):
-                if prop in fcs:
-                    _safe_set(prop, fcs[prop])
+            # Re-apply FCS after recenter, then one frame to propagate state
+            for path, val in norm_fcs.items():
+                _safe_set(path, val)
+            self.jsbsim_exec.run()
+            # Read actual FCS values back
+            report["fcs_command_after_recenter_actual"] = {
+                p: _safe_get(p) for p in _JSBSIM_FCS_PROPS
+            }
 
             self._update_properties()
             report["missing_properties"] = missing
