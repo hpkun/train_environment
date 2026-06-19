@@ -217,6 +217,12 @@ class UavCombatEnv(gymnasium.Env):
                  suppress_jsbsim_output: bool = True,
                  control_mode_by_role: dict | None = None,
                  direct_fcs_trim_by_role: dict | None = None,
+                 action_interface: str = "legacy_pid_3d",
+                 tam_action_levels: int = 40,
+                 tam_throttle_min: float = 0.4,
+                 tam_throttle_max: float = 0.9,
+                 scripted_evasion_red: bool = True,
+                 scripted_evasion_blue: bool = False,
                  render_mode=None):
         super().__init__()
         self.max_num_blue = max_num_blue
@@ -229,6 +235,19 @@ class UavCombatEnv(gymnasium.Env):
         self.suppress_jsbsim_output = suppress_jsbsim_output
         self.control_mode_by_role = dict(control_mode_by_role or {})
         self.direct_fcs_trim_by_role = dict(direct_fcs_trim_by_role or {})
+        if action_interface not in {"legacy_pid_3d", "tam_direct_fcs_4d"}:
+            raise ValueError(f"unknown action_interface: {action_interface}")
+        if tam_action_levels < 0:
+            raise ValueError("tam_action_levels must be non-negative")
+        if not 0.0 <= tam_throttle_min <= tam_throttle_max <= 1.0:
+            raise ValueError("TAM throttle range must satisfy 0 <= min <= max <= 1")
+        self.action_interface = action_interface
+        self.tam_action_levels = int(tam_action_levels)
+        self.tam_throttle_min = float(tam_throttle_min)
+        self.tam_throttle_max = float(tam_throttle_max)
+        self.scripted_evasion_red = bool(scripted_evasion_red)
+        self.scripted_evasion_blue = bool(scripted_evasion_blue)
+        self._last_tam_action_commands: dict[str, dict] = {}
         self.physics_dt = 1.0 / sim_freq
         self.env_dt = agent_interaction_steps * self.physics_dt
         self.missile_cooldown_frames = int(round(0.5 * self.sim_freq))
@@ -240,8 +259,9 @@ class UavCombatEnv(gymnasium.Env):
         self.agent_ids = self.blue_ids + self.red_ids
 
         # ---- Action space (Dict) ----
+        action_dim = 4 if self.action_interface == "tam_direct_fcs_4d" else 3
         self.action_space = gymnasium.spaces.Dict({
-            aid: gymnasium.spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+            aid: gymnasium.spaces.Box(low=-1.0, high=1.0, shape=(action_dim,), dtype=np.float32)
             for aid in self.agent_ids
         })
 
@@ -572,6 +592,29 @@ class UavCombatEnv(gymnasium.Env):
     #  Action parsing
     # ------------------------------------------------------------------
 
+    def _map_tam_direct_action(self, action) -> dict:
+        raw = np.asarray(action, dtype=np.float64).reshape(-1)
+        if raw.size != 4:
+            raise ValueError(f"TAM direct-FCS action must have 4 values, got {raw.size}")
+        clipped = np.clip(
+            np.nan_to_num(raw, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0
+        )
+        quantized = clipped.copy()
+        if self.tam_action_levels > 1:
+            scale = float(self.tam_action_levels - 1)
+            quantized = np.round((clipped + 1.0) / 2.0 * scale) / scale * 2.0 - 1.0
+        throttle = self.tam_throttle_min + (quantized[0] + 1.0) / 2.0 * (
+            self.tam_throttle_max - self.tam_throttle_min
+        )
+        return {
+            "raw_action": [float(value) for value in raw],
+            "quantized_action": [float(value) for value in quantized],
+            "throttle_cmd_norm": float(throttle),
+            "aileron_cmd_norm": float(quantized[1]),
+            "elevator_cmd_norm": float(quantized[2]),
+            "rudder_cmd_norm": float(quantized[3]),
+        }
+
     def _parse_actions(self, actions: dict) -> dict:
         """Convert normalised actor outputs ∈ [-1, 1] to physical setpoints.
 
@@ -594,6 +637,12 @@ class UavCombatEnv(gymnasium.Env):
                 targets[aid] = None
                 continue
 
+            if self.action_interface == "tam_direct_fcs_4d":
+                command = self._map_tam_direct_action(act)
+                self._last_tam_action_commands[aid] = command
+                targets[aid] = command
+                continue
+
             is_blue = aid.startswith("blue")
             rpy = sim.get_rpy()
             current_heading = float(rpy[2])  # ψ ∈ [−π, π]
@@ -608,7 +657,7 @@ class UavCombatEnv(gymnasium.Env):
             incoming = None
             if not is_blue:
                 incoming = sim.check_missile_warning()
-            if incoming is not None:
+            if incoming is not None and self.scripted_evasion_red:
                 alt_m = sim.get_geodetic()[2]
 
                 # Determine turn direction from missile bearing (+right, −left)
@@ -740,6 +789,12 @@ class UavCombatEnv(gymnasium.Env):
                 continue
 
             control_mode = self._control_mode_for(aid)
+            if self.action_interface == "tam_direct_fcs_4d":
+                sim.set_property_value("fcs/throttle-cmd-norm", target["throttle_cmd_norm"])
+                sim.set_property_value("fcs/aileron-cmd-norm", target["aileron_cmd_norm"])
+                sim.set_property_value("fcs/elevator-cmd-norm", target["elevator_cmd_norm"])
+                sim.set_property_value("fcs/rudder-cmd-norm", target["rudder_cmd_norm"])
+                continue
             if control_mode == "direct_fcs_3d":
                 # target = (elevator_cmd, aileron_cmd, throttle_cmd)
                 elevator, aileron, throttle_cmd = target

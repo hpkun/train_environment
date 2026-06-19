@@ -2,9 +2,9 @@ from setuptools import find_packages, setup
 
 
 setup(
-    name="hetero-uav",
+    name="tam-uav",
     version="0.1.0",
-    description="Self-contained heterogeneous MAV-UAV cooperative air combat environment.",
+    description="TAM-HAPPO aligned F22 MAV/F16 UAV direct-control air combat environment",
     packages=find_packages(),
     python_requires=">=3.9",
     install_requires=[

@@ -182,6 +182,15 @@ class HeteroUavCombatEnv(UavCombatEnv):
         return np.zeros(3, dtype=np.float32)
 
     def _apply_action_trim(self, actions: dict) -> dict:
+        if self.action_interface == "tam_direct_fcs_4d":
+            self._last_action_trim_applied = {
+                aid: [0.0, 0.0, 0.0, 0.0] for aid in actions
+            }
+            self._last_effective_actions = {
+                aid: np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0).tolist()
+                for aid, action in actions.items()
+            }
+            return actions
         trimmed = dict(actions)
         self._last_action_trim_applied = {}
         self._last_effective_actions = {}

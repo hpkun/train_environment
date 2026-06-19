@@ -33,9 +33,13 @@ class OpponentPolicy:
     - ``greedy_fsm``: low-intrusion finite-state scripted blue intent policy.
     - ``brma_rule``: delegates to the parent project's ``rule_based_agent.py``
       (BRMA-MAPPO paper-aligned blue opponent).
+    - ``tam_direct_fsm``: nearest-target rule with 4D direct-FCS output.
     """
 
-    MODES = {"zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"}
+    MODES = {
+        "zero", "random", "rule_nearest", "greedy_fsm", "brma_rule",
+        "tam_direct_fsm",
+    }
 
     def __init__(self, mode: str = "zero", seed: int | None = None):
         if mode not in self.MODES:
@@ -106,6 +110,11 @@ class OpponentPolicy:
             return actions
         if self.mode == "brma_rule":
             return self._brma_rule_actions(obs_dict, blue_ids, env)
+        if self.mode == "tam_direct_fsm":
+            return {
+                bid: self._tam_direct_action(obs_dict.get(bid, {}))
+                for bid in blue_ids
+            }
         return {
             bid: self._rule_nearest_action(obs_dict.get(bid, {}))
             for bid in blue_ids
@@ -193,6 +202,18 @@ class OpponentPolicy:
 
         action = np.array([pitch, heading, speed], dtype=np.float32)
         return np.clip(action, -1.0, 1.0).astype(np.float32)
+
+    @classmethod
+    def _tam_direct_action(cls, obs: dict) -> np.ndarray:
+        target, _target_index = cls._select_nearest_target(obs)
+        if target is None:
+            return np.array([0.6, 0.0, 0.0, 0.0], dtype=np.float32)
+
+        distance = cls._distance(target)
+        throttle = 1.0 if distance > 0.6 else 0.8 if distance > 0.25 else 0.6
+        aileron = float(target[1]) * 2.0 if target.size >= 2 else 0.0
+        elevator = float(target[2]) * 2.0 if target.size >= 3 else 0.0
+        return cls._clip_action([throttle, aileron, elevator, 0.0])
 
     LOST_TARGET_TURN_BACK_LIMIT = 50  # env steps before giving up
 

@@ -1,4 +1,27 @@
-# hetero_uav
+# tam_uav — TAM-HAPPO Direct Control
+
+`tam_uav` is the TAM-HAPPO-aligned direct-control branch. The sibling
+`hetero_uav` directory is the legacy experiment mainline and is not modified by
+this branch.
+
+The formal composition is fixed: MAV is F22 and every UAV is F16. The TAM
+action interface has `action_dim=4` in the order throttle, aileron, elevator,
+and rudder. Actor outputs are clipped to `[-1, 1]`; throttle is mapped to
+`[0.4, 0.9]` and the three surface commands remain in `[-1, 1]` before being
+written directly to JSBSim. No PID target conversion is used on this path.
+
+The environment applies 40-level quantization to each continuous actor output.
+This is the current approximation of the paper's multi-discrete action space;
+the policy remains a continuous Gaussian actor.
+
+Formal configs:
+
+- `uav_env/JSBSim/configs/tam_happo_f22_3v2_direct.yaml` for training/eval.
+- `uav_env/JSBSim/configs/tam_happo_f22_5v4_direct.yaml` for eval and zero-shot scale transfer only.
+
+Legacy 3D PID configurations remain available but are not the default TAM path.
+
+## Legacy project description
 
 `hetero_uav` is a self-contained debug environment project for heterogeneous
 MAV-UAV cooperative air combat. It is intended as the environment foundation for
@@ -17,7 +40,7 @@ experiments.
 ## Project Structure
 
 ```text
-hetero_uav/
+tam_uav/
   README.md
   setup.py
   requirements.txt
@@ -69,7 +92,7 @@ hetero_uav/
 ## Install
 
 ```bash
-cd hetero_uav
+cd tam_uav
 pip install -e .
 ```
 
