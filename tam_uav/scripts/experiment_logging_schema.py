@@ -102,6 +102,14 @@ ATTENTION_METRICS_COLUMNS = [
     "masked_ally_count", "availability",
 ]
 
+TAM_ACTION_TIMESERIES_COLUMNS = [
+    "run_id", "scenario", "episode_id", "step", "sim_time", "agent_id",
+    "action_distribution", "action_space",
+    "action_index_0", "action_index_1", "action_index_2", "action_index_3",
+    "normalized_level_0", "normalized_level_1", "normalized_level_2", "normalized_level_3",
+    "throttle_cmd_norm", "aileron_cmd_norm", "elevator_cmd_norm", "rudder_cmd_norm",
+]
+
 FILE_SCHEMAS = {
     "train_metrics.csv": TRAIN_METRICS_COLUMNS,
     "eval_episode_metrics.csv": EVAL_EPISODE_COLUMNS,
@@ -112,6 +120,7 @@ FILE_SCHEMAS = {
     "reward_components.csv": REWARD_COMPONENT_COLUMNS,
     "perturbation_eval_summary.csv": PERTURBATION_EVAL_COLUMNS,
     "attention_metrics.csv": ATTENTION_METRICS_COLUMNS,
+    "tam_action_timeseries.csv": TAM_ACTION_TIMESERIES_COLUMNS,
 }
 
 FIELD_DESCRIPTIONS = {

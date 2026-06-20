@@ -2,6 +2,7 @@ env_type: jsbsim_hetero
 observation_mode: mav_shared_geo
 hetero_reward_mode: happo_ref_v0
 action_interface: tam_direct_fcs_4d
+tam_action_distribution: multidiscrete_categorical
 tam_action_levels: 40
 tam_throttle_min: 0.4
 tam_throttle_max: 0.9

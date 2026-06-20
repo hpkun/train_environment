@@ -20,6 +20,7 @@ from algorithms.happo import (
     BRMARecurrentHAPPOReferencePolicy,
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
+    TAMCategoricalRecurrentHAPPOPolicy,
 )
 from algorithms.happo.rollout_safety import (
     sanitize_policy_inputs,
@@ -62,6 +63,15 @@ def _action_dim_from_env(env) -> int:
 
 
 def _build_policy_from_meta(meta: dict, device: torch.device, action_dim: int):
+    if meta.get("tam_action_distribution", meta.get("action_distribution")) == "multidiscrete_categorical":
+        return TAMCategoricalRecurrentHAPPOPolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=action_dim,
+            action_levels=int(meta.get("tam_action_levels", meta.get("action_levels", 40))),
+            rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+        ).to(device)
     policy_arch = meta.get("policy_arch", "flat")
     if policy_arch == "entity_attention":
         return EntityHAPPOReferencePolicy(
@@ -253,9 +263,17 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
             mav_sat_values.append(float(np.mean(np.abs(actions[0:1]) >= 0.999)))
             if actions.shape[0] > 1:
                 uav_sat_values.append(float(np.mean(np.abs(actions[1:]) >= 0.999)))
-            action_dict = {rid: actions[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
+            action_dtype = (np.int64 if getattr(env, "tam_action_distribution", "") == "multidiscrete_categorical" else np.float32)
+            action_dict = {rid: actions[i].astype(action_dtype) for i, rid in enumerate(env.red_ids)}
             action_dict.update(opponent.act(obs, env.blue_ids, env=env))
             obs, rewards, terminated, truncated, info = env.step(action_dict)
+            if rich_logger is not None:
+                rich_logger.write_tam_actions(
+                    env._last_tam_action_commands,
+                    scenario=cfg_name, episode_id=ep, step=ep_len,
+                    sim_time=_sim_time(env),
+                    action_space=type(env.action_space[env.red_ids[0]]).__name__,
+                )
             _update_missile_stats(mstats, info, env, prev_hits)
             if rich_logger is not None:
                 rich_logger.write_missile_events(
@@ -342,8 +360,15 @@ def main() -> None:
     configs = args.configs or DEFAULT_CONFIGS
     probe_env = make_env(configs[0], env_type="jsbsim_hetero")
     action_dim = _action_dim_from_env(probe_env)
+    action_distribution = getattr(probe_env, "tam_action_distribution", "continuous_quantized")
+    action_levels = int(getattr(probe_env, "tam_action_levels", 40))
     probe_env.close()
     meta = _load_meta(Path(args.model))
+    if action_distribution == "multidiscrete_categorical":
+        if meta.get("tam_action_distribution", meta.get("action_distribution")) != "multidiscrete_categorical":
+            raise ValueError("formal categorical evaluation rejects legacy continuous checkpoints")
+        if int(meta.get("tam_action_levels", meta.get("action_levels", -1))) != action_levels:
+            raise ValueError("checkpoint action_levels does not match environment")
     checkpoint_action_dim = int(meta.get("action_dim", action_dim))
     if checkpoint_action_dim != action_dim:
         raise ValueError(

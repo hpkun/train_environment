@@ -8,14 +8,17 @@ import torch
 class HAPPORolloutBuffer:
     def __init__(self, max_len: int, num_red: int, actor_dim: int,
                  critic_dim: int, action_dim: int, role_ids,
-                 rnn_hidden_size: int = 0):
+                 rnn_hidden_size: int = 0, action_dtype=np.float32):
         self.max_len = int(max_len)
         self.num_red = int(num_red)
         self.pos = 0
         self.rnn_hidden_size = int(rnn_hidden_size)
         self.actor_obs = np.zeros((max_len, num_red, actor_dim), dtype=np.float32)
         self.critic_state = np.zeros((max_len, critic_dim), dtype=np.float32)
-        self.actions = np.zeros((max_len, num_red, action_dim), dtype=np.float32)
+        self.action_dtype = np.dtype(action_dtype)
+        self.actions = np.zeros(
+            (max_len, num_red, action_dim), dtype=self.action_dtype
+        )
         self.log_probs = np.zeros((max_len, num_red), dtype=np.float32)
         self.rewards = np.zeros((max_len, num_red), dtype=np.float32)
         self.dones = np.zeros((max_len, num_red), dtype=np.float32)

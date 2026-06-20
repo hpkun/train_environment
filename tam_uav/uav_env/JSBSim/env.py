@@ -218,6 +218,7 @@ class UavCombatEnv(gymnasium.Env):
                  control_mode_by_role: dict | None = None,
                  direct_fcs_trim_by_role: dict | None = None,
                  action_interface: str = "legacy_pid_3d",
+                 tam_action_distribution: str = "continuous_quantized",
                  tam_action_levels: int = 40,
                  tam_throttle_min: float = 0.4,
                  tam_throttle_max: float = 0.9,
@@ -239,11 +240,16 @@ class UavCombatEnv(gymnasium.Env):
         self.direct_fcs_trim_by_role = dict(direct_fcs_trim_by_role or {})
         if action_interface not in {"legacy_pid_3d", "tam_direct_fcs_4d"}:
             raise ValueError(f"unknown action_interface: {action_interface}")
+        if tam_action_distribution not in {
+            "continuous_quantized", "multidiscrete_categorical"
+        }:
+            raise ValueError(f"unknown tam_action_distribution: {tam_action_distribution}")
         if tam_action_levels < 0:
             raise ValueError("tam_action_levels must be non-negative")
         if not 0.0 <= tam_throttle_min <= tam_throttle_max <= 1.0:
             raise ValueError("TAM throttle range must satisfy 0 <= min <= max <= 1")
         self.action_interface = action_interface
+        self.tam_action_distribution = tam_action_distribution
         self.tam_action_levels = int(tam_action_levels)
         self.tam_throttle_min = float(tam_throttle_min)
         self.tam_throttle_max = float(tam_throttle_max)
@@ -261,11 +267,26 @@ class UavCombatEnv(gymnasium.Env):
         self.agent_ids = self.blue_ids + self.red_ids
 
         # ---- Action space (Dict) ----
-        action_dim = 4 if self.action_interface == "tam_direct_fcs_4d" else 3
-        self.action_space = gymnasium.spaces.Dict({
-            aid: gymnasium.spaces.Box(low=-1.0, high=1.0, shape=(action_dim,), dtype=np.float32)
-            for aid in self.agent_ids
-        })
+        if (
+            self.action_interface == "tam_direct_fcs_4d"
+            and self.tam_action_distribution == "multidiscrete_categorical"
+        ):
+            if self.tam_action_levels <= 1:
+                raise ValueError("categorical TAM actions require tam_action_levels > 1")
+            self.action_space = gymnasium.spaces.Dict({
+                aid: gymnasium.spaces.MultiDiscrete(
+                    np.full(4, self.tam_action_levels, dtype=np.int64)
+                )
+                for aid in self.agent_ids
+            })
+        else:
+            action_dim = 4 if self.action_interface == "tam_direct_fcs_4d" else 3
+            self.action_space = gymnasium.spaces.Dict({
+                aid: gymnasium.spaces.Box(
+                    low=-1.0, high=1.0, shape=(action_dim,), dtype=np.float32
+                )
+                for aid in self.agent_ids
+            })
 
         # ---- Observation space (Dict) ----
         obs_spaces = {}
@@ -597,7 +618,7 @@ class UavCombatEnv(gymnasium.Env):
     #  Action parsing
     # ------------------------------------------------------------------
 
-    def _map_tam_direct_action(self, action) -> dict:
+    def _map_tam_direct_continuous_action(self, action) -> dict:
         raw = np.asarray(action, dtype=np.float64).reshape(-1)
         if raw.size != 4:
             raise ValueError(f"TAM direct-FCS action must have 4 values, got {raw.size}")
@@ -612,12 +633,45 @@ class UavCombatEnv(gymnasium.Env):
             self.tam_throttle_max - self.tam_throttle_min
         )
         return {
+            "action_distribution": "continuous_quantized",
             "raw_action": [float(value) for value in raw],
             "quantized_action": [float(value) for value in quantized],
             "throttle_cmd_norm": float(throttle),
             "aileron_cmd_norm": float(quantized[1]),
             "elevator_cmd_norm": float(quantized[2]),
             "rudder_cmd_norm": float(quantized[3]),
+        }
+
+    def _map_tam_direct_action(self, action) -> dict:
+        """Compatibility alias for the legacy continuous diagnostic mapper."""
+        return self._map_tam_direct_continuous_action(action)
+
+    def _map_tam_direct_discrete_action(self, action_indices) -> dict:
+        raw = np.asarray(action_indices)
+        if raw.shape != (4,):
+            raise ValueError(f"TAM categorical action must have shape (4,), got {raw.shape}")
+        if not np.issubdtype(raw.dtype, np.number):
+            raise ValueError("TAM categorical action indices must be numeric integers")
+        numeric = raw.astype(np.float64)
+        if not np.isfinite(numeric).all() or not np.equal(numeric, np.round(numeric)).all():
+            raise ValueError("TAM categorical action indices must be losslessly convertible to int")
+        indices = numeric.astype(np.int64)
+        if np.any(indices < 0) or np.any(indices >= self.tam_action_levels):
+            raise ValueError(
+                f"TAM categorical action indices must be in [0, {self.tam_action_levels - 1}]"
+            )
+        levels = indices.astype(np.float64) / float(self.tam_action_levels - 1)
+        return {
+            "action_distribution": "multidiscrete_categorical",
+            "action_indices": indices.tolist(),
+            "normalized_levels": levels.tolist(),
+            "throttle_cmd_norm": float(
+                self.tam_throttle_min
+                + levels[0] * (self.tam_throttle_max - self.tam_throttle_min)
+            ),
+            "aileron_cmd_norm": float(-1.0 + 2.0 * levels[1]),
+            "elevator_cmd_norm": float(-1.0 + 2.0 * levels[2]),
+            "rudder_cmd_norm": float(-1.0 + 2.0 * levels[3]),
         }
 
     def _parse_actions(self, actions: dict) -> dict:
@@ -643,7 +697,10 @@ class UavCombatEnv(gymnasium.Env):
                 continue
 
             if self.action_interface == "tam_direct_fcs_4d":
-                command = self._map_tam_direct_action(act)
+                if self.tam_action_distribution == "multidiscrete_categorical":
+                    command = self._map_tam_direct_discrete_action(act)
+                else:
+                    command = self._map_tam_direct_continuous_action(act)
                 self._last_tam_action_commands[aid] = command
                 targets[aid] = command
                 continue

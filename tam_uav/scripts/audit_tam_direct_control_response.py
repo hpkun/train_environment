@@ -8,6 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
+from algorithms.mappo.opponent_policy import tam_direct_command_to_indices
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -26,6 +28,17 @@ FIXED_ACTIONS = {
     "rudder_left": [0.75, 0.0, 0.0, -0.4],
     "rudder_right": [0.75, 0.0, 0.0, 0.4],
 }
+
+
+def _env_action(env, command):
+    if getattr(env, "tam_action_distribution", "continuous_quantized") == "multidiscrete_categorical":
+        return tam_direct_command_to_indices(
+            command,
+            env.tam_action_levels,
+            env.tam_throttle_min,
+            env.tam_throttle_max,
+        )
+    return np.asarray(command, dtype=np.float32)
 
 FCS_COMMAND_PROPERTIES = {
     "throttle": "fcs/throttle-cmd-norm",
@@ -109,10 +122,10 @@ def _run_case(config: str, target_id: str, name: str, raw_action: list[float], s
     last_info: dict = {}
     for step in range(1, steps + 1):
         actions = {
-            aid: np.asarray(FIXED_ACTIONS["level"], dtype=np.float32)
+            aid: _env_action(env, FIXED_ACTIONS["level"])
             for aid in env.agent_ids
         }
-        actions[target_id] = np.asarray(raw_action, dtype=np.float32)
+        actions[target_id] = _env_action(env, raw_action)
         _obs, _rewards, terminated, truncated, last_info = env.step(actions)
         records.append(_telemetry(env, target_id, step, origin))
         if terminated.get(target_id, False) or truncated.get(target_id, False):

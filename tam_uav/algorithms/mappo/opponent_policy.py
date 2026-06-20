@@ -12,6 +12,22 @@ from pathlib import Path
 import numpy as np
 
 
+def tam_direct_command_to_indices(
+    command, levels: int, throttle_min: float, throttle_max: float
+) -> np.ndarray:
+    command = np.asarray(command, dtype=np.float64).reshape(-1)
+    if command.size != 4 or levels <= 1 or throttle_max <= throttle_min:
+        raise ValueError("invalid TAM command/index conversion contract")
+    indices = np.empty(4, dtype=np.int64)
+    throttle = np.clip(command[0], throttle_min, throttle_max)
+    indices[0] = int(np.rint(
+        (throttle - throttle_min) / (throttle_max - throttle_min) * (levels - 1)
+    ))
+    surfaces = np.clip(command[1:], -1.0, 1.0)
+    indices[1:] = np.rint((surfaces + 1.0) / 2.0 * (levels - 1)).astype(np.int64)
+    return indices
+
+
 def _wrap_heading_norm(value: float) -> float:
     """Wrap normalized heading to [-1, 1] where +/-1 are the same direction."""
     wrapped = float(np.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0))
@@ -114,10 +130,24 @@ class OpponentPolicy:
             actions = {}
             for index, bid in enumerate(blue_ids):
                 ownship = self._ownship_context(bid, own_kinematics, own_positions)
-                actions[bid] = self._tam_direct_action(
+                command = self._tam_direct_action(
                     obs_dict.get(bid, {}), blue_id=bid, env=env,
                     ownship=ownship, agent_index=index,
                 )
+                if getattr(env, "tam_action_distribution", "continuous_quantized") == "multidiscrete_categorical":
+                    throttle_min = float(getattr(env, "tam_throttle_min", 0.4))
+                    throttle_max = float(getattr(env, "tam_throttle_max", 0.9))
+                    throttle_cmd = throttle_min + (float(command[0]) + 1.0) / 2.0 * (
+                        throttle_max - throttle_min
+                    )
+                    actions[bid] = tam_direct_command_to_indices(
+                        [throttle_cmd, *command[1:]],
+                        int(getattr(env, "tam_action_levels", 40)),
+                        throttle_min,
+                        throttle_max,
+                    )
+                else:
+                    actions[bid] = command
             return actions
         return {
             bid: self._rule_nearest_action(obs_dict.get(bid, {}))

@@ -10,6 +10,7 @@ from .brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 from .entity_policy import EntityHAPPOReferencePolicy
 from .happo_policy import HAPPOReferencePolicy
 from .happo_trainer import HAPPOReferenceTrainer
+from .tam_categorical_recurrent_policy import TAMCategoricalRecurrentHAPPOPolicy
 
 __all__ = [
     "BRMAEntityHAPPOReferencePolicy",
@@ -21,4 +22,5 @@ __all__ = [
     "HAPPOReferencePolicy",
     "HAPPORolloutBuffer",
     "HAPPOReferenceTrainer",
+    "TAMCategoricalRecurrentHAPPOPolicy",
 ]

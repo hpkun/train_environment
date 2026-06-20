@@ -149,12 +149,12 @@ def sanitize_policy_inputs(
 
 def zero_inactive_actions(actions: np.ndarray, active: np.ndarray) -> np.ndarray:
     """Zero out actions for inactive agents (active <= 0.5)."""
-    actions = np.asarray(actions, dtype=np.float32)
+    actions = np.asarray(actions)
     active = np.asarray(active, dtype=np.float32).reshape(-1)
     inactive_rows = active <= 0.5
     if inactive_rows.any():
         actions = actions.copy()
-        actions[inactive_rows] = 0.0
+        actions[inactive_rows] = 0
     return actions
 
 

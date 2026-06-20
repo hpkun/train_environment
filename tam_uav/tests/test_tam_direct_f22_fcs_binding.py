@@ -15,7 +15,9 @@ def _surface_after(agent_id: str, action: list[float], frames: int = 60) -> dict
     env = make_env(CONFIG)
     env.reset(seed=0)
     sim = env._get_sim(agent_id)
-    targets = env._parse_actions({agent_id: np.asarray(action, dtype=np.float32)})
+    normalized = np.asarray(action, dtype=np.float64)
+    indices = np.rint((normalized + 1.0) * 0.5 * (env.tam_action_levels - 1)).astype(np.int64)
+    targets = env._parse_actions({agent_id: indices})
     for _ in range(frames):
         env._apply_pid_controls(targets)
         sim.run()

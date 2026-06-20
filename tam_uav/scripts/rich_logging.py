@@ -10,6 +10,7 @@ from typing import Any
 from scripts.experiment_logging_schema import (
     FILE_SCHEMAS,
     MISSILE_EVENTS_COLUMNS,
+    TAM_ACTION_TIMESERIES_COLUMNS,
     TRAIN_METRICS_COLUMNS,
     ensure_schema_files,
 )
@@ -42,10 +43,38 @@ class RichExperimentLogger:
         self._train_writer.writeheader()
         self._missile_file = (directory / "missile_events.csv").open("a", newline="", encoding="utf-8")
         self._missile_writer = csv.DictWriter(self._missile_file, fieldnames=MISSILE_EVENTS_COLUMNS)
+        self._tam_action_file = (directory / "tam_action_timeseries.csv").open("a", newline="", encoding="utf-8")
+        self._tam_action_writer = csv.DictWriter(
+            self._tam_action_file, fieldnames=TAM_ACTION_TIMESERIES_COLUMNS
+        )
 
     def close(self) -> None:
         self._train_file.close()
         self._missile_file.close()
+        self._tam_action_file.close()
+
+    def write_tam_actions(self, commands: dict[str, dict], *, scenario: str,
+                          episode_id: int | str, step: int | str,
+                          sim_time: float | str = "", action_space: str = "") -> None:
+        for agent_id, command in commands.items():
+            indices = command.get("action_indices", ["", "", "", ""])
+            levels = command.get("normalized_levels", ["", "", "", ""])
+            row = {
+                "run_id": self.run_id, "scenario": scenario,
+                "episode_id": episode_id, "step": step, "sim_time": sim_time,
+                "agent_id": agent_id,
+                "action_distribution": command.get("action_distribution", ""),
+                "action_space": action_space,
+                "throttle_cmd_norm": command.get("throttle_cmd_norm", ""),
+                "aileron_cmd_norm": command.get("aileron_cmd_norm", ""),
+                "elevator_cmd_norm": command.get("elevator_cmd_norm", ""),
+                "rudder_cmd_norm": command.get("rudder_cmd_norm", ""),
+            }
+            row.update({f"action_index_{i}": indices[i] for i in range(4)})
+            row.update({f"normalized_level_{i}": levels[i] for i in range(4)})
+            self._tam_action_writer.writerow(row)
+        if commands:
+            self._tam_action_file.flush()
 
     def write_train_metrics(self, row: dict[str, Any]) -> None:
         elapsed = max(time.time() - self.start_time, 1e-9)

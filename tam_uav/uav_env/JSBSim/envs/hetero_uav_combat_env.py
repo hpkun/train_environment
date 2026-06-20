@@ -186,10 +186,16 @@ class HeteroUavCombatEnv(UavCombatEnv):
             self._last_action_trim_applied = {
                 aid: [0.0, 0.0, 0.0, 0.0] for aid in actions
             }
-            self._last_effective_actions = {
-                aid: np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0).tolist()
-                for aid, action in actions.items()
-            }
+            if self.tam_action_distribution == "multidiscrete_categorical":
+                self._last_effective_actions = {
+                    aid: np.asarray(action, dtype=np.int64).tolist()
+                    for aid, action in actions.items()
+                }
+            else:
+                self._last_effective_actions = {
+                    aid: np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0).tolist()
+                    for aid, action in actions.items()
+                }
             return actions
         trimmed = dict(actions)
         self._last_action_trim_applied = {}

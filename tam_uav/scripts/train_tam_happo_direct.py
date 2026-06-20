@@ -29,6 +29,7 @@ from algorithms.happo import (
     HAPPOReferencePolicy,
     HAPPORolloutBuffer,
     HAPPOReferenceTrainer,
+    TAMCategoricalRecurrentHAPPOPolicy,
 )
 from algorithms.happo.rollout_safety import (
     sanitize_policy_inputs,
@@ -307,7 +308,28 @@ def _load_checkpoint_meta(model_path: str | Path | None) -> dict:
 
 def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int, action_dim: int,
                   device: torch.device, init_checkpoint_meta: str | Path | None = None,
+                  action_distribution: str = "continuous_quantized",
+                  action_levels: int = 40,
                   ):
+    if action_distribution == "multidiscrete_categorical":
+        meta = {}
+        if init_checkpoint_meta is not None:
+            meta_path = Path(init_checkpoint_meta)
+            if not meta_path.exists():
+                raise ValueError("categorical init checkpoint requires meta.json")
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("tam_action_distribution", meta.get("action_distribution")) != "multidiscrete_categorical":
+                raise ValueError("formal categorical training rejects legacy continuous checkpoints")
+            if int(meta.get("tam_action_levels", meta.get("action_levels", -1))) != int(action_levels):
+                raise ValueError("checkpoint action_levels does not match environment")
+        return TAMCategoricalRecurrentHAPPOPolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            actor_obs_dim=actor_dim,
+            critic_state_dim=critic_dim,
+            action_dim=action_dim,
+            action_levels=action_levels,
+            rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+        ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(actor_dim, critic_dim, action_dim=action_dim).to(device)
     if policy_arch == "entity_attention":
@@ -452,6 +474,13 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int, action
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
         "action_dim": action_dim,
+        "action_distribution": getattr(policy, "action_distribution", "continuous_quantized"),
+        "action_space_class": ("MultiDiscrete" if getattr(policy, "action_distribution", "") == "multidiscrete_categorical" else "Box"),
+        "action_levels": getattr(policy, "action_levels", None),
+        "tam_action_distribution": getattr(policy, "action_distribution", "continuous_quantized"),
+        "action_space": ("MultiDiscrete" if getattr(policy, "action_distribution", "") == "multidiscrete_categorical" else "Box"),
+        "tam_action_levels": getattr(policy, "action_levels", None),
+        "policy_class": type(policy).__name__,
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
         "centralized_critic": True,
@@ -654,6 +683,9 @@ def _run_training_main() -> None:
     actor_dim = adapter.flat_actor_obs_dim
     critic_dim = adapter.critic_state_dim
     action_dim = _action_dim_from_env(env)
+    action_distribution = getattr(env, "tam_action_distribution", "continuous_quantized")
+    action_levels = int(getattr(env, "tam_action_levels", 40))
+    action_space_class = type(env.action_space[env.red_ids[0]]).__name__
     init_meta_path = None
     if args.init_checkpoint:
         init_path_for_meta = _rel(args.init_checkpoint)
@@ -666,6 +698,8 @@ def _run_training_main() -> None:
     policy = _build_policy(
         args.policy_arch, actor_dim, critic_dim, action_dim, device,
         init_checkpoint_meta=init_meta_path,
+        action_distribution=action_distribution,
+        action_levels=action_levels,
     )
     _SINGLE_RUNNER_STATE["policy"] = policy
     _SINGLE_RUNNER_STATE["meta"] = {
@@ -675,6 +709,13 @@ def _run_training_main() -> None:
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
         "action_dim": action_dim,
+        "action_distribution": action_distribution,
+        "action_space_class": action_space_class,
+        "action_levels": action_levels,
+        "tam_action_distribution": action_distribution,
+        "action_space": action_space_class,
+        "tam_action_levels": action_levels,
+        "policy_class": type(policy).__name__,
     }
     if args.init_checkpoint:
         init_path = Path(args.init_checkpoint)
@@ -769,6 +810,9 @@ def _run_training_main() -> None:
             "action_log_std_uav_max", "action_log_std_uav_mean",
             "approx_kl_mav", "approx_kl_uav",
             "mask_keep_ratio", "mask_entropy", "masked_entity_count",
+            "edge_bin_rate", "low_bin_rate", "high_bin_rate",
+            "max_action_prob_mav", "max_action_prob_uav",
+            "action_bin_usage_mav", "action_bin_usage_uav",
             "nan_detected",
         ])
         eval_writer = None
@@ -789,7 +833,8 @@ def _run_training_main() -> None:
                 break
             buffer = HAPPORolloutBuffer(rollout_transitions, len(env.red_ids), actor_dim,
                                         critic_dim, action_dim, roles,
-                                        rnn_hidden_size=getattr(policy, 'rnn_hidden_size', 0))
+                                        rnn_hidden_size=getattr(policy, 'rnn_hidden_size', 0),
+                                        action_dtype=(np.int64 if action_distribution == "multidiscrete_categorical" else np.float32))
             red_fired = blue_fired = hits = 0
             while len(buffer) < rollout_transitions and total_steps < args.total_env_steps:
                 for env_idx, rollout_env in enumerate(envs):
@@ -897,7 +942,8 @@ def _run_training_main() -> None:
                                 f"Non-finite returned rnn_hidden for active agent: "
                                 f"iter={iteration} env={env_idx} step={total_steps}"
                             )
-                    action_dict = {rid: actions[i].astype(np.float32)
+                    action_dtype = np.int64 if action_distribution == "multidiscrete_categorical" else np.float32
+                    action_dict = {rid: actions[i].astype(action_dtype)
                                    for i, rid in enumerate(rollout_env.red_ids)}
                     heartbeat.write(
                         "before_opponent_act",
@@ -937,6 +983,15 @@ def _run_training_main() -> None:
                         sim_time=_sim_time(rollout_env),
                     )
                     next_obs, rewards, terminated, truncated, next_info = rollout_env.step(action_dict)
+                    if rich_logger is not None:
+                        rich_logger.write_tam_actions(
+                            rollout_env._last_tam_action_commands,
+                            scenario=Path(args.config).stem,
+                            episode_id=current_ep_id[env_idx],
+                            step=current_ep_len[env_idx],
+                            sim_time=_sim_time(rollout_env),
+                            action_space=action_space_class,
+                        )
                     heartbeat.write(
                         "after_env_step",
                         iteration=iteration,
@@ -1072,8 +1127,8 @@ def _run_training_main() -> None:
                 red_fired, blue_fired, hits, f"{stats['actor_loss_mav']:.6f}",
                 f"{stats['actor_loss_uav']:.6f}", f"{stats['critic_loss']:.6f}",
                 f"{stats['entropy_mav']:.6f}", f"{stats['entropy_uav']:.6f}",
-                f"{stats['mav_action_saturation_rate']:.6f}",
-                f"{stats['uav_action_saturation_rate']:.6f}",
+                f"{stats.get('mav_action_saturation_rate', 0.0):.6f}",
+                f"{stats.get('uav_action_saturation_rate', 0.0):.6f}",
                 f"{stats.get('entropy_mav_valid_count', 0.0):.1f}",
                 f"{stats.get('entropy_uav_valid_count', 0.0):.1f}",
                 f"{stats.get('mav_active_sample_count', 0.0):.1f}",
@@ -1089,6 +1144,13 @@ def _run_training_main() -> None:
                 f"{stats.get('mask_keep_ratio', 1.0):.6f}",
                 f"{stats.get('mask_entropy', 0.0):.6f}",
                 f"{stats.get('masked_entity_count', 0.0):.2f}",
+                f"{stats.get('edge_bin_rate', 0.0):.6f}",
+                f"{stats.get('low_bin_rate', 0.0):.6f}",
+                f"{stats.get('high_bin_rate', 0.0):.6f}",
+                f"{stats.get('max_action_prob_mav', 0.0):.6f}",
+                f"{stats.get('max_action_prob_uav', 0.0):.6f}",
+                f"{stats.get('action_bin_usage_mav', 0.0):.6f}",
+                f"{stats.get('action_bin_usage_uav', 0.0):.6f}",
                 int(nan_detected),
             ])
             if rich_logger is not None:
@@ -1126,11 +1188,11 @@ def _run_training_main() -> None:
                     "policy_gradient_norm": "",
                     "value_gradient_norm": "",
                     "action_saturation_rate": max(
-                        stats["mav_action_saturation_rate"],
-                        stats["uav_action_saturation_rate"],
+                        stats.get("mav_action_saturation_rate", 0.0),
+                        stats.get("uav_action_saturation_rate", 0.0),
                     ),
-                    "mav_action_saturation_rate": stats["mav_action_saturation_rate"],
-                    "uav_action_saturation_rate": stats["uav_action_saturation_rate"],
+                    "mav_action_saturation_rate": stats.get("mav_action_saturation_rate", 0.0),
+                    "uav_action_saturation_rate": stats.get("uav_action_saturation_rate", 0.0),
                     "approx_kl_mav": stats.get("approx_kl_mav", 0.0),
                     "approx_kl_uav": stats.get("approx_kl_uav", 0.0),
                     "mask_keep_ratio": stats.get("mask_keep_ratio", 1.0),
@@ -1173,6 +1235,13 @@ def _run_training_main() -> None:
                     "actor_obs_dim": actor_dim,
                     "critic_state_dim": critic_dim,
                     "action_dim": action_dim,
+                    "action_distribution": action_distribution,
+                    "action_space_class": action_space_class,
+                    "action_levels": action_levels,
+                    "tam_action_distribution": action_distribution,
+                    "action_space": action_space_class,
+                    "tam_action_levels": action_levels,
+                    "policy_class": type(policy).__name__,
                     "entity_dim": getattr(policy, "entity_dim", None),
                     "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
                     "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
@@ -1260,6 +1329,13 @@ def _run_training_main() -> None:
                             "actor_obs_dim": actor_dim,
                             "critic_state_dim": critic_dim,
                             "action_dim": action_dim,
+                            "action_distribution": action_distribution,
+                            "action_space_class": action_space_class,
+                            "action_levels": action_levels,
+                            "tam_action_distribution": action_distribution,
+                            "action_space": action_space_class,
+                            "tam_action_levels": action_levels,
+                            "policy_class": type(policy).__name__,
                             "entity_dim": getattr(policy, "entity_dim", None),
                             "separate_actors": True,
                             "centralized_critic": True,
@@ -1294,6 +1370,13 @@ def _run_training_main() -> None:
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
         "action_dim": action_dim,
+        "action_distribution": action_distribution,
+        "action_space_class": action_space_class,
+        "action_levels": action_levels,
+        "tam_action_distribution": action_distribution,
+        "action_space": action_space_class,
+        "tam_action_levels": action_levels,
+        "policy_class": type(policy).__name__,
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
         "centralized_critic": True,

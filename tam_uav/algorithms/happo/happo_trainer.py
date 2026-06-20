@@ -69,8 +69,10 @@ class HAPPOReferenceTrainer:
             else []
         )
         self.actor_shared_params = _unique_params(self.actor_shared_params)
-        self.mav_actor_params = _unique_params(list(policy.mav_actor.parameters()) + [policy.action_log_std_mav])
-        self.uav_actor_params = _unique_params(list(policy.uav_actor.parameters()) + [policy.action_log_std_uav])
+        mav_extra = [policy.action_log_std_mav] if hasattr(policy, "action_log_std_mav") else []
+        uav_extra = [policy.action_log_std_uav] if hasattr(policy, "action_log_std_uav") else []
+        self.mav_actor_params = _unique_params(list(policy.mav_actor.parameters()) + mav_extra)
+        self.uav_actor_params = _unique_params(list(policy.uav_actor.parameters()) + uav_extra)
         self.shared_actor_opt = (
             torch.optim.Adam(self.actor_shared_params, lr=actor_lr)
             if self.actor_shared_params
@@ -218,21 +220,12 @@ class HAPPOReferenceTrainer:
 
         actions = data["actions"].detach()
         roles = data["role_ids"].detach().cpu().numpy()
-        abs_actions = torch.abs(actions)
-        sat = (abs_actions >= 0.999).float()
-        mav_mask = torch.as_tensor(roles == MAV_ROLE_ID, device=actions.device).view(1, -1, 1)
-        uav_mask = torch.as_tensor(roles == UAV_ROLE_ID, device=actions.device).view(1, -1, 1)
-        mav_sat = float(sat.masked_select(mav_mask.expand_as(sat)).mean().item()) if mav_mask.any() else 0.0
-        uav_sat = float(sat.masked_select(uav_mask.expand_as(sat)).mean().item()) if uav_mask.any() else 0.0
-
-        mav_log_std = self.policy.action_log_std_mav.detach()
-        uav_log_std = self.policy.action_log_std_uav.detach()
         mask_stats = (
             dict(getattr(self.policy, "last_mask_stats", {}))
             if hasattr(self.policy, "last_mask_stats")
             else {}
         )
-        return {
+        common_metrics = {
             "actor_loss_mav": float(np.mean(actor_loss_mav)),
             "actor_loss_uav": float(np.mean(actor_loss_uav)),
             "critic_loss": float(np.mean(critic_losses)),
@@ -242,19 +235,65 @@ class HAPPOReferenceTrainer:
             "entropy_uav_valid_count": float(np.mean(valid_uav)),
             "mav_active_sample_count": float(np.mean(valid_mav)),
             "uav_active_sample_count": float(np.mean(valid_uav)),
+            "approx_kl_mav": float(np.mean(kl_mav)),
+            "approx_kl_uav": float(np.mean(kl_uav)),
+            "uav_imitation_loss": float(np.mean(imitation_losses)) if imitation_losses else 0.0,
+            "mask_keep_ratio": float(mask_stats.get("mask_keep_ratio", 1.0)),
+            "mask_entropy": float(mask_stats.get("mask_entropy", 0.0)),
+            "masked_entity_count": float(mask_stats.get("masked_entity_count", 0.0)),
+        }
+        if getattr(self.policy, "action_distribution", "") == "multidiscrete_categorical":
+            levels = int(self.policy.action_levels)
+            flat_actions = actions.reshape(-1, actions.shape[-1])
+            flat_roles = np.tile(roles, actions.shape[0])
+            mav_rows = torch.as_tensor(flat_roles == MAV_ROLE_ID, device=actions.device)
+            uav_rows = torch.as_tensor(flat_roles == UAV_ROLE_ID, device=actions.device)
+            with torch.no_grad():
+                probs, _ = self.policy.action_probabilities(
+                    data["actor_obs"],
+                    data["role_ids"].view(1, -1).expand_as(data["active_masks"]),
+                    data.get("rnn_hidden"),
+                )
+                max_probs = probs.reshape(-1, probs.shape[-2], probs.shape[-1]).max(-1).values.mean(-1)
+
+            def _role_mean(values, row_mask):
+                return float(values[row_mask].mean().item()) if row_mask.any() else 0.0
+
+            def _usage(row_mask):
+                selected = flat_actions[row_mask]
+                if selected.numel() == 0:
+                    return 0.0
+                return float(torch.unique(selected).numel() / levels)
+
+            common_metrics.update({
+                "edge_bin_rate": float(((actions == 0) | (actions == levels - 1)).float().mean().item()),
+                "low_bin_rate": float((actions == 0).float().mean().item()),
+                "high_bin_rate": float((actions == levels - 1).float().mean().item()),
+                "max_action_prob_mav": _role_mean(max_probs, mav_rows),
+                "max_action_prob_uav": _role_mean(max_probs, uav_rows),
+                "action_bin_usage_mav": _usage(mav_rows),
+                "action_bin_usage_uav": _usage(uav_rows),
+            })
+            return common_metrics
+
+        abs_actions = torch.abs(actions)
+        sat = (abs_actions >= 0.999).float()
+        mav_mask = torch.as_tensor(roles == MAV_ROLE_ID, device=actions.device).view(1, -1, 1)
+        uav_mask = torch.as_tensor(roles == UAV_ROLE_ID, device=actions.device).view(1, -1, 1)
+        mav_sat = float(sat.masked_select(mav_mask.expand_as(sat)).mean().item()) if mav_mask.any() else 0.0
+        uav_sat = float(sat.masked_select(uav_mask.expand_as(sat)).mean().item()) if uav_mask.any() else 0.0
+
+        mav_log_std = self.policy.action_log_std_mav.detach()
+        uav_log_std = self.policy.action_log_std_uav.detach()
+        common_metrics.update({
             "action_log_std_mav_min": float(mav_log_std.min().item()),
             "action_log_std_mav_max": float(mav_log_std.max().item()),
             "action_log_std_mav_mean": float(mav_log_std.mean().item()),
             "action_log_std_uav_min": float(uav_log_std.min().item()),
             "action_log_std_uav_max": float(uav_log_std.max().item()),
             "action_log_std_uav_mean": float(uav_log_std.mean().item()),
-            "approx_kl_mav": float(np.mean(kl_mav)),
-            "approx_kl_uav": float(np.mean(kl_uav)),
             "action_saturation_rate": float(sat.mean().item()),
             "mav_action_saturation_rate": mav_sat,
             "uav_action_saturation_rate": uav_sat,
-            "uav_imitation_loss": float(np.mean(imitation_losses)) if imitation_losses else 0.0,
-            "mask_keep_ratio": float(mask_stats.get("mask_keep_ratio", 1.0)),
-            "mask_entropy": float(mask_stats.get("mask_entropy", 0.0)),
-            "masked_entity_count": float(mask_stats.get("masked_entity_count", 0.0)),
-        }
+        })
+        return common_metrics
