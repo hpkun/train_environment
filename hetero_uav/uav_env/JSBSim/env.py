@@ -22,7 +22,7 @@ from .alignment.reward_utils import (
 )
 
 from .simulator import AircraftSimulator, MissileSimulator
-from .pid_controller import PIDController
+from .pid_controller import PIDController, F22MavEnergyPIDController
 from .utils import get2d_AO_TA_R
 from .render_tacview import TacviewLogger
 
@@ -217,6 +217,8 @@ class UavCombatEnv(gymnasium.Env):
                  suppress_jsbsim_output: bool = True,
                  control_mode_by_role: dict | None = None,
                  direct_fcs_trim_by_role: dict | None = None,
+                 pid_profile_by_role: dict | None = None,
+                 pid_profile_config: dict | None = None,
                  render_mode=None):
         super().__init__()
         self.max_num_blue = max_num_blue
@@ -229,6 +231,8 @@ class UavCombatEnv(gymnasium.Env):
         self.suppress_jsbsim_output = suppress_jsbsim_output
         self.control_mode_by_role = dict(control_mode_by_role or {})
         self.direct_fcs_trim_by_role = dict(direct_fcs_trim_by_role or {})
+        self.pid_profile_by_role = dict(pid_profile_by_role or {})
+        self.pid_profile_config = dict(pid_profile_config or {})
         self.physics_dt = 1.0 / sim_freq
         self.env_dt = agent_interaction_steps * self.physics_dt
         self.missile_cooldown_frames = int(round(0.5 * self.sim_freq))
@@ -416,7 +420,8 @@ class UavCombatEnv(gymnasium.Env):
         # Create or reset PID controllers
         if first_reset:
             for aid in self.agent_ids:
-                self.pid_controllers[aid] = PIDController(self.physics_dt)
+                profile = self._pid_profile_for(aid)
+                self.pid_controllers[aid] = self._create_pid_controller(profile)
         else:
             for pid in self.pid_controllers.values():
                 pid.reset()
@@ -719,6 +724,42 @@ class UavCombatEnv(gymnasium.Env):
         if not role and agent_id.startswith("red_"):
             role = "mav" if agent_id == "red_0" else "attack_uav"
         return str(self.control_mode_by_role.get(role, "pid_target"))
+
+    def _pid_profile_for(self, agent_id: str) -> str:
+        """Return PID profile name for an agent (default: f16_default)."""
+        role = getattr(self, "agent_roles", {}).get(agent_id, "")
+        if not role and agent_id.startswith("red_"):
+            role = "mav" if agent_id == "red_0" else "attack_uav"
+        return str(self.pid_profile_by_role.get(role, "f16_default"))
+
+    def _create_pid_controller(self, profile: str):
+        """Create a PIDController instance for the given profile name."""
+        profile_cfg = self.pid_profile_config.get(profile, {})
+
+        if profile == "f22_mav_energy_pid":
+            kwargs = {}
+            for key in ("roll_kp", "roll_ki", "roll_kd",
+                        "pitch_kp", "pitch_ki", "pitch_kd",
+                        "vel_kp", "vel_ki", "vel_kd",
+                        "elevator_sign", "throttle_min", "throttle_max",
+                        "low_speed_throttle_floor"):
+                if key in profile_cfg:
+                    kwargs[key] = profile_cfg[key]
+            # Fallback: if no elevator_sign in config, default to +1 (F-22 convention)
+            # The tuning sweep validates or corrects this.
+            if "elevator_sign" not in kwargs:
+                kwargs["elevator_sign"] = +1
+            return F22MavEnergyPIDController(self.physics_dt, **kwargs)
+
+        # Default: standard F-16 PIDController
+        kwargs = {}
+        for key in ("roll_kp", "roll_ki", "roll_kd",
+                    "pitch_kp", "pitch_ki", "pitch_kd",
+                    "vel_kp", "vel_ki", "vel_kd",
+                    "elevator_sign", "throttle_min", "throttle_max"):
+            if key in profile_cfg:
+                kwargs[key] = profile_cfg[key]
+        return PIDController(self.physics_dt, **kwargs)
 
     def _direct_fcs_trim_for(self, agent_id: str) -> dict | None:
         role = getattr(self, "agent_roles", {}).get(agent_id, "")

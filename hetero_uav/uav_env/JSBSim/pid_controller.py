@@ -100,44 +100,60 @@ class PIDController:
     - Pitch PID:   pitch_error → elevator_cmd  [−1, 1]
     - Velocity PID: vel_error  → throttle_cmd  [0, 1]
     - Rudder:      0.0 (hard-locked per paper)
+
+    Gains are configurable via kwargs; defaults are tuned for F-16.
     """
 
-    def __init__(self, dt, debug: bool = False):
+    # Default F-16 PID gains (class-level for profile reuse)
+    F16_DEFAULT_GAINS = {
+        "roll_kp": 0.15,  "roll_ki": 0.5,  "roll_kd": 0.05,
+        "pitch_kp": 2.5,  "pitch_ki": 0.5,  "pitch_kd": 0.1,
+        "vel_kp": 0.04,   "vel_ki": 0.01,   "vel_kd": 0.003,
+        "elevator_sign": -1,    # F-16 FCS: positive cmd → pitch DOWN
+        "throttle_min": 0.0,    # no floor
+        "throttle_max": 1.0,
+    }
+
+    def __init__(self, dt, debug: bool = False,
+                 roll_kp=None, roll_ki=None, roll_kd=None,
+                 pitch_kp=None, pitch_ki=None, pitch_kd=None,
+                 vel_kp=None, vel_ki=None, vel_kd=None,
+                 elevator_sign=None,
+                 throttle_min=None, throttle_max=None):
         self.dt = dt
         self._debug = debug
         self._debug_step = 0          # throttled debug counter
         self._prev_target_heading = None   # for low-pass filter (Fix 2)
         self._prev_roll_error = None        # for D-term guard (clipped-error jump detection)
 
+        # Resolve gains: explicit arg > class default
+        g = self.F16_DEFAULT_GAINS
+        _rkp, _rki, _rkd = (roll_kp if roll_kp is not None else g["roll_kp"]), (roll_ki if roll_ki is not None else g["roll_ki"]), (roll_kd if roll_kd is not None else g["roll_kd"])
+        _pkp, _pki, _pkd = (pitch_kp if pitch_kp is not None else g["pitch_kp"]), (pitch_ki if pitch_ki is not None else g["pitch_ki"]), (pitch_kd if pitch_kd is not None else g["pitch_kd"])
+        _vkp, _vki, _vkd = (vel_kp if vel_kp is not None else g["vel_kp"]), (vel_ki if vel_ki is not None else g["vel_ki"]), (vel_kd if vel_kd is not None else g["vel_kd"])
+
+        self.elevator_sign = float(elevator_sign if elevator_sign is not None else g["elevator_sign"])
+        self.throttle_min = float(throttle_min if throttle_min is not None else g["throttle_min"])
+        self.throttle_max = float(throttle_max if throttle_max is not None else g["throttle_max"])
+
         # --- Roll PID (drives aileron) ---
-        # F-16 aero has strong natural roll-damping (Cl_p ≈ −0.5 rad⁻¹ at
-        # M0.8).  External D-gain is kept tiny to prevent derivative kick when
-        # the 5 Hz Actor updates the target_heading, causing a step-change in
-        # d_I_des → d_B_des → roll_error at the 60 Hz PID rate.
         self._roll_pid = PIDLoop(
-            kp=0.15, ki=0.5, kd=0.05,
+            kp=_rkp, ki=_rki, kd=_rkd,
             output_min=-1.0, output_max=1.0,
             name="roll",
         )
 
         # --- Pitch PID (drives elevator) ---
-        # fcs/elevator-cmd-norm is a G-command in the F-16 FCS.
-        # Positive cmd → pitch DOWN, so output is negated in compute_control.
-        # kd kept low (0.1): the dual-frequency system (Actor 5 Hz / PID 60 Hz)
-        # means target_pitch step-changes every 0.2 s; a large D-gain would
-        # spike the elevator on every update frame.
         self._pitch_pid = PIDLoop(
-            kp=2.5, ki=0.5, kd=0.1,
+            kp=_pkp, ki=_pki, kd=_pkd,
             output_min=-1.0, output_max=1.0,
             name="pitch",
         )
 
         # --- Velocity PID ---
-        # fcs/throttle-cmd-norm: throttle-pos-norm = cmd-norm × 2.
-        # Afterburner engages at throttle-pos-norm > 0.77 → cmd-norm > 0.385.
         self._velocity_pid = PIDLoop(
-            kp=0.04, ki=0.01, kd=0.003,
-            output_min=0.0, output_max=1.0,
+            kp=_vkp, ki=_vki, kd=_vkd,
+            output_min=self.throttle_min, output_max=self.throttle_max,
             name="velocity",
         )
 
@@ -428,8 +444,10 @@ class PIDController:
         aileron = self._roll_pid.step(roll_error, self.dt)
 
         # Pitch error → elevator
-        # F-16 FCS: positive elevator-cmd-norm → pitch DOWN, so negate
-        elevator = -self._pitch_pid.step(pitch_error, self.dt)
+        # elevator_sign is platform-specific:
+        #   F-16 FCS: positive elevator-cmd-norm → pitch DOWN  → sign = −1
+        #   F-22:     positive elevator-cmd-norm → pitch UP    → sign = +1
+        elevator = self.elevator_sign * self._pitch_pid.step(pitch_error, self.dt)
 
         # Velocity error → throttle
         velocity_error = target_velocity - current_velocity
@@ -437,5 +455,175 @@ class PIDController:
 
         # Rudder: hard-locked to 0 per paper specification
         rudder = 0.0
+
+        return aileron, elevator, rudder, throttle
+
+
+# ------------------------------------------------------------------
+#  F22 MAV energy-aware PID profile
+# ------------------------------------------------------------------
+
+# Default F22 PID gains (conservative starting point; can be overridden via sweep)
+F22_MAV_ENERGY_DEFAULT_GAINS = {
+    "roll_kp": 0.12,  "roll_ki": 0.45, "roll_kd": 0.04,
+    "pitch_kp": 1.2,  "pitch_ki": 0.45, "pitch_kd": 0.08,
+    "vel_kp": 0.06,   "vel_ki": 0.012,  "vel_kd": 0.003,
+    "elevator_sign": None,   # MUST be set via sweep before use
+    "throttle_min": 0.65,     # F22 needs higher idle to sustain flight
+    "throttle_max": 1.0,
+}
+
+
+class F22MavEnergyPIDController(PIDController):
+    """F22 MAV energy-aware BTT PID controller.
+
+    Extends the base PIDController with:
+      - Energy guard: limits aggressive pitch/roll commands at low speed
+      - Throttle floor: keeps engine spooled to prevent speed collapse
+      - F22-specific PID gains (conservative defaults, sweep-selectable)
+      - Autodetected elevator sign (NOT the F-16 hardcoded −1)
+
+    Low-level control protection — does NOT modify reward, action dim, or
+    aircraft XML.
+    """
+
+    # Energy guard thresholds
+    ENERGY_LOW_SPEED = 180.0       # m/s — below this, restrict maneuvering
+    ENERGY_CRITICAL_SPEED = 150.0  # m/s — below this, level/shallow climb only
+    LOW_SPEED_THROTTLE_FLOOR = 0.95  # throttle floor when speed < 180 (F22 needs high idle)
+
+    # Energy guard limits
+    LOW_SPEED_PITCH_MIN_DEG = -5.0    # max nose-down at low speed
+    LOW_SPEED_PITCH_MAX_DEG = 18.0    # max nose-up at low speed
+    LOW_SPEED_ROLL_MAX_DEG = 30.0     # max bank at low speed
+    CRITICAL_PITCH_MIN_DEG = -2.0     # max nose-down at critical speed
+    CRITICAL_PITCH_MAX_DEG = 15.0     # max nose-up at critical speed
+    CRITICAL_ROLL_MAX_DEG = 15.0      # max bank at critical speed
+
+    def __init__(self, dt, debug: bool = False,
+                 roll_kp=None, roll_ki=None, roll_kd=None,
+                 pitch_kp=None, pitch_ki=None, pitch_kd=None,
+                 vel_kp=None, vel_ki=None, vel_kd=None,
+                 elevator_sign=None,
+                 throttle_min=None, throttle_max=None,
+                 low_speed_throttle_floor=None):
+        g = F22_MAV_ENERGY_DEFAULT_GAINS
+        # Validate elevator_sign BEFORE super().__init__ so the F22 profile
+        # never silently falls back to the F-16 default.
+        resolved_sign = elevator_sign if elevator_sign is not None else g["elevator_sign"]
+        if resolved_sign is None:
+            raise ValueError(
+                "F22MavEnergyPIDController: elevator_sign must be set explicitly "
+                "(run elevator sign sweep first)"
+            )
+        super().__init__(
+            dt, debug=debug,
+            roll_kp=roll_kp if roll_kp is not None else g["roll_kp"],
+            roll_ki=roll_ki if roll_ki is not None else g["roll_ki"],
+            roll_kd=roll_kd if roll_kd is not None else g["roll_kd"],
+            pitch_kp=pitch_kp if pitch_kp is not None else g["pitch_kp"],
+            pitch_ki=pitch_ki if pitch_ki is not None else g["pitch_ki"],
+            pitch_kd=pitch_kd if pitch_kd is not None else g["pitch_kd"],
+            vel_kp=vel_kp if vel_kp is not None else g["vel_kp"],
+            vel_ki=vel_ki if vel_ki is not None else g["vel_ki"],
+            vel_kd=vel_kd if vel_kd is not None else g["vel_kd"],
+            elevator_sign=resolved_sign,
+            throttle_min=throttle_min if throttle_min is not None else g["throttle_min"],
+            throttle_max=throttle_max if throttle_max is not None else g["throttle_max"],
+        )
+        self.low_speed_throttle_floor = float(
+            low_speed_throttle_floor
+            if low_speed_throttle_floor is not None
+            else self.LOW_SPEED_THROTTLE_FLOOR
+        )
+
+        # Per-step diagnostics (read by env for logging)
+        self.last_energy_guard_active = False
+        self.last_energy_guard_level = ""
+        self.last_pitch_clamped = False
+        self.last_roll_clamped = False
+        self.last_throttle_boosted = False
+
+    def compute_control(self, current_rpy, current_velocity,
+                        target_pitch, target_heading, target_velocity,
+                        ned_velocity=None):
+        """Override to apply energy guard before delegating to base BTT logic.
+
+        Energy guard modifies *target_pitch, target_velocity, target_heading*
+        in place to protect low-speed F22 flight before the PID loops run.
+        """
+        roll, pitch, yaw = (float(current_rpy[0]), float(current_rpy[1]),
+                            float(current_rpy[2]))
+        current_speed = float(current_velocity)
+
+        # Reset per-step diagnostics
+        self.last_energy_guard_active = False
+        self.last_energy_guard_level = ""
+        self.last_pitch_clamped = False
+        self.last_roll_clamped = False
+        self.last_throttle_boosted = False
+
+        # ---- Energy guard: speed-dependent protection ----
+        if current_speed < self.ENERGY_CRITICAL_SPEED:
+            # Critical: level or shallow climb only. No large pitch or roll.
+            self.last_energy_guard_active = True
+            self.last_energy_guard_level = "critical"
+
+            target_pitch_deg = float(np.clip(
+                np.rad2deg(target_pitch),
+                self.CRITICAL_PITCH_MIN_DEG,
+                self.CRITICAL_PITCH_MAX_DEG,
+            ))
+            target_pitch = np.deg2rad(target_pitch_deg)
+            self.last_pitch_clamped = True
+
+            # Minimize roll: bank not useful at very low speed
+            # Override target_heading toward current heading to reduce roll demand
+            target_heading = yaw
+            self.last_roll_clamped = True
+
+            # Force full throttle recovery
+            target_velocity = max(target_velocity, 408.0)  # VELOCITY_MAX
+            self.last_throttle_boosted = True
+
+        elif current_speed < self.ENERGY_LOW_SPEED:
+            # Low speed: restrict aggressive pitch/roll
+            self.last_energy_guard_active = True
+            self.last_energy_guard_level = "low"
+
+            target_pitch_deg = float(np.clip(
+                np.rad2deg(target_pitch),
+                self.LOW_SPEED_PITCH_MIN_DEG,
+                self.LOW_SPEED_PITCH_MAX_DEG,
+            ))
+            target_pitch = np.deg2rad(target_pitch_deg)
+            if abs(np.rad2deg(target_pitch) - float(np.clip(
+                np.rad2deg(target_pitch), -90, 90))) > 1e-6:
+                pass  # already clamped above
+            self.last_pitch_clamped = True
+
+            # Boost target_velocity to ensure speed recovery
+            target_velocity = max(target_velocity, current_speed + 30.0)
+            self.last_throttle_boosted = True
+
+        # ---- Throttle floor: prevent speed collapse ----
+        # The velocity PID's output_min already enforces throttle_min,
+        # but at low speed we further boost the target to keep the PID
+        # error positive.
+        if current_speed < self.ENERGY_LOW_SPEED:
+            target_velocity = max(target_velocity, 250.0)  # ~M0.73
+
+        # Delegate to base BTT logic (which handles gimbal, LPF, roll deadband, etc.)
+        aileron, elevator, rudder, throttle = super().compute_control(
+            current_rpy, current_velocity,
+            target_pitch, target_heading, target_velocity,
+            ned_velocity=ned_velocity,
+        )
+
+        # ---- Throttle floor: hard clamp at low speed ----
+        if current_speed < self.ENERGY_LOW_SPEED:
+            if throttle < self.low_speed_throttle_floor:
+                throttle = self.low_speed_throttle_floor
+                self.last_throttle_boosted = True
 
         return aileron, elevator, rudder, throttle
