@@ -24,6 +24,11 @@ TRAIN_METRICS_COLUMNS = [
     "policy_gradient_norm", "value_gradient_norm", "action_saturation_rate",
     "mav_action_saturation_rate", "uav_action_saturation_rate",
     "approx_kl_mav", "approx_kl_uav",
+    "throttle_high_rate", "surface_edge_rate",
+    "max_action_prob_mav", "max_action_prob_uav",
+    "action_bin_usage_mav", "action_bin_usage_uav",
+    "grad_norm_actor", "grad_norm_critic",
+    "correction_factor_mean", "correction_factor_max", "correction_factor_min",
     "mask_keep_ratio", "mask_entropy", "masked_entity_count",
     "nan_detected",
 ]

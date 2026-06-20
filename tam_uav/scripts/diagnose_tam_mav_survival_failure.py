@@ -10,16 +10,31 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
 
 def _load_policy(args):
-    from algorithms.happo import BRMARecurrentMaskedHAPPOReferencePolicy
+    from algorithms.happo import (
+        BRMARecurrentMaskedHAPPOReferencePolicy,
+        TAMCategoricalRecurrentHAPPOPolicy,
+    )
     import torch, json as jj
     meta = jj.loads((Path(args.checkpoint).parent / "meta.json").read_text())
-    policy = BRMARecurrentMaskedHAPPOReferencePolicy(
-        entity_dim=meta.get("entity_dim", 19),
-        critic_state_dim=meta.get("critic_state_dim", 480),
-        action_dim=meta.get("action_dim", 4),
-        rnn_hidden_size=meta.get("rnn_hidden_size", 128),
-        random_scale_mask=meta.get("random_scale_mask", False),
-        biased_mask=meta.get("biased_mask", False))
+    if meta.get("tam_action_distribution", meta.get("action_distribution")) == "multidiscrete_categorical":
+        policy = TAMCategoricalRecurrentHAPPOPolicy(
+            entity_dim=meta.get("entity_dim", 19),
+            actor_obs_dim=meta.get("actor_obs_dim", 96),
+            critic_state_dim=meta.get("critic_state_dim", 480),
+            action_dim=meta.get("action_dim", 4),
+            action_levels=meta.get("tam_action_levels", meta.get("action_levels", 40)),
+            rnn_hidden_size=meta.get("rnn_hidden_size", 128),
+            neutral_action_init=meta.get("neutral_action_init", True),
+            neutral_action_init_std_bins=meta.get("neutral_action_init_std_bins", 4.0),
+        )
+    else:
+        policy = BRMARecurrentMaskedHAPPOReferencePolicy(
+            entity_dim=meta.get("entity_dim", 19),
+            critic_state_dim=meta.get("critic_state_dim", 480),
+            action_dim=meta.get("action_dim", 4),
+            rnn_hidden_size=meta.get("rnn_hidden_size", 128),
+            random_scale_mask=meta.get("random_scale_mask", False),
+            biased_mask=meta.get("biased_mask", False))
     policy.load(args.checkpoint, map_location=args.device)
     policy.eval()
     return policy
@@ -49,7 +64,7 @@ def main():
         det = mode == "deterministic"
         mav_deaths = []
         for ep in range(args.episodes):
-            env = make_env(args.config, env_type="jsbsim_hetero", suppress_jsbsim_output=True)
+            env = make_env(args.config, env_type="jsbsim_hetero", suppress_jsbsim_output=False)
             obs, info = env.reset(seed=ep)
             roles = [0 if "mav" in str(env.agent_roles.get(rid,"")).lower() or rid=="red_0" else 1 for rid in env.red_ids]
             rnn_h = None
@@ -70,9 +85,10 @@ def main():
                 actions = out["action"].cpu().numpy()
                 if rnn_h is not None and "rnn_hidden" in out:
                     rnn_h = out["rnn_hidden"].cpu().numpy()
-                act_dict = {rid: actions[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
+                action_dtype = np.int64 if getattr(policy, "action_distribution", "") == "multidiscrete_categorical" else np.float32
+                act_dict = {rid: actions[i].astype(action_dtype) for i, rid in enumerate(env.red_ids)}
                 for bid, bact in opp.act({bid: obs[bid] for bid in env.blue_ids}, env.blue_ids, env=env).items():
-                    act_dict[bid] = bact.astype(np.float32)
+                    act_dict[bid] = bact.astype(action_dtype)
                 obs, rew, term, trunc, info = env.step(act_dict)
                 mav = env.red_planes.get("red_0")
                 if mav is None or not mav.is_alive:
@@ -80,9 +96,7 @@ def main():
                         death_step = s
                         if s >= env.max_steps - 1: death_reason = "timeout"
                         else:
-                            mt = info.get("__missile_term__", {})
-                            red_hits = mt.get("red",{}).get("hit",0)
-                            death_reason = "missile_kill" if red_hits > 0 else "crash_or_unknown"
+                            death_reason = env._death_reasons.get("red_0", "crash_or_unknown")
                             if mav:
                                 alt = mav.get_geodetic()[2]
                                 spd = float(np.linalg.norm(mav.get_velocity()))

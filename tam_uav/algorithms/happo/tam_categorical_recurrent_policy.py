@@ -71,6 +71,8 @@ class TAMCategoricalRecurrentHAPPOPolicy(nn.Module):
         max_allies: int = 4,
         max_enemies: int = 4,
         max_red: int = 5,
+        neutral_action_init: bool = True,
+        neutral_action_init_std_bins: float = 4.0,
     ):
         super().__init__()
         if action_dim != 4 or action_levels <= 1:
@@ -85,6 +87,18 @@ class TAMCategoricalRecurrentHAPPOPolicy(nn.Module):
         self.max_enemies = int(max_enemies)
         self.flat_actor_obs_dim = self.actor_obs_dim
         self.action_distribution = "multidiscrete_categorical"
+        self.neutral_action_init = bool(neutral_action_init)
+        self.neutral_action_init_std_bins = float(neutral_action_init_std_bins)
+        self.neutral_action_centers_mav = [action_levels - 1, action_levels // 2,
+                                           11, action_levels // 2]
+        self.neutral_action_centers_uav = [action_levels - 1, action_levels // 2,
+                                           4, action_levels // 2]
+        self.neutral_action_centers = {
+            "mav": self.neutral_action_centers_mav,
+            "uav": self.neutral_action_centers_uav,
+        }
+        if self.neutral_action_init_std_bins <= 0:
+            raise ValueError("neutral_action_init_std_bins must be positive")
 
         self.encoder = BRMAEntityObservationEncoder(
             entity_dim=entity_dim, hidden_size=hidden_dim,
@@ -94,10 +108,29 @@ class TAMCategoricalRecurrentHAPPOPolicy(nn.Module):
         logits_dim = action_dim * action_levels
         self.mav_actor = _head(rnn_hidden_size, logits_dim)
         self.uav_actor = _head(rnn_hidden_size, logits_dim)
+        if self.neutral_action_init:
+            self._initialize_neutral_action_heads()
         self.critic = TAMCentralizedAttentionCritic(
             critic_state_dim, actor_obs_dim, max_red, hidden_dim,
             num_attention_heads,
         )
+
+    def _initialize_neutral_action_heads(self) -> None:
+        bins = torch.arange(self.action_levels, dtype=torch.float32)
+        for actor, centers in (
+            (self.mav_actor, self.neutral_action_centers_mav),
+            (self.uav_actor, self.neutral_action_centers_uav),
+        ):
+            biases = [
+                -0.5 * ((bins - float(center)) /
+                        self.neutral_action_init_std_bins).square()
+                for center in centers
+            ]
+            prior = torch.stack(biases).reshape(-1)
+            output = actor[-1]
+            nn.init.xavier_uniform_(output.weight, gain=0.01)
+            with torch.no_grad():
+                output.bias.copy_(prior)
 
     @staticmethod
     def infer_role_ids(roles: Iterable[str | int] | torch.Tensor | None,
@@ -240,6 +273,57 @@ class TAMCategoricalRecurrentHAPPOPolicy(nn.Module):
             expected.view(*leading, self.action_dim),
             role_ids.view(*leading),
         )
+
+    def evaluate_action_sequence(
+        self, actor_obs, roles, critic_state, actions, *, initial_hidden,
+        episode_start_masks, active_masks,
+    ):
+        obs = torch.as_tensor(
+            actor_obs, dtype=torch.float32, device=next(self.parameters()).device
+        )
+        action_indices = torch.as_tensor(actions, dtype=torch.long, device=obs.device)
+        starts = torch.as_tensor(
+            episode_start_masks, dtype=torch.float32, device=obs.device
+        )
+        active = torch.as_tensor(active_masks, dtype=torch.float32, device=obs.device)
+        hidden = torch.as_tensor(
+            initial_hidden, dtype=torch.float32, device=obs.device
+        )
+        if obs.ndim != 3 or action_indices.shape[:2] != obs.shape[:2]:
+            raise ValueError("sequence inputs must use [T, N, ...] layout")
+        if starts.shape != obs.shape[:2] or active.shape != obs.shape[:2]:
+            raise ValueError("sequence masks must use [T, N] layout")
+        role_tensor = torch.as_tensor(roles, dtype=torch.long, device=obs.device)
+        pooled_flat, _leading = self.encode(obs)
+        pooled = pooled_flat.reshape(obs.shape[0], obs.shape[1], -1)
+        log_probs, entropies, expected_actions = [], [], []
+        logits_trace, probs_trace, hidden_trace = [], [], []
+        bins = torch.linspace(-1.0, 1.0, self.action_levels, device=obs.device)
+        for step in range(obs.shape[0]):
+            hidden = hidden * (1.0 - starts[step]).unsqueeze(-1)
+            step_roles = role_tensor[step] if role_tensor.ndim == 2 else role_tensor
+            hidden_new = self.rnn(pooled[step], hidden)
+            role_ids = self.infer_role_ids(step_roles, obs.shape[1], obs.device)
+            logits = self._logits(hidden_new, role_ids)
+            dist = Categorical(logits=logits)
+            log_probs.append(dist.log_prob(action_indices[step]).sum(-1))
+            entropies.append(dist.entropy().sum(-1))
+            logits_trace.append(logits)
+            probs_trace.append(dist.probs)
+            expected_actions.append((dist.probs * bins).sum(-1))
+            hidden = hidden_new * active[step].unsqueeze(-1)
+            hidden_trace.append(hidden)
+        return {
+            "log_prob": torch.stack(log_probs),
+            "entropy": torch.stack(entropies),
+            "values": (self.critic(critic_state) if critic_state is not None else None),
+            "expected_action": torch.stack(expected_actions),
+            "action_logits": torch.stack(logits_trace),
+            "action_probs": torch.stack(probs_trace),
+            "hidden_states": torch.stack(hidden_trace),
+            "final_hidden": hidden,
+            "active_masks": active,
+        }
 
     def value(self, critic_state):
         return self.critic(critic_state)

@@ -29,6 +29,7 @@ from algorithms.happo import (
     HAPPOReferencePolicy,
     HAPPORolloutBuffer,
     HAPPOReferenceTrainer,
+    TAMCategoricalHAPPOTrainer,
     TAMCategoricalRecurrentHAPPOPolicy,
 )
 from algorithms.happo.rollout_safety import (
@@ -408,6 +409,15 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int, action_dim:
     raise ValueError(f"unsupported --policy-arch: {policy_arch}")
 
 
+def _build_trainer(policy, action_distribution: str, **kwargs):
+    trainer_class = (
+        TAMCategoricalHAPPOTrainer
+        if action_distribution == "multidiscrete_categorical"
+        else HAPPOReferenceTrainer
+    )
+    return trainer_class(policy, **kwargs)
+
+
 def _episode_outcome(env, truncated: dict, length: int) -> dict:
     red_alive, blue_alive = _alive_counts(env)
     timeout = bool(all(truncated.values()) or length >= getattr(env, "max_steps", 0))
@@ -465,6 +475,18 @@ def _score_eval(records: list[dict]) -> float:
     return scores["score_combined"]
 
 
+def _trainer_contract_meta(policy) -> dict:
+    categorical = getattr(policy, "action_distribution", "") == "multidiscrete_categorical"
+    return {
+        "trainer_class": ("TAMCategoricalHAPPOTrainer" if categorical else "HAPPOReferenceTrainer"),
+        "recurrent_update": ("sequence_replay" if categorical else "one_step"),
+        "happo_correction": ("enabled" if categorical else "legacy"),
+        "neutral_action_init": bool(getattr(policy, "neutral_action_init", False)),
+        "neutral_action_init_std_bins": getattr(policy, "neutral_action_init_std_bins", None),
+        "neutral_action_centers": getattr(policy, "neutral_action_centers", None),
+    }
+
+
 def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int, action_dim: int,
                            transitions_per_rollout: int) -> dict:
     return {
@@ -481,6 +503,7 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int, action
         "action_space": ("MultiDiscrete" if getattr(policy, "action_distribution", "") == "multidiscrete_categorical" else "Box"),
         "tam_action_levels": getattr(policy, "action_levels", None),
         "policy_class": type(policy).__name__,
+        **_trainer_contract_meta(policy),
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
         "centralized_critic": True,
@@ -716,6 +739,7 @@ def _run_training_main() -> None:
         "action_space": action_space_class,
         "tam_action_levels": action_levels,
         "policy_class": type(policy).__name__,
+        **_trainer_contract_meta(policy),
     }
     if args.init_checkpoint:
         init_path = Path(args.init_checkpoint)
@@ -723,8 +747,9 @@ def _run_training_main() -> None:
             init_path = ROOT / init_path
         policy.load(init_path, map_location=device)
         print(f"Loaded init_checkpoint: {init_path}", flush=True)
-    trainer = HAPPOReferenceTrainer(
-        policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
+    trainer = _build_trainer(
+        policy, action_distribution,
+        actor_lr=args.actor_lr, critic_lr=args.critic_lr,
         clip_param=args.clip_param, entropy_coef=args.entropy_coef,
         max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
         gamma=args.gamma, gae_lambda=args.gae_lambda,
@@ -792,6 +817,7 @@ def _run_training_main() -> None:
             np.zeros((len(env.red_ids), _rnn_hidden_size), dtype=np.float32)
             for _ in range(args.num_envs)
         ]
+    episode_start_pending = [True for _ in range(args.num_envs)]
 
     train_log = out_dir / "train_log.csv"
     with train_log.open("w", newline="", encoding="utf-8") as f:
@@ -813,6 +839,9 @@ def _run_training_main() -> None:
             "edge_bin_rate", "low_bin_rate", "high_bin_rate",
             "max_action_prob_mav", "max_action_prob_uav",
             "action_bin_usage_mav", "action_bin_usage_uav",
+            "throttle_high_rate", "surface_edge_rate",
+            "grad_norm_actor", "grad_norm_critic",
+            "correction_factor_mean", "correction_factor_max", "correction_factor_min",
             "nan_detected",
         ])
         eval_writer = None
@@ -834,7 +863,12 @@ def _run_training_main() -> None:
             buffer = HAPPORolloutBuffer(rollout_transitions, len(env.red_ids), actor_dim,
                                         critic_dim, action_dim, roles,
                                         rnn_hidden_size=getattr(policy, 'rnn_hidden_size', 0),
-                                        action_dtype=(np.int64 if action_distribution == "multidiscrete_categorical" else np.float32))
+                                        action_dtype=(np.int64 if action_distribution == "multidiscrete_categorical" else np.float32),
+                                        num_envs=args.num_envs)
+            if rnn_hidden is not None:
+                for env_idx in range(args.num_envs):
+                    buffer.set_rnn_hidden_initial(env_idx, rnn_hidden[env_idx])
+            rollout_env_step = [0 for _ in range(args.num_envs)]
             red_fired = blue_fired = hits = 0
             while len(buffer) < rollout_transitions and total_steps < args.total_env_steps:
                 for env_idx, rollout_env in enumerate(envs):
@@ -1025,7 +1059,14 @@ def _run_training_main() -> None:
                     buffer.store(
                         actor_obs, critic, actions, log_probs, reward_np, done_np,
                         value, active, next_value=next_value, env_id=env_idx,
+                        env_step_index=rollout_env_step[env_idx],
+                        episode_start_masks=np.full(
+                            len(env.red_ids), float(episode_start_pending[env_idx]),
+                            dtype=np.float32,
+                        ),
                         **store_kwargs)
+                    rollout_env_step[env_idx] += 1
+                    episode_start_pending[env_idx] = False
                     current_ep_return[env_idx] += reward_np
                     current_ep_len[env_idx] += 1
                     total_steps += 1
@@ -1087,6 +1128,7 @@ def _run_training_main() -> None:
                         _SINGLE_RUNNER_STATE["episode_id"] = current_ep_id[env_idx]
                         if rnn_hidden is not None:
                             rnn_hidden[env_idx][:] = 0.0
+                        episode_start_pending[env_idx] = True
                         heartbeat.write(
                             "after_reset",
                             iteration=iteration,
@@ -1151,6 +1193,13 @@ def _run_training_main() -> None:
                 f"{stats.get('max_action_prob_uav', 0.0):.6f}",
                 f"{stats.get('action_bin_usage_mav', 0.0):.6f}",
                 f"{stats.get('action_bin_usage_uav', 0.0):.6f}",
+                f"{stats.get('throttle_high_rate', 0.0):.6f}",
+                f"{stats.get('surface_edge_rate', 0.0):.6f}",
+                f"{stats.get('grad_norm_actor', 0.0):.6f}",
+                f"{stats.get('grad_norm_critic', 0.0):.6f}",
+                f"{stats.get('correction_factor_mean', 1.0):.6f}",
+                f"{stats.get('correction_factor_max', 1.0):.6f}",
+                f"{stats.get('correction_factor_min', 1.0):.6f}",
                 int(nan_detected),
             ])
             if rich_logger is not None:
@@ -1185,8 +1234,19 @@ def _run_training_main() -> None:
                     "actor_loss": (stats["actor_loss_mav"] + stats["actor_loss_uav"]) / 2.0,
                     "critic_loss": stats["critic_loss"],
                     "entropy": (stats["entropy_mav"] + stats["entropy_uav"]) / 2.0,
-                    "policy_gradient_norm": "",
-                    "value_gradient_norm": "",
+                    "policy_gradient_norm": stats.get("grad_norm_actor", ""),
+                    "value_gradient_norm": stats.get("grad_norm_critic", ""),
+                    "grad_norm_actor": stats.get("grad_norm_actor", ""),
+                    "grad_norm_critic": stats.get("grad_norm_critic", ""),
+                    "correction_factor_mean": stats.get("correction_factor_mean", ""),
+                    "correction_factor_max": stats.get("correction_factor_max", ""),
+                    "correction_factor_min": stats.get("correction_factor_min", ""),
+                    "throttle_high_rate": stats.get("throttle_high_rate", ""),
+                    "surface_edge_rate": stats.get("surface_edge_rate", ""),
+                    "max_action_prob_mav": stats.get("max_action_prob_mav", ""),
+                    "max_action_prob_uav": stats.get("max_action_prob_uav", ""),
+                    "action_bin_usage_mav": stats.get("action_bin_usage_mav", ""),
+                    "action_bin_usage_uav": stats.get("action_bin_usage_uav", ""),
                     "action_saturation_rate": max(
                         stats.get("mav_action_saturation_rate", 0.0),
                         stats.get("uav_action_saturation_rate", 0.0),
@@ -1242,6 +1302,7 @@ def _run_training_main() -> None:
                     "action_space": action_space_class,
                     "tam_action_levels": action_levels,
                     "policy_class": type(policy).__name__,
+                    **_trainer_contract_meta(policy),
                     "entity_dim": getattr(policy, "entity_dim", None),
                     "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
                     "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
@@ -1336,6 +1397,7 @@ def _run_training_main() -> None:
                             "action_space": action_space_class,
                             "tam_action_levels": action_levels,
                             "policy_class": type(policy).__name__,
+                            **_trainer_contract_meta(policy),
                             "entity_dim": getattr(policy, "entity_dim", None),
                             "separate_actors": True,
                             "centralized_critic": True,
@@ -1377,6 +1439,7 @@ def _run_training_main() -> None:
         "action_space": action_space_class,
         "tam_action_levels": action_levels,
         "policy_class": type(policy).__name__,
+        **_trainer_contract_meta(policy),
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
         "centralized_critic": True,
