@@ -6,6 +6,27 @@ tam_action_distribution: multidiscrete_categorical
 tam_action_levels: 40
 tam_throttle_min: 0.4
 tam_throttle_max: 0.9
+tam_direct_fcs_calibration:
+  enabled: true
+  by_model:
+    f22:
+      throttle_bias: 0.0
+      throttle_gain: 1.0
+      aileron_bias: -0.02564102564102555
+      aileron_gain: 1.0
+      elevator_bias: -0.027
+      elevator_gain: 1.0
+      rudder_bias: -0.02564102564102555
+      rudder_gain: 1.0
+    f16:
+      throttle_bias: 0.0
+      throttle_gain: 1.0
+      aileron_bias: 0.0
+      aileron_gain: 1.0
+      elevator_bias: 0.0
+      elevator_gain: 1.0
+      rudder_bias: 0.0
+      rudder_gain: 1.0
 scripted_evasion_red: false
 scripted_evasion_blue: false
 max_num_red: 3

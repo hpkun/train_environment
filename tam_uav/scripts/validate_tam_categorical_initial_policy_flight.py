@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from collections import Counter
@@ -15,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from algorithms.happo import TAMCategoricalRecurrentHAPPOPolicy
+from algorithms.mappo.opponent_policy import OpponentPolicy
 from algorithms.happo.rollout_safety import sanitize_policy_inputs, zero_inactive_hidden
 from uav_env import make_env
 from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
@@ -96,14 +98,19 @@ def _mav_trace_row(env, action, *, action_probs_max="", expected_action=None):
                 "elevator_cmd_norm", "rudder_cmd_norm",
             )
         },
+        "calibration_profile": command.get("calibration_profile", {}),
+        "written_fcs_paths": command.get("written_fcs_paths", []),
+        "readback_values": command.get("readback_values", {}),
     }
 
 
 def _run_policy_trace(config, policy, adapter, *, deterministic, max_steps,
-                      seed, device):
+                      seed, device, formal_blue=False, no_blue_missile=True):
     env = make_env(config, env_type="jsbsim_hetero", max_steps=max_steps)
     obs, info = env.reset(seed=seed)
-    _disable_blue_missiles(env)
+    if no_blue_missile:
+        _disable_blue_missiles(env)
+    opponent = OpponentPolicy("tam_direct_fsm", seed=seed + 1000)
     roles = [0 if rid == "red_0" else 1 for rid in env.red_ids]
     hidden = policy.init_hidden(len(env.red_ids), torch.device(device))
     trace = []
@@ -133,7 +140,10 @@ def _run_policy_trace(config, policy, adapter, *, deterministic, max_steps,
             out["rnn_hidden"].detach().cpu().numpy(), active
         ), device=device)
         action_dict = {rid: actions[i].copy() for i, rid in enumerate(env.red_ids)}
-        action_dict.update(_fixed_blue_actions(env))
+        action_dict.update(
+            opponent.act(obs, env.blue_ids, env=env)
+            if formal_blue else _fixed_blue_actions(env)
+        )
         obs, _rewards, _terminated, _truncated, info = env.step(action_dict)
         trace.append(_mav_trace_row(
             env, actions[0],
@@ -187,6 +197,7 @@ def run_long_horizon_validation(config, *, output_dir, episodes=10,
     result = {
         "config": config, "episodes": int(episodes), "max_steps": int(max_steps),
         "initial_policy": {}, "fixed_neutral": [], "f22_elevator_sweep": {},
+        "scenarios": {},
     }
     for mode in ("deterministic", "stochastic"):
         records = [
@@ -201,6 +212,7 @@ def run_long_horizon_validation(config, *, output_dir, episodes=10,
             "death_reasons": dict(Counter(record["death_reason"] for record in records)),
             "episodes": records,
         }
+        result["scenarios"][f"initial_{mode}_no_missile"] = result["initial_policy"][mode]
     result["fixed_neutral"] = [
         _run_fixed_trace(
             config, mav_elevator_bin=policy.neutral_action_centers_mav[2],
@@ -208,6 +220,35 @@ def run_long_horizon_validation(config, *, output_dir, episodes=10,
             seed=seed + episode,
         ) for episode in range(episodes)
     ]
+    result["scenarios"]["fixed_calibrated_neutral"] = {
+        "mav_survival_rate": float(np.mean([
+            record["survived_1000"] for record in result["fixed_neutral"]
+        ])),
+        "death_reasons": dict(Counter(
+            record["death_reason"] for record in result["fixed_neutral"]
+        )),
+        "episodes": result["fixed_neutral"],
+    }
+    for name, no_blue_missile in (
+        ("formal_blue_missiles_disabled", True),
+        ("formal_blue_missiles_enabled", False),
+    ):
+        records = [
+            _run_policy_trace(
+                config, policy, adapter, deterministic=True,
+                max_steps=max_steps, seed=seed + episode, device=device,
+                formal_blue=True, no_blue_missile=no_blue_missile,
+            ) for episode in range(episodes)
+        ]
+        result["scenarios"][name] = {
+            "mav_survival_rate": float(np.mean([
+                record["survived_1000"] for record in records
+            ])),
+            "death_reasons": dict(Counter(
+                record["death_reason"] for record in records
+            )),
+            "episodes": records,
+        }
     for elevator_bin in ELEVATOR_SWEEP_BINS:
         record = _run_fixed_trace(
             config, mav_elevator_bin=elevator_bin,
@@ -223,6 +264,9 @@ def run_long_horizon_validation(config, *, output_dir, episodes=10,
         out_dir = ROOT / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "initial_policy_1000step.json").write_text(
+        json.dumps(result, indent=2), encoding="utf-8"
+    )
+    (out_dir / "tam_initial_policy_long_horizon.json").write_text(
         json.dumps(result, indent=2), encoding="utf-8"
     )
     lines = ["# TAM MAV Long-Horizon Flight Stability", ""]
@@ -241,6 +285,39 @@ def run_long_horizon_validation(config, *, output_dir, episodes=10,
         )
     lines.extend(["", f"Selected elevator bin: `{result['selected_elevator_bin']}`", ""])
     (out_dir / "initial_policy_1000step.md").write_text("\n".join(lines), encoding="utf-8")
+    scenario_lines = ["# TAM Initial Policy Long-Horizon Audit", ""]
+    for name, scenario in result["scenarios"].items():
+        scenario_lines.extend([
+            f"## {name}", "",
+            f"- MAV survival: `{scenario['mav_survival_rate']:.3f}`",
+            f"- Death reasons: `{scenario['death_reasons']}`", "",
+        ])
+    (out_dir / "tam_initial_policy_long_horizon.md").write_text(
+        "\n".join(scenario_lines), encoding="utf-8"
+    )
+    with (out_dir / "tam_initial_policy_long_horizon_timeseries.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as file:
+        fieldnames = [
+            "scenario", "episode", "step", "altitude_m", "speed_mps",
+            "pitch_rad", "roll_rad", "vertical_speed_mps", "action_indices",
+            "fcs_command", "calibration_profile", "written_fcs_paths",
+            "readback_values",
+        ]
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        for scenario_name, scenario in result["scenarios"].items():
+            for episode_index, episode in enumerate(scenario["episodes"]):
+                for row in episode["trace"]:
+                    payload = {key: row.get(key, "") for key in fieldnames}
+                    payload["scenario"] = scenario_name
+                    payload["episode"] = episode_index
+                    for key in (
+                        "action_indices", "fcs_command", "calibration_profile",
+                        "written_fcs_paths", "readback_values",
+                    ):
+                        payload[key] = json.dumps(payload[key])
+                    writer.writerow(payload)
     return result
 
 

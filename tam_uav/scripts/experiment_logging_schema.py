@@ -114,6 +114,11 @@ TAM_ACTION_TIMESERIES_COLUMNS = [
     "action_index_0", "action_index_1", "action_index_2", "action_index_3",
     "normalized_level_0", "normalized_level_1", "normalized_level_2", "normalized_level_3",
     "throttle_cmd_norm", "aileron_cmd_norm", "elevator_cmd_norm", "rudder_cmd_norm",
+    "raw_throttle_cmd_norm", "raw_aileron_cmd_norm",
+    "raw_elevator_cmd_norm", "raw_rudder_cmd_norm",
+    "calibrated_throttle_cmd_norm", "calibrated_aileron_cmd_norm",
+    "calibrated_elevator_cmd_norm", "calibrated_rudder_cmd_norm",
+    "calibration_profile", "written_fcs_paths", "readback_values",
 ]
 
 FILE_SCHEMAS = {

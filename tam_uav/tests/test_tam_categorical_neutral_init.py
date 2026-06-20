@@ -17,10 +17,10 @@ def _policy(**kwargs):
 def test_neutral_prior_argmax_is_high_throttle_and_middle_surfaces():
     policy = _policy()
     out = policy.act(torch.zeros(2, 96), roles=[0, 1], deterministic=True)
-    expected = torch.tensor([[39, 20, 6, 20], [39, 20, 4, 20]])
+    expected = torch.tensor([[39, 20, 20, 20], [39, 20, 4, 20]])
     assert torch.equal(out["action"], expected)
     assert policy.neutral_action_centers == {
-        "mav": [39, 20, 6, 20], "uav": [39, 20, 4, 20]
+        "mav": [39, 20, 20, 20], "uav": [39, 20, 4, 20]
     }
 
 

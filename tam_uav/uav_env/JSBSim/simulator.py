@@ -297,6 +297,28 @@ class AircraftSimulator(BaseSimulator):
     ALIVE = 0
     CRASH = 1
     SHOTDOWN = 2
+    _TAM_FCS_PATH_CACHE: dict[str, dict[str, tuple[str, ...]]] = {}
+
+    _TAM_THROTTLE_CANDIDATES = (
+        "fcs/throttle-cmd-norm", "fcs/throttle-pos-norm",
+        "fcs/throttle-cmd-norm[0]", "fcs/throttle-pos-norm[0]",
+        "fcs/throttle-cmd-norm[1]", "fcs/throttle-pos-norm[1]",
+        "propulsion/engine[0]/throttle-cmd-norm",
+        "propulsion/engine[0]/throttle-pos-norm",
+        "propulsion/engine[1]/throttle-cmd-norm",
+        "propulsion/engine[1]/throttle-pos-norm",
+    )
+    _TAM_SURFACE_COMMAND_PATHS = {
+        "aileron_cmd_norm": "fcs/aileron-cmd-norm",
+        "elevator_cmd_norm": "fcs/elevator-cmd-norm",
+        "rudder_cmd_norm": "fcs/rudder-cmd-norm",
+    }
+    _TAM_SURFACE_READBACK_CANDIDATES = (
+        "fcs/aileron-cmd-norm", "fcs/elevator-cmd-norm",
+        "fcs/rudder-cmd-norm", "fcs/left-aileron-pos-rad",
+        "fcs/right-aileron-pos-rad", "fcs/elevator-pos-rad",
+        "fcs/rudder-pos-rad",
+    )
 
     def __init__(self,
                  uid: str = "A0100",
@@ -350,6 +372,88 @@ class AircraftSimulator(BaseSimulator):
 
     def shotdown(self):
         self._status = AircraftSimulator.SHOTDOWN
+
+    @staticmethod
+    def _catalog_rw_paths(entries) -> set[str]:
+        return {
+            entry.rsplit(" (", 1)[0]
+            for entry in entries
+            if entry.endswith("(RW)")
+        }
+
+    def _tam_fcs_paths(self) -> dict[str, tuple[str, ...]]:
+        cached = self._TAM_FCS_PATH_CACHE.get(self.model)
+        if cached is not None:
+            return cached
+        rw_paths = self._catalog_rw_paths(
+            self.jsbsim_exec.query_property_catalog("")
+        )
+        throttle_paths = []
+        for path in self._TAM_THROTTLE_CANDIDATES:
+            if path not in rw_paths:
+                continue
+            try:
+                current = float(self.jsbsim_exec.get_property_value(path))
+                self.jsbsim_exec.set_property_value(path, current)
+                float(self.jsbsim_exec.get_property_value(path))
+                throttle_paths.append(path)
+            except Exception:
+                continue
+        if not throttle_paths:
+            raise RuntimeError(
+                f"aircraft model {self.model} has no writable TAM throttle path"
+            )
+        surface_paths = tuple(
+            path for path in self._TAM_SURFACE_COMMAND_PATHS.values()
+            if path in rw_paths
+        )
+        if len(surface_paths) != len(self._TAM_SURFACE_COMMAND_PATHS):
+            raise RuntimeError(
+                f"aircraft model {self.model} is missing TAM surface command paths"
+            )
+        readback_paths = tuple(dict.fromkeys(
+            throttle_paths + [
+                path for path in self._TAM_SURFACE_READBACK_CANDIDATES
+                if path in rw_paths
+            ]
+        ))
+        cached = {
+            "throttle": tuple(throttle_paths),
+            "surfaces": surface_paths,
+            "readback": readback_paths,
+        }
+        self._TAM_FCS_PATH_CACHE[self.model] = cached
+        return cached
+
+    def set_tam_direct_fcs_command(self, command: dict) -> dict:
+        """Write one static TAM FCS command through model-validated paths."""
+        paths = self._tam_fcs_paths()
+        values = {
+            "throttle_cmd_norm": float(np.clip(command["throttle_cmd_norm"], 0.0, 1.0)),
+            "aileron_cmd_norm": float(np.clip(command["aileron_cmd_norm"], -1.0, 1.0)),
+            "elevator_cmd_norm": float(np.clip(command["elevator_cmd_norm"], -1.0, 1.0)),
+            "rudder_cmd_norm": float(np.clip(command["rudder_cmd_norm"], -1.0, 1.0)),
+        }
+        written = []
+        for path in paths["throttle"]:
+            self.jsbsim_exec.set_property_value(path, values["throttle_cmd_norm"])
+            written.append(path)
+        for key, path in self._TAM_SURFACE_COMMAND_PATHS.items():
+            self.jsbsim_exec.set_property_value(path, values[key])
+            written.append(path)
+        readback = {
+            path: float(self.jsbsim_exec.get_property_value(path))
+            for path in paths["readback"]
+        }
+        return {
+            "model": self.model,
+            "written_fcs_paths": written,
+            "missing_fcs_paths": [
+                path for path in self._TAM_THROTTLE_CANDIDATES
+                if path not in paths["throttle"]
+            ],
+            "readback_values": readback,
+        }
 
     def reload(self, new_state: Union[dict, None] = None, new_origin: Union[tuple, None] = None):
         """Reset the aircraft to initial conditions without recreating JSBSim."""
@@ -405,22 +509,30 @@ class AircraftSimulator(BaseSimulator):
             try: return float(self.jsbsim_exec.get_property_value(prop))
             except Exception: return 0.0
 
-        # Normalize FCS keys once
+        # Normalize the configured reset command once. Reset and step control
+        # intentionally use the same model-aware TAM writer.
         _FCS = ["fcs/throttle-cmd-norm","fcs/throttle-pos-norm","fcs/aileron-cmd-norm",
                 "fcs/elevator-cmd-norm","fcs/rudder-cmd-norm"]
-        _FCS_MAP = {"throttle_cmd_norm":"fcs/throttle-cmd-norm","throttle_pos_norm":"fcs/throttle-pos-norm",
-                    "aileron_cmd_norm":"fcs/aileron-cmd-norm","elevator_cmd_norm":"fcs/elevator-cmd-norm",
-                    "rudder_cmd_norm":"fcs/rudder-cmd-norm"}
-        _fcs: dict = {}
         raw_fcs = stab.get("fcs_command", {}) if _stab_enabled else {}
-        for s,p in _FCS_MAP.items():
-            if s in raw_fcs: _fcs[p] = float(raw_fcs[s])
-        for p in _FCS:
-            if p in raw_fcs: _fcs[p] = float(raw_fcs[p])
+        _tam_reset_command = {
+            "throttle_cmd_norm": float(raw_fcs.get(
+                "throttle_cmd_norm", raw_fcs.get("fcs/throttle-cmd-norm", 0.0)
+            )),
+            "aileron_cmd_norm": float(raw_fcs.get(
+                "aileron_cmd_norm", raw_fcs.get("fcs/aileron-cmd-norm", 0.0)
+            )),
+            "elevator_cmd_norm": float(raw_fcs.get(
+                "elevator_cmd_norm", raw_fcs.get("fcs/elevator-cmd-norm", 0.0)
+            )),
+            "rudder_cmd_norm": float(raw_fcs.get(
+                "rudder_cmd_norm", raw_fcs.get("fcs/rudder-cmd-norm", 0.0)
+            )),
+        }
 
         if _stab_enabled:
-            for p, v in _fcs.items():
-                _ss(p, v)
+            _stab_report["writer_report_before_run_ic"] = (
+                self.set_tam_direct_fcs_command(_tam_reset_command)
+            )
             _stab_report["fcs_before_run_ic"] = {p: _sg(p) for p in _FCS}
 
         success = self.jsbsim_exec.run_ic()
@@ -429,8 +541,9 @@ class AircraftSimulator(BaseSimulator):
 
         if _stab_enabled:
             # Re-apply FCS after run_ic (IC may reset them)
-            for p, v in _fcs.items():
-                _ss(p, v)
+            _stab_report["writer_report_after_run_ic"] = (
+                self.set_tam_direct_fcs_command(_tam_reset_command)
+            )
             _stab_report["fcs_after_run_ic"] = {p: _sg(p) for p in _FCS}
 
         # Restart propulsion
@@ -440,8 +553,9 @@ class AircraftSimulator(BaseSimulator):
             propulsion.get_engine(j).init_running()
 
         if _stab_enabled:
-            for p, v in _fcs.items():
-                _ss(p, v)
+            _stab_report["writer_report_before_steady_state"] = (
+                self.set_tam_direct_fcs_command(_tam_reset_command)
+            )
             _stab_report["fcs_before_steady_state"] = {p: _sg(p) for p in _FCS}
 
         propulsion.get_steady_state()
@@ -460,13 +574,13 @@ class AircraftSimulator(BaseSimulator):
                 self._clear_default_condition()
                 for key, value in self.init_state.items():
                     self.set_property_value(Catalog[key], value)
-                for p, v in _fcs.items():
-                    _ss(p, v)
+                self.set_tam_direct_fcs_command(_tam_reset_command)
                 # run_ic() restores the config-specified IC state
                 self.jsbsim_exec.run_ic()
                 # Re-apply FCS after run_ic
-                for p, v in _fcs.items():
-                    _ss(p, v)
+                _stab_report["writer_report_after_final_recenter"] = (
+                    self.set_tam_direct_fcs_command(_tam_reset_command)
+                )
                 # NO extra self.jsbsim_exec.run() — reset must return clean state
                 _stab_report["fcs_after_final_recenter"] = {p: _sg(p) for p in _FCS}
 

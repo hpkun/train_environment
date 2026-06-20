@@ -69,6 +69,17 @@ class RichExperimentLogger:
                 "aileron_cmd_norm": command.get("aileron_cmd_norm", ""),
                 "elevator_cmd_norm": command.get("elevator_cmd_norm", ""),
                 "rudder_cmd_norm": command.get("rudder_cmd_norm", ""),
+                "raw_throttle_cmd_norm": command.get("raw_throttle_cmd_norm", ""),
+                "raw_aileron_cmd_norm": command.get("raw_aileron_cmd_norm", ""),
+                "raw_elevator_cmd_norm": command.get("raw_elevator_cmd_norm", ""),
+                "raw_rudder_cmd_norm": command.get("raw_rudder_cmd_norm", ""),
+                "calibrated_throttle_cmd_norm": command.get("calibrated_throttle_cmd_norm", ""),
+                "calibrated_aileron_cmd_norm": command.get("calibrated_aileron_cmd_norm", ""),
+                "calibrated_elevator_cmd_norm": command.get("calibrated_elevator_cmd_norm", ""),
+                "calibrated_rudder_cmd_norm": command.get("calibrated_rudder_cmd_norm", ""),
+                "calibration_profile": json.dumps(command.get("calibration_profile", {})),
+                "written_fcs_paths": json.dumps(command.get("written_fcs_paths", [])),
+                "readback_values": json.dumps(command.get("readback_values", {})),
             }
             row.update({f"action_index_{i}": indices[i] for i in range(4)})
             row.update({f"normalized_level_{i}": levels[i] for i in range(4)})

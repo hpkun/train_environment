@@ -90,7 +90,7 @@ class TAMCategoricalRecurrentHAPPOPolicy(nn.Module):
         self.neutral_action_init = bool(neutral_action_init)
         self.neutral_action_init_std_bins = float(neutral_action_init_std_bins)
         self.neutral_action_centers_mav = [action_levels - 1, action_levels // 2,
-                                           6, action_levels // 2]
+                                           action_levels // 2, action_levels // 2]
         self.neutral_action_centers_uav = [action_levels - 1, action_levels // 2,
                                            4, action_levels // 2]
         self.neutral_action_centers = {

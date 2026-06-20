@@ -223,6 +223,7 @@ class UavCombatEnv(gymnasium.Env):
                  tam_action_levels: int = 40,
                  tam_throttle_min: float = 0.4,
                  tam_throttle_max: float = 0.9,
+                 tam_direct_fcs_calibration: dict | None = None,
                  scripted_evasion_red: bool = True,
                  scripted_evasion_blue: bool = False,
                  airborne_initial_state_stabilization=None,
@@ -254,6 +255,7 @@ class UavCombatEnv(gymnasium.Env):
         self.tam_action_levels = int(tam_action_levels)
         self.tam_throttle_min = float(tam_throttle_min)
         self.tam_throttle_max = float(tam_throttle_max)
+        self.tam_direct_fcs_calibration = dict(tam_direct_fcs_calibration or {})
         self.scripted_evasion_red = bool(scripted_evasion_red)
         self.scripted_evasion_blue = bool(scripted_evasion_blue)
         self._last_tam_action_commands: dict[str, dict] = {}
@@ -675,6 +677,32 @@ class UavCombatEnv(gymnasium.Env):
             "rudder_cmd_norm": float(-1.0 + 2.0 * levels[3]),
         }
 
+    def _calibrate_tam_direct_command(self, command: dict, model: str) -> dict:
+        """Apply a static per-model affine FCS profile without flight state."""
+        enabled = bool(self.tam_direct_fcs_calibration.get("enabled", False))
+        configured = self.tam_direct_fcs_calibration.get("by_model", {}).get(model, {})
+        profile = {"model": model, "enabled": enabled}
+        result = dict(command)
+        limits = {
+            "throttle": (0.0, 1.0),
+            "aileron": (-1.0, 1.0),
+            "elevator": (-1.0, 1.0),
+            "rudder": (-1.0, 1.0),
+        }
+        for axis, (lower, upper) in limits.items():
+            key = f"{axis}_cmd_norm"
+            raw = float(command[key])
+            bias = float(configured.get(f"{axis}_bias", 0.0)) if enabled else 0.0
+            gain = float(configured.get(f"{axis}_gain", 1.0)) if enabled else 1.0
+            calibrated = float(np.clip(bias + gain * raw, lower, upper))
+            result[f"raw_{key}"] = raw
+            result[f"calibrated_{key}"] = calibrated
+            result[key] = calibrated
+            profile[f"{axis}_bias"] = bias
+            profile[f"{axis}_gain"] = gain
+        result["calibration_profile"] = profile
+        return result
+
     def _parse_actions(self, actions: dict) -> dict:
         """Map formal direct-FCS commands or legacy PID target actions.
 
@@ -706,6 +734,7 @@ class UavCombatEnv(gymnasium.Env):
                     command = self._map_tam_direct_discrete_action(act)
                 else:
                     command = self._map_tam_direct_continuous_action(act)
+                command = self._calibrate_tam_direct_command(command, sim.model)
                 self._last_tam_action_commands[aid] = command
                 targets[aid] = command
                 continue
@@ -857,10 +886,9 @@ class UavCombatEnv(gymnasium.Env):
 
             control_mode = self._control_mode_for(aid)
             if self.action_interface == "tam_direct_fcs_4d":
-                sim.set_property_value("fcs/throttle-cmd-norm", target["throttle_cmd_norm"])
-                sim.set_property_value("fcs/aileron-cmd-norm", target["aileron_cmd_norm"])
-                sim.set_property_value("fcs/elevator-cmd-norm", target["elevator_cmd_norm"])
-                sim.set_property_value("fcs/rudder-cmd-norm", target["rudder_cmd_norm"])
+                writer_report = sim.set_tam_direct_fcs_command(target)
+                target.update(writer_report)
+                self._last_tam_action_commands[aid] = target
                 continue
             if control_mode == "direct_fcs_3d":
                 # target = (elevator_cmd, aileron_cmd, throttle_cmd)

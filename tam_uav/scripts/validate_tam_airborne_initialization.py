@@ -46,10 +46,23 @@ def classify_flight_outcome(alive, death_reason, finite):
     return f"policy_or_flight_failure:{reason}"
 
 
+def classify_audit_failure(reset_ok, authority_ok, fixed_ok, formal_ok):
+    if not reset_ok:
+        return "reset_contract_failed"
+    if not authority_ok:
+        return "throttle_authority_failed"
+    if not fixed_ok:
+        return "static_trim_failed"
+    if not formal_ok:
+        return "policy_drift_or_missile_kill"
+    return "passed"
+
+
 def _aircraft_row(env, agent_id, sim):
     altitude = float(sim.get_geodetic()[2])
     roll, pitch, yaw = (float(value) for value in sim.get_rpy())
     velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
+    command = env._last_tam_action_commands.get(agent_id, {})
     return {
         "step": int(env.current_step),
         "time_sec": float(env.current_step * env.agent_interaction_steps / env.sim_freq),
@@ -62,12 +75,17 @@ def _aircraft_row(env, agent_id, sim):
         "yaw_rad": yaw,
         "vertical_speed_mps": float(velocity[2]),
         "alive": bool(sim.is_alive),
+        "written_fcs_paths": command.get("written_fcs_paths", []),
+        "readback_values": command.get("readback_values", {}),
+        "calibrated_throttle_cmd_norm": command.get(
+            "calibrated_throttle_cmd_norm"
+        ),
     }
 
 
 def _fixed_action(env, agent_id):
     role = env.agent_roles.get(agent_id)
-    elevator = 6 if role == "mav" else 4
+    elevator = 20 if role == "mav" else 4
     return np.asarray([39, 20, elevator, 20], dtype=np.int64)
 
 
@@ -92,7 +110,7 @@ def _run_fixed_neutral(config, duration_seconds=120, seed=0):
                 )
             )
             traces[agent_id].append(row)
-        if all(terminated.values()) or all(truncated.values()):
+        if not env.red_planes["red_0"].is_alive:
             break
     summaries = {}
     for agent_id, trace in traces.items():
@@ -102,14 +120,22 @@ def _run_fixed_neutral(config, duration_seconds=120, seed=0):
             (row["speed_mps"] for row in trace if row["time_sec"] >= 60.0),
             trace[-1]["speed_mps"] if trace else float("nan"),
         )
+        speed_120 = next(
+            (row["speed_mps"] for row in trace if row["time_sec"] >= 120.0),
+            trace[-1]["speed_mps"] if trace else float("nan"),
+        )
         summaries[agent_id] = {
             "model": sim.model,
             "neutral_action": _fixed_action(env, agent_id).tolist(),
             "steps": len(trace),
             "speed_at_60s_mps": float(speed_60),
+            "speed_at_120s_mps": float(speed_120),
             "min_speed_mps": float(min(row["speed_mps"] for row in trace)),
             "final_speed_mps": float(trace[-1]["speed_mps"]),
             "final_altitude_m": float(trace[-1]["altitude_m"]),
+            "min_altitude_m": float(min(row["altitude_m"] for row in trace)),
+            "written_fcs_paths": trace[-1]["written_fcs_paths"],
+            "readback_values": trace[-1]["readback_values"],
             "death_reason": death_reason,
             "outcome_classification": classify_flight_outcome(
                 sim.is_alive, death_reason, finite
@@ -139,7 +165,7 @@ def run_audit(config, output_dir, seed=0):
     reset = summarize_reset_reports(reset_reports)
     env.close()
 
-    fixed = _run_fixed_neutral(config, duration_seconds=120, seed=seed)
+    fixed = _run_fixed_neutral(config, duration_seconds=200, seed=seed)
     policy = TAMCategoricalRecurrentHAPPOPolicy().eval()
     adapter = HeteroObsAdapterV2()
     formal_episodes = [
@@ -173,20 +199,42 @@ def run_audit(config, output_dir, seed=0):
             "min_speed_first_5s_mps": float(min_initial_speed),
             "reset_low_speed_cold_start": bool(min_initial_speed < 150.0),
         })
+    authority_path = Path(output_dir)
+    if not authority_path.is_absolute():
+        authority_path = ROOT / authority_path
+    authority_path = authority_path / "tam_fcs_authority.json"
+    authority_ok = False
+    if authority_path.exists():
+        authority_ok = bool(json.loads(
+            authority_path.read_text(encoding="utf-8")
+        ).get("authority", {}).get("f22_throttle_authority_passed"))
+    fixed_mav = fixed["aircraft"]["red_0"]
+    fixed_ok = bool(
+        fixed["finite"] and fixed["f22_speed_at_60s_passed"]
+        and fixed_mav["death_reason"] != "Crash_LowAlt"
+        and fixed_mav["steps"] >= 1000
+        and fixed_mav["min_altitude_m"] >= 4500.0
+    )
+    formal_ok = all(
+        item["death_reason"] != "Crash_LowAlt" for item in formal
+    )
+    failure_classification = classify_audit_failure(
+        reset["passed_reset_contract"], authority_ok, fixed_ok, formal_ok
+    )
     result = {
         "config": config,
         "reset_contract": reset,
         "fixed_neutral_120s": fixed,
+        "fixed_neutral_1000step": fixed,
         "formal_short_rollout": {
             "episodes": formal,
             "reset_low_speed_cold_start_detected": any(
                 item["reset_low_speed_cold_start"] for item in formal
             ),
         },
-        "passed": bool(
-            reset["passed_reset_contract"] and fixed["finite"]
-            and fixed["f22_speed_at_60s_passed"]
-        ),
+        "throttle_authority_passed": authority_ok,
+        "failure_classification": failure_classification,
+        "passed": failure_classification == "passed",
     }
     out_dir = Path(output_dir)
     if not out_dir.is_absolute():
@@ -202,6 +250,7 @@ def run_audit(config, output_dir, seed=0):
         f"- F22 speed at 60 s >= 150 m/s: `{fixed['f22_speed_at_60s_passed']}`",
         f"- Reset low-speed cold start detected: `{result['formal_short_rollout']['reset_low_speed_cold_start_detected']}`",
         f"- Overall audit passed: `{result['passed']}`", "",
+        f"- Classification: `{failure_classification}`", "",
         "## Formal episodes", "",
     ]
     for item in formal:

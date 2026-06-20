@@ -4,6 +4,7 @@ import numpy as np
 
 from uav_env import make_env
 from scripts.validate_tam_airborne_initialization import (
+    classify_audit_failure,
     classify_flight_outcome,
     summarize_reset_reports,
 )
@@ -52,3 +53,11 @@ def test_flight_outcome_classification_is_explicit():
     assert classify_flight_outcome(False, "Missile_Kill", True) == "missile_kill"
     assert classify_flight_outcome(False, "", False) == "nonfinite"
     assert classify_flight_outcome(False, "LowSpeed", True) == "policy_or_flight_failure:LowSpeed"
+
+
+def test_airborne_audit_failure_classifies_interface_before_trim_or_policy():
+    assert classify_audit_failure(False, True, True, True) == "reset_contract_failed"
+    assert classify_audit_failure(True, False, True, True) == "throttle_authority_failed"
+    assert classify_audit_failure(True, True, False, True) == "static_trim_failed"
+    assert classify_audit_failure(True, True, True, False) == "policy_drift_or_missile_kill"
+    assert classify_audit_failure(True, True, True, True) == "passed"
