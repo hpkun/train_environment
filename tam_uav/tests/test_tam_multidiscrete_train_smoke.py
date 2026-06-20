@@ -58,7 +58,7 @@ def test_checkpoint_metadata_contains_formal_action_contract():
     assert meta["happo_correction"] == "enabled"
     assert meta["neutral_action_init"] is True
     assert meta["neutral_action_centers"] == {
-        "mav": [39, 20, 11, 20], "uav": [39, 20, 4, 20]
+        "mav": [39, 20, 6, 20], "uav": [39, 20, 4, 20]
     }
 
 
