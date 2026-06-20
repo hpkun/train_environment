@@ -107,6 +107,16 @@ def classify_stage(summary):
     audit = summary.get("environment_audit") or {}
     if audit and not audit.get("reset_contract_passed", False):
         return "D"
+    eval_survival_collapsed = any(
+        trend.get("mav_survival", {}).get("start", 0.0) >= 0.5
+        and trend.get("mav_survival", {}).get("end", 1.0) <= 0.1
+        for trend in (summary.get("eval_trend") or {}).values()
+    )
+    policy_survival_collapsed = (
+        audit.get("passed", False)
+        and summary.get("mav_survival", {}).get("end") == 0.0
+        and eval_survival_collapsed
+    )
     correction = summary.get("correction_factor", {}).get("end")
     kl_values = [
         summary.get("approx_kl_mav", {}).get("end"),
@@ -114,6 +124,7 @@ def classify_stage(summary):
     ]
     if (
         summary.get("collapse_detected")
+        or policy_survival_collapsed
         or correction is not None and not 0.1 <= correction <= 10.0
         or any(value is not None and abs(value) > 1.0 for value in kl_values)
     ):

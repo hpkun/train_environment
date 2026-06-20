@@ -53,6 +53,21 @@ def test_stage_classifier_prioritizes_training_semantic_anomalies():
     assert classify_stage(summary) == "C"
 
 
+def test_stage_classifier_marks_policy_survival_collapse_as_training_semantics():
+    summary = summarize_training_rows(_rows())
+    summary["environment_audit"] = {
+        "passed": True,
+        "reset_contract_passed": True,
+        "f22_speed_at_60s_passed": True,
+    }
+    summary["mav_survival"]["end"] = 0.0
+    summary["eval_trend"] = {
+        "3v2": {"mav_survival": {"start": 1.0, "end": 0.0}},
+        "5v4": {"mav_survival": {"start": 1.0, "end": 0.0}},
+    }
+    assert classify_stage(summary) == "C"
+
+
 def test_stage_classifier_marks_persistent_mav_crash_as_stability_work():
     summary = summarize_training_rows(_rows())
     summary["rolling_return_slope_per_10k_steps"] = 0.0
