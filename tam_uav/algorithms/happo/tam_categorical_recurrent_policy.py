@@ -72,7 +72,7 @@ class TAMCategoricalRecurrentHAPPOPolicy(nn.Module):
         max_enemies: int = 4,
         max_red: int = 5,
         neutral_action_init: bool = True,
-        neutral_action_init_std_bins: float = 4.0,
+        neutral_action_init_std_bins: float = 0.35,
     ):
         super().__init__()
         if action_dim != 4 or action_levels <= 1:

@@ -25,7 +25,7 @@ def _load_policy(args):
             action_levels=meta.get("tam_action_levels", meta.get("action_levels", 40)),
             rnn_hidden_size=meta.get("rnn_hidden_size", 128),
             neutral_action_init=meta.get("neutral_action_init", True),
-            neutral_action_init_std_bins=meta.get("neutral_action_init_std_bins", 4.0),
+            neutral_action_init_std_bins=meta.get("neutral_action_init_std_bins", 0.35),
         )
     else:
         policy = BRMARecurrentMaskedHAPPOReferencePolicy(

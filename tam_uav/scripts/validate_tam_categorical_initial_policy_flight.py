@@ -35,6 +35,8 @@ def summarize_flight_trace(trace, *, death_reason, death_step):
         "min_altitude_m": min(altitudes) if altitudes else float("nan"),
         "mean_vertical_speed_mps": float(np.mean(vertical_speeds)) if vertical_speeds else float("nan"),
         "mean_speed_mps": float(np.mean(speeds)) if speeds else float("nan"),
+        "final_speed_mps": speeds[-1] if speeds else float("nan"),
+        "min_speed_mps": min(speeds) if speeds else float("nan"),
         "death_reason": death_reason,
         "death_step": int(death_step),
     }
@@ -63,7 +65,7 @@ def _alive_mask(env):
 
 
 def _fixed_blue_actions(env):
-    neutral = np.asarray([env.tam_action_levels - 1, 20, 0, 20], dtype=np.int64)
+    neutral = np.asarray([env.tam_action_levels - 1, 20, 4, 20], dtype=np.int64)
     return {bid: neutral.copy() for bid in env.blue_ids}
 
 
@@ -258,6 +260,29 @@ def run_long_horizon_validation(config, *, output_dir, episodes=10,
     result["selected_elevator_bin"] = choose_stable_elevator(
         result["f22_elevator_sweep"]
     )
+    fixed_scenario = result["scenarios"]["fixed_calibrated_neutral"]
+    deterministic_scenario = result["scenarios"]["initial_deterministic_no_missile"]
+    stochastic_scenario = result["scenarios"]["initial_stochastic_no_missile"]
+    result["stability_gate"] = {
+        "fixed_neutral_passed": bool(
+            fixed_scenario["mav_survival_rate"] == 1.0
+            and min(record["min_speed_mps"] for record in fixed_scenario["episodes"]) >= 150.0
+            and min(record["min_altitude_m"] for record in fixed_scenario["episodes"]) >= 4500.0
+        ),
+        "deterministic_policy_passed": bool(
+            deterministic_scenario["mav_survival_rate"] == 1.0
+            and "Crash_LowAlt" not in deterministic_scenario["death_reasons"]
+        ),
+        "stochastic_survival_rate": stochastic_scenario["mav_survival_rate"],
+        "stochastic_improved_over_old_zero": bool(
+            stochastic_scenario["mav_survival_rate"] > 0.0
+        ),
+    }
+    result["stability_gate"]["passed"] = all((
+        result["stability_gate"]["fixed_neutral_passed"],
+        result["stability_gate"]["deterministic_policy_passed"],
+        result["stability_gate"]["stochastic_improved_over_old_zero"],
+    ))
 
     out_dir = Path(output_dir)
     if not out_dir.is_absolute():

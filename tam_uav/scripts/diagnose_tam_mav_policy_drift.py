@@ -56,7 +56,7 @@ def _load_checkpoint_policy(checkpoint, device):
         action_levels=int(meta.get("tam_action_levels", meta.get("action_levels", 40))),
         rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
         neutral_action_init=bool(meta.get("neutral_action_init", True)),
-        neutral_action_init_std_bins=float(meta.get("neutral_action_init_std_bins", 4.0)),
+        neutral_action_init_std_bins=float(meta.get("neutral_action_init_std_bins", 0.35)),
     ).to(device)
     policy.load(checkpoint, map_location=device)
     policy.eval()

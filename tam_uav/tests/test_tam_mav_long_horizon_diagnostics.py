@@ -15,6 +15,8 @@ def test_trace_summary_reports_long_horizon_stability_fields():
     summary = summarize_flight_trace(trace, death_reason="alive", death_step=-1)
     assert summary["final_altitude_m"] == 5900.0
     assert summary["min_altitude_m"] == 5900.0
+    assert summary["final_speed_mps"] == 245.0
+    assert summary["min_speed_mps"] == 245.0
     assert summary["mean_vertical_speed_mps"] == -1.5
     assert summary["death_reason"] == "alive"
     assert summary["death_step"] == -1

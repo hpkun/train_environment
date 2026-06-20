@@ -29,10 +29,23 @@ def test_red_direct_action_is_not_overridden_after_reset_stabilization():
     targets = env._parse_actions({"red_0": indices})
     env._apply_pid_controls(targets)
     sim = env.red_planes["red_0"]
-    assert np.isclose(sim.get_property_value("fcs/throttle-cmd-norm"), 0.4)
-    assert np.isclose(sim.get_property_value("fcs/aileron-cmd-norm"), -1.0)
-    assert np.isclose(sim.get_property_value("fcs/elevator-cmd-norm"), 1.0)
-    assert np.isclose(sim.get_property_value("fcs/rudder-cmd-norm"), 1.0)
+    command = targets["red_0"]
+    assert np.isclose(
+        sim.get_property_value("fcs/throttle-cmd-norm"),
+        command["calibrated_throttle_cmd_norm"],
+    )
+    assert np.isclose(
+        sim.get_property_value("fcs/aileron-cmd-norm"),
+        command["calibrated_aileron_cmd_norm"],
+    )
+    assert np.isclose(
+        sim.get_property_value("fcs/elevator-cmd-norm"),
+        command["calibrated_elevator_cmd_norm"],
+    )
+    assert np.isclose(
+        sim.get_property_value("fcs/rudder-cmd-norm"),
+        command["calibrated_rudder_cmd_norm"],
+    )
     env.close()
 
 

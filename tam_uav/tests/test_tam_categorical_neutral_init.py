@@ -22,6 +22,7 @@ def test_neutral_prior_argmax_is_high_throttle_and_middle_surfaces():
     assert policy.neutral_action_centers == {
         "mav": [39, 20, 20, 20], "uav": [39, 20, 4, 20]
     }
+    assert policy.neutral_action_init_std_bins == 0.35
 
 
 def test_neutral_prior_remains_stochastic_with_nonzero_entropy_and_multiple_bins():
