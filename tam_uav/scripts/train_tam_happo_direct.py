@@ -47,6 +47,21 @@ from scripts.rich_logging import RichExperimentLogger, write_not_available_atten
 
 
 DEFAULT_CONFIG = "uav_env/JSBSim/configs/tam_happo_f22_3v2_direct.yaml"
+POLICY_ARCH_CHOICES = [
+    "flat", "entity_attention", "brma_entity", "brma_recurrent",
+    "brma_recurrent_masked", "tam_categorical_recurrent",
+]
+TAM_CATEGORICAL_ARCH = "tam_categorical_recurrent"
+
+
+def _resolve_policy_arch(requested_policy_arch: str, action_distribution: str):
+    if action_distribution != "multidiscrete_categorical":
+        return requested_policy_arch, requested_policy_arch, False
+    return (
+        requested_policy_arch,
+        TAM_CATEGORICAL_ARCH,
+        requested_policy_arch != TAM_CATEGORICAL_ARCH,
+    )
 DEFAULT_EVAL_CONFIGS = [
     "uav_env/JSBSim/configs/tam_happo_f22_3v2_direct.yaml",
     "uav_env/JSBSim/configs/tam_happo_f22_5v4_direct.yaml",
@@ -323,6 +338,12 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int, action_dim:
                 raise ValueError("formal categorical training rejects legacy continuous checkpoints")
             if int(meta.get("tam_action_levels", meta.get("action_levels", -1))) != int(action_levels):
                 raise ValueError("checkpoint action_levels does not match environment")
+            effective_arch = meta.get("effective_policy_arch")
+            if effective_arch is not None and effective_arch != TAM_CATEGORICAL_ARCH:
+                raise ValueError(
+                    "categorical checkpoint effective_policy_arch must be "
+                    f"{TAM_CATEGORICAL_ARCH}, got {effective_arch}"
+                )
         return TAMCategoricalRecurrentHAPPOPolicy(
             entity_dim=int(meta.get("entity_dim", 19)),
             actor_obs_dim=actor_dim,
@@ -487,10 +508,33 @@ def _trainer_contract_meta(policy) -> dict:
     }
 
 
+def _policy_arch_meta(args, policy) -> dict:
+    categorical = getattr(policy, "action_distribution", "") == "multidiscrete_categorical"
+    requested = getattr(args, "requested_policy_arch", args.policy_arch)
+    effective = getattr(
+        args, "effective_policy_arch",
+        TAM_CATEGORICAL_ARCH if categorical else args.policy_arch,
+    )
+    alias_used = bool(getattr(
+        args, "policy_arch_alias_used", requested != effective,
+    ))
+    return {
+        "policy_arch": effective,
+        "requested_policy_arch": requested,
+        "effective_policy_arch": effective,
+        "policy_arch_alias_used": alias_used,
+        "policy_class": type(policy).__name__,
+        "critic_arch": (
+            "centralized_attention" if categorical else "centralized_mlp"
+        ),
+    }
+
+
 def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int, action_dim: int,
                            transitions_per_rollout: int) -> dict:
     return {
         "algorithm": "happo_reference_v0",
+        **_policy_arch_meta(args, policy),
         "reward_mode": args.reward_mode,
         "opponent_policy": args.opponent_policy,
         "actor_obs_dim": actor_dim,
@@ -502,15 +546,14 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int, action
         "tam_action_distribution": getattr(policy, "action_distribution", "continuous_quantized"),
         "action_space": ("MultiDiscrete" if getattr(policy, "action_distribution", "") == "multidiscrete_categorical" else "Box"),
         "tam_action_levels": getattr(policy, "action_levels", None),
-        "policy_class": type(policy).__name__,
         **_trainer_contract_meta(policy),
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
         "centralized_critic": True,
         "sequential_update": True,
-        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-        "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+        "attention": getattr(args, "effective_policy_arch", args.policy_arch) in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
+        "brma_entity_encoder": getattr(args, "effective_policy_arch", args.policy_arch) in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
+        "recurrent": getattr(args, "effective_policy_arch", args.policy_arch) in {"brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
         "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
         "random_scale_mask": False,
         "biased_mask": False,
@@ -637,7 +680,7 @@ def _run_training_main() -> None:
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"],
+                        choices=POLICY_ARCH_CHOICES,
                         help="Policy architecture. Default flat preserves legacy checkpoints.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="tam_direct_fsm",
@@ -709,17 +752,28 @@ def _run_training_main() -> None:
     action_distribution = getattr(env, "tam_action_distribution", "continuous_quantized")
     action_levels = int(getattr(env, "tam_action_levels", 40))
     action_space_class = type(env.action_space[env.red_ids[0]]).__name__
+    (
+        args.requested_policy_arch,
+        args.effective_policy_arch,
+        args.policy_arch_alias_used,
+    ) = _resolve_policy_arch(args.policy_arch, action_distribution)
+    if args.policy_arch_alias_used:
+        print(
+            "WARNING: categorical action distribution maps requested policy_arch "
+            f"{args.requested_policy_arch} to {args.effective_policy_arch}",
+            flush=True,
+        )
     init_meta_path = None
     if args.init_checkpoint:
         init_path_for_meta = _rel(args.init_checkpoint)
         init_meta_path = init_path_for_meta.parent / "meta.json"
-        if args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"} and not init_meta_path.exists():
+        if args.effective_policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH} and not init_meta_path.exists():
             raise ValueError(
                 f"{args.policy_arch} init checkpoint requires meta.json with policy_arch={args.policy_arch}"
             )
-        _reject_unsafe_random_scale_mask_checkpoint(args.policy_arch, init_meta_path)
+        _reject_unsafe_random_scale_mask_checkpoint(args.requested_policy_arch, init_meta_path)
     policy = _build_policy(
-        args.policy_arch, actor_dim, critic_dim, action_dim, device,
+        args.effective_policy_arch, actor_dim, critic_dim, action_dim, device,
         init_checkpoint_meta=init_meta_path,
         action_distribution=action_distribution,
         action_levels=action_levels,
@@ -727,7 +781,7 @@ def _run_training_main() -> None:
     _SINGLE_RUNNER_STATE["policy"] = policy
     _SINGLE_RUNNER_STATE["meta"] = {
         "algorithm": "happo_reference_v0",
-        "policy_arch": args.policy_arch,
+        **_policy_arch_meta(args, policy),
         "config": args.config,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
@@ -738,7 +792,6 @@ def _run_training_main() -> None:
         "tam_action_distribution": action_distribution,
         "action_space": action_space_class,
         "tam_action_levels": action_levels,
-        "policy_class": type(policy).__name__,
         **_trainer_contract_meta(policy),
     }
     if args.init_checkpoint:
@@ -840,7 +893,8 @@ def _run_training_main() -> None:
             "max_action_prob_mav", "max_action_prob_uav",
             "action_bin_usage_mav", "action_bin_usage_uav",
             "throttle_high_rate", "surface_edge_rate",
-            "grad_norm_actor", "grad_norm_critic",
+            "grad_norm_actor", "grad_norm_shared", "grad_norm_mav_head",
+            "grad_norm_uav_head", "grad_norm_critic",
             "correction_factor_mean", "correction_factor_max", "correction_factor_min",
             "nan_detected",
         ])
@@ -1196,6 +1250,9 @@ def _run_training_main() -> None:
                 f"{stats.get('throttle_high_rate', 0.0):.6f}",
                 f"{stats.get('surface_edge_rate', 0.0):.6f}",
                 f"{stats.get('grad_norm_actor', 0.0):.6f}",
+                f"{stats.get('grad_norm_shared', 0.0):.6f}",
+                f"{stats.get('grad_norm_mav_head', 0.0):.6f}",
+                f"{stats.get('grad_norm_uav_head', 0.0):.6f}",
                 f"{stats.get('grad_norm_critic', 0.0):.6f}",
                 f"{stats.get('correction_factor_mean', 1.0):.6f}",
                 f"{stats.get('correction_factor_max', 1.0):.6f}",
@@ -1237,6 +1294,9 @@ def _run_training_main() -> None:
                     "policy_gradient_norm": stats.get("grad_norm_actor", ""),
                     "value_gradient_norm": stats.get("grad_norm_critic", ""),
                     "grad_norm_actor": stats.get("grad_norm_actor", ""),
+                    "grad_norm_shared": stats.get("grad_norm_shared", ""),
+                    "grad_norm_mav_head": stats.get("grad_norm_mav_head", ""),
+                    "grad_norm_uav_head": stats.get("grad_norm_uav_head", ""),
                     "grad_norm_critic": stats.get("grad_norm_critic", ""),
                     "correction_factor_mean": stats.get("correction_factor_mean", ""),
                     "correction_factor_max": stats.get("correction_factor_max", ""),
@@ -1291,7 +1351,7 @@ def _run_training_main() -> None:
                 policy.save(tmp_model)
                 (out_dir / "_tmp_eval_meta.json").write_text(json.dumps({
                     "algorithm": "happo_reference_v0",
-                    "policy_arch": args.policy_arch,
+                    **_policy_arch_meta(args, policy),
                     "actor_obs_dim": actor_dim,
                     "critic_state_dim": critic_dim,
                     "action_dim": action_dim,
@@ -1301,12 +1361,11 @@ def _run_training_main() -> None:
                     "tam_action_distribution": action_distribution,
                     "action_space": action_space_class,
                     "tam_action_levels": action_levels,
-                    "policy_class": type(policy).__name__,
                     **_trainer_contract_meta(policy),
                     "entity_dim": getattr(policy, "entity_dim", None),
-                    "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-                    "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-                    "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+                    "attention": args.effective_policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
+                    "brma_entity_encoder": args.effective_policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
+                    "recurrent": args.effective_policy_arch in {"brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
                     "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
                     "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
                     "biased_mask": bool(getattr(policy, "biased_mask", False)),
@@ -1350,7 +1409,7 @@ def _run_training_main() -> None:
                         meta = build_eval_checkpoint_meta(
                             step=total_steps,
                             iteration=iteration,
-                            policy_arch=args.policy_arch,
+                            policy_arch=args.effective_policy_arch,
                             records=records,
                             extra={
                                 **_eval_checkpoint_extra(
@@ -1383,7 +1442,7 @@ def _run_training_main() -> None:
                         policy.save(out_dir / "best" / "model.pt")
                         (out_dir / "best" / "meta.json").write_text(json.dumps({
                             "algorithm": "happo_reference_v0",
-                            "policy_arch": args.policy_arch,
+                            **_policy_arch_meta(args, policy),
                             "reward_mode": args.reward_mode,
                             "opponent_policy": args.opponent_policy,
                             "best_score": best_score,
@@ -1396,15 +1455,14 @@ def _run_training_main() -> None:
                             "tam_action_distribution": action_distribution,
                             "action_space": action_space_class,
                             "tam_action_levels": action_levels,
-                            "policy_class": type(policy).__name__,
                             **_trainer_contract_meta(policy),
                             "entity_dim": getattr(policy, "entity_dim", None),
                             "separate_actors": True,
                             "centralized_critic": True,
                             "sequential_update": True,
-                            "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-                            "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-                            "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+                            "attention": args.effective_policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
+                            "brma_entity_encoder": args.effective_policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
+                            "recurrent": args.effective_policy_arch in {"brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
                             "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
                             "random_scale_mask": False,
                             "biased_mask": False,
@@ -1425,7 +1483,7 @@ def _run_training_main() -> None:
     policy.save(latest_model)
     meta = {
         "algorithm": "happo_reference_v0",
-        "policy_arch": args.policy_arch,
+        **_policy_arch_meta(args, policy),
         "config": args.config,
         "reward_mode": args.reward_mode,
         "opponent_policy": args.opponent_policy,
@@ -1438,16 +1496,15 @@ def _run_training_main() -> None:
         "tam_action_distribution": action_distribution,
         "action_space": action_space_class,
         "tam_action_levels": action_levels,
-        "policy_class": type(policy).__name__,
         **_trainer_contract_meta(policy),
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
         "centralized_critic": True,
         "sequential_update": True,
         "sequential_update_detail": "simplified HAPPO-style v0 role-wise PPO",
-        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-        "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+        "attention": args.effective_policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
+        "brma_entity_encoder": args.effective_policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
+        "recurrent": args.effective_policy_arch in {"brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
         "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
         "random_scale_mask": False,
         "biased_mask": False,

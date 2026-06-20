@@ -143,10 +143,11 @@ class UavCombatEnv(gymnasium.Env):
     """
     Multi-agent UAV combat environment (paper BRMA-MAPPO baseline).
 
-    Action space (per agent): Box(3,) → paper §2.4 ABSOLUTE targets
-      - target_pitch:    ±90° (act[0] → θ ∈ (−π/2, π/2])
-      - target_heading:  ±180° absolute (act[1] → ψ ∈ (−π, π])
-      - target_velocity: 0.3–1.2 Mach ≈ 102–408 m/s (act[2] → V)
+    Two action interfaces are retained:
+      - legacy_pid_3d: Box(3) absolute pitch/heading/velocity PID targets.
+      - tam_direct_fcs_4d: throttle/aileron/elevator/rudder commands. The
+        formal TAM configuration uses MultiDiscrete([40, 40, 40, 40]) and a
+        categorical policy; it does not use PID target conversion.
 
     Observation space (per agent): Dict with keys
       - "ego_state"     (11,)       self state (body-frame relative)
@@ -155,8 +156,8 @@ class UavCombatEnv(gymnasium.Env):
       - "death_mask"    (max_allies+max_enemies,)  1=alive, 0=dead
     """
 
-    # ---- Action scale constants -------------------------------------------------
-    # Paper §2.4: action space uses ABSOLUTE target values (not deltas).
+    # ---- Legacy PID action scale constants --------------------------------------
+    # `legacy_pid_3d` uses absolute target values (not deltas).
     #
     #   θ ∈ (−π/2, π/2]       pitch   act[0] ∈ [-1, 1] → ±90°
     #   ψ ∈ (−π, π]           heading act[1] ∈ [-1, 1] → ±180° (absolute)
@@ -675,14 +676,18 @@ class UavCombatEnv(gymnasium.Env):
         }
 
     def _parse_actions(self, actions: dict) -> dict:
-        """Convert normalised actor outputs ∈ [-1, 1] to physical setpoints.
+        """Map formal direct-FCS commands or legacy PID target actions.
 
-        Control-flow priority (team-aware):
+        The `tam_direct_fcs_4d` branch returns before the legacy layers below.
+        Its categorical actions map directly to throttle, aileron, elevator,
+        and rudder FCS commands.
+
+        Legacy `legacy_pid_3d` control-flow priority (team-aware):
           Layer 1 — Missile evasion:     RED team only  (scripted)
           Layer 2 — GCAS safety net:     BLUE only   (hard-coded baseline)
           Layer 3 — Agent action:        BOTH teams  (identical §2.4 mapping)
 
-        Paper §2.4 mapping — IDENTICAL for both teams (ABSOLUTE targets):
+        Legacy PID mapping, identical for both teams (absolute targets):
           act[0] ∈ [-1, 1]  →  target_pitch   ∈ [-π/2, +π/2]     [rad]  (±90°)
           act[1] ∈ [-1, 1]  →  target_heading ∈ [-π,   +π]       [rad]  (±180° absolute)
           act[2] ∈ [-1, 1]  →  target_velocity ∈ [102, 408]      [m/s]  (M0.3–M1.2)

@@ -62,7 +62,8 @@ def test_trainer_uses_sequence_replay_and_reports_happo_metrics():
         "throttle_high_rate", "surface_edge_rate",
         "max_action_prob_mav", "max_action_prob_uav",
         "action_bin_usage_mav", "action_bin_usage_uav",
-        "grad_norm_actor", "grad_norm_critic",
+        "grad_norm_actor", "grad_norm_shared", "grad_norm_mav_head",
+        "grad_norm_uav_head", "grad_norm_critic",
         "correction_factor_mean", "correction_factor_max", "correction_factor_min",
         "mav_active_sample_count", "uav_active_sample_count",
     }
@@ -72,6 +73,40 @@ def test_trainer_uses_sequence_replay_and_reports_happo_metrics():
     assert metrics["uav_active_sample_count"] == 3.0
     assert not any("log_std" in key for key in metrics)
     assert all(torch.isfinite(parameter).all() for parameter in policy.parameters())
+
+
+def _optimizer_parameter_ids(optimizer):
+    if optimizer is None:
+        return set()
+    return {
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    }
+
+
+def test_actor_optimizers_have_disjoint_parameter_ownership():
+    policy = _policy()
+    trainer = happo.TAMCategoricalHAPPOTrainer(policy, ppo_epochs=1)
+    shared = {id(parameter) for parameter in policy.actor_shared_parameters()}
+    mav_head = {id(parameter) for parameter in policy.mav_actor.parameters()}
+    uav_head = {id(parameter) for parameter in policy.uav_actor.parameters()}
+
+    assert _optimizer_parameter_ids(trainer.shared_actor_opt) == shared
+    assert _optimizer_parameter_ids(trainer.mav_opt) == mav_head
+    assert _optimizer_parameter_ids(trainer.uav_opt) == uav_head
+    assert shared.isdisjoint(_optimizer_parameter_ids(trainer.mav_opt))
+    assert shared.isdisjoint(_optimizer_parameter_ids(trainer.uav_opt))
+    assert _optimizer_parameter_ids(trainer.mav_opt).isdisjoint(
+        _optimizer_parameter_ids(trainer.uav_opt)
+    )
+
+
+def test_empty_shared_parameter_group_does_not_create_adam_with_no_parameters():
+    policy = _policy()
+    policy.actor_shared_parameters = lambda: []
+    trainer = happo.TAMCategoricalHAPPOTrainer(policy, ppo_epochs=1)
+    assert trainer.shared_actor_opt is None
 
 
 def test_formal_trainer_class_is_distinct_from_reference_trainer():

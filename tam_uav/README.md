@@ -10,16 +10,20 @@ and rudder. Actor outputs are clipped to `[-1, 1]`; throttle is mapped to
 `[0.4, 0.9]` and the three surface commands remain in `[-1, 1]` before being
 written directly to JSBSim. No PID target conversion is used on this path.
 
-The environment applies 40-level quantization to each continuous actor output.
-This is the current approximation of the paper's multi-discrete action space;
-the policy remains a continuous Gaussian actor.
+The formal environment exposes `MultiDiscrete([40, 40, 40, 40])`. The
+`TAMCategoricalRecurrentHAPPOPolicy` uses four categorical heads and integer
+action indices; it is not a quantized continuous Gaussian actor. The effective
+formal policy architecture is recorded as `tam_categorical_recurrent`.
 
 Formal configs:
 
 - `uav_env/JSBSim/configs/tam_happo_f22_3v2_direct.yaml` for training/eval.
 - `uav_env/JSBSim/configs/tam_happo_f22_5v4_direct.yaml` for eval and zero-shot scale transfer only.
 
-Legacy 3D PID configurations remain available but are not the default TAM path.
+Legacy `legacy_pid_3d` configurations retain `Box(3)` absolute
+pitch/heading/velocity targets. They remain available but are not the formal TAM
+path. Formal configs use `tam_direct_fcs_4d`, bypass PID target conversion, and
+write throttle/aileron/elevator/rudder commands directly to JSBSim.
 
 ## Legacy project description
 

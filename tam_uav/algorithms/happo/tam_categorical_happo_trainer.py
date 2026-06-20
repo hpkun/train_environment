@@ -30,9 +30,13 @@ class TAMCategoricalHAPPOTrainer:
         if getattr(policy, "action_distribution", None) != "multidiscrete_categorical":
             raise ValueError("TAMCategoricalHAPPOTrainer requires categorical policy")
         self.policy = policy
-        shared = list(policy.actor_shared_parameters())
-        self.mav_params = _unique_parameters(shared + list(policy.mav_actor.parameters()))
-        self.uav_params = _unique_parameters(shared + list(policy.uav_actor.parameters()))
+        self.shared_actor_params = _unique_parameters(policy.actor_shared_parameters())
+        self.mav_params = _unique_parameters(policy.mav_actor.parameters())
+        self.uav_params = _unique_parameters(policy.uav_actor.parameters())
+        self.shared_actor_opt = (
+            torch.optim.Adam(self.shared_actor_params, lr=actor_lr)
+            if self.shared_actor_params else None
+        )
         self.mav_opt = torch.optim.Adam(self.mav_params, lr=actor_lr)
         self.uav_opt = torch.optim.Adam(self.uav_params, lr=actor_lr)
         self.critic_opt = torch.optim.Adam(policy.critic.parameters(), lr=critic_lr)
@@ -77,6 +81,11 @@ class TAMCategoricalHAPPOTrainer:
         )
 
     def _update_role(self, sequences, advantages, correction, role_id, optimizer, params):
+        if self.shared_actor_opt is not None:
+            self.shared_actor_opt.zero_grad()
+        else:
+            for parameter in self.shared_actor_params:
+                parameter.grad = None
         optimizer.zero_grad()
         loss_sum = torch.zeros((), device=advantages.device)
         entropy_sum = torch.zeros((), device=advantages.device)
@@ -99,12 +108,23 @@ class TAMCategoricalHAPPOTrainer:
             kl_sum = kl_sum + ((old - out["log_prob"]) * valid).sum()
             valid_sum = valid_sum + valid.sum()
         if valid_sum.item() <= 0:
-            return 0.0, 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         policy_loss = loss_sum / valid_sum
         entropy_mean = entropy_sum / valid_sum
         (policy_loss - self.entropy_coef * entropy_mean).backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(params, self.max_grad_norm)
+        shared_grad_norm = (
+            torch.nn.utils.clip_grad_norm_(
+                self.shared_actor_params, self.max_grad_norm
+            ) if self.shared_actor_params else torch.zeros(())
+        )
+        head_grad_norm = torch.nn.utils.clip_grad_norm_(params, self.max_grad_norm)
         optimizer.step()
+        if self.shared_actor_opt is not None:
+            self.shared_actor_opt.step()
+
+        shared_grad_value = float(torch.as_tensor(shared_grad_norm).item())
+        head_grad_value = float(torch.as_tensor(head_grad_norm).item())
+        actor_grad_value = float(np.hypot(shared_grad_value, head_grad_value))
 
         with torch.no_grad():
             for sequence in sequences:
@@ -120,7 +140,7 @@ class TAMCategoricalHAPPOTrainer:
         return (
             float(policy_loss.item()), float(entropy_mean.item()),
             float((kl_sum / valid_sum).item()), float(valid_sum.item()),
-            float(torch.as_tensor(grad_norm).item()),
+            actor_grad_value, shared_grad_value, head_grad_value,
         )
 
     def _distribution_metrics(self, sequences):
@@ -210,6 +230,9 @@ class TAMCategoricalHAPPOTrainer:
             "mav_active_sample_count": float(mav[:, 3].mean()),
             "uav_active_sample_count": float(uav[:, 3].mean()),
             "grad_norm_actor": float(np.mean(np.concatenate([mav[:, 4], uav[:, 4]]))),
+            "grad_norm_shared": float(np.mean(np.concatenate([mav[:, 5], uav[:, 5]]))),
+            "grad_norm_mav_head": float(mav[:, 6].mean()),
+            "grad_norm_uav_head": float(uav[:, 6].mean()),
             "grad_norm_critic": float(np.mean(critic_grad_norms)),
             "correction_factor_mean": float(correction.mean().item()),
             "correction_factor_max": float(correction.max().item()),

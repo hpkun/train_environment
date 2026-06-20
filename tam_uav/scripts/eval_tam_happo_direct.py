@@ -64,6 +64,12 @@ def _action_dim_from_env(env) -> int:
 
 def _build_policy_from_meta(meta: dict, device: torch.device, action_dim: int):
     if meta.get("tam_action_distribution", meta.get("action_distribution")) == "multidiscrete_categorical":
+        effective_arch = meta.get("effective_policy_arch")
+        if effective_arch is not None and effective_arch != "tam_categorical_recurrent":
+            raise ValueError(
+                "categorical checkpoint effective_policy_arch must be "
+                f"tam_categorical_recurrent, got {effective_arch}"
+            )
         return TAMCategoricalRecurrentHAPPOPolicy(
             entity_dim=int(meta.get("entity_dim", 19)),
             actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
