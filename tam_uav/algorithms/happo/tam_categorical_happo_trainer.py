@@ -32,7 +32,11 @@ class TAMCategoricalHAPPOTrainer:
         mav_target_kl=0.0, uav_target_kl=0.0,
         role_kl_early_stop=False,
         mav_shared_update_mode="full",
+        happo_update_granularity: str = "role",
+        agent_ids: list[str] | None = None,
     ):
+        if happo_update_granularity not in ("role", "agent"):
+            raise ValueError("happo_update_granularity must be 'role' or 'agent'")
         if getattr(policy, "action_distribution", None) != "multidiscrete_categorical":
             raise ValueError("TAMCategoricalHAPPOTrainer requires categorical policy")
         self.policy = policy
@@ -75,8 +79,10 @@ class TAMCategoricalHAPPOTrainer:
         self.ppo_epochs = int(ppo_epochs)
         self.gamma = float(gamma)
         self.gae_lambda = float(gae_lambda)
+        self.happo_update_granularity = happo_update_granularity
+        self.agent_ids = list(agent_ids) if agent_ids else ["red_0", "red_1", "red_2"]
         self.role_update_order = (MAV_ROLE_ID, UAV_ROLE_ID)
-        self.happo_correction = "role_level"
+        self.happo_correction = "agent_sequential" if happo_update_granularity == "agent" else "role_level"
         self.recurrent_update = "sequence_replay"
 
     @staticmethod
@@ -287,16 +293,35 @@ class TAMCategoricalHAPPOTrainer:
             critic_grad_norms.append(float(torch.as_tensor(critic_grad).item()))
 
             correction = torch.ones_like(data["old_log_probs"])
-            for role_id, optimizer, params in (
-                (MAV_ROLE_ID, self.mav_opt, self.mav_params),
-                (UAV_ROLE_ID, self.uav_opt, self.uav_params),
-            ):
-                role_stats[role_id].append(self._update_role(
-                    sequences, advantages, correction, role_id, optimizer, params,
-                    force_skip_by_kl=role_id in kl_stopped_roles,
-                ))
-                if role_stats[role_id][-1][7] > 0.0:
-                    kl_stopped_roles.add(role_id)
+            if self.happo_update_granularity == "agent":
+                # Agent-sequential: iterate over individual agents (red_ids order)
+                agent_stats = {}
+                for agent_index, agent_id in enumerate(self.agent_ids):
+                    role_id = MAV_ROLE_ID if agent_index == 0 else UAV_ROLE_ID
+                    optimizer = self.mav_opt if agent_index == 0 else self.uav_opt
+                    params = self.mav_params if agent_index == 0 else self.uav_params
+                    if agent_id not in agent_stats:
+                        agent_stats[agent_id] = []
+                    agent_stats[agent_id].append(self._update_role(
+                        sequences, advantages, correction, role_id, optimizer, params,
+                        force_skip_by_kl=role_id in kl_stopped_roles,
+                    ))
+                    if agent_stats[agent_id][-1][7] > 0.0:
+                        kl_stopped_roles.add(role_id)
+                for role_id in (MAV_ROLE_ID, UAV_ROLE_ID):
+                    role_stats[role_id] = []
+            else:
+                # Role-level: iterate MAV then UAV
+                for role_id, optimizer, params in (
+                    (MAV_ROLE_ID, self.mav_opt, self.mav_params),
+                    (UAV_ROLE_ID, self.uav_opt, self.uav_params),
+                ):
+                    role_stats[role_id].append(self._update_role(
+                        sequences, advantages, correction, role_id, optimizer, params,
+                        force_skip_by_kl=role_id in kl_stopped_roles,
+                    ))
+                    if role_stats[role_id][-1][7] > 0.0:
+                        kl_stopped_roles.add(role_id)
             if not torch.isfinite(correction).all():
                 raise ValueError("non-finite HAPPO correction factor")
             correction_values.append(correction.detach().reshape(-1))
@@ -305,12 +330,22 @@ class TAMCategoricalHAPPOTrainer:
             if not torch.isfinite(parameter).all():
                 raise ValueError(f"non-finite policy parameter after update: {name}")
 
+        # In agent mode, aggregate per-agent stats into MAV/UAV role stats
+        if self.happo_update_granularity == "agent":
+            agent_ids_in_stats = set(self.agent_ids) & set(agent_stats.keys())
+            for agent_id in agent_ids_in_stats:
+                agent_index = self.agent_ids.index(agent_id)
+                role_id = MAV_ROLE_ID if agent_index == 0 else UAV_ROLE_ID
+                role_stats[role_id].extend(agent_stats[agent_id])
+
         mav = np.asarray(role_stats[MAV_ROLE_ID], dtype=np.float64)
         uav = np.asarray(role_stats[UAV_ROLE_ID], dtype=np.float64)
         correction = torch.cat(correction_values)
         metrics = {
-            "actor_loss_mav": float(mav[:, 0].mean()),
-            "actor_loss_uav": float(uav[:, 0].mean()),
+            "happo_update_granularity": self.happo_update_granularity,
+            "agent_update_order": self.agent_ids if self.happo_update_granularity == "agent" else "role_level",
+            "actor_loss_mav": float(mav[:, 0].mean()) if len(mav) else 0.0,
+            "actor_loss_uav": float(uav[:, 0].mean()) if len(uav) else 0.0,
             "critic_loss": float(np.mean(critic_losses)),
             "entropy_mav": float(mav[:, 1].mean()),
             "entropy_uav": float(uav[:, 1].mean()),
@@ -349,4 +384,19 @@ class TAMCategoricalHAPPOTrainer:
             "correction_factor_min": float(correction.min().item()),
         }
         metrics.update(self._distribution_metrics(sequences))
+        # Agent-level metrics
+        if self.happo_update_granularity == "agent":
+            for agent_id in self.agent_ids:
+                if agent_id in agent_stats and agent_stats[agent_id]:
+                    arr = np.asarray(agent_stats[agent_id], dtype=np.float64)
+                    metrics[f"agent_loss_{agent_id}"] = float(arr[:, 0].mean())
+                    metrics[f"agent_entropy_{agent_id}"] = float(arr[:, 1].mean())
+                    metrics[f"agent_approx_kl_{agent_id}"] = float(arr[:, 2].mean())
+                    metrics[f"agent_active_sample_count_{agent_id}"] = float(arr[:, 3].mean())
+            metrics["shared_step_count"] = int(
+                len([a for a in agent_stats.values() if len(a) > 0]))
+            metrics["mav_head_step_count"] = int(
+                len(agent_stats.get(self.agent_ids[0], [])) if self.agent_ids else 0)
+            metrics["uav_head_step_count"] = int(
+                sum(len(agent_stats.get(aid, [])) for aid in self.agent_ids[1:]) if len(self.agent_ids) > 1 else 0)
         return metrics
