@@ -227,6 +227,7 @@ class UavCombatEnv(gymnasium.Env):
                  scripted_evasion_red: bool = True,
                  scripted_evasion_blue: bool = False,
                  airborne_initial_state_stabilization=None,
+                 tam_paper_mode: bool = False,
                  render_mode=None):
         super().__init__()
         self.max_num_blue = max_num_blue

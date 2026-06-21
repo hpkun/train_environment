@@ -88,3 +88,8 @@ airborne_initial_state_stabilization:
     max_position_drift_m: 50.0
     max_altitude_drift_m: 50.0
     max_heading_drift_deg: 2.0
+
+tam_paper_mode: true
+control_mode_by_role:
+  mav: direct_fcs_3d
+  attack_uav: direct_fcs_3d
