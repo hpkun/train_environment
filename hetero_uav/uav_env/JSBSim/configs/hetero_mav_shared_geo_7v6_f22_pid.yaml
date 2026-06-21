@@ -1,0 +1,91 @@
+env_type: jsbsim_hetero
+observation_mode: mav_shared_geo
+hetero_reward_mode: happo_ref_v0
+max_num_red: 7
+max_num_blue: 6
+sim_freq: 60
+agent_interaction_steps: 12
+max_steps: 1000
+suppress_jsbsim_output: true
+enable_gcas_for_blue: true
+uav_direct_observation_range_m: 10000.0
+mav_observation_range_m: 80000.0
+
+red_agent_types:
+  - mav
+  - attack_uav
+  - attack_uav
+  - attack_uav
+  - attack_uav
+  - attack_uav
+  - attack_uav
+blue_agent_types:
+  - attack_uav
+  - attack_uav
+  - attack_uav
+  - attack_uav
+  - attack_uav
+  - attack_uav
+
+aircraft_type_params:
+  mav:
+    aircraft_model: f22
+    role: mav
+    num_missiles: 0
+    init_altitude_offset_m: 0.0
+    init_speed_offset_mps: 0.0
+  attack_uav:
+    aircraft_model: f16
+    role: attack_uav
+    num_missiles: 2
+    init_altitude_offset_m: 0.0
+    init_speed_offset_mps: 0.0
+  scout_uav:
+    aircraft_model: f16
+    role: scout_uav
+    num_missiles: 0
+  interceptor_uav:
+    aircraft_model: f16
+    role: interceptor_uav
+    num_missiles: 2
+
+action_trim_by_role:
+  mav:
+    pitch: 0.0
+    heading: 0.0
+    speed: 0.0
+
+pid_profile_by_role:
+  mav: f22_mav_energy_pid
+  attack_uav: f16_default
+  interceptor_uav: f16_default
+pid_profile_config:
+  f22_mav_energy_pid:
+    elevator_sign: 1
+    pitch_kp: 1.2
+    pitch_ki: 0.45
+    pitch_kd: 0.08
+    roll_kp: 0.08
+    roll_ki: 0.45
+    roll_kd: 0.04
+    vel_kp: 0.04
+    vel_ki: 0.012
+    vel_kd: 0.003
+    throttle_min: 0.65
+    throttle_max: 1.0
+    low_speed_throttle_floor: 0.95
+
+initial_states:
+  red_0: {lon: 120.00, lat: 60.00, altitude_m: 6700, speed_mps: 250, yaw_deg: 0.0}
+  red_1: {lon: 119.97, lat: 60.02, altitude_m: 6000, speed_mps: 250, yaw_deg: 0.0}
+  red_2: {lon: 120.00, lat: 60.02, altitude_m: 6000, speed_mps: 250, yaw_deg: 0.0}
+  red_3: {lon: 120.03, lat: 60.02, altitude_m: 6000, speed_mps: 250, yaw_deg: 0.0}
+  red_4: {lon: 119.97, lat: 59.98, altitude_m: 6000, speed_mps: 250, yaw_deg: 0.0}
+  red_5: {lon: 120.00, lat: 59.98, altitude_m: 6000, speed_mps: 250, yaw_deg: 0.0}
+  red_6: {lon: 120.03, lat: 59.98, altitude_m: 6000, speed_mps: 250, yaw_deg: 0.0}
+  blue_0: {lon: 119.96, lat: 60.15, altitude_m: 6000, speed_mps: 250, yaw_deg: 180.0}
+  blue_1: {lon: 120.00, lat: 60.15, altitude_m: 6000, speed_mps: 250, yaw_deg: 180.0}
+  blue_2: {lon: 120.04, lat: 60.15, altitude_m: 6000, speed_mps: 250, yaw_deg: 180.0}
+  blue_3: {lon: 119.96, lat: 60.19, altitude_m: 6000, speed_mps: 250, yaw_deg: 180.0}
+  blue_4: {lon: 120.00, lat: 60.19, altitude_m: 6000, speed_mps: 250, yaw_deg: 180.0}
+  blue_5: {lon: 120.04, lat: 60.19, altitude_m: 6000, speed_mps: 250, yaw_deg: 180.0}

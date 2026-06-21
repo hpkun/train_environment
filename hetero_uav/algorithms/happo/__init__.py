@@ -9,6 +9,7 @@ from .brma_masked_policy import (
 from .brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 from .entity_policy import EntityHAPPOReferencePolicy
 from .happo_policy import HAPPOReferencePolicy
+from .hetero_entity_recurrent_policy import HeteroEntityRecurrentPolicy
 from .happo_trainer import HAPPOReferenceTrainer
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "BRMARecurrentHAPPOReferencePolicy",
     "EntityHAPPOReferencePolicy",
     "HAPPOReferencePolicy",
+    "HeteroEntityRecurrentPolicy",
     "HAPPORolloutBuffer",
     "HAPPOReferenceTrainer",
 ]

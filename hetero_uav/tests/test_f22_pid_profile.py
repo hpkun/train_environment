@@ -62,9 +62,9 @@ class TestF22MavEnergyPIDController:
         assert pid._pitch_pid.kp != 2.5   # F16 default
         assert pid._velocity_pid.kp != 0.04  # F16 default
         # F22 has throttle floor
-        assert pid.throttle_min == 0.55
+        assert pid.throttle_min == 0.65
         assert pid.throttle_max == 1.0
-        assert pid.low_speed_throttle_floor == 0.85
+        assert pid.low_speed_throttle_floor == 0.95
 
     def test_f22_gains_match_expected_defaults(self):
         pid = F22MavEnergyPIDController(dt=1.0 / 60, elevator_sign=+1)
@@ -235,6 +235,17 @@ class TestF22ProfileEnvIntegration:
         uav_pid = env.pid_controllers["red_1"]
         assert isinstance(uav_pid, PIDController)
         assert not isinstance(uav_pid, F22MavEnergyPIDController)
+        env.close()
+
+    def test_f22_pid_mainline_keeps_three_dimensional_actions(self):
+        from uav_env.make_env import make_env
+
+        env = make_env(
+            "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0_f22_pid.yaml"
+        )
+        env.reset()
+        assert env.action_space["red_0"].shape == (3,)
+        assert "direct_fcs" not in env.pid_profile_by_role["mav"]
         env.close()
 
     def test_env_f16_default_without_profile_config(self):

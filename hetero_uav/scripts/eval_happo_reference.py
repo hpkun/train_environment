@@ -21,6 +21,9 @@ from algorithms.happo import (
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
 )
+from algorithms.happo.hetero_entity_recurrent_policy import HeteroEntityRecurrentPolicy
+from uav_env.JSBSim.adapters.hetero_entity_set_adapter import FEATURE_SCHEMA_VERSION
+from uav_env.JSBSim.adapters.hetero_entity_set_adapter import HeteroEntitySetAdapter
 from algorithms.happo.rollout_safety import (
     sanitize_policy_inputs,
     zero_inactive_actions,
@@ -56,6 +59,21 @@ def _role_ids(env) -> list[int]:
 
 def _build_policy_from_meta(meta: dict, device: torch.device):
     policy_arch = meta.get("policy_arch", "flat")
+    if policy_arch == "hetero_entity_recurrent":
+        if int(meta.get("action_dim", -1)) != 3:
+            raise ValueError("hetero_entity_recurrent checkpoint action_dim must be 3")
+        if meta.get("feature_schema_version") != FEATURE_SCHEMA_VERSION:
+            raise ValueError(
+                "unsupported hetero_entity_recurrent feature_schema_version: "
+                f"{meta.get('feature_schema_version')!r}"
+            )
+        if meta.get("adapter_mode") != "hetero_entity_set":
+            raise ValueError("hetero_entity_recurrent checkpoint adapter_mode mismatch")
+        return HeteroEntityRecurrentPolicy(
+            entity_dim=int(meta["entity_dim"]),
+            action_dim=3,
+            rnn_hidden_size=int(meta["rnn_hidden_size"]),
+        ).to(device)
     if policy_arch == "entity_attention":
         return EntityHAPPOReferencePolicy(
             entity_dim=int(meta.get("entity_dim", 19)),
@@ -186,11 +204,7 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
             eval_rnn_hidden = np.zeros((len(env.red_ids), _rnn_hidden_size), dtype=np.float32)
         while True:
             adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
-            actor_obs = np.stack([
-                adapted["actor_obs"].get(rid, np.zeros(adapter.flat_actor_obs_dim, dtype=np.float32))
-                for rid in env.red_ids
-            ])
-            critic = adapted["critic_state"]
+            entity_mode = isinstance(adapter, HeteroEntitySetAdapter)
             # Build active mask from info dict (same logic as training)
             active = np.zeros(len(env.red_ids), dtype=np.float32)
             for i, rid in enumerate(env.red_ids):
@@ -202,33 +216,54 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
                     alive = bool(sim is not None and sim.is_alive)
                 active[i] = 1.0 if alive else 0.0
             san_ctx = {"env_idx": "eval", "episode_id": ep, "total_steps": ep_len}
-            san = sanitize_policy_inputs(
-                actor_obs, active, critic_state=critic,
-                rnn_hidden=eval_rnn_hidden, context=san_ctx,
-            )
-            actor_obs = san["actor_obs"]
-            critic = san["critic_state"] if san["critic_state"] is not None else critic
-            eval_rnn_hidden = san["rnn_hidden"] if san["rnn_hidden"] is not None else eval_rnn_hidden
-            # Only flag NaN for active-agent obs/critic
             active_rows = active > 0.5
-            if active_rows.any():
-                if not np.isfinite(actor_obs[active_rows]).all():
+            if entity_mode:
+                actor_tokens = adapted["actor_entity_tokens"].copy()
+                actor_keep = adapted["actor_keep_mask"].copy()
+                critic_tokens = adapted["critic_entity_tokens"].copy()
+                critic_keep = adapted["critic_keep_mask"].copy()
+                actor_tokens[~active_rows] = 0.0
+                actor_keep[~active_rows] = 0.0
+                actor_keep[~active_rows, 0] = 1.0
+                if active_rows.any() and (
+                    not np.isfinite(actor_tokens[active_rows]).all()
+                    or not np.isfinite(critic_tokens[critic_keep > 0.5]).all()
+                ):
                     nan_detected = True
                     break
-                if not np.isfinite(critic).all():
+                if eval_rnn_hidden is not None:
+                    eval_rnn_hidden = zero_inactive_hidden(eval_rnn_hidden, active)
+            else:
+                actor_obs = np.stack([
+                    adapted["actor_obs"].get(rid, np.zeros(adapter.flat_actor_obs_dim, dtype=np.float32))
+                    for rid in env.red_ids
+                ])
+                critic = adapted["critic_state"]
+                san = sanitize_policy_inputs(
+                    actor_obs, active, critic_state=critic,
+                    rnn_hidden=eval_rnn_hidden, context=san_ctx,
+                )
+                actor_obs = san["actor_obs"]
+                critic = san["critic_state"] if san["critic_state"] is not None else critic
+                eval_rnn_hidden = san["rnn_hidden"] if san["rnn_hidden"] is not None else eval_rnn_hidden
+                if active_rows.any() and (
+                    not np.isfinite(actor_obs[active_rows]).all() or not np.isfinite(critic).all()
+                ):
                     nan_detected = True
                     break
             act_kwargs = {}
             if eval_rnn_hidden is not None:
                 act_kwargs["rnn_hidden"] = torch.as_tensor(eval_rnn_hidden, device=device)
             with torch.no_grad():
-                out = policy.act(
-                    torch.as_tensor(actor_obs, device=device),
-                    roles=roles,
-                    critic_state=torch.as_tensor(critic, device=device),
-                    deterministic=True,
-                    **act_kwargs,
-                )
+                if entity_mode:
+                    out = policy.act(
+                        actor_tokens, actor_keep, roles, critic_tokens, critic_keep,
+                        deterministic=True, **act_kwargs)
+                else:
+                    out = policy.act(
+                        torch.as_tensor(actor_obs, device=device), roles=roles,
+                        critic_state=torch.as_tensor(critic, device=device),
+                        deterministic=True, **act_kwargs)
             if eval_rnn_hidden is not None and "rnn_hidden" in out:
                 eval_rnn_hidden = zero_inactive_hidden(
                     out["rnn_hidden"].detach().cpu().numpy(), active)
@@ -335,7 +370,11 @@ def main() -> None:
     policy = _build_policy_from_meta(meta, device)
     policy.load(Path(args.model), map_location=device)
     policy.eval()
-    adapter = HeteroObsAdapterV2()
+    adapter = (
+        HeteroEntitySetAdapter()
+        if meta.get("policy_arch") == "hetero_entity_recurrent"
+        else HeteroObsAdapterV2()
+    )
     rich_logger = None
     if args.enable_rich_logging:
         rich_dir = Path(args.rich_log_dir) if args.rich_log_dir else Path(args.model).parent / "eval_rich_logs"

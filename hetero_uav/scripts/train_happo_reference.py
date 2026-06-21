@@ -50,6 +50,27 @@ DEFAULT_EVAL_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
 ]
 
+
+def _entity_policy_meta(policy) -> dict:
+    if policy.__class__.__name__ != "HeteroEntityRecurrentPolicy":
+        return {}
+    return {
+        "feature_schema_version": "hetero_entity_set_v1",
+        "adapter_mode": "hetero_entity_set",
+        "actor_obs_format": "entity_tokens_keep_mask",
+        "critic_obs_format": "global_entity_tokens_keep_mask",
+        "entity_dim": policy.entity_dim,
+        "role_dim": 4,
+        "role_vocab": ["mav", "attack_uav", "scout_uav", "interceptor_uav"],
+        "action_dim": policy.action_dim,
+        "rnn_hidden_size": policy.rnn_hidden_size,
+        "policy_arch": "hetero_entity_recurrent",
+        "actor_arch": "entity_attention_grucell_role_heads",
+        "critic_arch": "global_entity_attention_value",
+        "scale_support_mode": "variable_token_count",
+        "padding_mode": "keep_mask",
+    }
+
 _SINGLE_RUNNER_STATE = {
     "policy": None,
     "output_dir": None,
@@ -303,6 +324,18 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                   brma_random_scale_mask: bool = False,
                   brma_biased_mask: bool = False,
                   brma_random_mask_prob: float = 0.25):
+    if policy_arch == "hetero_entity_recurrent":
+        from algorithms.happo.hetero_entity_recurrent_policy import HeteroEntityRecurrentPolicy
+        meta = {}
+        if init_checkpoint_meta is not None and Path(init_checkpoint_meta).exists():
+            meta = json.loads(Path(init_checkpoint_meta).read_text(encoding="utf-8"))
+            if meta.get("policy_arch") != policy_arch:
+                raise ValueError("hetero_entity_recurrent requires a matching checkpoint meta")
+        return HeteroEntityRecurrentPolicy(
+            entity_dim=int(meta.get("entity_dim", 19)),
+            action_dim=3,
+            rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+        ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(actor_dim, critic_dim).to(device)
     if policy_arch == "entity_attention":
@@ -430,6 +463,7 @@ def _run_eval(model_path: str, args, summary_json: str) -> list[dict] | None:
         "--episodes", str(args.train_eval_episodes),
         "--device", str(args.device),
         "--opponent-policy", args.opponent_policy,
+        "--max-steps-override", str(args.max_steps),
         "--summary-json", summary_json,
         "--configs", *(args.eval_configs or DEFAULT_EVAL_CONFIGS),
     ]
@@ -470,9 +504,9 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int,
         "separate_actors": True,
         "centralized_critic": True,
         "sequential_update": True,
-        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-        "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+        "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
         "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
         "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
         "biased_mask": bool(getattr(policy, "biased_mask", False)),
@@ -484,6 +518,7 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int,
         "uav_imitation_dataset": args.uav_imitation_dataset,
         "uav_imitation_coef": args.uav_imitation_coef,
         "uav_imitation_until_steps": args.uav_imitation_until_steps,
+        **_entity_policy_meta(policy),
     }
 
 
@@ -602,7 +637,7 @@ def _run_training_main() -> None:
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"],
+                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"],
                         help="Policy architecture. Default flat preserves legacy checkpoints.")
     parser.add_argument("--brma-random-scale-mask", action="store_true",
                         help="Accepted for compatibility but rejected: unsafe without rollout mask replay.")
@@ -664,6 +699,7 @@ def _run_training_main() -> None:
 
     from uav_env import make_env
     from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
+    from uav_env.JSBSim.adapters.hetero_entity_set_adapter import HeteroEntitySetAdapter
 
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
@@ -678,14 +714,15 @@ def _run_training_main() -> None:
                    hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
     envs = [env]
     _SINGLE_RUNNER_STATE["envs"] = envs
-    adapter = HeteroObsAdapterV2()
-    actor_dim = adapter.flat_actor_obs_dim
-    critic_dim = adapter.critic_state_dim
+    entity_mode = args.policy_arch == "hetero_entity_recurrent"
+    adapter = HeteroEntitySetAdapter() if entity_mode else HeteroObsAdapterV2()
+    actor_dim = 0 if entity_mode else adapter.flat_actor_obs_dim
+    critic_dim = 0 if entity_mode else adapter.critic_state_dim
     init_meta_path = None
     if args.init_checkpoint:
         init_path_for_meta = _rel(args.init_checkpoint)
         init_meta_path = init_path_for_meta.parent / "meta.json"
-        if args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"} and not init_meta_path.exists():
+        if args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"} and not init_meta_path.exists():
             raise ValueError(
                 f"{args.policy_arch} init checkpoint requires meta.json with policy_arch={args.policy_arch}"
             )
@@ -702,6 +739,7 @@ def _run_training_main() -> None:
         "config": args.config,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
+        **_entity_policy_meta(policy),
     }
     if args.init_checkpoint:
         init_path = Path(args.init_checkpoint)
@@ -824,9 +862,17 @@ def _run_training_main() -> None:
             rollout_transitions = min(transitions_per_rollout, args.total_env_steps - total_steps)
             if rollout_transitions <= 0:
                 break
+            buffer_kwargs = {}
+            if entity_mode:
+                buffer_kwargs = {
+                    "actor_token_count": len(env.red_ids) + len(env.blue_ids),
+                    "critic_token_count": len(env.red_ids) + len(env.blue_ids),
+                    "entity_dim": adapter.entity_dim,
+                }
             buffer = HAPPORolloutBuffer(rollout_transitions, len(env.red_ids), actor_dim,
                                         critic_dim, 3, roles,
-                                        rnn_hidden_size=getattr(policy, 'rnn_hidden_size', 0))
+                                        rnn_hidden_size=getattr(policy, 'rnn_hidden_size', 0),
+                                        **buffer_kwargs)
             red_fired = blue_fired = hits = 0
             while len(buffer) < rollout_transitions and total_steps < args.total_env_steps:
                 for env_idx, rollout_env in enumerate(envs):
@@ -849,27 +895,40 @@ def _run_training_main() -> None:
                     )
                     adapted = adapter.adapt_all(
                         obs, info=info, red_ids=rollout_env.red_ids, blue_ids=rollout_env.blue_ids)
-                    actor_obs = np.stack([
-                        adapted["actor_obs"].get(rid, np.zeros(actor_dim, dtype=np.float32))
-                        for rid in rollout_env.red_ids
-                    ])
-                    critic = adapted["critic_state"]
                     active = _build_red_alive_mask(info, rollout_env, rollout_env.red_ids)
                     san_ctx = {
                         "iteration": iteration, "env_idx": env_idx,
                         "total_steps": total_steps, "episode_id": current_ep_id[env_idx],
                     }
                     _sh = rnn_hidden[env_idx] if rnn_hidden is not None else None
-                    san = sanitize_policy_inputs(
-                        actor_obs, active,
-                        critic_state=critic,
-                        rnn_hidden=_sh,
-                        context=san_ctx,
-                    )
-                    actor_obs = san["actor_obs"]
-                    critic = san["critic_state"] if san["critic_state"] is not None else critic
-                    if rnn_hidden is not None and san["rnn_hidden"] is not None:
-                        rnn_hidden[env_idx] = san["rnn_hidden"]
+                    if entity_mode:
+                        actor_obs = None
+                        critic = None
+                        actor_tokens = adapted["actor_entity_tokens"].copy()
+                        actor_keep = adapted["actor_keep_mask"].copy()
+                        critic_tokens = adapted["critic_entity_tokens"].copy()
+                        critic_keep = adapted["critic_keep_mask"].copy()
+                        actor_tokens[active <= 0.5] = 0.0
+                        actor_keep[active <= 0.5] = 0.0
+                        actor_keep[active <= 0.5, 0] = 1.0
+                        if not np.isfinite(actor_tokens[active > 0.5]).all():
+                            raise ValueError(f"Non-finite active entity tokens: {san_ctx}")
+                        if not np.isfinite(critic_tokens[critic_keep > 0.5]).all():
+                            raise ValueError(f"Non-finite active critic entity tokens: {san_ctx}")
+                        if rnn_hidden is not None:
+                            rnn_hidden[env_idx] = zero_inactive_hidden(rnn_hidden[env_idx], active)
+                    else:
+                        actor_obs = np.stack([
+                            adapted["actor_obs"].get(rid, np.zeros(actor_dim, dtype=np.float32))
+                            for rid in rollout_env.red_ids
+                        ])
+                        critic = adapted["critic_state"]
+                        san = sanitize_policy_inputs(
+                            actor_obs, active, critic_state=critic, rnn_hidden=_sh, context=san_ctx)
+                        actor_obs = san["actor_obs"]
+                        critic = san["critic_state"] if san["critic_state"] is not None else critic
+                        if rnn_hidden is not None and san["rnn_hidden"] is not None:
+                            rnn_hidden[env_idx] = san["rnn_hidden"]
                     rnn_hidden_pre = None
                     if rnn_hidden is not None:
                         rnn_hidden_pre = rnn_hidden[env_idx].copy()
@@ -878,13 +937,19 @@ def _run_training_main() -> None:
                         act_kwargs["rnn_hidden"] = torch.as_tensor(
                             rnn_hidden[env_idx], device=device)
                     with torch.no_grad():
-                        out = policy.act(
-                            torch.as_tensor(actor_obs, device=device),
-                            roles=roles,
-                            critic_state=torch.as_tensor(critic, device=device),
-                            deterministic=False,
-                            **act_kwargs,
-                        )
+                        if entity_mode:
+                            out = policy.act(
+                                torch.as_tensor(actor_tokens, device=device),
+                                torch.as_tensor(actor_keep, device=device),
+                                torch.as_tensor(roles, device=device),
+                                torch.as_tensor(critic_tokens, device=device),
+                                torch.as_tensor(critic_keep, device=device),
+                                deterministic=False, **act_kwargs)
+                        else:
+                            out = policy.act(
+                                torch.as_tensor(actor_obs, device=device), roles=roles,
+                                critic_state=torch.as_tensor(critic, device=device),
+                                deterministic=False, **act_kwargs)
                     # ---- Zero out actions for inactive agents ----
                     actions_np = zero_inactive_actions(
                         out["action"].cpu().numpy(), active)
@@ -998,12 +1063,25 @@ def _run_training_main() -> None:
                         next_adapted = adapter.adapt_all(
                             next_obs, info=next_info, red_ids=rollout_env.red_ids, blue_ids=rollout_env.blue_ids)
                         with torch.no_grad():
-                            next_value = float(policy.value(
-                                torch.as_tensor(next_adapted["critic_state"], device=device).unsqueeze(0)
-                            ).item())
+                            if entity_mode:
+                                next_value = float(policy.value(
+                                    next_adapted["critic_entity_tokens"],
+                                    next_adapted["critic_keep_mask"],
+                                ).item())
+                            else:
+                                next_value = float(policy.value(
+                                    torch.as_tensor(next_adapted["critic_state"], device=device).unsqueeze(0)
+                                ).item())
                     store_kwargs = {}
                     if rnn_hidden_pre is not None:
                         store_kwargs["rnn_hidden"] = rnn_hidden_pre
+                    if entity_mode:
+                        store_kwargs.update({
+                            "actor_entity_tokens": actor_tokens,
+                            "actor_keep_mask": actor_keep,
+                            "critic_entity_tokens": critic_tokens,
+                            "critic_keep_mask": critic_keep,
+                        })
                     buffer.store(
                         actor_obs, critic, actions, log_probs, reward_np, done_np,
                         value, active, next_value=next_value, env_id=env_idx,
@@ -1225,13 +1303,14 @@ def _run_training_main() -> None:
                     "actor_obs_dim": actor_dim,
                     "critic_state_dim": critic_dim,
                     "entity_dim": getattr(policy, "entity_dim", None),
-                    "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-                    "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-                    "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+                    "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+                    "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+                    "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
                     "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
                     "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
                     "biased_mask": bool(getattr(policy, "biased_mask", False)),
                     "random_mask_prob": float(getattr(policy, "random_mask_prob", 0.0)),
+                    **_entity_policy_meta(policy),
                 }, indent=2), encoding="utf-8")
                 (out_dir / "meta.json").unlink(missing_ok=True)
                 (tmp_model.parent / "meta.json").write_text(
@@ -1313,9 +1392,9 @@ def _run_training_main() -> None:
                             "separate_actors": True,
                             "centralized_critic": True,
                             "sequential_update": True,
-                            "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-                            "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-                            "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+                            "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+                            "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+                            "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
                             "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
                             "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
                             "biased_mask": bool(getattr(policy, "biased_mask", False)),
@@ -1327,6 +1406,7 @@ def _run_training_main() -> None:
                             "uav_imitation_dataset": args.uav_imitation_dataset,
                             "uav_imitation_coef": args.uav_imitation_coef,
                             "uav_imitation_until_steps": args.uav_imitation_until_steps,
+                            **_entity_policy_meta(policy),
                         }, indent=2), encoding="utf-8")
                 tmp_model.unlink(missing_ok=True)
                 (out_dir / "_tmp_eval_meta.json").unlink(missing_ok=True)
@@ -1350,9 +1430,9 @@ def _run_training_main() -> None:
         "centralized_critic": True,
         "sequential_update": True,
         "sequential_update_detail": "simplified HAPPO-style v0 role-wise PPO",
-        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-        "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+        "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
         "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
         "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
         "biased_mask": bool(getattr(policy, "biased_mask", False)),
@@ -1370,6 +1450,7 @@ def _run_training_main() -> None:
         "total_env_steps_actual": total_steps,
         "episodes": episodes,
         "nan_detected": nan_detected,
+        **_entity_policy_meta(policy),
     }
     (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")

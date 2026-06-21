@@ -118,8 +118,16 @@ class HAPPOReferenceTrainer:
         eval_kwargs = {}
         if "rnn_hidden" in data and data["rnn_hidden"] is not None:
             eval_kwargs["rnn_hidden"] = data["rnn_hidden"]
-        log_prob, entropy, _values, _mean, _roles = self.policy.evaluate_actions(
-            actor_obs, repeated_roles, data["critic_state"], actions, **eval_kwargs)
+        if "actor_entity_tokens" in data:
+            result = self.policy.evaluate_actions(
+                data["actor_entity_tokens"], data["actor_keep_mask"], repeated_roles,
+                data["critic_entity_tokens"], data["critic_keep_mask"], actions,
+                **eval_kwargs,
+            )
+            log_prob, entropy, _values, _mean, _roles = result[:5]
+        else:
+            log_prob, entropy, _values, _mean, _roles = self.policy.evaluate_actions(
+                actor_obs, repeated_roles, data["critic_state"], actions, **eval_kwargs)
         ratio = torch.exp(log_prob - old_log_probs)
         adv = advantages.unsqueeze(-1)
         surr1 = ratio * adv
@@ -155,7 +163,11 @@ class HAPPOReferenceTrainer:
                 data["env_ids"], self.gamma, self.gae_lambda)
         else:
             with torch.no_grad():
-                next_val = self.policy.value(data["critic_state"][-1:])
+                if "critic_entity_tokens" in data:
+                    next_val = self.policy.value(
+                        data["critic_entity_tokens"][-1:], data["critic_keep_mask"][-1:])
+                else:
+                    next_val = self.policy.value(data["critic_state"][-1:])
             all_values = torch.cat([values, next_val])
             advantages, returns = compute_gae(
                 team_reward, all_values, team_dones, self.gamma, self.gae_lambda)
@@ -171,7 +183,11 @@ class HAPPOReferenceTrainer:
 
         for _ in range(self.ppo_epochs):
             self.critic_opt.zero_grad()
-            new_values = self.policy.value(data["critic_state"])
+            if "critic_entity_tokens" in data:
+                new_values = self.policy.value(
+                    data["critic_entity_tokens"], data["critic_keep_mask"])
+            else:
+                new_values = self.policy.value(data["critic_state"])
             critic_loss = F.mse_loss(new_values, returns) * self.value_coef
             critic_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy.critic.parameters(), self.max_grad_norm)
