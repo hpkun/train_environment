@@ -803,6 +803,13 @@ def _run_training_main() -> None:
     parser.set_defaults(role_kl_early_stop=None)
     parser.add_argument("--mav-shared-update-mode", default="full",
                         choices=["full", "head_only"])
+    parser.add_argument("--happo-update-granularity", default=None,
+                        choices=["role", "agent"],
+                        help="HAPPO update granularity: role (default non-paper) or agent (paper)")
+    parser.add_argument("--tam-paper-mode", action="store_true", default=None)
+    parser.add_argument("--no-tam-paper-mode", dest="tam_paper_mode",
+                        action="store_false")
+    parser.set_defaults(tam_paper_mode=None)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
@@ -927,12 +934,17 @@ def _run_training_main() -> None:
             "role_kl_early_stop": args.role_kl_early_stop,
             "mav_shared_update_mode": args.mav_shared_update_mode,
         }
+    granularity = getattr(args, "happo_update_granularity", None)
+    if granularity is None:
+        granularity = "agent" if getattr(args, "tam_paper_mode", False) else "role"
     trainer = _build_trainer(
         policy, action_distribution,
         actor_lr=args.actor_lr, critic_lr=args.critic_lr,
         clip_param=args.clip_param, entropy_coef=args.entropy_coef,
         max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
         gamma=args.gamma, gae_lambda=args.gae_lambda,
+        happo_update_granularity=granularity,
+        agent_ids=env.red_ids if hasattr(env, 'red_ids') else None,
         **role_update_kwargs,
     )
     print("TAM effective update params: " + json.dumps(
