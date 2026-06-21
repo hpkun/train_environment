@@ -31,6 +31,7 @@ class TAMCategoricalHAPPOTrainer:
         mav_clip_param=None, uav_clip_param=None,
         mav_target_kl=0.0, uav_target_kl=0.0,
         role_kl_early_stop=False,
+        mav_shared_update_mode="full",
     ):
         if getattr(policy, "action_distribution", None) != "multidiscrete_categorical":
             raise ValueError("TAMCategoricalHAPPOTrainer requires categorical policy")
@@ -66,6 +67,9 @@ class TAMCategoricalHAPPOTrainer:
             UAV_ROLE_ID: float(uav_target_kl),
         }
         self.role_kl_early_stop = bool(role_kl_early_stop)
+        if mav_shared_update_mode not in {"full", "head_only"}:
+            raise ValueError("mav_shared_update_mode must be full or head_only")
+        self.mav_shared_update_mode = mav_shared_update_mode
         self.value_coef = float(value_coef)
         self.max_grad_norm = float(max_grad_norm)
         self.ppo_epochs = int(ppo_epochs)
@@ -149,6 +153,8 @@ class TAMCategoricalHAPPOTrainer:
             and approx_kl_mean.item() > target_kl
         )
         if force_skip_by_kl or kl_triggered:
+            for parameter in self.shared_actor_params:
+                parameter.grad = None
             return (
                 float(policy_loss.item()), float(entropy_mean.item()),
                 float(approx_kl_mean.item()), float(valid_sum.item()),
@@ -162,8 +168,14 @@ class TAMCategoricalHAPPOTrainer:
         )
         head_grad_norm = torch.nn.utils.clip_grad_norm_(params, self.max_grad_norm)
         optimizer.step()
-        if self.shared_actor_opt is not None:
+        shared_step_enabled = (
+            self.shared_actor_opt is not None
+            and (role_id != MAV_ROLE_ID or self.mav_shared_update_mode == "full")
+        )
+        if shared_step_enabled:
             self.shared_actor_opt.step()
+        for parameter in self.shared_actor_params:
+            parameter.grad = None
 
         shared_grad_value = float(torch.as_tensor(shared_grad_norm).item())
         head_grad_value = float(torch.as_tensor(head_grad_norm).item())
@@ -318,6 +330,15 @@ class TAMCategoricalHAPPOTrainer:
             "grad_norm_shared": float(np.mean(np.concatenate([mav[:, 5], uav[:, 5]]))),
             "grad_norm_mav_head": float(mav[:, 6].mean()),
             "grad_norm_uav_head": float(uav[:, 6].mean()),
+            "mav_shared_update_mode": self.mav_shared_update_mode,
+            "mav_shared_step_enabled": int(
+                self.shared_actor_opt is not None
+                and self.mav_shared_update_mode == "full"
+            ),
+            "uav_shared_step_enabled": int(self.shared_actor_opt is not None),
+            "mav_shared_grad_norm_before_clear": float(mav[:, 5].mean()),
+            "grad_norm_shared_from_mav": float(mav[:, 5].mean()),
+            "grad_norm_shared_from_uav": float(uav[:, 5].mean()),
             "mav_kl_early_stop_count": int(mav[:, 7].sum()),
             "uav_kl_early_stop_count": int(uav[:, 7].sum()),
             "mav_update_skipped_by_kl": int(mav[:, 8].sum()),

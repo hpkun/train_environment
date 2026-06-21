@@ -106,6 +106,10 @@ def analyze_run(run_dir: str | Path):
         "grad_norm_shared", "grad_norm_mav_head", "kl_to_neutral_mav",
         "dominant_bin_mav_throttle", "dominant_bin_mav_aileron",
         "dominant_bin_mav_elevator", "dominant_bin_mav_rudder",
+        "mav_death_step_mean_recent", "mav_crash_lowalt_rate_recent",
+        "mav_missile_kill_rate_recent", "red_uav_fired_rollout",
+        "red_uav_hits_rollout", "grad_norm_shared_from_mav",
+        "grad_norm_shared_from_uav",
     )
     result = {
         "run_dir": str(run_dir),
@@ -116,13 +120,44 @@ def analyze_run(run_dir: str | Path):
             run_dir / "rich_logs" / "tam_action_timeseries.csv", total_steps
         ),
         "missiles": _missile_totals(run_dir / "rich_logs" / "missile_events.csv"),
-        "mav_death_time": {
+    }
+    death_steps = [
+        value for value in (
+            _number(row.get("mav_death_step_mean_recent")) for row in rows
+        ) if value is not None
+    ]
+    death_reasons = [
+        row.get("mav_death_reason_top_recent") for row in rows
+        if row.get("mav_death_reason_top_recent")
+        not in (None, "", "alive_or_unavailable")
+    ]
+    result["mav_death_time"] = (
+        {"available": True, "start": death_steps[0], "end": death_steps[-1]}
+        if death_steps else {
             "available": False,
-            "reason": "training logs do not contain per-episode MAV death steps",
-        },
-        "mav_death_reason": {
+            "reason": "training logs do not contain MAV death step telemetry",
+        }
+    )
+    result["mav_death_reason"] = (
+        {"available": True, "top_recent": death_reasons[-1]}
+        if death_reasons else {
             "available": False,
-            "reason": "training logs do not contain per-episode termination reasons",
+            "reason": "training logs do not contain MAV death reason telemetry",
+        }
+    )
+    result["per_agent_missiles"] = {
+        "red_uav_fired_total": int(sum(
+            _number(row.get("red_uav_fired_rollout")) or 0 for row in rows
+        )),
+        "red_uav_hits_total": int(sum(
+            _number(row.get("red_uav_hits_rollout")) or 0 for row in rows
+        )),
+        **{
+            f"red_{index}_{kind}_total": int(sum(
+                _number(row.get(f"red_{index}_{kind}_rollout")) or 0
+                for row in rows
+            ))
+            for index in range(3) for kind in ("fired", "hits")
         },
     }
     numeric = lambda field: [
@@ -187,14 +222,15 @@ def _comparison(current, baseline):
     }
 
 
-def _write_report(result, baseline, output_dir: Path):
+def write_report(result, baseline, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = "200k" if result["total_steps"] >= 200000 else "50k"
     payload = dict(result)
     payload["baseline_comparison"] = _comparison(result, baseline)
     json_path = output_dir / f"mav_policy_drift_{suffix}.json"
     md_path = output_dir / f"mav_policy_drift_{suffix}.md"
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    json_text = json.dumps(payload, indent=2)
+    json_path.write_text(json_text, encoding="utf-8")
     answers = payload["answers"]
     lines = [
         f"# MAV Policy Drift Analysis ({suffix})", "",
@@ -211,9 +247,19 @@ def _write_report(result, baseline, output_dir: Path):
         f"- Metric stages: `{payload['metrics']}`",
         f"- Missile totals: `{payload['missiles']}`",
         f"- MAV death time: `{payload['mav_death_time']}`",
+        f"- MAV death reason: `{payload['mav_death_reason']}`",
+        f"- Per-agent missiles: `{payload['per_agent_missiles']}`",
         f"- Baseline comparison: `{payload['baseline_comparison']}`", "",
     ]
-    md_path.write_text("\n".join(lines), encoding="utf-8")
+    markdown_text = "\n".join(lines)
+    md_path.write_text(markdown_text, encoding="utf-8")
+    run_name = Path(result["run_dir"]).name
+    (output_dir / f"{run_name}_mav_policy_drift_{suffix}.json").write_text(
+        json_text, encoding="utf-8"
+    )
+    (output_dir / f"{run_name}_mav_policy_drift_{suffix}.md").write_text(
+        markdown_text, encoding="utf-8"
+    )
     return json_path, md_path
 
 
@@ -225,7 +271,7 @@ def main():
     args = parser.parse_args()
     current = analyze_run(args.run_dir)
     baseline = analyze_run(args.baseline_run_dir) if args.baseline_run_dir else None
-    paths = _write_report(current, baseline, Path(args.output_dir))
+    paths = write_report(current, baseline, Path(args.output_dir))
     print(json.dumps({
         "json": str(paths[0]), "markdown": str(paths[1]),
         "answers": current["answers"],

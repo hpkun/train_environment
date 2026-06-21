@@ -85,6 +85,7 @@ def test_metadata_records_effective_role_specific_update_parameters():
         "mav_target_kl": 0.015,
         "uav_target_kl": 0.04,
         "role_kl_early_stop": True,
+        "mav_shared_update_mode": "head_only",
     })()
     meta = _tam_update_meta(args)
     assert meta["tam_update_preset"] == "mav_conservative"
@@ -92,6 +93,7 @@ def test_metadata_records_effective_role_specific_update_parameters():
     assert meta["uav_actor_lr_effective"] == 2e-4
     assert meta["mav_target_kl"] == 0.015
     assert meta["role_kl_early_stop"] is True
+    assert meta["mav_shared_update_mode"] == "head_only"
 
 
 def test_legacy_continuous_flat_policy_route_is_unchanged():

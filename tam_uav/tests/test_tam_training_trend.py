@@ -3,6 +3,7 @@ from scripts.analyze_tam_training_trend import (
     summarize_missile_event_rows,
     staged_values,
     summarize_training_rows,
+    logged_mav_death_trend,
 )
 
 
@@ -68,6 +69,19 @@ def test_stage_classifier_marks_policy_survival_collapse_as_training_semantics()
     assert classify_stage(summary) == "C"
 
 
+def test_stage_classifier_uses_training_semantics_when_audit_passes_but_sampling_collapses():
+    summary = summarize_training_rows(_rows())
+    summary["environment_audit"] = {
+        "passed": True,
+        "reset_contract_passed": True,
+        "f22_speed_at_60s_passed": True,
+    }
+    summary["mav_survival"]["end"] = 0.0
+    summary["entropy_mav"]["end"] = 3.8
+    summary["mav_death_step"] = {"start": 800.0, "end": 300.0, "slope": -10.0}
+    assert classify_stage(summary) == "C"
+
+
 def test_stage_classifier_marks_persistent_mav_crash_as_stability_work():
     summary = summarize_training_rows(_rows())
     summary["rolling_return_slope_per_10k_steps"] = 0.0
@@ -98,3 +112,13 @@ def test_rich_missile_events_provide_red_only_launch_and_hit_trends():
     assert summary["red_fired"]["end"] == 1.0
     assert summary["red_hits"]["end"] == 1.0
     assert summary["red_hit_rate"]["end"] == 1.0
+
+
+def test_training_trend_prefers_logged_recent_mav_death_steps():
+    rows = [
+        {"total_steps": "100", "mav_death_step_mean_recent": "400"},
+        {"total_steps": "200", "mav_death_step_mean_recent": "500"},
+    ]
+    assert logged_mav_death_trend(rows) == {
+        "start": 400.0, "end": 500.0, "slope": 10000.0,
+    }

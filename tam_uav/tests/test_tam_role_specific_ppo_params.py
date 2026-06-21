@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from numbers import Real
 
 import numpy as np
 import torch
@@ -23,6 +24,7 @@ def _args(preset="default", **overrides):
         mav_target_kl=None,
         uav_target_kl=None,
         role_kl_early_stop=None,
+        mav_shared_update_mode="full",
     )
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -35,6 +37,7 @@ def test_default_preset_preserves_legacy_values():
     assert args.mav_clip_param == args.uav_clip_param == args.clip_param
     assert args.mav_target_kl == args.uav_target_kl == 0.0
     assert args.role_kl_early_stop is False
+    assert args.mav_shared_update_mode == "full"
 
 
 def test_mav_conservative_preset_and_explicit_override_priority():
@@ -77,5 +80,5 @@ def test_role_specific_entropy_clip_and_kl_early_stop_are_finite():
     assert metrics["mav_kl_early_stop_count"] >= 1
     assert metrics["mav_update_skipped_by_kl"] >= 1
     assert metrics["uav_update_skipped_by_kl"] == 0
-    assert all(np.isfinite(value) for value in metrics.values() if np.isscalar(value))
+    assert all(np.isfinite(value) for value in metrics.values() if isinstance(value, Real))
     assert all(torch.isfinite(parameter).all() for parameter in policy.parameters())

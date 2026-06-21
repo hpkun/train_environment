@@ -115,7 +115,10 @@ def classify_stage(summary):
     policy_survival_collapsed = (
         audit.get("passed", False)
         and summary.get("mav_survival", {}).get("end") == 0.0
-        and eval_survival_collapsed
+        and (
+            eval_survival_collapsed
+            or (summary.get("entropy_mav", {}).get("end") or 0.0) > 2.0
+        )
     )
     correction = summary.get("correction_factor", {}).get("end")
     kl_values = [
@@ -223,6 +226,24 @@ def _mav_death_trend(path):
     return {"start": death_steps[0], "end": death_steps[-1], "slope": slope}
 
 
+def logged_mav_death_trend(rows):
+    points = [
+        (_value(row, "total_steps"), _number(row.get("mav_death_step_mean_recent")))
+        for row in rows
+    ]
+    points = [(step, death) for step, death in points if step is not None and death is not None]
+    if not points:
+        return None
+    slope = _linear_slope(
+        [point[0] for point in points], [point[1] for point in points]
+    )
+    return {
+        "start": points[0][1],
+        "end": points[-1][1],
+        "slope": float((slope or 0.0) * 10000.0),
+    }
+
+
 def _eval_summary(rows):
     by_config = {}
     for row in rows:
@@ -244,6 +265,7 @@ def analyze_run(run_dir, baseline_50k=None, paper_reference_note=None):
     rich_rows = _read_csv(run_dir / "rich_logs" / "train_metrics.csv")
     rows = train_rows if train_rows else rich_rows
     death = _mav_death_trend(run_dir / "rich_logs" / "aircraft_timeseries.csv")
+    death = logged_mav_death_trend(rows) or death
     summary = summarize_training_rows(rows, mav_death_step=death)
     summary.update({
         "run_dir": str(run_dir),

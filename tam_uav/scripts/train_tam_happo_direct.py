@@ -6,6 +6,7 @@ import csv
 import faulthandler
 import json
 import math
+import statistics
 import os
 import subprocess
 import sys
@@ -278,6 +279,53 @@ def _mav_alive(env) -> bool:
     return bool(sim is not None and sim.is_alive)
 
 
+def _new_rollout_agent_missile_counts(red_ids):
+    return {
+        "fired": {agent_id: 0 for agent_id in red_ids},
+        "hits": {agent_id: 0 for agent_id in red_ids},
+    }
+
+
+def _record_rollout_agent_missiles(counts, info, red_ids):
+    for agent_id in red_ids:
+        agent_info = info.get(agent_id, {})
+        if isinstance(agent_info, dict):
+            counts["fired"][agent_id] += int(
+                agent_info.get("missiles_fired_this_step", 0) or 0
+            )
+    for record in info.get("__launch_quality_done__", []) or []:
+        owner_id = record.get("owner_id")
+        reason = str(record.get("termination_reason", "")).lower()
+        hit = bool(record.get("is_success") or record.get("hit_success") or reason == "hit")
+        if owner_id in counts["hits"] and hit:
+            counts["hits"][owner_id] += 1
+
+
+def _summarize_recent_mav_deaths(recent):
+    deaths = [
+        row for row in recent
+        if row.get("mav_death_step") is not None
+    ]
+    steps = [float(row["mav_death_step"]) for row in deaths]
+    reasons = [str(row.get("mav_death_reason") or "other_or_unknown") for row in deaths]
+    if not deaths:
+        return {
+            "mav_death_step_mean_recent": "",
+            "mav_death_step_median_recent": "",
+            "mav_death_reason_top_recent": "alive_or_unavailable",
+            "mav_crash_lowalt_rate_recent": 0.0,
+            "mav_missile_kill_rate_recent": 0.0,
+        }
+    top_reason = max(dict.fromkeys(reasons), key=reasons.count)
+    return {
+        "mav_death_step_mean_recent": float(sum(steps) / len(steps)),
+        "mav_death_step_median_recent": float(statistics.median(steps)),
+        "mav_death_reason_top_recent": top_reason,
+        "mav_crash_lowalt_rate_recent": reasons.count("Crash_LowAlt") / len(reasons),
+        "mav_missile_kill_rate_recent": reasons.count("Missile_Kill") / len(reasons),
+    }
+
+
 def _missile_count(env) -> int:
     inflight = getattr(env, "_missiles_in_flight", None)
     if inflight is not None:
@@ -458,6 +506,8 @@ def resolve_tam_update_params(args):
     for name, value in defaults.items():
         if getattr(args, name, None) is None:
             setattr(args, name, value)
+    if getattr(args, "mav_shared_update_mode", "full") not in {"full", "head_only"}:
+        raise ValueError("--mav-shared-update-mode must be full or head_only")
     return args
 
 
@@ -478,6 +528,7 @@ def _tam_update_meta(args) -> dict:
         "mav_target_kl": float(getattr(args, "mav_target_kl", 0.0) or 0.0),
         "uav_target_kl": float(getattr(args, "uav_target_kl", 0.0) or 0.0),
         "role_kl_early_stop": bool(getattr(args, "role_kl_early_stop", False)),
+        "mav_shared_update_mode": getattr(args, "mav_shared_update_mode", "full"),
     }
 
 
@@ -750,6 +801,8 @@ def _run_training_main() -> None:
     kl_group.add_argument("--no-role-kl-early-stop", dest="role_kl_early_stop",
                           action="store_false")
     parser.set_defaults(role_kl_early_stop=None)
+    parser.add_argument("--mav-shared-update-mode", default="full",
+                        choices=["full", "head_only"])
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
@@ -872,6 +925,7 @@ def _run_training_main() -> None:
             "mav_target_kl": args.mav_target_kl,
             "uav_target_kl": args.uav_target_kl,
             "role_kl_early_stop": args.role_kl_early_stop,
+            "mav_shared_update_mode": args.mav_shared_update_mode,
         }
     trainer = _build_trainer(
         policy, action_distribution,
@@ -978,6 +1032,15 @@ def _run_training_main() -> None:
             "dominant_bin_mav_elevator", "dominant_bin_mav_rudder",
             "dominant_bin_uav_throttle", "dominant_bin_uav_aileron",
             "dominant_bin_uav_elevator", "dominant_bin_uav_rudder",
+            "mav_shared_update_mode", "mav_shared_step_enabled",
+            "mav_shared_grad_norm_before_clear", "uav_shared_step_enabled",
+            "grad_norm_shared_from_mav", "grad_norm_shared_from_uav",
+            "mav_death_step_mean_recent", "mav_death_step_median_recent",
+            "mav_death_reason_top_recent", "mav_crash_lowalt_rate_recent",
+            "mav_missile_kill_rate_recent",
+            "red_0_fired_rollout", "red_1_fired_rollout", "red_2_fired_rollout",
+            "red_0_hits_rollout", "red_1_hits_rollout", "red_2_hits_rollout",
+            "red_uav_fired_rollout", "red_uav_hits_rollout",
             "mask_keep_ratio", "mask_entropy", "masked_entity_count",
             "edge_bin_rate", "low_bin_rate", "high_bin_rate",
             "max_action_prob_mav", "max_action_prob_uav",
@@ -1014,6 +1077,7 @@ def _run_training_main() -> None:
                     buffer.set_rnn_hidden_initial(env_idx, rnn_hidden[env_idx])
             rollout_env_step = [0 for _ in range(args.num_envs)]
             red_fired = blue_fired = hits = 0
+            agent_missiles = _new_rollout_agent_missile_counts(env.red_ids)
             while len(buffer) < rollout_transitions and total_steps < args.total_env_steps:
                 for env_idx, rollout_env in enumerate(envs):
                     if len(buffer) >= rollout_transitions or total_steps >= args.total_env_steps:
@@ -1230,6 +1294,9 @@ def _run_training_main() -> None:
                             red_fired += fired
                         else:
                             blue_fired += fired
+                    _record_rollout_agent_missiles(
+                        agent_missiles, next_info, rollout_env.red_ids
+                    )
                     mt = next_info.get("__missile_term__", {})
                     if isinstance(mt, dict):
                         red_hit_total = int(mt.get("red", {}).get("hit", 0))
@@ -1248,6 +1315,15 @@ def _run_training_main() -> None:
                             "mav": _mav_alive(rollout_env),
                             "red_alive": ra,
                             "blue_alive": ba,
+                            "mav_death_step": (
+                                None if _mav_alive(rollout_env)
+                                else current_ep_len[env_idx]
+                            ),
+                            "mav_death_reason": (
+                                "alive" if _mav_alive(rollout_env)
+                                else rollout_env._death_reasons.get("red_0")
+                                or "other_or_unknown"
+                            ),
                         })
                         episodes += 1
                         current_ep_return[env_idx][:] = 0.0
@@ -1306,6 +1382,13 @@ def _run_training_main() -> None:
             mav_surv = sum(1 for r in rec if r["mav"]) / n
             red_alive = float(np.mean([r["red_alive"] for r in rec])) if rec else 0.0
             blue_alive = float(np.mean([r["blue_alive"] for r in rec])) if rec else 0.0
+            death_stats = _summarize_recent_mav_deaths(rec)
+            fired_by_agent = agent_missiles["fired"]
+            hits_by_agent = agent_missiles["hits"]
+            red_uav_ids = [
+                agent_id for agent_id in env.red_ids
+                if env.agent_roles.get(agent_id) != "mav"
+            ]
             writer.writerow([
                 iteration, total_steps, f"{avg_return:.4f}", f"{red_win:.4f}",
                 f"{blue_win:.4f}", f"{draw:.4f}", f"{timeout:.4f}",
@@ -1347,6 +1430,21 @@ def _run_training_main() -> None:
                 json.dumps(stats.get("per_axis_kl_to_neutral_uav", [])),
                 *[int(stats.get(f"dominant_bin_mav_{axis}", 0)) for axis in ("throttle", "aileron", "elevator", "rudder")],
                 *[int(stats.get(f"dominant_bin_uav_{axis}", 0)) for axis in ("throttle", "aileron", "elevator", "rudder")],
+                stats.get("mav_shared_update_mode", "full"),
+                int(stats.get("mav_shared_step_enabled", 0)),
+                f"{stats.get('mav_shared_grad_norm_before_clear', 0.0):.6f}",
+                int(stats.get("uav_shared_step_enabled", 0)),
+                f"{stats.get('grad_norm_shared_from_mav', 0.0):.6f}",
+                f"{stats.get('grad_norm_shared_from_uav', 0.0):.6f}",
+                death_stats["mav_death_step_mean_recent"],
+                death_stats["mav_death_step_median_recent"],
+                death_stats["mav_death_reason_top_recent"],
+                f"{death_stats['mav_crash_lowalt_rate_recent']:.6f}",
+                f"{death_stats['mav_missile_kill_rate_recent']:.6f}",
+                *[int(fired_by_agent.get(f"red_{index}", 0)) for index in range(3)],
+                *[int(hits_by_agent.get(f"red_{index}", 0)) for index in range(3)],
+                sum(fired_by_agent.get(agent_id, 0) for agent_id in red_uav_ids),
+                sum(hits_by_agent.get(agent_id, 0) for agent_id in red_uav_ids),
                 f"{stats.get('mask_keep_ratio', 1.0):.6f}",
                 f"{stats.get('mask_entropy', 0.0):.6f}",
                 f"{stats.get('masked_entity_count', 0.0):.2f}",
@@ -1440,8 +1538,26 @@ def _run_training_main() -> None:
                             "dominant_bin_mav_elevator", "dominant_bin_mav_rudder",
                             "dominant_bin_uav_throttle", "dominant_bin_uav_aileron",
                             "dominant_bin_uav_elevator", "dominant_bin_uav_rudder",
+                            "mav_shared_update_mode", "mav_shared_step_enabled",
+                            "mav_shared_grad_norm_before_clear", "uav_shared_step_enabled",
+                            "grad_norm_shared_from_mav", "grad_norm_shared_from_uav",
                         )
                     },
+                    **death_stats,
+                    **{
+                        f"red_{index}_fired_rollout": fired_by_agent.get(f"red_{index}", 0)
+                        for index in range(3)
+                    },
+                    **{
+                        f"red_{index}_hits_rollout": hits_by_agent.get(f"red_{index}", 0)
+                        for index in range(3)
+                    },
+                    "red_uav_fired_rollout": sum(
+                        fired_by_agent.get(agent_id, 0) for agent_id in red_uav_ids
+                    ),
+                    "red_uav_hits_rollout": sum(
+                        hits_by_agent.get(agent_id, 0) for agent_id in red_uav_ids
+                    ),
                     "mask_keep_ratio": stats.get("mask_keep_ratio", 1.0),
                     "mask_entropy": stats.get("mask_entropy", 0.0),
                     "masked_entity_count": stats.get("masked_entity_count", 0.0),
