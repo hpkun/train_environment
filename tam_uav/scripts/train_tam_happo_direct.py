@@ -478,6 +478,28 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int, action_dim:
     raise ValueError(f"unsupported --policy-arch: {policy_arch}")
 
 
+def _build_agent_metrics_json(stats: dict, red_ids: list[str]) -> str:
+    """Build agent_metrics_json from trainer stats for CSV."""
+    agent_data = {}
+    for agent_id in red_ids:
+        entry = {}
+        for key_base in ("loss", "entropy", "approx_kl", "active_sample_count",
+                         "correction_mean", "correction_min", "correction_max"):
+            val = stats.get(f"agent_{key_base}_{agent_id}", None)
+            if val is not None:
+                try:
+                    entry[key_base] = float(val)
+                except (TypeError, ValueError):
+                    entry[key_base] = None
+            else:
+                entry[key_base] = None
+        if any(v is not None for v in entry.values()):
+            agent_data[agent_id] = entry
+    if not agent_data:
+        agent_data = {"note": "agent_metrics_not_available"}
+    return json.dumps(agent_data)
+
+
 def _build_trainer(policy, action_distribution: str, **kwargs):
     trainer_class = (
         TAMCategoricalHAPPOTrainer
@@ -1061,6 +1083,9 @@ def _run_training_main() -> None:
             "grad_norm_actor", "grad_norm_shared", "grad_norm_mav_head",
             "grad_norm_uav_head", "grad_norm_critic",
             "correction_factor_mean", "correction_factor_max", "correction_factor_min",
+            "paper_mode", "paper_config_passed", "happo_update_granularity",
+            "agent_update_order", "shared_step_count", "mav_head_step_count",
+            "uav_head_step_count", "agent_metrics_json",
             "nan_detected",
         ])
         eval_writer = None
@@ -1477,6 +1502,14 @@ def _run_training_main() -> None:
                 f"{stats.get('correction_factor_mean', 1.0):.6f}",
                 f"{stats.get('correction_factor_max', 1.0):.6f}",
                 f"{stats.get('correction_factor_min', 1.0):.6f}",
+                int(getattr(args, "tam_paper_mode", False) or False),
+                int(getattr(args, "tam_paper_mode", False) or False),
+                str(stats.get("happo_update_granularity", "role")),
+                json.dumps(stats.get("agent_update_order", "role_level") if isinstance(stats.get("agent_update_order"), list) else stats.get("agent_update_order", "role_level")),
+                int(stats.get("shared_step_count", 0)),
+                int(stats.get("mav_head_step_count", 0)),
+                int(stats.get("uav_head_step_count", 0)),
+                json.dumps(_build_agent_metrics_json(stats, env.red_ids)),
                 int(nan_detected),
             ])
             if rich_logger is not None:
