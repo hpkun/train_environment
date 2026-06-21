@@ -15,6 +15,7 @@ from scripts.train_tam_happo_direct import (
     _build_policy,
     _eval_checkpoint_extra,
     _resolve_policy_arch,
+    _tam_update_meta,
 )
 
 
@@ -69,6 +70,28 @@ def test_categorical_metadata_records_requested_and_effective_architecture():
     assert meta["policy_arch"] == "tam_categorical_recurrent"
     assert meta["policy_arch_alias_used"] is True
     assert meta["critic_arch"] == "centralized_attention"
+
+
+def test_metadata_records_effective_role_specific_update_parameters():
+    args = type("Args", (), {
+        "tam_update_preset": "mav_conservative",
+        "actor_lr": 2e-4,
+        "mav_actor_lr_scale": 0.25,
+        "uav_actor_lr_scale": 1.0,
+        "mav_entropy_coef": 0.003,
+        "uav_entropy_coef": 0.02,
+        "mav_clip_param": 0.1,
+        "uav_clip_param": 0.2,
+        "mav_target_kl": 0.015,
+        "uav_target_kl": 0.04,
+        "role_kl_early_stop": True,
+    })()
+    meta = _tam_update_meta(args)
+    assert meta["tam_update_preset"] == "mav_conservative"
+    assert meta["mav_actor_lr_effective"] == 5e-5
+    assert meta["uav_actor_lr_effective"] == 2e-4
+    assert meta["mav_target_kl"] == 0.015
+    assert meta["role_kl_early_stop"] is True
 
 
 def test_legacy_continuous_flat_policy_route_is_unchanged():

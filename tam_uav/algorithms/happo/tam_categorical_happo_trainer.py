@@ -26,6 +26,11 @@ class TAMCategoricalHAPPOTrainer:
         self, policy, actor_lr=2e-4, critic_lr=5e-4, clip_param=0.2,
         entropy_coef=0.02, value_coef=0.5, max_grad_norm=10.0,
         ppo_epochs=4, gamma=0.99, gae_lambda=0.95,
+        mav_actor_lr_scale=1.0, uav_actor_lr_scale=1.0,
+        mav_entropy_coef=None, uav_entropy_coef=None,
+        mav_clip_param=None, uav_clip_param=None,
+        mav_target_kl=0.0, uav_target_kl=0.0,
+        role_kl_early_stop=False,
     ):
         if getattr(policy, "action_distribution", None) != "multidiscrete_categorical":
             raise ValueError("TAMCategoricalHAPPOTrainer requires categorical policy")
@@ -37,11 +42,30 @@ class TAMCategoricalHAPPOTrainer:
             torch.optim.Adam(self.shared_actor_params, lr=actor_lr)
             if self.shared_actor_params else None
         )
-        self.mav_opt = torch.optim.Adam(self.mav_params, lr=actor_lr)
-        self.uav_opt = torch.optim.Adam(self.uav_params, lr=actor_lr)
+        self.mav_actor_lr_effective = float(actor_lr) * float(mav_actor_lr_scale)
+        self.uav_actor_lr_effective = float(actor_lr) * float(uav_actor_lr_scale)
+        self.mav_opt = torch.optim.Adam(
+            self.mav_params, lr=self.mav_actor_lr_effective
+        )
+        self.uav_opt = torch.optim.Adam(
+            self.uav_params, lr=self.uav_actor_lr_effective
+        )
         self.critic_opt = torch.optim.Adam(policy.critic.parameters(), lr=critic_lr)
         self.clip_param = float(clip_param)
         self.entropy_coef = float(entropy_coef)
+        self.role_entropy_coef = {
+            MAV_ROLE_ID: float(entropy_coef if mav_entropy_coef is None else mav_entropy_coef),
+            UAV_ROLE_ID: float(entropy_coef if uav_entropy_coef is None else uav_entropy_coef),
+        }
+        self.role_clip_param = {
+            MAV_ROLE_ID: float(clip_param if mav_clip_param is None else mav_clip_param),
+            UAV_ROLE_ID: float(clip_param if uav_clip_param is None else uav_clip_param),
+        }
+        self.role_target_kl = {
+            MAV_ROLE_ID: float(mav_target_kl),
+            UAV_ROLE_ID: float(uav_target_kl),
+        }
+        self.role_kl_early_stop = bool(role_kl_early_stop)
         self.value_coef = float(value_coef)
         self.max_grad_norm = float(max_grad_norm)
         self.ppo_epochs = int(ppo_epochs)
@@ -80,7 +104,10 @@ class TAMCategoricalHAPPOTrainer:
             active_masks=sequence["agent_alive_masks"],
         )
 
-    def _update_role(self, sequences, advantages, correction, role_id, optimizer, params):
+    def _update_role(
+        self, sequences, advantages, correction, role_id, optimizer, params,
+        force_skip_by_kl=False,
+    ):
         if self.shared_actor_opt is not None:
             self.shared_actor_opt.zero_grad()
         else:
@@ -101,17 +128,33 @@ class TAMCategoricalHAPPOTrainer:
             corrected_advantage = advantages[indices].unsqueeze(-1) * correction[indices]
             surrogate1 = ratio * corrected_advantage
             surrogate2 = torch.clamp(
-                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+                ratio,
+                1.0 - self.role_clip_param[role_id],
+                1.0 + self.role_clip_param[role_id],
             ) * corrected_advantage
             loss_sum = loss_sum - (torch.minimum(surrogate1, surrogate2) * valid).sum()
             entropy_sum = entropy_sum + (out["entropy"] * valid).sum()
-            kl_sum = kl_sum + ((old - out["log_prob"]) * valid).sum()
+            log_ratio = out["log_prob"] - old
+            approx_kl = (ratio - 1.0) - log_ratio
+            kl_sum = kl_sum + (approx_kl * valid).sum()
             valid_sum = valid_sum + valid.sum()
         if valid_sum.item() <= 0:
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            return (0.0,) * 9
         policy_loss = loss_sum / valid_sum
         entropy_mean = entropy_sum / valid_sum
-        (policy_loss - self.entropy_coef * entropy_mean).backward()
+        approx_kl_mean = kl_sum / valid_sum
+        target_kl = self.role_target_kl[role_id]
+        kl_triggered = bool(
+            self.role_kl_early_stop and target_kl > 0.0
+            and approx_kl_mean.item() > target_kl
+        )
+        if force_skip_by_kl or kl_triggered:
+            return (
+                float(policy_loss.item()), float(entropy_mean.item()),
+                float(approx_kl_mean.item()), float(valid_sum.item()),
+                0.0, 0.0, 0.0, float(kl_triggered), 1.0,
+            )
+        (policy_loss - self.role_entropy_coef[role_id] * entropy_mean).backward()
         shared_grad_norm = (
             torch.nn.utils.clip_grad_norm_(
                 self.shared_actor_params, self.max_grad_norm
@@ -139,8 +182,8 @@ class TAMCategoricalHAPPOTrainer:
                 correction[indices] = correction[indices] * updated
         return (
             float(policy_loss.item()), float(entropy_mean.item()),
-            float((kl_sum / valid_sum).item()), float(valid_sum.item()),
-            actor_grad_value, shared_grad_value, head_grad_value,
+            float(approx_kl_mean.item()), float(valid_sum.item()),
+            actor_grad_value, shared_grad_value, head_grad_value, 0.0, 0.0,
         )
 
     def _distribution_metrics(self, sequences):
@@ -158,17 +201,33 @@ class TAMCategoricalHAPPOTrainer:
         levels = self.policy.action_levels
         selected = actions[active]
 
+        axis_names = ("throttle", "aileron", "elevator", "rudder")
+
         def role_metrics(role_id):
             mask = active & (roles == role_id)
             if not mask.any():
-                return 0.0, 0.0
-            maximum = probabilities[mask].max(-1).values.mean()
+                return 0.0, 0.0, 0.0, [0.0] * 4, [0] * 4
+            role_probs = probabilities[mask]
+            maximum = role_probs.max(-1).values.mean()
             usage = torch.unique(actions[mask]).numel() / levels
-            return float(maximum.item()), float(usage)
+            prior = self.policy.neutral_prior_probabilities(role_id).to(role_probs)
+            safe_probs = role_probs.clamp_min(1e-8)
+            safe_prior = prior.clamp_min(1e-8)
+            per_sample_axis_kl = (
+                safe_probs * (safe_probs.log() - safe_prior.log())
+            ).sum(-1)
+            per_axis_kl = per_sample_axis_kl.mean(0)
+            dominant = role_probs.mean(0).argmax(-1)
+            return (
+                float(maximum.item()), float(usage),
+                float(per_axis_kl.sum().item()),
+                [float(value) for value in per_axis_kl.cpu()],
+                [int(value) for value in dominant.cpu()],
+            )
 
-        mav_prob, mav_usage = role_metrics(MAV_ROLE_ID)
-        uav_prob, uav_usage = role_metrics(UAV_ROLE_ID)
-        return {
+        mav_prob, mav_usage, mav_kl, mav_axis_kl, mav_dominant = role_metrics(MAV_ROLE_ID)
+        uav_prob, uav_usage, uav_kl, uav_axis_kl, uav_dominant = role_metrics(UAV_ROLE_ID)
+        metrics = {
             "edge_bin_rate": float(((selected == 0) | (selected == levels - 1)).float().mean().item()),
             "low_bin_rate": float((selected == 0).float().mean().item()),
             "high_bin_rate": float((selected == levels - 1).float().mean().item()),
@@ -178,7 +237,21 @@ class TAMCategoricalHAPPOTrainer:
             "max_action_prob_uav": uav_prob,
             "action_bin_usage_mav": mav_usage,
             "action_bin_usage_uav": uav_usage,
+            "neutral_prior_probs_mav": self.policy.neutral_prior_probabilities(
+                MAV_ROLE_ID
+            ).cpu().tolist(),
+            "neutral_prior_probs_uav": self.policy.neutral_prior_probabilities(
+                UAV_ROLE_ID
+            ).cpu().tolist(),
+            "kl_to_neutral_mav": mav_kl,
+            "kl_to_neutral_uav": uav_kl,
+            "per_axis_kl_to_neutral_mav": mav_axis_kl,
+            "per_axis_kl_to_neutral_uav": uav_axis_kl,
         }
+        for index, name in enumerate(axis_names):
+            metrics[f"dominant_bin_mav_{name}"] = mav_dominant[index]
+            metrics[f"dominant_bin_uav_{name}"] = uav_dominant[index]
+        return metrics
 
     def update(self, buffer):
         device = next(self.policy.parameters()).device
@@ -186,6 +259,7 @@ class TAMCategoricalHAPPOTrainer:
         sequences = buffer.get_sequences(device)
         advantages, returns = self._advantages_and_returns(data)
         role_stats = {MAV_ROLE_ID: [], UAV_ROLE_ID: []}
+        kl_stopped_roles = set()
         critic_losses, critic_grad_norms, correction_values = [], [], []
 
         for _epoch in range(self.ppo_epochs):
@@ -206,8 +280,11 @@ class TAMCategoricalHAPPOTrainer:
                 (UAV_ROLE_ID, self.uav_opt, self.uav_params),
             ):
                 role_stats[role_id].append(self._update_role(
-                    sequences, advantages, correction, role_id, optimizer, params
+                    sequences, advantages, correction, role_id, optimizer, params,
+                    force_skip_by_kl=role_id in kl_stopped_roles,
                 ))
+                if role_stats[role_id][-1][7] > 0.0:
+                    kl_stopped_roles.add(role_id)
             if not torch.isfinite(correction).all():
                 raise ValueError("non-finite HAPPO correction factor")
             correction_values.append(correction.detach().reshape(-1))
@@ -227,12 +304,24 @@ class TAMCategoricalHAPPOTrainer:
             "entropy_uav": float(uav[:, 1].mean()),
             "approx_kl_mav": float(mav[:, 2].mean()),
             "approx_kl_uav": float(uav[:, 2].mean()),
+            "mav_actor_lr_effective": self.mav_actor_lr_effective,
+            "uav_actor_lr_effective": self.uav_actor_lr_effective,
+            "mav_entropy_coef_effective": self.role_entropy_coef[MAV_ROLE_ID],
+            "uav_entropy_coef_effective": self.role_entropy_coef[UAV_ROLE_ID],
+            "mav_clip_param_effective": self.role_clip_param[MAV_ROLE_ID],
+            "uav_clip_param_effective": self.role_clip_param[UAV_ROLE_ID],
+            "mav_target_kl": self.role_target_kl[MAV_ROLE_ID],
+            "uav_target_kl": self.role_target_kl[UAV_ROLE_ID],
             "mav_active_sample_count": float(mav[:, 3].mean()),
             "uav_active_sample_count": float(uav[:, 3].mean()),
             "grad_norm_actor": float(np.mean(np.concatenate([mav[:, 4], uav[:, 4]]))),
             "grad_norm_shared": float(np.mean(np.concatenate([mav[:, 5], uav[:, 5]]))),
             "grad_norm_mav_head": float(mav[:, 6].mean()),
             "grad_norm_uav_head": float(uav[:, 6].mean()),
+            "mav_kl_early_stop_count": int(mav[:, 7].sum()),
+            "uav_kl_early_stop_count": int(uav[:, 7].sum()),
+            "mav_update_skipped_by_kl": int(mav[:, 8].sum()),
+            "uav_update_skipped_by_kl": int(uav[:, 8].sum()),
             "grad_norm_critic": float(np.mean(critic_grad_norms)),
             "correction_factor_mean": float(correction.mean().item()),
             "correction_factor_max": float(correction.max().item()),

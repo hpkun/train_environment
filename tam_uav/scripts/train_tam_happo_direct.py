@@ -439,6 +439,48 @@ def _build_trainer(policy, action_distribution: str, **kwargs):
     return trainer_class(policy, **kwargs)
 
 
+def resolve_tam_update_params(args):
+    preset = getattr(args, "tam_update_preset", "default")
+    if preset not in {"default", "mav_conservative"}:
+        raise ValueError(f"unsupported TAM update preset: {preset}")
+    conservative = preset == "mav_conservative"
+    defaults = {
+        "mav_actor_lr_scale": 0.25 if conservative else 1.0,
+        "uav_actor_lr_scale": 1.0,
+        "mav_entropy_coef": 0.003 if conservative else args.entropy_coef,
+        "uav_entropy_coef": args.entropy_coef,
+        "mav_clip_param": 0.10 if conservative else args.clip_param,
+        "uav_clip_param": args.clip_param,
+        "mav_target_kl": 0.015 if conservative else 0.0,
+        "uav_target_kl": 0.04 if conservative else 0.0,
+        "role_kl_early_stop": conservative,
+    }
+    for name, value in defaults.items():
+        if getattr(args, name, None) is None:
+            setattr(args, name, value)
+    return args
+
+
+def _tam_update_meta(args) -> dict:
+    actor_lr = float(getattr(args, "actor_lr", 2e-4))
+    mav_scale = float(getattr(args, "mav_actor_lr_scale", 1.0) or 1.0)
+    uav_scale = float(getattr(args, "uav_actor_lr_scale", 1.0) or 1.0)
+    return {
+        "tam_update_preset": getattr(args, "tam_update_preset", "default"),
+        "mav_actor_lr_scale": mav_scale,
+        "uav_actor_lr_scale": uav_scale,
+        "mav_actor_lr_effective": actor_lr * mav_scale,
+        "uav_actor_lr_effective": actor_lr * uav_scale,
+        "mav_entropy_coef_effective": getattr(args, "mav_entropy_coef", None),
+        "uav_entropy_coef_effective": getattr(args, "uav_entropy_coef", None),
+        "mav_clip_param_effective": getattr(args, "mav_clip_param", None),
+        "uav_clip_param_effective": getattr(args, "uav_clip_param", None),
+        "mav_target_kl": float(getattr(args, "mav_target_kl", 0.0) or 0.0),
+        "uav_target_kl": float(getattr(args, "uav_target_kl", 0.0) or 0.0),
+        "role_kl_early_stop": bool(getattr(args, "role_kl_early_stop", False)),
+    }
+
+
 def _episode_outcome(env, truncated: dict, length: int) -> dict:
     red_alive, blue_alive = _alive_counts(env)
     timeout = bool(all(truncated.values()) or length >= getattr(env, "max_steps", 0))
@@ -519,6 +561,7 @@ def _policy_arch_meta(args, policy) -> dict:
         args, "policy_arch_alias_used", requested != effective,
     ))
     return {
+        **_tam_update_meta(args),
         "policy_arch": effective,
         "requested_policy_arch": requested,
         "effective_policy_arch": effective,
@@ -691,6 +734,22 @@ def _run_training_main() -> None:
     parser.add_argument("--actor-lr", type=float, default=2e-4)
     parser.add_argument("--critic-lr", type=float, default=5e-4)
     parser.add_argument("--clip-param", type=float, default=0.2)
+    parser.add_argument("--tam-update-preset", default="default",
+                        choices=["default", "mav_conservative"])
+    parser.add_argument("--mav-actor-lr-scale", type=float, default=None)
+    parser.add_argument("--uav-actor-lr-scale", type=float, default=None)
+    parser.add_argument("--mav-entropy-coef", type=float, default=None)
+    parser.add_argument("--uav-entropy-coef", type=float, default=None)
+    parser.add_argument("--mav-clip-param", type=float, default=None)
+    parser.add_argument("--uav-clip-param", type=float, default=None)
+    parser.add_argument("--mav-target-kl", type=float, default=None)
+    parser.add_argument("--uav-target-kl", type=float, default=None)
+    kl_group = parser.add_mutually_exclusive_group()
+    kl_group.add_argument("--role-kl-early-stop", dest="role_kl_early_stop",
+                          action="store_true")
+    kl_group.add_argument("--no-role-kl-early-stop", dest="role_kl_early_stop",
+                          action="store_false")
+    parser.set_defaults(role_kl_early_stop=None)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
@@ -717,6 +776,7 @@ def _run_training_main() -> None:
     parser.add_argument("--timeseries-episodes-limit", type=int, default=3)
     parser.add_argument("--timeseries-step-stride", type=int, default=5)
     args = parser.parse_args()
+    args = resolve_tam_update_params(args)
     if args.num_envs < 1:
         raise ValueError("--num-envs must be >= 1")
     if args.num_envs > 1:
@@ -800,13 +860,30 @@ def _run_training_main() -> None:
             init_path = ROOT / init_path
         policy.load(init_path, map_location=device)
         print(f"Loaded init_checkpoint: {init_path}", flush=True)
+    role_update_kwargs = {}
+    if action_distribution == "multidiscrete_categorical":
+        role_update_kwargs = {
+            "mav_actor_lr_scale": args.mav_actor_lr_scale,
+            "uav_actor_lr_scale": args.uav_actor_lr_scale,
+            "mav_entropy_coef": args.mav_entropy_coef,
+            "uav_entropy_coef": args.uav_entropy_coef,
+            "mav_clip_param": args.mav_clip_param,
+            "uav_clip_param": args.uav_clip_param,
+            "mav_target_kl": args.mav_target_kl,
+            "uav_target_kl": args.uav_target_kl,
+            "role_kl_early_stop": args.role_kl_early_stop,
+        }
     trainer = _build_trainer(
         policy, action_distribution,
         actor_lr=args.actor_lr, critic_lr=args.critic_lr,
         clip_param=args.clip_param, entropy_coef=args.entropy_coef,
         max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
         gamma=args.gamma, gae_lambda=args.gae_lambda,
+        **role_update_kwargs,
     )
+    print("TAM effective update params: " + json.dumps(
+        _tam_update_meta(args), sort_keys=True
+    ), flush=True)
     opponents = [
         OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17 + i)
         for i in range(args.num_envs)
@@ -888,6 +965,19 @@ def _run_training_main() -> None:
             "action_log_std_mav_mean", "action_log_std_uav_min",
             "action_log_std_uav_max", "action_log_std_uav_mean",
             "approx_kl_mav", "approx_kl_uav",
+            "mav_actor_lr_effective", "uav_actor_lr_effective",
+            "mav_entropy_coef_effective", "uav_entropy_coef_effective",
+            "mav_clip_param_effective", "uav_clip_param_effective",
+            "mav_target_kl", "uav_target_kl",
+            "mav_kl_early_stop_count", "uav_kl_early_stop_count",
+            "mav_update_skipped_by_kl", "uav_update_skipped_by_kl",
+            "neutral_prior_probs_mav", "neutral_prior_probs_uav",
+            "kl_to_neutral_mav", "kl_to_neutral_uav",
+            "per_axis_kl_to_neutral_mav", "per_axis_kl_to_neutral_uav",
+            "dominant_bin_mav_throttle", "dominant_bin_mav_aileron",
+            "dominant_bin_mav_elevator", "dominant_bin_mav_rudder",
+            "dominant_bin_uav_throttle", "dominant_bin_uav_aileron",
+            "dominant_bin_uav_elevator", "dominant_bin_uav_rudder",
             "mask_keep_ratio", "mask_entropy", "masked_entity_count",
             "edge_bin_rate", "low_bin_rate", "high_bin_rate",
             "max_action_prob_mav", "max_action_prob_uav",
@@ -1237,6 +1327,26 @@ def _run_training_main() -> None:
                 f"{stats.get('action_log_std_uav_mean', 0.0):.6f}",
                 f"{stats.get('approx_kl_mav', 0.0):.6f}",
                 f"{stats.get('approx_kl_uav', 0.0):.6f}",
+                f"{stats.get('mav_actor_lr_effective', 0.0):.8f}",
+                f"{stats.get('uav_actor_lr_effective', 0.0):.8f}",
+                f"{stats.get('mav_entropy_coef_effective', 0.0):.6f}",
+                f"{stats.get('uav_entropy_coef_effective', 0.0):.6f}",
+                f"{stats.get('mav_clip_param_effective', 0.0):.6f}",
+                f"{stats.get('uav_clip_param_effective', 0.0):.6f}",
+                f"{stats.get('mav_target_kl', 0.0):.6f}",
+                f"{stats.get('uav_target_kl', 0.0):.6f}",
+                int(stats.get("mav_kl_early_stop_count", 0)),
+                int(stats.get("uav_kl_early_stop_count", 0)),
+                int(stats.get("mav_update_skipped_by_kl", 0)),
+                int(stats.get("uav_update_skipped_by_kl", 0)),
+                json.dumps(stats.get("neutral_prior_probs_mav", []), separators=(",", ":")),
+                json.dumps(stats.get("neutral_prior_probs_uav", []), separators=(",", ":")),
+                f"{stats.get('kl_to_neutral_mav', 0.0):.6f}",
+                f"{stats.get('kl_to_neutral_uav', 0.0):.6f}",
+                json.dumps(stats.get("per_axis_kl_to_neutral_mav", [])),
+                json.dumps(stats.get("per_axis_kl_to_neutral_uav", [])),
+                *[int(stats.get(f"dominant_bin_mav_{axis}", 0)) for axis in ("throttle", "aileron", "elevator", "rudder")],
+                *[int(stats.get(f"dominant_bin_uav_{axis}", 0)) for axis in ("throttle", "aileron", "elevator", "rudder")],
                 f"{stats.get('mask_keep_ratio', 1.0):.6f}",
                 f"{stats.get('mask_entropy', 0.0):.6f}",
                 f"{stats.get('masked_entity_count', 0.0):.2f}",
@@ -1315,6 +1425,23 @@ def _run_training_main() -> None:
                     "uav_action_saturation_rate": stats.get("uav_action_saturation_rate", 0.0),
                     "approx_kl_mav": stats.get("approx_kl_mav", 0.0),
                     "approx_kl_uav": stats.get("approx_kl_uav", 0.0),
+                    **{
+                        key: stats.get(key, "") for key in (
+                            "mav_actor_lr_effective", "uav_actor_lr_effective",
+                            "mav_entropy_coef_effective", "uav_entropy_coef_effective",
+                            "mav_clip_param_effective", "uav_clip_param_effective",
+                            "mav_target_kl", "uav_target_kl",
+                            "mav_kl_early_stop_count", "uav_kl_early_stop_count",
+                            "mav_update_skipped_by_kl", "uav_update_skipped_by_kl",
+                            "neutral_prior_probs_mav", "neutral_prior_probs_uav",
+                            "kl_to_neutral_mav", "kl_to_neutral_uav",
+                            "per_axis_kl_to_neutral_mav", "per_axis_kl_to_neutral_uav",
+                            "dominant_bin_mav_throttle", "dominant_bin_mav_aileron",
+                            "dominant_bin_mav_elevator", "dominant_bin_mav_rudder",
+                            "dominant_bin_uav_throttle", "dominant_bin_uav_aileron",
+                            "dominant_bin_uav_elevator", "dominant_bin_uav_rudder",
+                        )
+                    },
                     "mask_keep_ratio": stats.get("mask_keep_ratio", 1.0),
                     "mask_entropy": stats.get("mask_entropy", 0.0),
                     "masked_entity_count": stats.get("masked_entity_count", 0.0),

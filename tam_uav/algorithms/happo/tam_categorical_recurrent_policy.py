@@ -132,6 +132,24 @@ class TAMCategoricalRecurrentHAPPOPolicy(nn.Module):
             with torch.no_grad():
                 output.bias.copy_(prior)
 
+    def neutral_prior_probabilities(self, role_id: int) -> torch.Tensor:
+        """Return the fixed initialization prior for diagnostics only."""
+        centers = (
+            self.neutral_action_centers_mav
+            if int(role_id) == MAV_ROLE_ID
+            else self.neutral_action_centers_uav
+        )
+        bins = torch.arange(
+            self.action_levels, dtype=torch.float32,
+            device=next(self.parameters()).device,
+        )
+        logits = torch.stack([
+            -0.5 * ((bins - float(center)) /
+                    self.neutral_action_init_std_bins).square()
+            for center in centers
+        ])
+        return torch.softmax(logits, dim=-1).detach()
+
     @staticmethod
     def infer_role_ids(roles: Iterable[str | int] | torch.Tensor | None,
                        batch: int, device) -> torch.Tensor:

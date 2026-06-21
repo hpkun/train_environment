@@ -100,6 +100,12 @@ class RichExperimentLogger:
         payload = {col: "" for col in TRAIN_METRICS_COLUMNS}
         payload.update(defaults)
         payload.update(row)
+        for key in (
+            "neutral_prior_probs_mav", "neutral_prior_probs_uav",
+            "per_axis_kl_to_neutral_mav", "per_axis_kl_to_neutral_uav",
+        ):
+            if isinstance(payload.get(key), (list, dict)):
+                payload[key] = json.dumps(payload[key], separators=(",", ":"))
         self._train_writer.writerow(payload)
         self._train_file.flush()
 
