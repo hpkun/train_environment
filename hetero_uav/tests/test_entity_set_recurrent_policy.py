@@ -118,3 +118,25 @@ def test_entity_rollout_buffer_and_trainer_update_use_entity_critic():
     assert torch.isfinite(torch.tensor(stats["actor_loss_mav"]))
     assert torch.isfinite(torch.tensor(stats["actor_loss_uav"]))
     assert torch.isfinite(torch.tensor(stats["critic_loss"]))
+
+
+def test_non_self_token_permutation_preserves_action_and_value():
+    torch.manual_seed(11)
+    policy = HeteroEntityRecurrentPolicy(
+        entity_dim=19, action_dim=3, rnn_hidden_size=32).eval()
+    actor_tokens, actor_mask, critic_tokens, critic_mask, roles = _inputs(3, 2)
+    hidden = policy.init_hidden(3)
+    base = policy.act(
+        actor_tokens, actor_mask, roles, critic_tokens, critic_mask,
+        deterministic=True, rnn_hidden=hidden,
+    )
+
+    actor_perm = torch.tensor([0, 3, 4, 1, 2])
+    critic_perm = torch.tensor([3, 0, 4, 2, 1])
+    permuted = policy.act(
+        actor_tokens[:, actor_perm], actor_mask[:, actor_perm], roles,
+        critic_tokens[critic_perm], critic_mask[critic_perm],
+        deterministic=True, rnn_hidden=hidden,
+    )
+    assert torch.allclose(base["action"], permuted["action"], atol=1e-6)
+    assert torch.allclose(base["value"], permuted["value"], atol=1e-6)

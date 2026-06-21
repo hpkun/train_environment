@@ -21,8 +21,10 @@ from algorithms.happo import (
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
 )
-from algorithms.happo.hetero_entity_recurrent_policy import HeteroEntityRecurrentPolicy
-from uav_env.JSBSim.adapters.hetero_entity_set_adapter import FEATURE_SCHEMA_VERSION
+from algorithms.happo.hetero_entity_recurrent_policy import (
+    HeteroEntityRecurrentPolicy,
+    validate_entity_policy_meta,
+)
 from uav_env.JSBSim.adapters.hetero_entity_set_adapter import HeteroEntitySetAdapter
 from algorithms.happo.rollout_safety import (
     sanitize_policy_inputs,
@@ -61,15 +63,7 @@ def _role_ids(env) -> list[int]:
 def _build_policy_from_meta(meta: dict, device: torch.device):
     policy_arch = meta.get("policy_arch", "flat")
     if policy_arch == "hetero_entity_recurrent":
-        if int(meta.get("action_dim", -1)) != 3:
-            raise ValueError("hetero_entity_recurrent checkpoint action_dim must be 3")
-        if meta.get("feature_schema_version") != FEATURE_SCHEMA_VERSION:
-            raise ValueError(
-                "unsupported hetero_entity_recurrent feature_schema_version: "
-                f"{meta.get('feature_schema_version')!r}"
-            )
-        if meta.get("adapter_mode") != "hetero_entity_set":
-            raise ValueError("hetero_entity_recurrent checkpoint adapter_mode mismatch")
+        validate_entity_policy_meta(meta)
         return HeteroEntityRecurrentPolicy(
             entity_dim=int(meta["entity_dim"]),
             action_dim=3,

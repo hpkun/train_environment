@@ -44,7 +44,7 @@ from eval_checkpoint_selection import (
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 
 
-DEFAULT_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml"
+DEFAULT_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0_f22_pid.yaml"
 DEFAULT_EVAL_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0_f22_pid.yaml",
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4_f22_pid.yaml",
@@ -72,6 +72,9 @@ def _entity_policy_meta(policy) -> dict:
         "critic_arch": "global_entity_attention_value",
         "scale_support_mode": "variable_token_count",
         "padding_mode": "keep_mask",
+        "policy_class": policy.__class__.__name__,
+        "critic_class": policy.critic.__class__.__name__,
+        "observation_adapter": "HeteroEntitySetAdapter",
     }
 
 _SINGLE_RUNNER_STATE = {
@@ -328,12 +331,16 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                   brma_biased_mask: bool = False,
                   brma_random_mask_prob: float = 0.25):
     if policy_arch == "hetero_entity_recurrent":
-        from algorithms.happo.hetero_entity_recurrent_policy import HeteroEntityRecurrentPolicy
+        from algorithms.happo.hetero_entity_recurrent_policy import (
+            HeteroEntityRecurrentPolicy,
+            validate_entity_policy_meta,
+        )
         meta = {}
         if init_checkpoint_meta is not None and Path(init_checkpoint_meta).exists():
             meta = json.loads(Path(init_checkpoint_meta).read_text(encoding="utf-8"))
             if meta.get("policy_arch") != policy_arch:
                 raise ValueError("hetero_entity_recurrent requires a matching checkpoint meta")
+            validate_entity_policy_meta(meta)
         return HeteroEntityRecurrentPolicy(
             entity_dim=int(meta.get("entity_dim", 19)),
             action_dim=3,
@@ -484,17 +491,12 @@ def _run_eval(model_path: str, args, summary_json: str) -> list[dict] | None:
         return None
 
 
-def _score_eval(records: list[dict]) -> float:
+def _score_eval(records: list[dict], metric: str = "combined") -> float:
     scores = compute_eval_scores(records)
-    for record in records:
-        if "3v2" in record.get("config", ""):
-            return (
-                record.get("red_win_rate", 0.0)
-                + 0.1 * record.get("mav_survival_rate", 0.0)
-                + 0.05 * record.get("blue_dead_mean", 0.0)
-                + 0.05 * record.get("red_missile_hits_mean", 0.0)
-            )
-    return scores["score_combined"]
+    key = "score_combined" if metric == "combined" else f"score_{metric}"
+    if key not in scores:
+        raise ValueError(f"unsupported eval checkpoint metric: {metric}")
+    return scores[key]
 
 
 def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int,
@@ -668,7 +670,7 @@ def _run_training_main() -> None:
     parser.add_argument("--train-eval-episodes", type=int, default=1)
     parser.add_argument("--eval-configs", nargs="*", default=None)
     parser.add_argument("--save-eval-checkpoints", action="store_true",
-                        help="Save every eval checkpoint and maintain best_3v2/best_5v4/best_combined.")
+                        help="Save every eval checkpoint and maintain best_3v2/best_5v4/best_7v6/best_combined.")
     parser.add_argument("--eval-checkpoint-metric", default="combined",
                         choices=["combined", "3v2", "5v4", "7v6"],
                         help="Reference metric for eval checkpoint summaries; all best dirs are still maintained.")
@@ -1383,7 +1385,7 @@ def _run_training_main() -> None:
                                 best_meta["best_score"] = metric_score
                                 best_meta["best_score_metric"] = metric_name
                                 _save_policy_checkpoint(policy, out_dir / best_name, best_meta)
-                    score = _score_eval(records)
+                    score = _score_eval(records, args.eval_checkpoint_metric)
                     if score > best_score:
                         best_score = score
                         policy.save(out_dir / "best" / "model.pt")

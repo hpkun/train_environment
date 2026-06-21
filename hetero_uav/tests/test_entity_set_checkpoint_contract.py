@@ -15,6 +15,7 @@ REQUIRED_FIELDS = {
     "action_dim", "rnn_hidden_size", "policy_arch", "actor_arch",
     "critic_arch", "scale_support_mode", "padding_mode", "hidden_dim",
     "num_attention_heads",
+    "policy_class", "critic_class", "observation_adapter",
 }
 
 
@@ -36,6 +37,9 @@ def _meta():
         "critic_arch": "global_entity_attention_value",
         "scale_support_mode": "variable_token_count",
         "padding_mode": "keep_mask",
+        "policy_class": "HeteroEntityRecurrentPolicy",
+        "critic_class": "_GlobalEntityCritic",
+        "observation_adapter": "HeteroEntitySetAdapter",
     }
 
 
@@ -77,3 +81,33 @@ def test_training_factory_restores_entity_architecture_from_meta(tmp_path):
     )
     assert policy.hidden_dim == 96
     assert policy.num_attention_heads == 3
+
+
+@pytest.mark.parametrize(
+    "field,bad_value",
+    [
+        ("role_vocab", ["mav", "uav"]),
+        ("actor_arch", "wrong_actor"),
+        ("critic_arch", "wrong_critic"),
+        ("actor_obs_format", "flat"),
+        ("critic_obs_format", "flat"),
+        ("role_dim", 3),
+        ("policy_class", "WrongPolicy"),
+        ("critic_class", "WrongCritic"),
+    ],
+)
+def test_entity_checkpoint_schema_mismatch_is_rejected_by_train_and_eval(
+    tmp_path, field, bad_value,
+):
+    meta = _meta()
+    meta[field] = bad_value
+    meta_path = tmp_path / f"{field}.json"
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=field):
+        _build_policy(
+            "hetero_entity_recurrent", 96, 480, torch.device("cpu"),
+            init_checkpoint_meta=meta_path,
+        )
+    with pytest.raises(ValueError, match=field):
+        _build_policy_from_meta(meta, torch.device("cpu"))

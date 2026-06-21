@@ -20,6 +20,7 @@ REQUIRED_ENTITY_SET_KEYS = {
     "enemy_observed_mask",
     "enemy_track_source",
 }
+GLOBAL_ENTITY_KEYS = {"ego_geo_state", "ego_role", "missile_warning"}
 
 
 class HeteroEntitySetAdapter:
@@ -51,6 +52,14 @@ class HeteroEntitySetAdapter:
                     "HeteroEntitySetAdapter requires "
                     "observation_mode='mav_shared_geo'; "
                     f"agent {rid} missing keys: {missing}"
+                )
+        for aid in red_ids + blue_ids:
+            missing = sorted(GLOBAL_ENTITY_KEYS.difference(obs_dict.get(aid, {})))
+            if missing:
+                raise ValueError(
+                    "HeteroEntitySetAdapter global critic requires "
+                    "observation_mode='mav_shared_geo'; "
+                    f"agent {aid} missing keys: {missing}"
                 )
 
         actor_tokens = []

@@ -11,6 +11,40 @@ from torch.distributions import Normal
 from .happo_policy import MAV_ROLE_ID, UAV_ROLE_ID
 
 
+ENTITY_POLICY_META_EXPECTED = {
+    "action_dim": 3,
+    "feature_schema_version": "hetero_entity_set_v1",
+    "adapter_mode": "hetero_entity_set",
+    "actor_obs_format": "entity_tokens_keep_mask",
+    "critic_obs_format": "global_entity_tokens_keep_mask",
+    "role_vocab": ["mav", "attack_uav", "scout_uav", "interceptor_uav"],
+    "actor_arch": "entity_attention_grucell_role_heads",
+    "critic_arch": "global_entity_attention_value",
+    "entity_dim": 19,
+    "role_dim": 4,
+    "observation_adapter": "HeteroEntitySetAdapter",
+}
+
+
+def validate_entity_policy_meta(meta: dict) -> None:
+    for field, expected in ENTITY_POLICY_META_EXPECTED.items():
+        if meta.get(field) != expected:
+            raise ValueError(
+                f"hetero_entity_recurrent checkpoint {field} mismatch: "
+                f"expected {expected!r}, got {meta.get(field)!r}"
+            )
+    optional_classes = {
+        "policy_class": "HeteroEntityRecurrentPolicy",
+        "critic_class": "_GlobalEntityCritic",
+    }
+    for field, expected in optional_classes.items():
+        if field in meta and meta[field] != expected:
+            raise ValueError(
+                f"hetero_entity_recurrent checkpoint {field} mismatch: "
+                f"expected {expected!r}, got {meta[field]!r}"
+            )
+
+
 class _EntityAttention(nn.Module):
     def __init__(self, entity_dim: int, hidden_dim: int, num_heads: int):
         super().__init__()

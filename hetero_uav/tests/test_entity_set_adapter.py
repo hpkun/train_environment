@@ -63,6 +63,13 @@ def test_entity_set_adapter_rejects_non_mav_shared_geo_observation():
         HeteroEntitySetAdapter().adapt_all(obs, red_ids=red_ids, blue_ids=blue_ids)
 
 
+def test_entity_set_adapter_rejects_blue_missing_global_critic_key():
+    obs, red_ids, blue_ids = _team_obs(3, 2)
+    del obs["blue_1"]["ego_geo_state"]
+    with pytest.raises(ValueError, match="observation_mode='mav_shared_geo'.*blue_1.*ego_geo_state"):
+        HeteroEntitySetAdapter().adapt_all(obs, red_ids=red_ids, blue_ids=blue_ids)
+
+
 @pytest.mark.parametrize(
     "config,red_count,blue_count",
     [

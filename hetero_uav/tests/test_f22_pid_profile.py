@@ -237,6 +237,29 @@ class TestF22ProfileEnvIntegration:
         assert not isinstance(uav_pid, F22MavEnergyPIDController)
         env.close()
 
+
+def test_direct_fcs_applies_aileron_and_elevator_trim_without_changing_mainline():
+    from uav_env.JSBSim.env import UavCombatEnv
+
+    class FakeSim:
+        is_alive = True
+
+        def __init__(self):
+            self.values = {}
+
+        def set_property_value(self, name, value):
+            self.values[name] = value
+
+    env = UavCombatEnv.__new__(UavCombatEnv)
+    sim = FakeSim()
+    env._get_sim = lambda _aid: sim
+    env._control_mode_for = lambda _aid: "direct_fcs_3d"
+    env._direct_fcs_trim_for = lambda _aid: {"elevator": 0.1, "aileron": -0.2}
+    env._apply_pid_controls({"red_0": (0.2, 0.3, 0.6)})
+
+    assert sim.values["fcs/elevator-cmd-norm"] == pytest.approx(0.3)
+    assert sim.values["fcs/aileron-cmd-norm"] == pytest.approx(0.1)
+
     def test_f22_pid_mainline_keeps_three_dimensional_actions(self):
         from uav_env.make_env import make_env
 

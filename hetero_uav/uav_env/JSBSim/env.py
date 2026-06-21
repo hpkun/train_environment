@@ -789,6 +789,7 @@ class UavCombatEnv(gymnasium.Env):
                 trim = self._direct_fcs_trim_for(aid)
                 if trim is not None:
                     elevator += trim.get("elevator", 0.0)
+                    aileron += trim.get("aileron", 0.0)
                 elevator = float(np.clip(elevator, -1.0, 1.0))
                 aileron = float(np.clip(aileron, -1.0, 1.0))
                 throttle_cmd = float(np.clip(throttle_cmd, 0.0, 1.0))

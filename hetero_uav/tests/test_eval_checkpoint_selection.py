@@ -83,3 +83,27 @@ def test_summarize_eval_checkpoints_help_runs():
         check=True,
     )
     assert "--output-dir" in result.stdout
+
+
+def test_training_best_score_uses_requested_checkpoint_metric():
+    from scripts.train_happo_reference import _score_eval
+
+    records = [
+        {"config": "3v2.yaml", "red_win_rate": 0.2},
+        {"config": "5v4.yaml", "red_win_rate": 0.5},
+        {"config": "7v6.yaml", "red_win_rate": 0.8},
+    ]
+    assert _score_eval(records, "3v2") == pytest.approx(0.2)
+    assert _score_eval(records, "7v6") == pytest.approx(0.8)
+    assert _score_eval(records, "combined") == pytest.approx(0.47)
+
+
+def test_training_default_config_is_f22_pid_mainline():
+    from scripts.train_happo_reference import DEFAULT_CONFIG, DEFAULT_EVAL_CONFIGS
+
+    assert DEFAULT_CONFIG.endswith("3v2_happo_ref_v0_f22_pid.yaml")
+    assert ["3v2", "5v4", "7v6"] == [
+        next(scale for scale in ("3v2", "5v4", "7v6") if scale in config)
+        for config in DEFAULT_EVAL_CONFIGS
+    ]
+    assert all("f22_pid" in config for config in DEFAULT_EVAL_CONFIGS)
