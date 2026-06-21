@@ -497,7 +497,7 @@ def _build_agent_metrics_json(stats: dict, red_ids: list[str]) -> str:
             agent_data[agent_id] = entry
     if not agent_data:
         agent_data = {"note": "agent_metrics_not_available"}
-    return json.dumps(agent_data)
+    return agent_data
 
 
 def _build_trainer(policy, action_distribution: str, **kwargs):
@@ -1094,9 +1094,10 @@ def _run_training_main() -> None:
             eval_f = (out_dir / "eval_log.csv").open("w", newline="", encoding="utf-8")
             eval_writer = csv.writer(eval_f)
             eval_writer.writerow([
-                "total_steps", "iteration", "config", "red_win_rate",
+                "total_steps", "iteration", "scenario", "config", "red_win_rate",
                 "blue_win_rate", "draw_rate", "timeout_rate",
-                "mav_survival_rate", "blue_dead_mean", "red_missile_hits_mean",
+                "mav_survival_rate", "red_uav_fired_mean", "red_uav_hits_mean",
+                "blue_dead_mean", "red_missile_hits_mean", "avg_episode_len",
             ])
         last_eval = -999999 if args.eval_at_start else 0
         for iteration in range(1, iterations + 1):
@@ -1686,11 +1687,17 @@ def _run_training_main() -> None:
                 )
                 if records and eval_writer is not None:
                     for r in records:
+                        cfg_stem = Path(r.get("config", "")).stem
+                        uav_fired = r.get("red_uav_fired_mean", "")
+                        uav_hits = r.get("red_uav_hits_mean", "")
+                        avg_len = r.get("avg_length", "")
                         eval_writer.writerow([
-                            total_steps, iteration, r["config"], r["red_win_rate"],
-                            r["blue_win_rate"], r["draw_rate"], r["timeout_rate"],
-                            r["mav_survival_rate"], r["blue_dead_mean"],
-                            r["red_missile_hits_mean"],
+                            total_steps, iteration, cfg_stem, r["config"],
+                            r["red_win_rate"], r["blue_win_rate"], r["draw_rate"],
+                            r["timeout_rate"], r["mav_survival_rate"],
+                            uav_fired, uav_hits,
+                            r["blue_dead_mean"], r["red_missile_hits_mean"],
+                            avg_len,
                         ])
                     eval_f.flush()
                     if args.save_eval_checkpoints:
