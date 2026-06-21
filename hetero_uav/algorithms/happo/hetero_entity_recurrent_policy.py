@@ -56,11 +56,14 @@ class HeteroEntityRecurrentPolicy(nn.Module):
         self.action_dim = int(action_dim)
         self.hidden_dim = int(hidden_dim)
         self.rnn_hidden_size = int(rnn_hidden_size)
-        self.actor_encoder = _EntityAttention(self.entity_dim, self.hidden_dim, num_attention_heads)
+        self.num_attention_heads = int(num_attention_heads)
+        self.actor_encoder = _EntityAttention(
+            self.entity_dim, self.hidden_dim, self.num_attention_heads)
         self.rnn = nn.GRUCell(self.hidden_dim, self.rnn_hidden_size)
         self.mav_actor = self._head()
         self.uav_actor = self._head()
-        self.critic = _GlobalEntityCritic(self.entity_dim, self.hidden_dim, num_attention_heads)
+        self.critic = _GlobalEntityCritic(
+            self.entity_dim, self.hidden_dim, self.num_attention_heads)
         initial = float(np.log(0.3))
         self.action_log_std_mav = nn.Parameter(torch.full((3,), initial))
         self.action_log_std_uav = nn.Parameter(torch.full((3,), initial))
@@ -162,4 +165,3 @@ class HeteroEntityRecurrentPolicy(nn.Module):
 
     def load(self, path: str | Path, map_location=None):
         self.load_state_dict(torch.load(path, map_location=map_location, weights_only=True))
-

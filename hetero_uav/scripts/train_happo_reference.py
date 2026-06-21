@@ -46,8 +46,9 @@ from scripts.rich_logging import RichExperimentLogger, write_not_available_atten
 
 DEFAULT_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml"
 DEFAULT_EVAL_CONFIGS = [
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml",
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
+    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0_f22_pid.yaml",
+    "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4_f22_pid.yaml",
+    "uav_env/JSBSim/configs/hetero_mav_shared_geo_7v6_f22_pid.yaml",
 ]
 
 
@@ -64,6 +65,8 @@ def _entity_policy_meta(policy) -> dict:
         "role_vocab": ["mav", "attack_uav", "scout_uav", "interceptor_uav"],
         "action_dim": policy.action_dim,
         "rnn_hidden_size": policy.rnn_hidden_size,
+        "hidden_dim": policy.hidden_dim,
+        "num_attention_heads": policy.num_attention_heads,
         "policy_arch": "hetero_entity_recurrent",
         "actor_arch": "entity_attention_grucell_role_heads",
         "critic_arch": "global_entity_attention_value",
@@ -334,7 +337,9 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
         return HeteroEntityRecurrentPolicy(
             entity_dim=int(meta.get("entity_dim", 19)),
             action_dim=3,
+            hidden_dim=int(meta.get("hidden_dim", 128)),
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+            num_attention_heads=int(meta.get("num_attention_heads", 4)),
         ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(actor_dim, critic_dim).to(device)
@@ -665,7 +670,7 @@ def _run_training_main() -> None:
     parser.add_argument("--save-eval-checkpoints", action="store_true",
                         help="Save every eval checkpoint and maintain best_3v2/best_5v4/best_combined.")
     parser.add_argument("--eval-checkpoint-metric", default="combined",
-                        choices=["combined", "3v2", "5v4"],
+                        choices=["combined", "3v2", "5v4", "7v6"],
                         help="Reference metric for eval checkpoint summaries; all best dirs are still maintained.")
     parser.add_argument("--keep-eval-checkpoints", type=int, default=20,
                         help="Maximum number of per-eval checkpoint directories to keep when enabled.")
@@ -815,6 +820,7 @@ def _run_training_main() -> None:
     eval_best_scores = {
         "best_3v2": -float("inf"),
         "best_5v4": -float("inf"),
+        "best_7v6": -float("inf"),
         "best_combined": -float("inf"),
     }
     nan_detected = False
@@ -1366,7 +1372,8 @@ def _run_training_main() -> None:
                         eval_ckpt_dir = out_dir / "eval_checkpoints" / f"step_{total_steps:06d}"
                         _save_policy_checkpoint(policy, eval_ckpt_dir, meta)
                         _prune_eval_checkpoints(out_dir / "eval_checkpoints", args.keep_eval_checkpoints)
-                        for best_name in ("best_3v2", "best_5v4", "best_combined"):
+                        for best_name in (
+                            "best_3v2", "best_5v4", "best_7v6", "best_combined"):
                             metric_name = best_metric_name(best_name)
                             metric_score = float(meta["scores"].get(metric_name, 0.0))
                             if metric_score > eval_best_scores[best_name]:

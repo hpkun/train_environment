@@ -14,6 +14,8 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 def eval_record_label(record: dict) -> str:
     config = str(record.get("config", "")).lower()
     name = Path(config).name
+    if "7v6" in name or "7v6" in config:
+        return "7v6"
     if "5v4" in name or "5v4" in config:
         return "5v4"
     if "3v2" in name or "3v2" in config:
@@ -30,12 +32,21 @@ def score_record(record: dict) -> float:
 
 
 def compute_eval_scores(records: list[dict]) -> dict[str, float]:
-    scores = {"score_3v2": 0.0, "score_5v4": 0.0, "score_combined": 0.0}
+    scores = {
+        "score_3v2": 0.0,
+        "score_5v4": 0.0,
+        "score_7v6": 0.0,
+        "score_combined": 0.0,
+    }
     for record in records:
         label = eval_record_label(record)
-        if label in {"3v2", "5v4"}:
+        if label in {"3v2", "5v4", "7v6"}:
             scores[f"score_{label}"] = score_record(record)
-    scores["score_combined"] = 0.5 * scores["score_3v2"] + 0.5 * scores["score_5v4"]
+    scores["score_combined"] = (
+        0.4 * scores["score_3v2"]
+        + 0.3 * scores["score_5v4"]
+        + 0.3 * scores["score_7v6"]
+    )
     return scores
 
 
@@ -43,6 +54,7 @@ def best_metric_name(best_name: str) -> str:
     mapping = {
         "best_3v2": "score_3v2",
         "best_5v4": "score_5v4",
+        "best_7v6": "score_7v6",
         "best_combined": "score_combined",
     }
     if best_name not in mapping:
@@ -92,4 +104,3 @@ def build_eval_checkpoint_meta(
     if extra:
         meta.update(extra)
     return meta
-

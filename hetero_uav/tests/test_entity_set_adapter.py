@@ -56,6 +56,13 @@ def test_entity_set_adapter_masks_dead_and_unobserved_without_masking_self():
     assert out["critic_keep_mask"].tolist() == [1, 1, 1, 1, 0]
 
 
+def test_entity_set_adapter_rejects_non_mav_shared_geo_observation():
+    obs, red_ids, blue_ids = _team_obs(3, 2)
+    del obs["red_1"]["enemy_observed_mask"]
+    with pytest.raises(ValueError, match="observation_mode='mav_shared_geo'.*enemy_observed_mask"):
+        HeteroEntitySetAdapter().adapt_all(obs, red_ids=red_ids, blue_ids=blue_ids)
+
+
 @pytest.mark.parametrize(
     "config,red_count,blue_count",
     [

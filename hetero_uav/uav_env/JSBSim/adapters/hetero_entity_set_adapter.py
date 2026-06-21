@@ -8,6 +8,18 @@ ROLE_VOCAB = ("mav", "attack_uav", "scout_uav", "interceptor_uav")
 ROLE_DIM = len(ROLE_VOCAB)
 ENTITY_DIM = 19
 FEATURE_SCHEMA_VERSION = "hetero_entity_set_v1"
+REQUIRED_ENTITY_SET_KEYS = {
+    "ego_geo_state",
+    "ego_role",
+    "missile_warning",
+    "ally_geo_states",
+    "ally_roles",
+    "ally_alive_mask",
+    "enemy_geo_states",
+    "enemy_alive_mask",
+    "enemy_observed_mask",
+    "enemy_track_source",
+}
 
 
 class HeteroEntitySetAdapter:
@@ -32,6 +44,14 @@ class HeteroEntitySetAdapter:
         blue_ids = blue_ids or self._ids(obs_dict, "blue_")
         if not red_ids or not blue_ids:
             raise ValueError("entity-set adapter requires non-empty red and blue teams")
+        for rid in red_ids:
+            missing = sorted(REQUIRED_ENTITY_SET_KEYS.difference(obs_dict.get(rid, {})))
+            if missing:
+                raise ValueError(
+                    "HeteroEntitySetAdapter requires "
+                    "observation_mode='mav_shared_geo'; "
+                    f"agent {rid} missing keys: {missing}"
+                )
 
         actor_tokens = []
         actor_masks = []
@@ -143,4 +163,3 @@ class HeteroEntitySetAdapter:
         out = np.zeros((rows, cols), dtype=np.float32)
         out[:min(rows, len(src))] = src[:rows]
         return out
-

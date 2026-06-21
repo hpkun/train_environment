@@ -41,8 +41,9 @@ except ModuleNotFoundError:
 
 
 DEFAULT_CONFIGS = [
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml",
-    "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
+    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0_f22_pid.yaml",
+    "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4_f22_pid.yaml",
+    "uav_env/JSBSim/configs/hetero_mav_shared_geo_7v6_f22_pid.yaml",
 ]
 
 
@@ -72,7 +73,9 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
         return HeteroEntityRecurrentPolicy(
             entity_dim=int(meta["entity_dim"]),
             action_dim=3,
+            hidden_dim=int(meta.get("hidden_dim", 128)),
             rnn_hidden_size=int(meta["rnn_hidden_size"]),
+            num_attention_heads=int(meta.get("num_attention_heads", 4)),
         ).to(device)
     if policy_arch == "entity_attention":
         return EntityHAPPOReferencePolicy(

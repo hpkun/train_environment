@@ -13,7 +13,8 @@ REQUIRED_FIELDS = {
     "feature_schema_version", "adapter_mode", "actor_obs_format",
     "critic_obs_format", "entity_dim", "role_dim", "role_vocab",
     "action_dim", "rnn_hidden_size", "policy_arch", "actor_arch",
-    "critic_arch", "scale_support_mode", "padding_mode",
+    "critic_arch", "scale_support_mode", "padding_mode", "hidden_dim",
+    "num_attention_heads",
 }
 
 
@@ -28,6 +29,8 @@ def _meta():
         "role_vocab": ["mav", "attack_uav", "scout_uav", "interceptor_uav"],
         "action_dim": 3,
         "rnn_hidden_size": 64,
+        "hidden_dim": 96,
+        "num_attention_heads": 3,
         "policy_arch": "hetero_entity_recurrent",
         "actor_arch": "entity_attention_grucell_role_heads",
         "critic_arch": "global_entity_attention_value",
@@ -42,6 +45,8 @@ def test_entity_checkpoint_meta_rebuilds_policy():
     policy = _build_policy_from_meta(meta, torch.device("cpu"))
     assert policy.action_dim == 3
     assert policy.rnn_hidden_size == 64
+    assert policy.hidden_dim == 96
+    assert policy.num_attention_heads == 3
 
 
 def test_entity_checkpoint_rejects_action_or_schema_mismatch():
@@ -61,3 +66,14 @@ def test_training_policy_factory_builds_entity_recurrent():
     assert policy.action_dim == 3
     assert policy.critic.__class__.__name__ != "Sequential"
     assert REQUIRED_FIELDS <= set(_entity_policy_meta(policy))
+
+
+def test_training_factory_restores_entity_architecture_from_meta(tmp_path):
+    meta_path = tmp_path / "meta.json"
+    meta_path.write_text(json.dumps(_meta()), encoding="utf-8")
+    policy = _build_policy(
+        "hetero_entity_recurrent", 96, 480, torch.device("cpu"),
+        init_checkpoint_meta=meta_path,
+    )
+    assert policy.hidden_dim == 96
+    assert policy.num_attention_heads == 3
