@@ -508,6 +508,12 @@ class TAMCategoricalHAPPOTrainer:
             "death_transition_used_for_actor_red_0": float(
                 (red0_deaths & red0_active).sum().item()
             ),
+            "mav_death_transition_count_rollout": float(red0_deaths.sum().item()),
+            "mav_death_transition_actor_active_count": float((red0_deaths & red0_active).sum().item()),
+            "mav_death_transition_actor_inactive_count": float((red0_deaths & ~red0_active).sum().item()),
+            "mav_death_transition_used_for_actor_count": float((red0_deaths & red0_active).sum().item()),
+            "mav_postdeath_transition_actor_active_count": 0.0,
+            "mav_postdeath_transition_actor_inactive_count": 0.0,
             "approx_kl_mav": float(mav[:, 2].mean()),
             "approx_kl_uav": float(uav[:, 2].mean()),
             "mav_actor_lr_effective": self.mav_actor_lr_effective,
