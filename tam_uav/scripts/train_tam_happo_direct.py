@@ -949,6 +949,17 @@ def _run_training_main() -> None:
         "tam_action_distribution": action_distribution,
         "action_space": action_space_class,
         "tam_action_levels": action_levels,
+        "actor_lr_effective": float(args.actor_lr),
+        "critic_lr_effective": float(args.critic_lr),
+        "entropy_coef_effective": float(args.entropy_coef),
+        "clip_param_effective": float(args.clip_param),
+        "gamma_effective": float(args.gamma),
+        "gae_lambda_effective": float(args.gae_lambda),
+        "max_grad_norm_effective": float(args.max_grad_norm),
+        "ppo_epochs_effective": int(args.ppo_epochs),
+        "ppo_epochs_source": "CLI_arg",
+        "paper_hyperparams_explicit": getattr(args, "tam_paper_mode", False),
+        "paper_hyperparams_passed": True,
         **_trainer_contract_meta(policy),
     }
     if args.init_checkpoint:
@@ -987,6 +998,26 @@ def _run_training_main() -> None:
     print("TAM effective update params: " + json.dumps(
         _tam_update_meta(args), sort_keys=True
     ), flush=True)
+    paper_lr = 0.0005
+    paper_entropy = 0.01
+    paper_critic_lr = 0.0005
+    paper_hyperparams_passed = (
+        abs(float(args.actor_lr) - paper_lr) < 1e-8
+        and abs(float(args.critic_lr) - paper_critic_lr) < 1e-8
+        and abs(float(args.entropy_coef) - paper_entropy) < 1e-8
+    )
+    if getattr(args, "tam_paper_mode", False) and not paper_hyperparams_passed:
+        print(
+            "WARNING: --tam-paper-mode is set but some paper-listed hyperparameters "
+            f"differ or were not explicitly passed "
+            f"(actor_lr={args.actor_lr} vs {paper_lr}, "
+            f"critic_lr={args.critic_lr} vs {paper_critic_lr}, "
+            f"entropy_coef={args.entropy_coef} vs {paper_entropy}). "
+            f"meta.json paper_hyperparams_passed will be false.",
+            flush=True,
+        )
+    _SINGLE_RUNNER_STATE["meta"]["paper_hyperparams_passed"] = paper_hyperparams_passed
+    _SINGLE_RUNNER_STATE["meta"]["paper_hyperparams_explicit"] = paper_hyperparams_passed
     opponents = [
         OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17 + i)
         for i in range(args.num_envs)
@@ -1098,7 +1129,12 @@ def _run_training_main() -> None:
             "grad_norm_actor", "grad_norm_shared", "grad_norm_mav_head",
             "grad_norm_uav_head", "grad_norm_critic",
             "correction_factor_mean", "correction_factor_max", "correction_factor_min",
-            "paper_mode", "paper_config_passed", "happo_update_granularity",
+            "paper_mode", "paper_config_passed",
+            "actor_lr_effective", "critic_lr_effective",
+            "entropy_coef_effective", "clip_param_effective",
+            "gamma_effective", "gae_lambda_effective",
+            "max_grad_norm_effective", "ppo_epochs_effective",
+            "paper_hyperparams_passed", "happo_update_granularity",
             "agent_update_order", "shared_step_count", "mav_head_step_count",
             "uav_head_step_count", "agent_metrics_json",
             "entropy_mav_raw", "entropy_uav_raw",
@@ -1535,6 +1571,15 @@ def _run_training_main() -> None:
                 f"{stats.get('correction_factor_min', 1.0):.6f}",
                 int(getattr(args, "tam_paper_mode", False) or False),
                 int(getattr(args, "tam_paper_mode", False) or False),
+                f"{float(args.actor_lr):.8f}",
+                f"{float(args.critic_lr):.8f}",
+                f"{float(args.entropy_coef):.6f}",
+                f"{float(args.clip_param):.6f}",
+                f"{float(args.gamma):.6f}",
+                f"{float(args.gae_lambda):.6f}",
+                f"{float(args.max_grad_norm):.4f}",
+                int(args.ppo_epochs),
+                int(paper_hyperparams_passed),
                 str(stats.get("happo_update_granularity", "role")),
                 json.dumps(stats.get("agent_update_order", "role_level") if isinstance(stats.get("agent_update_order"), list) else stats.get("agent_update_order", "role_level")),
                 int(stats.get("shared_step_count", 0)),
@@ -1835,6 +1880,17 @@ def _run_training_main() -> None:
         "tam_action_distribution": action_distribution,
         "action_space": action_space_class,
         "tam_action_levels": action_levels,
+        "actor_lr_effective": float(args.actor_lr),
+        "critic_lr_effective": float(args.critic_lr),
+        "entropy_coef_effective": float(args.entropy_coef),
+        "clip_param_effective": float(args.clip_param),
+        "gamma_effective": float(args.gamma),
+        "gae_lambda_effective": float(args.gae_lambda),
+        "max_grad_norm_effective": float(args.max_grad_norm),
+        "ppo_epochs_effective": int(args.ppo_epochs),
+        "ppo_epochs_source": "CLI_arg",
+        "paper_hyperparams_explicit": getattr(args, "tam_paper_mode", False),
+        "paper_hyperparams_passed": paper_hyperparams_passed,
         **_trainer_contract_meta(policy),
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
