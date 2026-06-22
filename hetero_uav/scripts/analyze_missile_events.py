@@ -1,11 +1,9 @@
 """Analyse missile_events.csv from rich logs.
 
-Outputs summary.json and summary.csv with:
-  - owner_id x raw_termination_reason pivot
-  - shooter_speed_mps by termination reason
-  - owner_id low_speed counts
-  - hit vs low_speed shooter_speed_mps means
-  - red/blue hit rates
+Separates launch rows from termination rows so that fired/hit/speed
+statistics are computed from the correct row types.
+
+Outputs summary.json and summary.csv.
 """
 from __future__ import annotations
 
@@ -27,73 +25,127 @@ if str(ROOT) not in sys.path:
 def analyse(missile_csv: str, output_dir: str) -> dict:
     os.makedirs(output_dir, exist_ok=True)
 
-    rows = []
+    all_rows = []
     with open(missile_csv, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            rows.append(row)
+            all_rows.append(row)
 
-    # -- owner_id x termination reason --
-    reason_by_owner = defaultdict(lambda: defaultdict(int))
-    speed_by_reason = defaultdict(list)
-    # -- red/blue aggregates --
-    red_fired = red_hits = red_low_speed = 0
-    blue_fired = blue_hits = blue_low_speed = 0
-    hit_speeds = []
-    low_speed_speeds = []
-    owner_low_speed = defaultdict(int)
-    owner_hits = defaultdict(int)
+    # ---- split by event_type ----
+    launch_rows = [r for r in all_rows if r.get("event_type", "") == "launch"]
+    term_rows = [r for r in all_rows if r.get("event_type", "") != "launch"]
 
-    for r in rows:
-        team = r.get("owner_team", "")
-        reason = r.get("raw_termination_reason", "") or "in_flight"
+    def _team_rows(rows, team):
+        return [r for r in rows if r.get("owner_team", "") == team]
+
+    red_launch = _team_rows(launch_rows, "red")
+    blue_launch = _team_rows(launch_rows, "blue")
+    red_term = _team_rows(term_rows, "red")
+    blue_term = _team_rows(term_rows, "blue")
+
+    red_launch_count = len(red_launch)
+    blue_launch_count = len(blue_launch)
+    red_term_count = len(red_term)
+    blue_term_count = len(blue_term)
+
+    # ---- termination reason counts (from term_rows only) ----
+    def _reason_counts(rows):
+        counts = defaultdict(int)
+        for r in rows:
+            reason = r.get("raw_termination_reason", "") or "unresolved"
+            counts[reason] += 1
+        return dict(counts)
+
+    red_term_reasons = _reason_counts(red_term)
+    blue_term_reasons = _reason_counts(blue_term)
+
+    red_hit_count = red_term_reasons.get("hit", 0)
+    blue_hit_count = blue_term_reasons.get("hit", 0)
+    red_low_speed_count = red_term_reasons.get("low_speed", 0)
+    blue_low_speed_count = blue_term_reasons.get("low_speed", 0)
+
+    # ---- rates ----
+    red_hit_rate_by_launch = red_hit_count / max(red_launch_count, 1)
+    red_hit_rate_by_terminated = red_hit_count / max(red_term_count, 1)
+    blue_hit_rate_by_launch = blue_hit_count / max(blue_launch_count, 1)
+    blue_hit_rate_by_terminated = blue_hit_count / max(blue_term_count, 1)
+
+    # ---- shooter speed by termination reason (term_rows only) ----
+    def _shooter_speed(rows):
+        speeds = []
+        for r in rows:
+            s = r.get("shooter_speed_mps", "")
+            try:
+                speeds.append(float(s))
+            except (ValueError, TypeError):
+                pass
+        return speeds
+
+    # red-only speeds
+    red_hit_speeds = _shooter_speed([r for r in red_term if r.get("raw_termination_reason", "") == "hit"])
+    red_low_speed_speeds = _shooter_speed([r for r in red_term if r.get("raw_termination_reason", "") == "low_speed"])
+
+    # per-reason speeds (red term only)
+    red_speed_by_reason = {}
+    for reason in sorted(set(r.get("raw_termination_reason", "") or "unresolved" for r in red_term)):
+        speeds_r = _shooter_speed([r for r in red_term if r.get("raw_termination_reason", "") == reason])
+        if speeds_r:
+            red_speed_by_reason[reason] = float(np.mean(speeds_r))
+
+    # all-team hit speeds (for reference, explicitly labelled)
+    all_hit_speeds = _shooter_speed([r for r in term_rows if r.get("raw_termination_reason", "") == "hit"])
+
+    # ---- owner_id x raw_termination_reason (term_rows only) ----
+    owner_reason = defaultdict(lambda: defaultdict(int))
+    for r in term_rows:
         owner = r.get("owner_id", "")
-        shooter_speed = float(r.get("shooter_speed_mps", 0) or 0)
-        reason_by_owner[owner][reason] += 1
-        speed_by_reason[reason].append(shooter_speed)
+        reason = r.get("raw_termination_reason", "") or "unresolved"
+        owner_reason[owner][reason] += 1
 
-        if team == "red":
-            red_fired += 1
-            if reason == "hit":
-                red_hits += 1
-                hit_speeds.append(shooter_speed)
-                owner_hits[owner] += 1
-            if reason == "low_speed":
-                red_low_speed += 1
-                low_speed_speeds.append(shooter_speed)
-                owner_low_speed[owner] += 1
-        elif team == "blue":
-            blue_fired += 1
-            if reason == "hit":
-                blue_hits += 1
-                hit_speeds.append(shooter_speed)
+    red_owner_reason = defaultdict(lambda: defaultdict(int))
+    for r in red_term:
+        owner = r.get("owner_id", "")
+        reason = r.get("raw_termination_reason", "") or "unresolved"
+        red_owner_reason[owner][reason] += 1
 
-    # -- summary dict --
+    # ---- unresolved / in_flight (launches without matching termination) ----
+    launch_ids = set(r.get("missile_id", "") for r in launch_rows)
+    term_ids = set(r.get("missile_id", "") for r in term_rows)
+    unresolved_count = len(launch_ids - term_ids)
+
+    # ---- build summary ----
     summary = {
         "source": str(missile_csv),
-        "total_missiles": len(rows),
+        "launch_rows": len(launch_rows),
+        "termination_rows": len(term_rows),
+        "unresolved_missiles": unresolved_count,
         "red": {
-            "fired": red_fired,
-            "hits": red_hits,
-            "hit_rate": red_hits / max(red_fired, 1),
-            "low_speed": red_low_speed,
-            "low_speed_rate": red_low_speed / max(red_fired, 1),
+            "launch_count": red_launch_count,
+            "term_count": red_term_count,
+            "hit_count": red_hit_count,
+            "low_speed_count": red_low_speed_count,
+            "hit_rate_by_launch": red_hit_rate_by_launch,
+            "hit_rate_by_terminated": red_hit_rate_by_terminated,
+            "low_speed_rate_by_launch": red_low_speed_count / max(red_launch_count, 1),
+            "term_reasons": red_term_reasons,
+            "hit_shooter_speed_mean": float(np.mean(red_hit_speeds)) if red_hit_speeds else 0.0,
+            "low_speed_shooter_speed_mean": float(np.mean(red_low_speed_speeds)) if red_low_speed_speeds else 0.0,
+            "speed_by_reason": red_speed_by_reason,
         },
         "blue": {
-            "fired": blue_fired,
-            "hits": blue_hits,
-            "hit_rate": blue_hits / max(blue_fired, 1),
-            "low_speed": blue_low_speed,
-            "low_speed_rate": blue_low_speed / max(blue_fired, 1),
+            "launch_count": blue_launch_count,
+            "term_count": blue_term_count,
+            "hit_count": blue_hit_count,
+            "low_speed_count": blue_low_speed_count,
+            "hit_rate_by_launch": blue_hit_rate_by_launch,
+            "hit_rate_by_terminated": blue_hit_rate_by_terminated,
+            "term_reasons": blue_term_reasons,
         },
-        "hit_shooter_speed_mean": float(np.mean(hit_speeds)) if hit_speeds else 0.0,
-        "low_speed_shooter_speed_mean": float(np.mean(low_speed_speeds)) if low_speed_speeds else 0.0,
-        "owner_low_speed_counts": dict(owner_low_speed),
-        "owner_hit_counts": dict(owner_hits),
-        "reason_by_owner": {
-            owner: dict(reasons) for owner, reasons in sorted(reason_by_owner.items())
+        "all_team_hit_shooter_speed_mean": float(np.mean(all_hit_speeds)) if all_hit_speeds else 0.0,
+        "owner_reason_from_term_rows": {
+            owner: dict(reasons) for owner, reasons in sorted(owner_reason.items())
         },
-        "speed_by_reason": {
-            reason: float(np.mean(speeds)) for reason, speeds in sorted(speed_by_reason.items())
+        "red_owner_reason_from_term_rows": {
+            owner: dict(reasons) for owner, reasons in sorted(red_owner_reason.items())
         },
     }
 
@@ -109,44 +161,58 @@ def analyse(missile_csv: str, output_dir: str) -> dict:
         w = csv.writer(f)
         w.writerow(["key", "value"])
         for key, val in [
-            ("total_missiles", summary["total_missiles"]),
-            ("red_fired", red_fired),
-            ("red_hits", red_hits),
-            ("red_hit_rate", summary["red"]["hit_rate"]),
-            ("red_low_speed", red_low_speed),
-            ("red_low_speed_rate", summary["red"]["low_speed_rate"]),
-            ("blue_fired", blue_fired),
-            ("blue_hits", blue_hits),
-            ("blue_hit_rate", summary["blue"]["hit_rate"]),
-            ("blue_low_speed", blue_low_speed),
-            ("blue_low_speed_rate", summary["blue"]["low_speed_rate"]),
-            ("hit_shooter_speed_mean", summary["hit_shooter_speed_mean"]),
-            ("low_speed_shooter_speed_mean", summary["low_speed_shooter_speed_mean"]),
+            ("launch_rows", len(launch_rows)),
+            ("termination_rows", len(term_rows)),
+            ("unresolved_missiles", unresolved_count),
+            ("red_launch_count", red_launch_count),
+            ("red_term_count", red_term_count),
+            ("red_hit_count", red_hit_count),
+            ("red_low_speed_count", red_low_speed_count),
+            ("red_hit_rate_by_launch", red_hit_rate_by_launch),
+            ("red_hit_rate_by_terminated", red_hit_rate_by_terminated),
+            ("red_low_speed_rate_by_launch", red_low_speed_count / max(red_launch_count, 1)),
+            ("blue_launch_count", blue_launch_count),
+            ("blue_term_count", blue_term_count),
+            ("blue_hit_count", blue_hit_count),
+            ("blue_low_speed_count", blue_low_speed_count),
+            ("blue_hit_rate_by_launch", blue_hit_rate_by_launch),
+            ("red_hit_shooter_speed_mean", summary["red"]["hit_shooter_speed_mean"]),
+            ("red_low_speed_shooter_speed_mean", summary["red"]["low_speed_shooter_speed_mean"]),
+            ("all_team_hit_shooter_speed_mean", summary["all_team_hit_shooter_speed_mean"]),
         ]:
             w.writerow([key, str(val)])
-        # per-owner low_speed
+        # per-owner red reasons
         w.writerow([])
-        w.writerow(["owner_id", "low_speed_count", "hit_count"])
-        for owner in sorted(set(list(owner_low_speed) + list(owner_hits))):
-            w.writerow([owner, owner_low_speed.get(owner, 0), owner_hits.get(owner, 0)])
+        w.writerow(["owner_id", "low_speed", "hit", "other"])
+        for owner in sorted(red_owner_reason):
+            reasons = red_owner_reason[owner]
+            ls = reasons.get("low_speed", 0)
+            hit = reasons.get("hit", 0)
+            other = sum(v for k, v in reasons.items() if k not in ("low_speed", "hit"))
+            w.writerow([owner, ls, hit, other])
     print(f"Saved: {csv_path}", flush=True)
 
-    # -- Print summary --
+    # -- Print --
     print()
-    print(f"Total missiles: {summary['total_missiles']}")
-    print(f"Red:  fired={red_fired}  hits={red_hits} (rate={summary['red']['hit_rate']:.3f})  "
-          f"low_speed={red_low_speed} (rate={summary['red']['low_speed_rate']:.3f})")
-    print(f"Blue: fired={blue_fired}  hits={blue_hits} (rate={summary['blue']['hit_rate']:.3f})  "
-          f"low_speed={blue_low_speed}")
-    print(f"Hit shooter speed mean:  {summary['hit_shooter_speed_mean']:.1f} m/s")
-    print(f"Low_speed shooter speed: {summary['low_speed_shooter_speed_mean']:.1f} m/s")
+    print(f"Launch rows:   {len(launch_rows)}  (unresolved: {unresolved_count})")
+    print(f"Termination rows: {len(term_rows)}")
+    print(f"Red:  launched={red_launch_count}  terminated={red_term_count}  "
+          f"hits={red_hit_count} (by_launch={red_hit_rate_by_launch:.3f}, by_term={red_hit_rate_by_terminated:.3f})  "
+          f"low_speed={red_low_speed_count}")
+    print(f"Blue: launched={blue_launch_count}  terminated={blue_term_count}  "
+          f"hits={blue_hit_count} (by_launch={blue_hit_rate_by_launch:.3f})")
+    print(f"Red hit shooter speed mean:       {summary['red']['hit_shooter_speed_mean']:.1f} m/s")
+    print(f"Red low_speed shooter speed mean: {summary['red']['low_speed_shooter_speed_mean']:.1f} m/s")
+    print(f"All-team hit shooter speed mean:  {summary['all_team_hit_shooter_speed_mean']:.1f} m/s")
     print()
-    print("Owner low_speed:")
-    for owner, count in sorted(owner_low_speed.items()):
-        print(f"  {owner}: {count}")
+    print("Red owner low_speed:")
+    for owner in sorted(red_owner_reason):
+        ls = red_owner_reason[owner].get("low_speed", 0)
+        if ls > 0:
+            print(f"  {owner}: {ls}")
     print()
-    print("Speed by termination reason:")
-    for reason, spd in summary["speed_by_reason"].items():
+    print("Red speed by termination reason:")
+    for reason, spd in sorted(red_speed_by_reason.items()):
         print(f"  {reason}: {spd:.1f} m/s")
 
     return summary

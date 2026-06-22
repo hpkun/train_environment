@@ -106,6 +106,27 @@ class TestPolicyV2Forward:
         # Different counts -> different values
         assert v_win.item() != v_lose.item()
 
+    def test_critic_counts_no_silent_fallback(self):
+        """value() with explicit counts must differ from default (no counts).
+
+        This guards against the training/eval code path that forgets to pass
+        critic_counts — if value() silently fell back to zeros, the contract
+        test would fail.
+        """
+        policy = HeteroEntityRecurrentPolicy(entity_dim=21)
+        policy.eval()
+        tokens = torch.randn(7, 21)
+        mask = torch.ones(7)
+        all_dead = torch.tensor([0., 3., 0., 4.])  # no red alive
+        with torch.no_grad():
+            v_default = policy.value(tokens, mask, critic_counts=None)
+            v_all_dead = policy.value(tokens, mask, critic_counts=all_dead)
+        # Different inputs -> different outputs (proves critic actually uses counts)
+        assert abs(v_default.item() - v_all_dead.item()) > 1e-6, (
+            "critic_counts must affect value output; "
+            "silent fallback would produce identical values"
+        )
+
     def test_save_load_roundtrip(self, tmp_path):
         policy = HeteroEntityRecurrentPolicy(entity_dim=21)
         path = tmp_path / "test.pt"

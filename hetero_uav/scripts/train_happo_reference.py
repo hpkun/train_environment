@@ -1082,6 +1082,7 @@ def _run_training_main() -> None:
                                 next_value = float(policy.value(
                                     next_adapted["critic_entity_tokens"],
                                     next_adapted["critic_keep_mask"],
+                                    critic_counts=next_adapted.get("critic_counts"),
                                 ).item())
                             else:
                                 next_value = float(policy.value(

@@ -219,6 +219,8 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
                 actor_keep = adapted["actor_keep_mask"].copy()
                 critic_tokens = adapted["critic_entity_tokens"].copy()
                 critic_keep = adapted["critic_keep_mask"].copy()
+                critic_counts = adapted.get("critic_counts",
+                                            np.zeros(4, dtype=np.float32))
                 actor_tokens[~active_rows] = 0.0
                 actor_keep[~active_rows] = 0.0
                 actor_keep[~active_rows, 0] = 1.0
@@ -255,7 +257,9 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
                 if entity_mode:
                     out = policy.act(
                         actor_tokens, actor_keep, roles, critic_tokens, critic_keep,
-                        deterministic=True, **act_kwargs)
+                        deterministic=True,
+                        critic_counts=torch.as_tensor(critic_counts, device=device),
+                        **act_kwargs)
                 else:
                     out = policy.act(
                         torch.as_tensor(actor_obs, device=device), roles=roles,
