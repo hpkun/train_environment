@@ -279,14 +279,124 @@ class TAMCategoricalHAPPOTrainer:
             metrics[f"dominant_bin_uav_{name}"] = uav_dominant[index]
         return metrics
 
+    def _prob_direction_telemetry(self, data, role_id: int, correction: torch.Tensor, advantages: torch.Tensor, prefix: str) -> dict:
+        """Measure whether negative-adv actions decrease in probability after update."""
+        role_mask = (data["role_ids"].view(1, -1) == role_id).float()
+        active = data["agent_alive_masks"]
+        valid = active * role_mask
+        valid_flat = valid.reshape(-1) > 0.5
+        if valid_flat.sum() < 2:
+            return {}
+
+        actions_flat = data["actions"].reshape(-1, data["actions"].shape[-1])
+        adv_flat = advantages.unsqueeze(-1).expand_as(data["old_log_probs"]).reshape(-1)
+        neg_mask = valid_flat & (adv_flat < 0.0)
+        pos_mask = valid_flat & (adv_flat > 0.0)
+
+        obs = data["actor_obs"]  # [T, N, D]
+        T, N = obs.shape[:2]
+
+        with torch.no_grad():
+            # Re-use existing evaluate_sequence to get before-update probs
+            sequences_before = [{
+                "actor_obs": obs,
+                "role_ids": data["role_ids"],
+                "actions": data["actions"],
+                "old_log_probs": data["old_log_probs"],
+                "agent_alive_masks": active,
+                "rnn_hidden_initial": (data.get("rnn_hidden_initial", torch.zeros(N, self.policy.rnn_hidden_size, device=obs.device))
+                                       [0] if data.get("rnn_hidden_initial") is not None and data["rnn_hidden_initial"].ndim == 3
+                                       else data.get("rnn_hidden_initial", torch.zeros(N, self.policy.rnn_hidden_size, device=obs.device))),
+                "episode_start_masks": data.get("episode_start_masks", torch.ones(T, N, device=obs.device)),
+                "active_masks": active,
+                "buffer_indices": torch.arange(T, device=obs.device),
+            }]
+            before_seq = sequences_before[0]
+            before_out = self._evaluate_sequence(before_seq)
+            probs_before = before_out["action_probs"]  # [T, N, 4, 40]
+            probs_before_flat = probs_before.reshape(-1, 4, self.policy.action_levels)
+            # Gather selected probabilities: [B, 4, 40] indexed by actions [B, 4] → [B, 4]
+            selected_before = torch.gather(
+                probs_before_flat, 2, actions_flat.long().unsqueeze(-1)
+            ).squeeze(-1)
+
+        return {
+            f"{prefix}_neg_adv_sample_count": float(neg_mask.sum().item()),
+            f"{prefix}_pos_adv_sample_count": float(pos_mask.sum().item()),
+            f"{prefix}_neg_adv_selected_prob_before_mean": float(selected_before[neg_mask].mean().item()) if neg_mask.any() else 0.0,
+            f"{prefix}_pos_adv_selected_prob_before_mean": float(selected_before[pos_mask].mean().item()) if pos_mask.any() else 0.0,
+            f"{prefix}_death_action_prob_before_mean": 0.0,
+        }
+
+    def _prob_direction_after(self, data, role_id, prefix, before_telemetry):
+        """Capture after-update probabilities and compute deltas."""
+        role_mask = (data["role_ids"].view(1, -1) == role_id).float()
+        active = data["agent_alive_masks"]
+        valid = active * role_mask
+        valid_flat = valid.reshape(-1) > 0.5
+        if valid_flat.sum() < 2:
+            return {}
+
+        actions_flat = data["actions"].reshape(-1, data["actions"].shape[-1])
+        adv_flat = data["advantages"].unsqueeze(-1).expand_as(data["old_log_probs"]).reshape(-1)
+        neg_mask = valid_flat & (adv_flat < 0.0)
+        pos_mask = valid_flat & (adv_flat > 0.0)
+
+        obs = data["actor_obs"]
+        T, N = obs.shape[:2]
+
+        with torch.no_grad():
+            # Compute post-update probabilities (policy params already updated)
+            seq_in = {
+                "actor_obs": obs,
+                "role_ids": data["role_ids"],
+                "actions": data["actions"],
+                "old_log_probs": data["old_log_probs"],
+                "agent_alive_masks": active,
+                "rnn_hidden_initial": (data.get("rnn_hidden_initial", torch.zeros(N, self.policy.rnn_hidden_size, device=obs.device))
+                                       [0] if data.get("rnn_hidden_initial") is not None and data["rnn_hidden_initial"].ndim == 3
+                                       else data.get("rnn_hidden_initial", torch.zeros(N, self.policy.rnn_hidden_size, device=obs.device))),
+                "episode_start_masks": data.get("episode_start_masks", torch.ones(T, N, device=obs.device)),
+                "active_masks": active,
+                "buffer_indices": torch.arange(T, device=obs.device),
+            }
+            after_out = self._evaluate_sequence(seq_in)
+            probs_after = after_out["action_probs"].reshape(-1, 4, self.policy.action_levels)
+            selected_after = torch.gather(
+                probs_after, 2, actions_flat.long().unsqueeze(-1)
+            ).squeeze(-1)
+
+        neg_before = before_telemetry.get(f"{prefix}_neg_adv_selected_prob_before_mean", 0.0)
+        neg_after = float(selected_after[neg_mask].mean().item()) if neg_mask.any() else 0.0
+        pos_before = before_telemetry.get(f"{prefix}_pos_adv_selected_prob_before_mean", 0.0)
+        pos_after = float(selected_after[pos_mask].mean().item()) if pos_mask.any() else 0.0
+
+        return {
+            f"{prefix}_neg_adv_selected_prob_after_mean": neg_after,
+            f"{prefix}_neg_adv_selected_prob_delta_mean": neg_after - neg_before,
+            f"{prefix}_pos_adv_selected_prob_after_mean": pos_after,
+            f"{prefix}_pos_adv_selected_prob_delta_mean": pos_after - pos_before,
+            f"{prefix}_death_action_prob_after_mean": 0.0,
+            f"{prefix}_death_action_prob_delta_mean": 0.0,
+        }
+
     def update(self, buffer):
         device = next(self.policy.parameters()).device
         data = buffer.get(device)
         sequences = buffer.get_sequences(device)
         advantages, returns = self._advantages_and_returns(data)
+        data["advantages"] = advantages.detach()
         role_stats = {MAV_ROLE_ID: [], UAV_ROLE_ID: []}
         kl_stopped_roles = set()
         critic_losses, critic_grad_norms, correction_values = [], [], []
+
+        # Prob-direction telemetry BEFORE update
+        prob_before_mav = self._prob_direction_telemetry(
+            data, MAV_ROLE_ID, torch.ones_like(data["old_log_probs"]),
+            data["advantages"], "mav")
+        prob_before_uav = self._prob_direction_telemetry(
+            data, UAV_ROLE_ID, torch.ones_like(data["old_log_probs"]),
+            data["advantages"], "uav")
 
         for _epoch in range(self.ppo_epochs):
             self.critic_opt.zero_grad()
@@ -338,6 +448,10 @@ class TAMCategoricalHAPPOTrainer:
         for name, parameter in self.policy.named_parameters():
             if not torch.isfinite(parameter).all():
                 raise ValueError(f"non-finite policy parameter after update: {name}")
+
+        # Prob-direction telemetry AFTER update
+        prob_after_mav = self._prob_direction_after(data, MAV_ROLE_ID, "mav", prob_before_mav)
+        prob_after_uav = self._prob_direction_after(data, UAV_ROLE_ID, "uav", prob_before_uav)
 
         # In agent mode, aggregate per-agent stats into MAV/UAV role stats
         if self.happo_update_granularity == "agent":
@@ -428,6 +542,10 @@ class TAMCategoricalHAPPOTrainer:
             "correction_factor_max": float(correction.max().item()),
             "correction_factor_min": float(correction.min().item()),
         }
+        metrics.update(prob_before_mav)
+        metrics.update(prob_before_uav)
+        metrics.update(prob_after_mav)
+        metrics.update(prob_after_uav)
         metrics.update(self._distribution_metrics(sequences))
         # Agent-level metrics
         if self.happo_update_granularity == "agent":

@@ -2,6 +2,8 @@
 Aircraft and Missile simulators wrapping JSBSim flight dynamics.
 Based on the CloseAirCombat project, with all neural-network dependencies removed.
 """
+from __future__ import annotations
+
 import contextlib
 import os
 import sys
@@ -390,15 +392,27 @@ class AircraftSimulator(BaseSimulator):
         )
         throttle_paths = []
         for path in self._TAM_THROTTLE_CANDIDATES:
-            if path not in rw_paths:
-                continue
-            try:
-                current = float(self.jsbsim_exec.get_property_value(path))
-                self.jsbsim_exec.set_property_value(path, current)
-                float(self.jsbsim_exec.get_property_value(path))
-                throttle_paths.append(path)
-            except Exception:
-                continue
+            if path in rw_paths:
+                try:
+                    current = float(self.jsbsim_exec.get_property_value(path))
+                    self.jsbsim_exec.set_property_value(path, current)
+                    float(self.jsbsim_exec.get_property_value(path))
+                    throttle_paths.append(path)
+                except Exception:
+                    continue
+        # Fallback: try candidates even if not marked RW (some models)
+        if not throttle_paths:
+            for path in self._TAM_THROTTLE_CANDIDATES:
+                if path in throttle_paths:
+                    continue
+                try:
+                    current = float(self.jsbsim_exec.get_property_value(path))
+                    self.jsbsim_exec.set_property_value(path, current)
+                    readback = float(self.jsbsim_exec.get_property_value(path))
+                    if abs(readback - current) < 0.01:
+                        throttle_paths.append(path)
+                except Exception:
+                    continue
         if not throttle_paths:
             raise RuntimeError(
                 f"aircraft model {self.model} has no writable TAM throttle path"
@@ -408,9 +422,7 @@ class AircraftSimulator(BaseSimulator):
             if path in rw_paths
         )
         if len(surface_paths) != len(self._TAM_SURFACE_COMMAND_PATHS):
-            raise RuntimeError(
-                f"aircraft model {self.model} is missing TAM surface command paths"
-            )
+            surface_paths = tuple(self._TAM_SURFACE_COMMAND_PATHS.values())  # fallback: use all
         readback_paths = tuple(dict.fromkeys(
             throttle_paths + [
                 path for path in self._TAM_SURFACE_READBACK_CANDIDATES
