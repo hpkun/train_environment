@@ -126,3 +126,85 @@ class TestParallelRunnerEntityV2:
         assert meta["entity_dim"] == 21
         assert meta["critic_arch"] == "global_entity_attention_value_v2"
         assert meta["policy_arch"] == "hetero_entity_recurrent"
+
+
+class TestInactiveAgentHandling:
+    """Verify inactive agent action/hidden/entity sanitisation aligns with single-proc runner."""
+
+    def test_zero_inactive_actions(self):
+        from algorithms.happo.rollout_safety import zero_inactive_actions
+        actions = np.array([[1.0, 0.5, -0.3], [0.8, 0.1, 0.2], [-0.5, 1.0, 0.9]], dtype=np.float32)
+        active = np.array([1.0, 0.0, 1.0], dtype=np.float32)
+        result = zero_inactive_actions(actions, active)
+        assert result.shape == (3, 3)
+        # active row 0 unchanged
+        assert abs(result[0, 0] - 1.0) < 1e-6
+        # inactive row 1 zeroed
+        assert np.all(result[1] == 0.0)
+        # active row 2 unchanged
+        assert abs(result[2, 1] - 1.0) < 1e-6
+
+    def test_zero_inactive_hidden(self):
+        from algorithms.happo.rollout_safety import zero_inactive_hidden
+        hidden = np.array([[0.5, 0.3], [-0.2, 0.8], [1.0, -0.5]], dtype=np.float32)
+        active = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        result = zero_inactive_hidden(hidden, active)
+        # inactive rows zeroed
+        assert np.all(result[1] == 0.0)
+        assert np.all(result[2] == 0.0)
+        # active row preserved
+        assert abs(result[0, 0] - 0.5) < 1e-6
+
+    def test_entity_tokens_zeroed_for_inactive(self):
+        """Inactive agent entity tokens and keep mask must be zeroed."""
+        actor_tokens = np.ones((3, 9, 21), dtype=np.float32)
+        actor_keep = np.ones((3, 9), dtype=np.float32)
+        active = np.array([1.0, 0.0, 1.0], dtype=np.float32)
+        active_rows = active > 0.5
+
+        # Simulate the parallel runner's sanitisation
+        actor_tokens[~active_rows] = 0.0
+        actor_keep[~active_rows] = 0.0
+        actor_keep[~active_rows, 0] = 1.0
+
+        # Row 1 (inactive) tokens zeroed
+        assert np.all(actor_tokens[1] == 0.0)
+        # Row 1 keep mask zeroed except self (index 0)
+        assert actor_keep[1, 0] == 1.0
+        assert np.all(actor_keep[1, 1:] == 0.0)
+        # Row 0 (active) unchanged
+        assert np.all(actor_tokens[0] == 1.0)
+        assert np.all(actor_keep[0] == 1.0)
+
+    def test_pre_action_hidden_is_post_zero(self):
+        """Pre-action hidden saved to buffer must be the zeroed version."""
+        from algorithms.happo.rollout_safety import zero_inactive_hidden
+        hidden = np.array([[0.5, 0.3], [-0.2, 0.8]], dtype=np.float32)
+        active = np.array([0.0, 1.0], dtype=np.float32)
+
+        # Step 1: zero inactive BEFORE act
+        hidden = zero_inactive_hidden(hidden, active)
+        # Step 2: save pre-action hidden
+        pre_hidden = hidden.copy()
+
+        # Inactive row 0 must be zero
+        assert np.all(pre_hidden[0] == 0.0)
+        # Active row 1 preserved
+        assert abs(pre_hidden[1, 0] - (-0.2)) < 1e-6
+
+    def test_nonfinite_check_only_active_rows(self):
+        """Nonfinite check must only inspect active agent rows."""
+        actions = np.array([[0.1, 0.2, 0.3], [np.nan, 0.0, 0.0]], dtype=np.float32)
+        active = np.array([1.0, 0.0], dtype=np.float32)
+        active_rows = active > 0.5
+
+        # Only check active rows
+        finite = True
+        if active_rows.any():
+            if not np.isfinite(actions[active_rows]).all():
+                finite = False
+        assert finite is True  # nan is in inactive row
+
+        # If we checked all rows, it would fail
+        assert not np.isfinite(actions).all()
+

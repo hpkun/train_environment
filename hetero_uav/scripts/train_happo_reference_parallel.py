@@ -61,6 +61,10 @@ _RUNNER_PROGRESS = {
 
 
 from algorithms.happo import HAPPORolloutBuffer, HAPPOReferenceTrainer
+from algorithms.happo.rollout_safety import (
+    zero_inactive_actions,
+    zero_inactive_hidden,
+)
 from algorithms.mappo.opponent_policy import OpponentPolicy
 from eval_checkpoint_selection import (
     best_metric_name,
@@ -761,11 +765,24 @@ def _run_training(args: argparse.Namespace) -> None:
                         ])
                         critic = adapted["critic_state"]
                     active = _build_red_alive_mask_from_info(info, proxy)
+                    active_rows = active > 0.5
+
+                    # ---- Zero inactive hidden BEFORE act (align with single-proc) ----
+                    if rnn_hidden is not None:
+                        rnn_hidden[env_idx] = zero_inactive_hidden(rnn_hidden[env_idx], active)
+                    # Save pre-action hidden AFTER inactive rows are zeroed
                     rnn_hidden_pre = None
                     act_kwargs = {}
                     if rnn_hidden is not None:
                         rnn_hidden_pre = rnn_hidden[env_idx].copy()
                         act_kwargs["rnn_hidden"] = torch.as_tensor(rnn_hidden[env_idx], device=device)
+
+                    # ---- Sanitize entity inputs for inactive rows (entity_mode) ----
+                    if entity_mode:
+                        actor_tokens[~active_rows] = 0.0
+                        actor_keep[~active_rows] = 0.0
+                        actor_keep[~active_rows, 0] = 1.0
+
                     with torch.no_grad():
                         if entity_mode:
                             out = policy.act(
@@ -798,14 +815,26 @@ def _run_training(args: argparse.Namespace) -> None:
                         missile_count=proxy.diag.get("missile_count", ""),
                         sim_time=proxy.diag.get("sim_time", ""),
                     )
-                    actions = out["action"].cpu().numpy()
+
+                    # ---- Zero inactive actions (align with single-proc) ----
+                    actions_raw = out["action"].cpu().numpy()
+                    actions = zero_inactive_actions(actions_raw, active)
                     log_probs = out["log_prob"].cpu().numpy()
                     value = float(out["value"].item())
+
+                    # ---- Zero inactive returned hidden ----
                     if rnn_hidden is not None and "rnn_hidden" in out:
-                        rnn_hidden[env_idx] = out["rnn_hidden"].cpu().numpy()
-                    if np.isnan(actions).any() or np.isnan(value):
-                        nan_detected = True
-                        break
+                        rnn_post = out["rnn_hidden"].cpu().numpy()
+                        rnn_hidden[env_idx] = zero_inactive_hidden(rnn_post, active)
+
+                    # ---- Finite check: only active rows ----
+                    if active_rows.any():
+                        if not np.isfinite(actions[active_rows]).all():
+                            nan_detected = True
+                            break
+                        if not np.isfinite(value):
+                            nan_detected = True
+                            break
                     action_dict = {rid: actions[i].astype(np.float32)
                                    for i, rid in enumerate(proxy.red_ids)}
                     heartbeat.write(
