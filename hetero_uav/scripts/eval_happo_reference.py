@@ -300,8 +300,15 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
     reason_counts = Counter(r["episode_end_reason"] for r in results)
     winner_counts = Counter(r["winner"] for r in results)
     n = max(len(results), 1)
+    num_red = len(env.red_ids)
+    num_blue = len(env.blue_ids)
     red_dead = [r["red_dead"] for r in results]
     blue_dead = [r["blue_dead"] for r in results]
+    red_dead_mean = float(np.mean(red_dead))
+    blue_dead_mean = float(np.mean(blue_dead))
+    red_kill_fraction = blue_dead_mean / max(num_blue, 1)
+    red_loss_fraction = red_dead_mean / max(num_red, 1)
+    net_kill_fraction = red_kill_fraction - red_loss_fraction
     red_win = winner_counts["red"] + winner_counts["red_alive_advantage"]
     blue_win = winner_counts["blue"] + winner_counts["blue_alive_advantage"]
     draw = winner_counts["draw"]
@@ -311,6 +318,7 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
     blue_hits = [m["blue_hits"] for m in missile_stats]
     return {
         "config": cfg_path,
+        "num_red": num_red, "num_blue": num_blue,
         "avg_return": float(np.mean(returns)),
         "avg_length": float(np.mean(lengths)),
         "red_win_rate": red_win / n,
@@ -322,12 +330,15 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
         "red_timeout_alive_advantage_rate": winner_counts["red_alive_advantage"] / n,
         "blue_timeout_alive_advantage_rate": winner_counts["blue_alive_advantage"] / n,
         "timeout_draw_rate": (winner_counts["draw"] / n if reason_counts["timeout"] else 0.0),
+        "red_kill_fraction": red_kill_fraction,
+        "red_loss_fraction": red_loss_fraction,
+        "net_kill_fraction": net_kill_fraction,
         "mav_survival_rate": sum(1 for r in results if r["mav_alive"]) / n,
         "red_alive_final_mean": float(np.mean(red_alive)),
         "blue_alive_final_mean": float(np.mean(blue_alive)),
-        "red_dead_mean": float(np.mean(red_dead)),
-        "blue_dead_mean": float(np.mean(blue_dead)),
-        "kill_death_ratio": float(np.mean(blue_dead) / max(np.mean(red_dead), 1e-6)),
+        "red_dead_mean": red_dead_mean,
+        "blue_dead_mean": blue_dead_mean,
+        "kill_death_ratio": blue_dead_mean / max(red_dead_mean, 1e-6),
         "red_missiles_fired_mean": float(np.mean(red_fired)),
         "blue_missiles_fired_mean": float(np.mean(blue_fired)),
         "red_missile_hits_mean": float(np.mean(red_hits)),
@@ -394,7 +405,10 @@ def main() -> None:
         records.append(record)
         print(f"=== {cfg} ===", flush=True)
         for key in ["avg_return", "avg_length", "red_win_rate", "blue_win_rate",
-                    "draw_rate", "timeout_rate", "mav_survival_rate",
+                    "draw_rate", "timeout_rate",
+                    "red_elimination_win_rate", "red_timeout_alive_advantage_rate",
+                    "red_kill_fraction", "net_kill_fraction",
+                    "mav_survival_rate",
                     "red_missile_hits_mean", "blue_missile_hits_mean"]:
             print(f"{key}: {record[key]}", flush=True)
     if rich_logger is not None:

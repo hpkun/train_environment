@@ -56,7 +56,7 @@ def _entity_policy_meta(policy) -> dict:
     if policy.__class__.__name__ != "HeteroEntityRecurrentPolicy":
         return {}
     return {
-        "feature_schema_version": "hetero_entity_set_v1",
+        "feature_schema_version": "hetero_entity_set_v2",
         "adapter_mode": "hetero_entity_set",
         "actor_obs_format": "entity_tokens_keep_mask",
         "critic_obs_format": "global_entity_tokens_keep_mask",
@@ -69,7 +69,7 @@ def _entity_policy_meta(policy) -> dict:
         "num_attention_heads": policy.num_attention_heads,
         "policy_arch": "hetero_entity_recurrent",
         "actor_arch": "entity_attention_grucell_role_heads",
-        "critic_arch": "global_entity_attention_value",
+        "critic_arch": "global_entity_attention_value_v2",
         "scale_support_mode": "variable_token_count",
         "padding_mode": "keep_mask",
         "policy_class": policy.__class__.__name__,
@@ -342,7 +342,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                 raise ValueError("hetero_entity_recurrent requires a matching checkpoint meta")
             validate_entity_policy_meta(meta)
         return HeteroEntityRecurrentPolicy(
-            entity_dim=int(meta.get("entity_dim", 19)),
+            entity_dim=int(meta.get("entity_dim", 21)),
             action_dim=3,
             hidden_dim=int(meta.get("hidden_dim", 128)),
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
@@ -841,7 +841,7 @@ def _run_training_main() -> None:
             "iteration", "total_steps", "avg_return", "red_win", "blue_win",
             "draw", "timeout", "mav_survival", "red_alive_final",
             "blue_alive_final", "red_missiles_fired", "blue_missiles_fired",
-            "missile_hits", "actor_loss_mav", "actor_loss_uav",
+            "red_missile_hits", "blue_missile_hits", "actor_loss_mav", "actor_loss_uav",
             "critic_loss", "entropy_mav", "entropy_uav",
             "mav_action_saturation_rate", "uav_action_saturation_rate",
             "uav_imitation_loss",
@@ -862,7 +862,10 @@ def _run_training_main() -> None:
             eval_writer.writerow([
                 "total_steps", "iteration", "config", "red_win_rate",
                 "blue_win_rate", "draw_rate", "timeout_rate",
-                "mav_survival_rate", "blue_dead_mean", "red_missile_hits_mean",
+                "red_elimination_win_rate", "red_timeout_alive_advantage_rate",
+                "red_kill_fraction", "net_kill_fraction",
+                "mav_survival_rate", "blue_dead_mean",
+                "red_missile_hits_mean", "blue_missile_hits_mean",
             ])
         last_eval = -999999 if args.eval_at_start else 0
         for iteration in range(1, iterations + 1):
@@ -881,7 +884,7 @@ def _run_training_main() -> None:
                                         critic_dim, 3, roles,
                                         rnn_hidden_size=getattr(policy, 'rnn_hidden_size', 0),
                                         **buffer_kwargs)
-            red_fired = blue_fired = hits = 0
+            red_fired = blue_fired = red_hits = blue_hits = 0
             while len(buffer) < rollout_transitions and total_steps < args.total_env_steps:
                 for env_idx, rollout_env in enumerate(envs):
                     if len(buffer) >= rollout_transitions or total_steps >= args.total_env_steps:
@@ -916,6 +919,8 @@ def _run_training_main() -> None:
                         actor_keep = adapted["actor_keep_mask"].copy()
                         critic_tokens = adapted["critic_entity_tokens"].copy()
                         critic_keep = adapted["critic_keep_mask"].copy()
+                        critic_counts = adapted.get("critic_counts",
+                                                    np.zeros(4, dtype=np.float32))
                         actor_tokens[active <= 0.5] = 0.0
                         actor_keep[active <= 0.5] = 0.0
                         actor_keep[active <= 0.5, 0] = 1.0
@@ -952,7 +957,9 @@ def _run_training_main() -> None:
                                 torch.as_tensor(roles, device=device),
                                 torch.as_tensor(critic_tokens, device=device),
                                 torch.as_tensor(critic_keep, device=device),
-                                deterministic=False, **act_kwargs)
+                                deterministic=False,
+                                critic_counts=torch.as_tensor(critic_counts, device=device),
+                                **act_kwargs)
                         else:
                             out = policy.act(
                                 torch.as_tensor(actor_obs, device=device), roles=roles,
@@ -1089,6 +1096,7 @@ def _run_training_main() -> None:
                             "actor_keep_mask": actor_keep,
                             "critic_entity_tokens": critic_tokens,
                             "critic_keep_mask": critic_keep,
+                            "critic_counts": critic_counts,
                         })
                     buffer.store(
                         actor_obs, critic, actions, log_probs, reward_np, done_np,
@@ -1117,8 +1125,8 @@ def _run_training_main() -> None:
                     if isinstance(mt, dict):
                         red_hit_total = int(mt.get("red", {}).get("hit", 0))
                         blue_hit_total = int(mt.get("blue", {}).get("hit", 0))
-                        hits += max(red_hit_total - prev_hit_totals[env_idx]["red"], 0)
-                        hits += max(blue_hit_total - prev_hit_totals[env_idx]["blue"], 0)
+                        red_hits += max(red_hit_total - prev_hit_totals[env_idx]["red"], 0)
+                        blue_hits += max(blue_hit_total - prev_hit_totals[env_idx]["blue"], 0)
                         prev_hit_totals[env_idx]["red"] = red_hit_total
                         prev_hit_totals[env_idx]["blue"] = blue_hit_total
                     if done:
@@ -1206,7 +1214,7 @@ def _run_training_main() -> None:
                 iteration, total_steps, f"{avg_return:.4f}", f"{red_win:.4f}",
                 f"{blue_win:.4f}", f"{draw:.4f}", f"{timeout:.4f}",
                 f"{mav_surv:.4f}", f"{red_alive:.2f}", f"{blue_alive:.2f}",
-                red_fired, blue_fired, hits, f"{stats['actor_loss_mav']:.6f}",
+                red_fired, blue_fired, red_hits, blue_hits, f"{stats['actor_loss_mav']:.6f}",
                 f"{stats['actor_loss_uav']:.6f}", f"{stats['critic_loss']:.6f}",
                 f"{stats['entropy_mav']:.6f}", f"{stats['entropy_uav']:.6f}",
                 f"{stats['mav_action_saturation_rate']:.6f}",
@@ -1350,8 +1358,12 @@ def _run_training_main() -> None:
                         eval_writer.writerow([
                             total_steps, iteration, r["config"], r["red_win_rate"],
                             r["blue_win_rate"], r["draw_rate"], r["timeout_rate"],
+                            r.get("red_elimination_win_rate", 0.0),
+                            r.get("red_timeout_alive_advantage_rate", 0.0),
+                            r.get("red_kill_fraction", 0.0),
+                            r.get("net_kill_fraction", 0.0),
                             r["mav_survival_rate"], r["blue_dead_mean"],
-                            r["red_missile_hits_mean"],
+                            r["red_missile_hits_mean"], r.get("blue_missile_hits_mean", 0.0),
                         ])
                     eval_f.flush()
                     if args.save_eval_checkpoints:

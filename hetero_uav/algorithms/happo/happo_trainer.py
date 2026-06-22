@@ -118,6 +118,8 @@ class HAPPOReferenceTrainer:
         eval_kwargs = {}
         if "rnn_hidden" in data and data["rnn_hidden"] is not None:
             eval_kwargs["rnn_hidden"] = data["rnn_hidden"]
+        if "critic_counts" in data and data["critic_counts"] is not None:
+            eval_kwargs["critic_counts"] = data["critic_counts"]
         if "actor_entity_tokens" in data:
             result = self.policy.evaluate_actions(
                 data["actor_entity_tokens"], data["actor_keep_mask"], repeated_roles,
@@ -164,8 +166,10 @@ class HAPPOReferenceTrainer:
         else:
             with torch.no_grad():
                 if "critic_entity_tokens" in data:
+                    cc = data.get("critic_counts")
                     next_val = self.policy.value(
-                        data["critic_entity_tokens"][-1:], data["critic_keep_mask"][-1:])
+                        data["critic_entity_tokens"][-1:], data["critic_keep_mask"][-1:],
+                        critic_counts=cc[-1:] if cc is not None else None)
                 else:
                     next_val = self.policy.value(data["critic_state"][-1:])
             all_values = torch.cat([values, next_val])
@@ -184,8 +188,10 @@ class HAPPOReferenceTrainer:
         for _ in range(self.ppo_epochs):
             self.critic_opt.zero_grad()
             if "critic_entity_tokens" in data:
+                cc = data.get("critic_counts")
                 new_values = self.policy.value(
-                    data["critic_entity_tokens"], data["critic_keep_mask"])
+                    data["critic_entity_tokens"], data["critic_keep_mask"],
+                    critic_counts=cc)
             else:
                 new_values = self.policy.value(data["critic_state"])
             critic_loss = F.mse_loss(new_values, returns) * self.value_coef

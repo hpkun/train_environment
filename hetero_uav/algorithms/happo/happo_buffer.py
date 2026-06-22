@@ -39,11 +39,13 @@ class HAPPORolloutBuffer:
                 (max_len, critic_token_count, entity_dim), dtype=np.float32)
             self.critic_keep_mask = np.zeros(
                 (max_len, critic_token_count), dtype=np.float32)
+            self.critic_counts = np.zeros((max_len, 4), dtype=np.float32)
 
     def store(self, actor_obs, critic_state, actions, log_probs,
               rewards, dones, value, active_masks, next_value=None, env_id=0,
               rnn_hidden=None, actor_entity_tokens=None, actor_keep_mask=None,
-              critic_entity_tokens=None, critic_keep_mask=None):
+              critic_entity_tokens=None, critic_keep_mask=None,
+              critic_counts=None):
         idx = self.pos
         if actor_obs is not None:
             self.actor_obs[idx] = actor_obs
@@ -65,6 +67,8 @@ class HAPPORolloutBuffer:
             self.actor_keep_mask[idx] = actor_keep_mask
             self.critic_entity_tokens[idx] = critic_entity_tokens
             self.critic_keep_mask[idx] = critic_keep_mask
+            if critic_counts is not None:
+                self.critic_counts[idx] = np.asarray(critic_counts, dtype=np.float32)
         self.pos += 1
 
     def __len__(self):
@@ -93,5 +97,6 @@ class HAPPORolloutBuffer:
                 "actor_keep_mask": torch.as_tensor(self.actor_keep_mask[:n], device=device),
                 "critic_entity_tokens": torch.as_tensor(self.critic_entity_tokens[:n], device=device),
                 "critic_keep_mask": torch.as_tensor(self.critic_keep_mask[:n], device=device),
+                "critic_counts": torch.as_tensor(self.critic_counts[:n], device=device),
             })
         return data

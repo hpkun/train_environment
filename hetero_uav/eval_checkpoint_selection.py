@@ -1,3 +1,9 @@
+"""Combat-oriented checkpoint selection scoring.
+
+v2: rewards elimination wins and kill fractions, penalises timeout
+advantage.  This prevents timeout-survival policies from outscoring
+policies that actually engage and eliminate enemies.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -24,10 +30,30 @@ def eval_record_label(record: dict) -> str:
 
 
 def score_record(record: dict) -> float:
+    """Combat-oriented score that heavily favours elimination wins.
+
+    Timeout alive-advantage wins receive minimal credit.
+    Blue timeout wins and red losses are penalised.
+    """
+    num_red = _as_float(record.get("num_red"), 3.0)
+    num_blue = _as_float(record.get("num_blue"), 2.0)
+    if num_red <= 0:
+        num_red = 3.0
+    if num_blue <= 0:
+        num_blue = 2.0
+
+    red_kill_fraction = _as_float(record.get("blue_dead_mean")) / num_blue
+    red_loss_fraction = _as_float(record.get("red_dead_mean")) / num_red
+    net_kill_fraction = red_kill_fraction - red_loss_fraction
+
     return (
-        _as_float(record.get("red_win_rate"))
+        3.0 * _as_float(record.get("red_elimination_win_rate"))
+        + 1.0 * red_kill_fraction
+        + 0.5 * net_kill_fraction
         + 0.2 * _as_float(record.get("red_missile_hits_mean"))
-        + 0.2 * _as_float(record.get("blue_dead_mean"))
+        + 0.1 * _as_float(record.get("red_timeout_alive_advantage_rate"))
+        - 0.5 * _as_float(record.get("blue_timeout_alive_advantage_rate"))
+        - 0.5 * red_loss_fraction
     )
 
 
@@ -63,22 +89,21 @@ def best_metric_name(best_name: str) -> str:
 
 
 def selected_eval_metrics(record: dict) -> dict[str, Any]:
+    """Extended eval metrics including combat-oriented fields."""
     keys = [
         "config",
-        "avg_return",
-        "avg_length",
-        "red_win_rate",
-        "blue_win_rate",
-        "draw_rate",
-        "timeout_rate",
+        "num_red", "num_blue",
+        "avg_return", "avg_length",
+        "red_win_rate", "blue_win_rate", "draw_rate", "timeout_rate",
         "red_elimination_win_rate",
         "red_timeout_alive_advantage_rate",
+        "blue_timeout_alive_advantage_rate",
+        "red_kill_fraction", "red_loss_fraction", "net_kill_fraction",
         "mav_survival_rate",
-        "red_missiles_fired_mean",
-        "red_missile_hits_mean",
-        "blue_dead_mean",
-        "red_alive_final_mean",
-        "blue_alive_final_mean",
+        "red_missiles_fired_mean", "blue_missiles_fired_mean",
+        "red_missile_hits_mean", "blue_missile_hits_mean",
+        "blue_dead_mean", "red_dead_mean",
+        "red_alive_final_mean", "blue_alive_final_mean",
         "nan_detected",
     ]
     return {key: record.get(key) for key in keys if key in record}

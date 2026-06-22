@@ -1,4 +1,8 @@
-"""Variable-token recurrent entity policy with an entity-based critic."""
+"""Variable-token recurrent entity policy with an entity-based critic.
+
+v2: entity_dim 19 -> 21, critic receives all entities (dead included)
+    with alive_flag, plus side-alive counts.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,20 +17,29 @@ from .happo_policy import MAV_ROLE_ID, UAV_ROLE_ID
 
 ENTITY_POLICY_META_EXPECTED = {
     "action_dim": 3,
-    "feature_schema_version": "hetero_entity_set_v1",
+    "feature_schema_version": "hetero_entity_set_v2",
     "adapter_mode": "hetero_entity_set",
     "actor_obs_format": "entity_tokens_keep_mask",
     "critic_obs_format": "global_entity_tokens_keep_mask",
     "role_vocab": ["mav", "attack_uav", "scout_uav", "interceptor_uav"],
     "actor_arch": "entity_attention_grucell_role_heads",
-    "critic_arch": "global_entity_attention_value",
-    "entity_dim": 19,
+    "critic_arch": "global_entity_attention_value_v2",
+    "entity_dim": 21,
     "role_dim": 4,
     "observation_adapter": "HeteroEntitySetAdapter",
 }
+# v1 schema — detect and reject
+V1_SCHEMA = "hetero_entity_set_v1"
 
 
 def validate_entity_policy_meta(meta: dict) -> None:
+    schema = meta.get("feature_schema_version", "")
+    if schema == V1_SCHEMA:
+        raise ValueError(
+            "hetero_entity_recurrent v1 checkpoint is incompatible with v2 adapter. "
+            "v2 uses entity_dim=21 (with alive_flag + observed_flag) and a different "
+            "critic architecture. Retrain from scratch with v2."
+        )
     for field, expected in ENTITY_POLICY_META_EXPECTED.items():
         if meta.get(field) != expected:
             raise ValueError(
@@ -69,19 +82,44 @@ class _EntityAttention(nn.Module):
 
 
 class _GlobalEntityCritic(nn.Module):
-    def __init__(self, entity_dim: int, hidden_dim: int, num_heads: int):
+    """Entity-based critic that sees all entities (dead included) with alive_flag.
+
+    v2: receives critic_counts (red_alive, red_total, blue_alive, blue_total)
+    concatenated to the attention-pooled encoding before the value head.
+    This prevents the critic from being blind to kill/advantage differences.
+    """
+
+    def __init__(self, entity_dim: int, hidden_dim: int, num_heads: int,
+                 count_feat_dim: int = 4):
         super().__init__()
         self.encoder = _EntityAttention(entity_dim, hidden_dim, num_heads)
-        self.value_head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1))
+        self.count_feat_dim = count_feat_dim
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden_dim + count_feat_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1),
+        )
 
-    def forward(self, tokens: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
-        return self.value_head(self.encoder(tokens, keep_mask, pool_ego=False)).squeeze(-1)
+    def forward(self, tokens: torch.Tensor, keep_mask: torch.Tensor,
+                counts: torch.Tensor | None = None) -> torch.Tensor:
+        pooled = self.encoder(tokens, keep_mask, pool_ego=False)
+        if counts is not None:
+            c = counts.to(pooled.dtype)
+            if c.ndim == 1:
+                c = c.unsqueeze(0).expand(pooled.shape[0], -1)
+        else:
+            c = torch.zeros(pooled.shape[0], self.count_feat_dim, dtype=pooled.dtype, device=pooled.device)
+        pooled = torch.cat([pooled, c], dim=-1)
+        return self.value_head(pooled).squeeze(-1)
 
 
 class HeteroEntityRecurrentPolicy(nn.Module):
-    """Shared entity encoder + GRUCell + heterogeneous action heads."""
+    """Shared entity encoder + GRUCell + heterogeneous action heads.
 
-    def __init__(self, entity_dim=19, action_dim=3, hidden_dim=128,
+    v2: entity_dim=21, critic receives all entities + side-alive counts.
+    """
+
+    def __init__(self, entity_dim=21, action_dim=3, hidden_dim=128,
                  rnn_hidden_size=128, num_attention_heads=4):
         super().__init__()
         if int(action_dim) != 3:
@@ -97,7 +135,8 @@ class HeteroEntityRecurrentPolicy(nn.Module):
         self.mav_actor = self._head()
         self.uav_actor = self._head()
         self.critic = _GlobalEntityCritic(
-            self.entity_dim, self.hidden_dim, self.num_attention_heads)
+            self.entity_dim, self.hidden_dim, self.num_attention_heads,
+            count_feat_dim=4)
         initial = float(np.log(0.3))
         self.action_log_std_mav = nn.Parameter(torch.full((3,), initial))
         self.action_log_std_uav = nn.Parameter(torch.full((3,), initial))
@@ -112,7 +151,8 @@ class HeteroEntityRecurrentPolicy(nn.Module):
         return list(self.actor_encoder.parameters()) + list(self.rnn.parameters())
 
     def init_hidden(self, batch: int, device=None):
-        return torch.zeros(batch, self.rnn_hidden_size, device=device or next(self.parameters()).device)
+        return torch.zeros(batch, self.rnn_hidden_size,
+                          device=device or next(self.parameters()).device)
 
     def _actor_features(self, tokens, keep_mask, rnn_hidden):
         leading = tokens.shape[:-2]
@@ -139,7 +179,7 @@ class HeteroEntityRecurrentPolicy(nn.Module):
 
     def act(self, actor_entity_tokens, actor_keep_mask, roles,
             critic_entity_tokens, critic_keep_mask, deterministic=False,
-            rnn_hidden=None):
+            rnn_hidden=None, critic_counts=None):
         device = next(self.parameters()).device
         tokens = torch.as_tensor(actor_entity_tokens, dtype=torch.float32, device=device)
         keep = torch.as_tensor(actor_keep_mask, dtype=torch.bool, device=device)
@@ -152,7 +192,7 @@ class HeteroEntityRecurrentPolicy(nn.Module):
         dist, means = self._distribution(hidden, role_ids)
         actions = means if deterministic else dist.rsample()
         actions = actions.clamp(-1.0, 1.0)
-        value = self.value(critic_entity_tokens, critic_keep_mask)
+        value = self.value(critic_entity_tokens, critic_keep_mask, critic_counts)
         return {
             "action": actions.reshape(*leading, self.action_dim),
             "log_prob": dist.log_prob(actions).sum(-1).reshape(*leading),
@@ -165,17 +205,18 @@ class HeteroEntityRecurrentPolicy(nn.Module):
 
     def evaluate_actions(self, actor_entity_tokens, actor_keep_mask, roles,
                          critic_entity_tokens, critic_keep_mask, actions,
-                         rnn_hidden=None):
+                         rnn_hidden=None, critic_counts=None):
         tokens = actor_entity_tokens.float()
         keep = actor_keep_mask.bool()
         role_ids = roles.long()
         if rnn_hidden is None:
-            rnn_hidden = self.init_hidden(int(np.prod(tokens.shape[:-2])), tokens.device).reshape(
-                *tokens.shape[:-2], self.rnn_hidden_size)
+            rnn_hidden = self.init_hidden(
+                int(np.prod(tokens.shape[:-2])), tokens.device
+            ).reshape(*tokens.shape[:-2], self.rnn_hidden_size)
         hidden, leading = self._actor_features(tokens, keep, rnn_hidden)
         dist, means = self._distribution(hidden, role_ids)
         flat_actions = actions.reshape(-1, self.action_dim)
-        values = self.value(critic_entity_tokens, critic_keep_mask)
+        values = self.value(critic_entity_tokens, critic_keep_mask, critic_counts)
         return (
             dist.log_prob(flat_actions).sum(-1).reshape(*leading),
             dist.entropy().sum(-1).reshape(*leading),
@@ -185,14 +226,19 @@ class HeteroEntityRecurrentPolicy(nn.Module):
             hidden.reshape(*leading, self.rnn_hidden_size),
         )
 
-    def value(self, critic_entity_tokens, critic_keep_mask):
+    def value(self, critic_entity_tokens, critic_keep_mask, critic_counts=None):
         device = next(self.parameters()).device
         tokens = torch.as_tensor(critic_entity_tokens, dtype=torch.float32, device=device)
         keep = torch.as_tensor(critic_keep_mask, dtype=torch.bool, device=device)
+        counts_t = None
+        if critic_counts is not None:
+            counts_t = torch.as_tensor(critic_counts, dtype=torch.float32, device=device)
         if tokens.ndim == 2:
             tokens = tokens.unsqueeze(0)
             keep = keep.unsqueeze(0)
-        return self.critic(tokens, keep)
+            if counts_t is not None and counts_t.ndim == 1:
+                counts_t = counts_t.unsqueeze(0)
+        return self.critic(tokens, keep, counts_t)
 
     def save(self, path: str | Path):
         torch.save(self.state_dict(), path)
