@@ -73,6 +73,7 @@ from scripts.train_happo_reference import (
     HeartbeatLogger,
     HeartbeatStallWatchdog,
     _build_policy,
+    _entity_policy_meta,
     _eval_checkpoint_extra,
     _load_uav_imitation_dataset,
     _reject_unsafe_random_scale_mask,
@@ -381,7 +382,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"])
+                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"])
     parser.add_argument("--brma-random-scale-mask", action="store_true")
     parser.add_argument("--brma-biased-mask", action="store_true")
     parser.add_argument("--brma-random-mask-prob", type=float, default=0.25)
@@ -404,7 +405,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-configs", nargs="*", default=None)
     parser.add_argument("--save-eval-checkpoints", action="store_true")
     parser.add_argument("--eval-checkpoint-metric", default="combined",
-                        choices=["combined", "3v2", "5v4"])
+                        choices=["combined", "3v2", "5v4", "7v6"])
     parser.add_argument("--keep-eval-checkpoints", type=int, default=20)
     parser.add_argument("--init-checkpoint", default=None)
     parser.add_argument("--uav-imitation-dataset", default=None)
@@ -505,7 +506,9 @@ def _run_training(args: argparse.Namespace) -> None:
         args.device = "cpu"
 
     from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
+    from uav_env.JSBSim.adapters.hetero_entity_set_adapter import HeteroEntitySetAdapter
 
+    entity_mode = args.policy_arch == "hetero_entity_recurrent"
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -537,9 +540,14 @@ def _run_training(args: argparse.Namespace) -> None:
     _RUNNER_RESOURCES["vec_env"] = vec_env
     proxies = [RemoteEnvProxy(meta, diag) for meta, diag in zip(vec_env.metas, vec_env.diags)]
     env = proxies[0]
-    adapter = HeteroObsAdapterV2()
-    actor_dim = adapter.flat_actor_obs_dim
-    critic_dim = adapter.critic_state_dim
+    if entity_mode:
+        adapter = HeteroEntitySetAdapter()
+        actor_dim = 0
+        critic_dim = 0
+    else:
+        adapter = HeteroObsAdapterV2()
+        actor_dim = adapter.flat_actor_obs_dim
+        critic_dim = adapter.critic_state_dim
     roles = vec_env.metas[0]["role_ids"]
     if any(meta["red_ids"] != env.red_ids or meta["blue_ids"] != env.blue_ids for meta in vec_env.metas):
         raise RuntimeError("parallel workers returned inconsistent agent ids")
@@ -548,7 +556,7 @@ def _run_training(args: argparse.Namespace) -> None:
     if args.init_checkpoint:
         init_path_for_meta = _rel(args.init_checkpoint)
         init_meta_path = init_path_for_meta.parent / "meta.json"
-        if args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"} and not init_meta_path.exists():
+        if args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"} and not init_meta_path.exists():
             raise ValueError(
                 f"{args.policy_arch} init checkpoint requires meta.json with policy_arch={args.policy_arch}"
             )
@@ -648,7 +656,7 @@ def _run_training(args: argparse.Namespace) -> None:
     prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(args.num_envs)]
     nan_detected = False
     best_score = -float("inf")
-    eval_best_scores = {"best_3v2": -float("inf"), "best_5v4": -float("inf"), "best_combined": -float("inf")}
+    eval_best_scores = {"best_3v2": -float("inf"), "best_5v4": -float("inf"), "best_7v6": -float("inf"), "best_combined": -float("inf")}
     last_eval = -999999 if args.eval_at_start else 0
     worker_restart_count = 0
     rollout_aborted_count = 0
@@ -667,7 +675,7 @@ def _run_training(args: argparse.Namespace) -> None:
             "iteration", "total_steps", "avg_return", "red_win", "blue_win",
             "draw", "timeout", "mav_survival", "red_alive_final",
             "blue_alive_final", "red_missiles_fired", "blue_missiles_fired",
-            "missile_hits", "actor_loss_mav", "actor_loss_uav",
+            "red_missile_hits", "blue_missile_hits", "actor_loss_mav", "actor_loss_uav",
             "critic_loss", "entropy_mav", "entropy_uav",
             "mav_action_saturation_rate", "uav_action_saturation_rate",
             "uav_imitation_loss", "entropy_mav_valid_count",
@@ -688,7 +696,10 @@ def _run_training(args: argparse.Namespace) -> None:
             eval_writer.writerow([
                 "total_steps", "iteration", "config", "red_win_rate",
                 "blue_win_rate", "draw_rate", "timeout_rate",
-                "mav_survival_rate", "blue_dead_mean", "red_missile_hits_mean",
+                "red_elimination_win_rate", "red_timeout_alive_advantage_rate",
+                "red_kill_fraction", "net_kill_fraction",
+                "mav_survival_rate", "blue_dead_mean",
+                "red_missile_hits_mean", "blue_missile_hits_mean",
             ])
 
         for iteration in range(1, iterations + 1):
@@ -696,11 +707,19 @@ def _run_training(args: argparse.Namespace) -> None:
             rollout_transitions = min(transitions_per_rollout, args.total_env_steps - total_steps)
             if rollout_transitions <= 0:
                 break
+            buffer_kwargs = {}
+            if entity_mode:
+                buffer_kwargs = {
+                    "actor_token_count": len(env.red_ids) + len(env.blue_ids),
+                    "critic_token_count": len(env.red_ids) + len(env.blue_ids),
+                    "entity_dim": adapter.entity_dim,
+                }
             buffer = HAPPORolloutBuffer(
                 rollout_transitions, len(env.red_ids), actor_dim, critic_dim, 3,
                 roles, rnn_hidden_size=getattr(policy, "rnn_hidden_size", 0),
+                **buffer_kwargs,
             )
-            red_fired = blue_fired = hits = 0
+            red_fired = blue_fired = red_hits = blue_hits = 0
             rollout_aborted = False
 
             while len(buffer) < rollout_transitions and total_steps < args.total_env_steps:
@@ -726,11 +745,21 @@ def _run_training(args: argparse.Namespace) -> None:
                     )
                     adapted = adapter.adapt_all(
                         obs, info=info, red_ids=proxy.red_ids, blue_ids=proxy.blue_ids)
-                    actor_obs = np.stack([
-                        adapted["actor_obs"].get(rid, np.zeros(actor_dim, dtype=np.float32))
-                        for rid in proxy.red_ids
-                    ])
-                    critic = adapted["critic_state"]
+                    if entity_mode:
+                        actor_obs = None
+                        critic = None
+                        actor_tokens = adapted["actor_entity_tokens"].copy()
+                        actor_keep = adapted["actor_keep_mask"].copy()
+                        critic_tokens = adapted["critic_entity_tokens"].copy()
+                        critic_keep = adapted["critic_keep_mask"].copy()
+                        critic_counts_t = adapted.get("critic_counts",
+                                                      np.zeros(4, dtype=np.float32))
+                    else:
+                        actor_obs = np.stack([
+                            adapted["actor_obs"].get(rid, np.zeros(actor_dim, dtype=np.float32))
+                            for rid in proxy.red_ids
+                        ])
+                        critic = adapted["critic_state"]
                     active = _build_red_alive_mask_from_info(info, proxy)
                     rnn_hidden_pre = None
                     act_kwargs = {}
@@ -738,13 +767,25 @@ def _run_training(args: argparse.Namespace) -> None:
                         rnn_hidden_pre = rnn_hidden[env_idx].copy()
                         act_kwargs["rnn_hidden"] = torch.as_tensor(rnn_hidden[env_idx], device=device)
                     with torch.no_grad():
-                        out = policy.act(
-                            torch.as_tensor(actor_obs, device=device),
-                            roles=roles,
-                            critic_state=torch.as_tensor(critic, device=device),
-                            deterministic=False,
-                            **act_kwargs,
-                        )
+                        if entity_mode:
+                            out = policy.act(
+                                torch.as_tensor(actor_tokens, device=device),
+                                torch.as_tensor(actor_keep, device=device),
+                                torch.as_tensor(roles, device=device),
+                                torch.as_tensor(critic_tokens, device=device),
+                                torch.as_tensor(critic_keep, device=device),
+                                deterministic=False,
+                                critic_counts=torch.as_tensor(critic_counts_t, device=device),
+                                **act_kwargs,
+                            )
+                        else:
+                            out = policy.act(
+                                torch.as_tensor(actor_obs, device=device),
+                                roles=roles,
+                                critic_state=torch.as_tensor(critic, device=device),
+                                deterministic=False,
+                                **act_kwargs,
+                            )
                     heartbeat.write(
                         "after_policy_act",
                         iteration=iteration,
@@ -803,6 +844,11 @@ def _run_training(args: argparse.Namespace) -> None:
                         "active": active,
                         "rnn_hidden_pre": rnn_hidden_pre,
                         "rollout_local_step": rollout_local_step,
+                        "actor_tokens": actor_tokens if entity_mode else None,
+                        "actor_keep": actor_keep if entity_mode else None,
+                        "critic_tokens": critic_tokens if entity_mode else None,
+                        "critic_keep": critic_keep if entity_mode else None,
+                        "critic_counts": critic_counts_t if entity_mode else None,
                     })
                 if nan_detected or not batch_records:
                     break
@@ -895,12 +941,27 @@ def _run_training(args: argparse.Namespace) -> None:
                         next_adapted = adapter.adapt_all(
                             next_obs, info=next_info, red_ids=proxy.red_ids, blue_ids=proxy.blue_ids)
                         with torch.no_grad():
-                            next_value = float(policy.value(
-                                torch.as_tensor(next_adapted["critic_state"], device=device).unsqueeze(0)
-                            ).item())
+                            if entity_mode:
+                                next_value = float(policy.value(
+                                    next_adapted["critic_entity_tokens"],
+                                    next_adapted["critic_keep_mask"],
+                                    critic_counts=next_adapted.get("critic_counts"),
+                                ).item())
+                            else:
+                                next_value = float(policy.value(
+                                    torch.as_tensor(next_adapted["critic_state"], device=device).unsqueeze(0)
+                                ).item())
                     store_kwargs = {}
                     if record["rnn_hidden_pre"] is not None:
                         store_kwargs["rnn_hidden"] = record["rnn_hidden_pre"]
+                    if entity_mode:
+                        store_kwargs.update({
+                            "actor_entity_tokens": record["actor_tokens"],
+                            "actor_keep_mask": record["actor_keep"],
+                            "critic_entity_tokens": record["critic_tokens"],
+                            "critic_keep_mask": record["critic_keep"],
+                            "critic_counts": record["critic_counts"],
+                        })
                     buffer.store(
                         record["actor_obs"], record["critic"], record["actions"],
                         record["log_probs"], reward_np, done_np, record["value"],
@@ -929,8 +990,8 @@ def _run_training(args: argparse.Namespace) -> None:
                     if isinstance(mt, dict):
                         red_hit_total = int(mt.get("red", {}).get("hit", 0))
                         blue_hit_total = int(mt.get("blue", {}).get("hit", 0))
-                        hits += max(red_hit_total - prev_hit_totals[env_idx]["red"], 0)
-                        hits += max(blue_hit_total - prev_hit_totals[env_idx]["blue"], 0)
+                        red_hits += max(red_hit_total - prev_hit_totals[env_idx]["red"], 0)
+                        blue_hits += max(blue_hit_total - prev_hit_totals[env_idx]["blue"], 0)
                         prev_hit_totals[env_idx]["red"] = red_hit_total
                         prev_hit_totals[env_idx]["blue"] = blue_hit_total
                     if done:
@@ -1017,7 +1078,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 iteration, total_steps, f"{avg_return:.4f}", f"{red_win:.4f}",
                 f"{blue_win:.4f}", f"{draw:.4f}", f"{timeout:.4f}",
                 f"{mav_surv:.4f}", f"{red_alive:.2f}", f"{blue_alive:.2f}",
-                red_fired, blue_fired, hits, f"{stats['actor_loss_mav']:.6f}",
+                red_fired, blue_fired, red_hits, blue_hits, f"{stats['actor_loss_mav']:.6f}",
                 f"{stats['actor_loss_uav']:.6f}", f"{stats['critic_loss']:.6f}",
                 f"{stats['entropy_mav']:.6f}", f"{stats['entropy_uav']:.6f}",
                 f"{stats['mav_action_saturation_rate']:.6f}",
@@ -1058,7 +1119,7 @@ def _run_training(args: argparse.Namespace) -> None:
                     "blue_alive_final_mean": blue_alive,
                     "red_missiles_fired_mean": red_fired / max(args.num_envs, 1),
                     "blue_missiles_fired_mean": blue_fired / max(args.num_envs, 1),
-                    "red_missile_hits_mean": hits / max(args.num_envs, 1),
+                    "red_missile_hits_mean": red_hits / max(args.num_envs, 1),
                     "actor_loss": (stats["actor_loss_mav"] + stats["actor_loss_uav"]) / 2.0,
                     "critic_loss": stats["critic_loss"],
                     "entropy": (stats["entropy_mav"] + stats["entropy_uav"]) / 2.0,
@@ -1090,14 +1151,15 @@ def _run_training(args: argparse.Namespace) -> None:
                     "policy_arch": args.policy_arch,
                     "actor_obs_dim": actor_dim,
                     "critic_state_dim": critic_dim,
-                    "entity_dim": getattr(policy, "entity_dim", None),
-                    "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-                    "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-                    "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+                    "entity_dim": getattr(policy, "entity_dim", 21),
+                    "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+                    "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+                    "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
                     "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
                     "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
                     "biased_mask": bool(getattr(policy, "biased_mask", False)),
                     "random_mask_prob": float(getattr(policy, "random_mask_prob", 0.0)),
+                    **_entity_policy_meta(policy),
                 }
                 (out_dir / "_tmp_eval_meta.json").write_text(json.dumps(tmp_meta, indent=2), encoding="utf-8")
                 (out_dir / "meta.json").unlink(missing_ok=True)
@@ -1111,8 +1173,12 @@ def _run_training(args: argparse.Namespace) -> None:
                         eval_writer.writerow([
                             total_steps, iteration, r["config"], r["red_win_rate"],
                             r["blue_win_rate"], r["draw_rate"], r["timeout_rate"],
+                            r.get("red_elimination_win_rate", 0.0),
+                            r.get("red_timeout_alive_advantage_rate", 0.0),
+                            r.get("red_kill_fraction", 0.0),
+                            r.get("net_kill_fraction", 0.0),
                             r["mav_survival_rate"], r["blue_dead_mean"],
-                            r["red_missile_hits_mean"],
+                            r["red_missile_hits_mean"], r.get("blue_missile_hits_mean", 0.0),
                         ])
                     eval_f.flush()
                     if args.save_eval_checkpoints:
@@ -1132,7 +1198,7 @@ def _run_training(args: argparse.Namespace) -> None:
                         eval_ckpt_dir = out_dir / "eval_checkpoints" / f"step_{total_steps:06d}"
                         _save_policy_checkpoint(policy, eval_ckpt_dir, meta)
                         _prune_eval_checkpoints(out_dir / "eval_checkpoints", args.keep_eval_checkpoints)
-                        for best_name in ("best_3v2", "best_5v4", "best_combined"):
+                        for best_name in ("best_3v2", "best_5v4", "best_7v6", "best_combined"):
                             metric_name = best_metric_name(best_name)
                             metric_score = float(meta["scores"].get(metric_name, 0.0))
                             if metric_score > eval_best_scores[best_name]:
@@ -1175,9 +1241,9 @@ def _run_training(args: argparse.Namespace) -> None:
         "separate_actors": True,
         "centralized_critic": True,
         "sequential_update": True,
-        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked"},
-        "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked"},
+        "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+        "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+        "recurrent": args.policy_arch in {"brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
         "rnn_hidden_size": getattr(policy, "rnn_hidden_size", None),
         "random_scale_mask": bool(getattr(policy, "random_scale_mask", False)),
         "biased_mask": bool(getattr(policy, "biased_mask", False)),
@@ -1193,6 +1259,8 @@ def _run_training(args: argparse.Namespace) -> None:
         "total_env_steps_actual": total_steps,
         "episodes": episodes,
         "nan_detected": nan_detected,
+        "observation_adapter": "HeteroEntitySetAdapter" if entity_mode else "HeteroObsAdapterV2",
+        **_entity_policy_meta(policy),
     }
     (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
