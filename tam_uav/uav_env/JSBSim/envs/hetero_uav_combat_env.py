@@ -82,6 +82,18 @@ HAPPO_REF_V0_REWARD_COMPONENT_KEYS = (
     "death_penalty",
 )
 
+TAM_PAPER_MAV_COMPONENT_KEYS = (
+    "tam_mav_safety", "tam_mav_dist", "tam_mav_threat", "tam_mav_aspect",
+    "tam_mav_support", "tam_mav_pos", "tam_mav_aware", "tam_mav_event",
+    "tam_mav_death", "tam_mav_team_bonus", "tam_paper_reward_v1_total",
+)
+TAM_PAPER_UAV_COMPONENT_KEYS = (
+    "tam_uav_height", "tam_uav_speed", "tam_uav_angle", "tam_uav_distance",
+    "tam_uav_dodge", "tam_uav_dodge_angle", "tam_uav_dodge_speed",
+    "tam_uav_event", "tam_uav_kill", "tam_uav_death",
+    "tam_uav_out_of_zone", "tam_paper_reward_v1_total",
+)
+
 
 class HeteroUavCombatEnv(UavCombatEnv):
     """BRMA environment with per-agent aircraft model, role, and missile count.
@@ -103,18 +115,27 @@ class HeteroUavCombatEnv(UavCombatEnv):
         action_trim_by_type: dict | None = None,
         action_trim_by_agent: dict | None = None,
         hetero_reward_mode: str = "brma_legacy",
+        tam_paper_reward_v1: dict | None = None,
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
-        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0"}:
+        if hetero_reward_mode not in {
+            "brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0",
+            "tam_paper_reward_v1",
+        }:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
+        self.tam_paper_reward_config = deepcopy(tam_paper_reward_v1 or {})
+        if hetero_reward_mode == "tam_paper_reward_v1" and not self.tam_paper_reward_config:
+            raise ValueError("tam_paper_reward_v1 mode requires its config block")
         # Cached per-step obs for reward overlay (minimal_v1 / role_v1)
         self._last_step_obs: dict = {}
         # First-death detection for MAV — penalize once per episode
         self._mav_death_penalized: bool = False
         # First-death detection per UAV (role_v1)
         self._uav_death_penalized: set[str] = set()
+        self._tam_paper_out_of_zone_penalized: set[str] = set()
+        self._tam_paper_missile_speed_cache: dict[str, float] = {}
         if observation_mode not in {"brma_sensor", "mav_shared_geo"}:
             raise ValueError(f"unknown observation_mode: {observation_mode}")
         self.observation_mode = observation_mode
@@ -216,7 +237,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
     def step(self, actions: dict):
         trimmed = self._apply_action_trim(actions)
         obs, rewards, terminated, truncated, info = super().step(trimmed)
-        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0"}:
+        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "tam_paper_reward_v1"}:
             self._last_step_obs = obs
         return obs, rewards, terminated, truncated, info
 
@@ -224,8 +245,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._last_step_obs = {}
         self._mav_death_penalized = False
         self._uav_death_penalized = set()
+        self._tam_paper_out_of_zone_penalized = set()
+        self._tam_paper_missile_speed_cache = {}
         obs, info = super().reset(*args, **kwargs)
-        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0"}:
+        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "tam_paper_reward_v1"}:
             self._last_step_obs = obs
         return obs, info
 
@@ -484,9 +507,259 @@ class HeteroUavCombatEnv(UavCombatEnv):
             for key in HAPPO_REF_V0_REWARD_COMPONENT_KEYS:
                 comp.setdefault(key, 0.0)
 
+    @staticmethod
+    def _tam_paper_feature(sim) -> np.ndarray:
+        position = np.asarray(sim.get_position(), dtype=np.float64)
+        velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
+        return np.asarray([
+            position[0], position[1], -position[2],
+            velocity[0], velocity[1], -velocity[2],
+        ], dtype=np.float64)
+
+    @staticmethod
+    def _tam_paper_uav_distance_reward(distance_m: float) -> float:
+        distance_km = float(distance_m) / 1000.0
+        if distance_km <= 5.0:
+            return 1.0
+        if distance_km < 10.0:
+            return float(np.exp(-0.921 * (distance_km - 5.0)))
+        return -1.0
+
+    @staticmethod
+    def _tam_paper_speed_reward(red_speed: float, blue_speed: float) -> float:
+        red_speed = max(float(red_speed), 1e-8)
+        blue_speed = float(blue_speed)
+        if blue_speed < 0.5 * red_speed:
+            return 1.0
+        if blue_speed <= 1.5 * red_speed:
+            return float(2.0 - 2.0 * blue_speed / red_speed)
+        return -1.0
+
+    def _tam_paper_height_reward(self, altitude_m: float) -> float:
+        geometry = self.tam_paper_reward_config["geometry"]
+        minimum = float(geometry["min_altitude_m"])
+        optimum = float(geometry["optimal_altitude_m"])
+        maximum = float(geometry["max_altitude_m"])
+        if altitude_m < minimum:
+            return -1.0
+        if altitude_m > maximum:
+            return -0.5
+        value = 1.0 - abs(float(altitude_m) - optimum) / (maximum - minimum)
+        return float(np.clip(value, 0.0, 1.0))
+
+    def _tam_paper_alive_blue(self) -> list:
+        return [sim for sim in self.blue_planes.values() if sim.is_alive]
+
+    def _tam_paper_mav_reward(self, mav_id: str, mav, alive_blue: list) -> tuple[float, dict]:
+        cfg = self.tam_paper_reward_config
+        mav_cfg = cfg["mav"]
+        safety_weights = mav_cfg["safety_weights"]
+        support_weights = mav_cfg["support_weights"]
+        values = {key: 0.0 for key in TAM_PAPER_MAV_COMPONENT_KEYS}
+
+        if mav.is_alive and alive_blue:
+            distances = [self._distance_m(mav, blue) for blue in alive_blue]
+            nearest_distance = min(distances)
+            danger = float(mav_cfg["d_danger_m"])
+            safe = float(mav_cfg["d_safe_m"])
+            if nearest_distance < danger:
+                r_dist = -(1.0 - nearest_distance / danger)
+            elif nearest_distance < safe:
+                r_dist = -0.5 * (1.0 - (nearest_distance - danger) / (safe - danger))
+            else:
+                r_dist = 0.2
+
+            incoming = [
+                missile for missile in getattr(mav, "under_missiles", [])
+                if getattr(missile, "is_alive", False)
+            ]
+            r_threat = -1.0 if incoming else 0.0
+            mav_feature = self._tam_paper_feature(mav)
+            r_aspect = 0.0
+            r_aware = 0.0
+            for blue in alive_blue:
+                # get2d_AO_TA_R returns (MAV attack angle AO,
+                # blue-to-MAV target-aspect threat angle TA, range).
+                ao, ta, distance = get2d_AO_TA_R(
+                    mav_feature, self._tam_paper_feature(blue)
+                )
+                if ta < np.pi / 4.0:
+                    r_aspect -= 1.0 - ta / (np.pi / 4.0)
+                if distance <= self.mav_observation_range_m and ao < np.pi / 2.0:
+                    r_aware += 0.3 * (1.0 - ao / (np.pi / 2.0))
+
+            centroid = np.mean(
+                [np.asarray(blue.get_position(), dtype=np.float64) for blue in alive_blue],
+                axis=0,
+            )
+            d_b = float(np.linalg.norm(np.asarray(mav.get_position()) - centroid))
+            d_opt = float(mav_cfg["d_opt_m"])
+            d_max = float(mav_cfg["d_max_m"])
+            if d_b < d_opt:
+                r_pos = d_b / d_opt - 1.0
+            elif d_b < d_max:
+                r_pos = 1.0 - (d_b - d_opt) / (d_max - d_opt)
+            else:
+                r_pos = -0.5
+
+            r_safety = (
+                float(safety_weights["dist"]) * r_dist
+                + float(safety_weights["threat"]) * r_threat
+                + float(safety_weights["aspect"]) * r_aspect
+            )
+            r_support = (
+                float(support_weights["pos"]) * r_pos
+                + float(support_weights["aware"]) * r_aware
+            )
+            values.update({
+                "tam_mav_safety": r_safety,
+                "tam_mav_dist": r_dist,
+                "tam_mav_threat": r_threat,
+                "tam_mav_aspect": r_aspect,
+                "tam_mav_support": r_support,
+                "tam_mav_pos": r_pos,
+                "tam_mav_aware": r_aware,
+            })
+
+        if not mav.is_alive and not self._mav_death_penalized:
+            values["tam_mav_death"] = -float(mav_cfg["death_penalty"])
+            self._mav_death_penalized = True
+        team_kills = sum(
+            int(self._step_kill_count.get(rid, 0))
+            for rid in self.red_ids if rid != mav_id
+        )
+        per_kill = min(
+            float(mav_cfg["team_kill_bonus"]),
+            float(mav_cfg["team_kill_bonus_cap"]),
+        )
+        values["tam_mav_team_bonus"] = team_kills * per_kill
+        values["tam_mav_event"] = (
+            values["tam_mav_death"] + values["tam_mav_team_bonus"]
+        )
+        total = (
+            values["tam_mav_safety"] + values["tam_mav_support"]
+            + values["tam_mav_event"]
+        ) * float(cfg["global_scale"])
+        values["tam_paper_reward_v1_total"] = float(total)
+        return float(total), values
+
+    def _tam_paper_dodge_reward(self, sim) -> tuple[float, float, float]:
+        cfg = self.tam_paper_reward_config["uav"]
+        incoming = [
+            missile for missile in getattr(sim, "under_missiles", [])
+            if getattr(missile, "is_alive", False)
+        ]
+        if not incoming:
+            return 0.0, 0.0, 0.0
+        candidates = []
+        for missile in incoming:
+            velocity = np.asarray(missile.get_velocity(), dtype=np.float64)
+            los = np.asarray(sim.get_position(), dtype=np.float64) - np.asarray(
+                missile.get_position(), dtype=np.float64
+            )
+            speed = float(np.linalg.norm(velocity))
+            denominator = speed * float(np.linalg.norm(los))
+            cosine = float(np.dot(velocity, los) / denominator) if denominator > 1e-8 else 1.0
+            r_angle = -float(np.clip(cosine, -1.0, 1.0))
+            uid = str(getattr(missile, "_uid", id(missile)))
+            previous_speed = self._tam_paper_missile_speed_cache.get(uid)
+            r_speed = 0.0 if previous_speed is None else (
+                previous_speed - speed
+            ) / float(cfg["v_norm_mps"])
+            self._tam_paper_missile_speed_cache[uid] = speed
+            candidates.append((r_angle + r_speed, r_angle, r_speed))
+        return max(candidates, key=lambda item: item[0])
+
+    def _tam_paper_uav_reward(self, aid: str, sim, alive_blue: list) -> tuple[float, dict]:
+        cfg = self.tam_paper_reward_config
+        uav_cfg = cfg["uav"]
+        weights = uav_cfg["reward_weights"]
+        event_cfg = uav_cfg["event"]
+        values = {key: 0.0 for key in TAM_PAPER_UAV_COMPONENT_KEYS}
+        values["height_formula_source"] = "paper_undefined_PV_PH_v1_approx"
+
+        if sim.is_alive:
+            altitude = float(sim.get_geodetic()[2])
+            r_height = self._tam_paper_height_reward(altitude)
+            if alive_blue:
+                red_speed = float(np.linalg.norm(sim.get_velocity()))
+                red_feature = self._tam_paper_feature(sim)
+                speed_rewards = []
+                angle_rewards = []
+                distance_rewards = []
+                for blue in alive_blue:
+                    ao, ta, distance = get2d_AO_TA_R(
+                        red_feature, self._tam_paper_feature(blue)
+                    )
+                    speed_rewards.append(self._tam_paper_speed_reward(
+                        red_speed, np.linalg.norm(blue.get_velocity())
+                    ))
+                    angle_rewards.append(1.0 - (ao + ta) / np.pi)
+                    distance_rewards.append(self._tam_paper_uav_distance_reward(distance))
+                r_speed = max(speed_rewards)
+                r_angle = max(angle_rewards)
+                r_distance = max(distance_rewards)
+            else:
+                r_speed = r_angle = r_distance = 0.0
+            r_dodge, r_dodge_angle, r_dodge_speed = self._tam_paper_dodge_reward(sim)
+            values.update({
+                "tam_uav_height": float(weights["height"]) * r_height,
+                "tam_uav_speed": float(weights["speed"]) * r_speed,
+                "tam_uav_angle": float(weights["angle"]) * r_angle,
+                "tam_uav_distance": float(weights["distance"]) * r_distance,
+                "tam_uav_dodge": float(weights["dodge"]) * r_dodge,
+                "tam_uav_dodge_angle": r_dodge_angle,
+                "tam_uav_dodge_speed": r_dodge_speed,
+            })
+
+        kills = int(self._step_kill_count.get(aid, 0))
+        values["tam_uav_kill"] = kills * float(event_cfg["kill_enemy"])
+        if not sim.is_alive and aid not in self._uav_death_penalized:
+            values["tam_uav_death"] = float(event_cfg["death"])
+            self._uav_death_penalized.add(aid)
+        horizontal_distance = float(np.linalg.norm(
+            np.asarray(sim.get_position(), dtype=np.float64)[:2]
+        ))
+        if (
+            horizontal_distance > float(cfg["geometry"]["combat_zone_radius_m"])
+            and aid not in self._tam_paper_out_of_zone_penalized
+        ):
+            values["tam_uav_out_of_zone"] = float(event_cfg["out_of_zone"])
+            self._tam_paper_out_of_zone_penalized.add(aid)
+        values["tam_uav_event"] = (
+            values["tam_uav_kill"] + values["tam_uav_death"]
+            + values["tam_uav_out_of_zone"]
+        )
+        total = sum(values[key] for key in (
+            "tam_uav_height", "tam_uav_speed", "tam_uav_angle",
+            "tam_uav_distance", "tam_uav_dodge", "tam_uav_event",
+        )) * float(cfg["global_scale"])
+        values["tam_paper_reward_v1_total"] = float(total)
+        return float(total), values
+
+    def _compute_tam_paper_reward_v1(self, base_rewards: dict, components: dict):
+        alive_blue = self._tam_paper_alive_blue()
+        mav_id = next((
+            aid for aid in self.red_ids if self.agent_roles.get(aid) == "mav"
+        ), self.red_ids[0] if self.red_ids else None)
+        for rid in self.red_ids:
+            sim = self.red_planes.get(rid)
+            if sim is None:
+                continue
+            if rid == mav_id:
+                reward, comp = self._tam_paper_mav_reward(rid, sim, alive_blue)
+            else:
+                reward, comp = self._tam_paper_uav_reward(rid, sim, alive_blue)
+            base_rewards[rid] = reward
+            components[rid] = comp
+        return base_rewards, components
+
     def _compute_rewards(self) -> tuple[dict, dict]:
         """Override to add minimal hetero role-aware overlay."""
         base_rewards, components = super()._compute_rewards()
+
+        if self.hetero_reward_mode == "tam_paper_reward_v1":
+            return self._compute_tam_paper_reward_v1(base_rewards, components)
 
         if self.hetero_reward_mode not in {"minimal_v1", "role_v1", "happo_ref_v0"}:
             return base_rewards, components
