@@ -586,6 +586,8 @@ def _run_eval(model_path: str, args, summary_json: str) -> list[dict] | None:
         "--summary-json", summary_json,
         "--configs", *(args.eval_configs or DEFAULT_EVAL_CONFIGS),
     ]
+    if getattr(args, "stochastic_eval", False):
+        cmd.append("--stochastic-eval")
     result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True,
                             encoding="utf-8", errors="replace", timeout=1200)
     if result.returncode != 0:
@@ -643,7 +645,16 @@ def _policy_arch_meta(args, policy) -> dict:
         "critic_arch": (
             "centralized_attention" if categorical else "centralized_mlp"
         ),
+        "train_sampling_mode": "stochastic",
+        "eval_deterministic": not bool(getattr(args, "stochastic_eval", False)),
+        "eval_action_selection": (
+            "sample" if getattr(args, "stochastic_eval", False) else "argmax"
+        ),
     }
+
+
+def _train_rollout_deterministic() -> bool:
+    return False
 
 
 def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int, action_dim: int,
@@ -840,6 +851,10 @@ def _run_training_main() -> None:
     parser.add_argument("--eval-at-start", action="store_true")
     parser.add_argument("--train-eval-episodes", type=int, default=1)
     parser.add_argument("--eval-configs", nargs="*", default=None)
+    parser.add_argument(
+        "--stochastic-eval", action="store_true",
+        help="Diagnostic-only eval sampling; training rollout remains stochastic.",
+    )
     parser.add_argument("--save-eval-checkpoints", action="store_true",
                         help="Save every eval checkpoint and maintain best_3v2/best_5v4/best_combined.")
     parser.add_argument("--eval-checkpoint-metric", default="combined",
@@ -1086,6 +1101,15 @@ def _run_training_main() -> None:
             "paper_mode", "paper_config_passed", "happo_update_granularity",
             "agent_update_order", "shared_step_count", "mav_head_step_count",
             "uav_head_step_count", "agent_metrics_json",
+            "entropy_mav_raw", "entropy_uav_raw",
+            "entropy_mav_per_axis_mean", "entropy_uav_per_axis_mean",
+            "entropy_bonus_mav", "entropy_bonus_uav",
+            "actor_surrogate_loss_mav_abs", "actor_surrogate_loss_uav_abs",
+            "entropy_to_policy_loss_ratio_mav", "entropy_to_policy_loss_ratio_uav",
+            "advantage_mean_red_0", "advantage_std_red_0",
+            "advantage_min_red_0", "advantage_max_red_0",
+            "active_sample_count_red_0", "death_transition_count_red_0",
+            "death_transition_used_for_actor_red_0",
             "nan_detected",
         ])
         eval_writer = None
@@ -1098,6 +1122,7 @@ def _run_training_main() -> None:
                 "blue_win_rate", "draw_rate", "timeout_rate",
                 "mav_survival_rate", "red_uav_fired_mean", "red_uav_hits_mean",
                 "blue_dead_mean", "red_missile_hits_mean", "avg_episode_len",
+                "eval_deterministic", "train_sampling_mode", "eval_action_selection",
             ])
         last_eval = -999999 if args.eval_at_start else 0
         for iteration in range(1, iterations + 1):
@@ -1170,7 +1195,7 @@ def _run_training_main() -> None:
                             torch.as_tensor(actor_obs, device=device),
                             roles=roles,
                             critic_state=torch.as_tensor(critic, device=device),
-                            deterministic=False,
+                            deterministic=_train_rollout_deterministic(),
                             **act_kwargs,
                         )
                     # ---- Zero out actions for inactive agents ----
@@ -1288,6 +1313,10 @@ def _run_training_main() -> None:
                         truncated=bool(all(truncated.values())) if truncated else False,
                     )
                     reward_np = np.array([float(rewards.get(rid, 0.0)) for rid in rollout_env.red_ids], dtype=np.float32)
+                    next_active = _build_red_alive_mask(
+                        next_info, rollout_env, rollout_env.red_ids
+                    )
+                    death_transition_masks = active * (1.0 - next_active)
                     done = _team_done(terminated, truncated)
                     done_np = np.full((len(rollout_env.red_ids),), float(done), dtype=np.float32)
                     if done:
@@ -1310,6 +1339,7 @@ def _run_training_main() -> None:
                             len(env.red_ids), float(episode_start_pending[env_idx]),
                             dtype=np.float32,
                         ),
+                        death_transition_masks=death_transition_masks,
                         **store_kwargs)
                     rollout_env_step[env_idx] += 1
                     episode_start_pending[env_idx] = False
@@ -1511,6 +1541,17 @@ def _run_training_main() -> None:
                 int(stats.get("mav_head_step_count", 0)),
                 int(stats.get("uav_head_step_count", 0)),
                 json.dumps(_build_agent_metrics_json(stats, env.red_ids)),
+                *[f"{stats.get(key, 0.0):.6f}" for key in (
+                    "entropy_mav_raw", "entropy_uav_raw",
+                    "entropy_mav_per_axis_mean", "entropy_uav_per_axis_mean",
+                    "entropy_bonus_mav", "entropy_bonus_uav",
+                    "actor_surrogate_loss_mav_abs", "actor_surrogate_loss_uav_abs",
+                    "entropy_to_policy_loss_ratio_mav", "entropy_to_policy_loss_ratio_uav",
+                    "advantage_mean_red_0", "advantage_std_red_0",
+                    "advantage_min_red_0", "advantage_max_red_0",
+                    "active_sample_count_red_0", "death_transition_count_red_0",
+                    "death_transition_used_for_actor_red_0",
+                )],
                 int(nan_detected),
             ])
             if rich_logger is not None:
@@ -1698,6 +1739,9 @@ def _run_training_main() -> None:
                             uav_fired, uav_hits,
                             r["blue_dead_mean"], r["red_missile_hits_mean"],
                             avg_len,
+                            r.get("eval_deterministic", not args.stochastic_eval),
+                            "stochastic",
+                            r.get("eval_action_selection", "sample" if args.stochastic_eval else "argmax"),
                         ])
                     eval_f.flush()
                     if args.save_eval_checkpoints:

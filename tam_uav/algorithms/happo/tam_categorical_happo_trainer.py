@@ -116,7 +116,7 @@ class TAMCategoricalHAPPOTrainer:
 
     def _update_role(
         self, sequences, advantages, correction, role_id, optimizer, params,
-        force_skip_by_kl=False,
+        force_skip_by_kl=False, agent_index=None,
     ):
         if self.shared_actor_opt is not None:
             self.shared_actor_opt.zero_grad()
@@ -132,6 +132,10 @@ class TAMCategoricalHAPPOTrainer:
             out = self._evaluate_sequence(sequence)
             indices = sequence["buffer_indices"]
             role_mask = (sequence["role_ids"].view(1, -1) == role_id).float()
+            if agent_index is not None:
+                agent_mask = torch.zeros_like(role_mask)
+                agent_mask[:, agent_index] = 1.0
+                role_mask = role_mask * agent_mask
             valid = sequence["agent_alive_masks"] * role_mask
             old = sequence["old_log_probs"]
             ratio = torch.exp(out["log_prob"] - old)
@@ -192,6 +196,10 @@ class TAMCategoricalHAPPOTrainer:
                 out = self._evaluate_sequence(sequence)
                 indices = sequence["buffer_indices"]
                 role_mask = (sequence["role_ids"].view(1, -1) == role_id)
+                if agent_index is not None:
+                    agent_mask = torch.zeros_like(role_mask)
+                    agent_mask[:, agent_index] = True
+                    role_mask = role_mask & agent_mask
                 valid = (sequence["agent_alive_masks"] > 0.5) & role_mask
                 role_ratio = self.role_importance_ratio(
                     out["log_prob"], sequence["old_log_probs"]
@@ -305,6 +313,7 @@ class TAMCategoricalHAPPOTrainer:
                     agent_stats[agent_id].append(self._update_role(
                         sequences, advantages, correction, role_id, optimizer, params,
                         force_skip_by_kl=role_id in kl_stopped_roles,
+                        agent_index=agent_index,
                     ))
                     if agent_stats[agent_id][-1][7] > 0.0:
                         kl_stopped_roles.add(role_id)
@@ -341,14 +350,50 @@ class TAMCategoricalHAPPOTrainer:
         mav = np.asarray(role_stats[MAV_ROLE_ID], dtype=np.float64)
         uav = np.asarray(role_stats[UAV_ROLE_ID], dtype=np.float64)
         correction = torch.cat(correction_values)
+        mav_entropy = float(mav[:, 1].mean()) if len(mav) else 0.0
+        uav_entropy = float(uav[:, 1].mean()) if len(uav) else 0.0
+        mav_actor_loss = float(mav[:, 0].mean()) if len(mav) else 0.0
+        uav_actor_loss = float(uav[:, 0].mean()) if len(uav) else 0.0
+        red0_active = data["active_masks"][:, 0] > 0.5
+        red0_advantages = advantages[red0_active]
+        red0_deaths = data.get(
+            "death_transition_masks", torch.zeros_like(data["active_masks"])
+        )[:, 0] > 0.5
+
+        def _finite_ratio(numerator, denominator):
+            return float(numerator / max(abs(denominator), 1e-8))
+
         metrics = {
             "happo_update_granularity": self.happo_update_granularity,
             "agent_update_order": self.agent_ids if self.happo_update_granularity == "agent" else "role_level",
-            "actor_loss_mav": float(mav[:, 0].mean()) if len(mav) else 0.0,
-            "actor_loss_uav": float(uav[:, 0].mean()) if len(uav) else 0.0,
+            "actor_loss_mav": mav_actor_loss,
+            "actor_loss_uav": uav_actor_loss,
             "critic_loss": float(np.mean(critic_losses)),
-            "entropy_mav": float(mav[:, 1].mean()),
-            "entropy_uav": float(uav[:, 1].mean()),
+            "entropy_mav": mav_entropy,
+            "entropy_uav": uav_entropy,
+            "entropy_mav_raw": mav_entropy,
+            "entropy_uav_raw": uav_entropy,
+            "entropy_mav_per_axis_mean": mav_entropy / 4.0,
+            "entropy_uav_per_axis_mean": uav_entropy / 4.0,
+            "entropy_bonus_mav": self.role_entropy_coef[MAV_ROLE_ID] * mav_entropy,
+            "entropy_bonus_uav": self.role_entropy_coef[UAV_ROLE_ID] * uav_entropy,
+            "actor_surrogate_loss_mav_abs": abs(mav_actor_loss),
+            "actor_surrogate_loss_uav_abs": abs(uav_actor_loss),
+            "entropy_to_policy_loss_ratio_mav": _finite_ratio(
+                self.role_entropy_coef[MAV_ROLE_ID] * mav_entropy, mav_actor_loss
+            ),
+            "entropy_to_policy_loss_ratio_uav": _finite_ratio(
+                self.role_entropy_coef[UAV_ROLE_ID] * uav_entropy, uav_actor_loss
+            ),
+            "advantage_mean_red_0": float(red0_advantages.mean().item()) if red0_advantages.numel() else 0.0,
+            "advantage_std_red_0": float(red0_advantages.std(unbiased=False).item()) if red0_advantages.numel() else 0.0,
+            "advantage_min_red_0": float(red0_advantages.min().item()) if red0_advantages.numel() else 0.0,
+            "advantage_max_red_0": float(red0_advantages.max().item()) if red0_advantages.numel() else 0.0,
+            "active_sample_count_red_0": float(red0_active.sum().item()),
+            "death_transition_count_red_0": float(red0_deaths.sum().item()),
+            "death_transition_used_for_actor_red_0": float(
+                (red0_deaths & red0_active).sum().item()
+            ),
             "approx_kl_mav": float(mav[:, 2].mean()),
             "approx_kl_uav": float(uav[:, 2].mean()),
             "mav_actor_lr_effective": self.mav_actor_lr_effective,

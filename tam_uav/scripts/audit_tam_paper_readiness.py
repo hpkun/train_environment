@@ -20,6 +20,7 @@ def main():
     p.add_argument("--config", default="uav_env/JSBSim/configs/tam_happo_f22_3v2_direct.yaml")
     p.add_argument("--eval-config", default="uav_env/JSBSim/configs/tam_happo_f22_5v4_direct.yaml")
     p.add_argument("--output-dir", default="outputs/tam_paper_readiness")
+    p.add_argument("--strict", action="store_true")
     args = p.parse_args()
 
     out_dir = ROOT / args.output_dir

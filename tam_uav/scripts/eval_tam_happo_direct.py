@@ -44,6 +44,11 @@ DEFAULT_CONFIGS = [
 ]
 
 
+def _eval_deterministic(args) -> bool:
+    """Evaluation is argmax unless stochastic sampling is explicitly requested."""
+    return not bool(getattr(args, "stochastic_eval", False))
+
+
 def _load_meta(model_path: Path) -> dict:
     meta_path = model_path.parent / "meta.json"
     if meta_path.exists():
@@ -250,7 +255,7 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
                     torch.as_tensor(actor_obs, device=device),
                     roles=roles,
                     critic_state=torch.as_tensor(critic, device=device),
-                    deterministic=True,
+                    deterministic=_eval_deterministic(args),
                     **act_kwargs,
                 )
             if eval_rnn_hidden is not None and "rnn_hidden" in out:
@@ -310,6 +315,10 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
     red_hits = [m["red_hits"] for m in missile_stats]
     blue_hits = [m["blue_hits"] for m in missile_stats]
     return {
+        "eval_deterministic": _eval_deterministic(args),
+        "eval_action_selection": (
+            "argmax" if _eval_deterministic(args) else "sample"
+        ),
         "config": cfg_path,
         "avg_return": float(np.mean(returns)),
         "avg_length": float(np.mean(lengths)),
@@ -358,6 +367,10 @@ def main() -> None:
     parser.add_argument("--configs", nargs="*", default=None)
     parser.add_argument("--summary-json", default=None)
     parser.add_argument("--max-steps-override", type=int, default=None)
+    parser.add_argument(
+        "--stochastic-eval", action="store_true",
+        help="Diagnostic-only: sample categorical actions instead of argmax.",
+    )
     parser.add_argument("--enable-rich-logging", action="store_true")
     parser.add_argument("--rich-log-dir", default=None)
     args = parser.parse_args()

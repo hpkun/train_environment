@@ -28,6 +28,7 @@ class HAPPORolloutBuffer:
         self.next_values = np.full(max_len, np.nan, dtype=np.float32)
         self.active_masks = np.zeros((max_len, num_red), dtype=np.float32)
         self.agent_alive_masks = np.zeros((max_len, num_red), dtype=np.float32)
+        self.death_transition_masks = np.zeros((max_len, num_red), dtype=np.float32)
         self.episode_start_masks = np.zeros((max_len, num_red), dtype=np.float32)
         self.env_step_index = np.zeros(max_len, dtype=np.int64)
         self.env_ids = np.zeros(max_len, dtype=np.int64)
@@ -46,7 +47,8 @@ class HAPPORolloutBuffer:
 
     def store(self, actor_obs, critic_state, actions, log_probs,
               rewards, dones, value, active_masks, next_value=None, env_id=0,
-              rnn_hidden=None, episode_start_masks=None, env_step_index=None):
+              rnn_hidden=None, episode_start_masks=None, env_step_index=None,
+              death_transition_masks=None):
         idx = self.pos
         self.actor_obs[idx] = actor_obs
         self.critic_state[idx] = critic_state
@@ -59,6 +61,10 @@ class HAPPORolloutBuffer:
             self.next_values[idx] = float(next_value)
         self.active_masks[idx] = active_masks
         self.agent_alive_masks[idx] = active_masks
+        if death_transition_masks is not None:
+            self.death_transition_masks[idx] = np.asarray(
+                death_transition_masks, dtype=np.float32
+            )
         if episode_start_masks is not None:
             self.episode_start_masks[idx] = np.asarray(
                 episode_start_masks, dtype=np.float32
@@ -89,6 +95,9 @@ class HAPPORolloutBuffer:
             "next_values": torch.as_tensor(self.next_values[:n], device=device),
             "active_masks": torch.as_tensor(self.active_masks[:n], device=device),
             "agent_alive_masks": torch.as_tensor(self.agent_alive_masks[:n], device=device),
+            "death_transition_masks": torch.as_tensor(
+                self.death_transition_masks[:n], device=device
+            ),
             "episode_start_masks": torch.as_tensor(self.episode_start_masks[:n], device=device),
             "env_step_index": torch.as_tensor(self.env_step_index[:n], device=device),
             "env_ids": torch.as_tensor(self.env_ids[:n], device=device),
