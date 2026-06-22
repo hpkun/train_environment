@@ -211,6 +211,21 @@ def main():
     # ---- Trainer real-parameter audit ----
     _check_trainer_hyperparams()
 
+    # ---- Advantage mode audit ----
+    manifest_path_am = ROOT / "outputs/tam_paper_run_manifest/manifest.json"
+    if manifest_path_am.exists():
+        m = json.loads(manifest_path_am.read_text(encoding="utf-8"))
+        for cmd_name, cmd in m.get("commands", {}).items():
+            cmd_str = cmd.get("command", "")
+            if "--advantage-mode per_agent_reward" in cmd_str:
+                warn(f"manifest {cmd_name}: advantage_mode=per_agent_reward (ABLATION, not paper main)")
+                check(f"manifest {cmd_name}: advantage_mode is ablation", True,
+                      "per_agent_reward marked as diagnostic only")
+            elif "--advantage-mode" not in cmd_str:
+                check(f"manifest {cmd_name}: advantage_mode defaults to team_average", True)
+            else:
+                check(f"manifest {cmd_name}: advantage_mode=team_average", True)
+
     # ---- Verdict ----
     failed = [c["name"] for c in CHECKS if c["status"] == "FAIL"]
     warned = [c["name"] for c in CHECKS if c["status"] == "WARN"]

@@ -34,11 +34,15 @@ class TAMCategoricalHAPPOTrainer:
         mav_shared_update_mode="full",
         happo_update_granularity: str = "role",
         agent_ids: list[str] | None = None,
+        advantage_mode: str = "team_average",
     ):
         if happo_update_granularity not in ("role", "agent"):
             raise ValueError("happo_update_granularity must be 'role' or 'agent'")
         if getattr(policy, "action_distribution", None) != "multidiscrete_categorical":
             raise ValueError("TAMCategoricalHAPPOTrainer requires categorical policy")
+        self.advantage_mode = str(advantage_mode)
+        if self.advantage_mode not in ("team_average", "per_agent_reward"):
+            raise ValueError(f"advantage_mode must be team_average or per_agent_reward, got {advantage_mode}")
         self.policy = policy
         self.shared_actor_params = _unique_parameters(policy.actor_shared_parameters())
         self.mav_params = _unique_parameters(policy.mav_actor.parameters())
@@ -92,17 +96,50 @@ class TAMCategoricalHAPPOTrainer:
     def _advantages_and_returns(self, data):
         active = data["active_masks"]
         valid_count = active.sum(-1).clamp(min=1.0)
-        team_reward = (data["rewards"] * active).sum(-1) / valid_count
         team_dones = data["dones"][:, 0].float()
         next_values = data["next_values"]
         if torch.isnan(next_values).any():
             raise ValueError("categorical sequence trainer requires per-step next_values")
+
+        if self.advantage_mode == "per_agent_reward":
+            # Per-agent GAE: each agent gets own advantage from its own reward stream.
+            # Critic target remains team-average scalar (returns) for critic loss.
+            T, N = data["rewards"].shape
+            per_agent_advantages = torch.zeros(T, N, device=data["rewards"].device)
+            for agent_idx in range(N):
+                agent_reward = data["rewards"][:, agent_idx]
+                agent_active = active[:, agent_idx]
+                agent_valid_count = agent_active.sum().clamp(min=1)
+                if agent_valid_count <= 0:
+                    continue
+                agent_adv, _agent_ret = _compute_grouped_gae(
+                    agent_reward, data["values"], next_values, team_dones,
+                    data["env_ids"], self.gamma, self.gae_lambda,
+                )
+                per_agent_advantages[:, agent_idx] = agent_adv
+            # Also compute team-average returns for critic target
+            team_reward = (data["rewards"] * active).sum(-1) / valid_count
+            _team_adv, returns = _compute_grouped_gae(
+                team_reward, data["values"], next_values, team_dones,
+                data["env_ids"], self.gamma, self.gae_lambda,
+            )
+            # Normalize per-agent advantages
+            if per_agent_advantages.numel() > 1:
+                flat = per_agent_advantages.reshape(-1)
+                per_agent_advantages = (per_agent_advantages - flat.mean()) / (flat.std() + 1e-8)
+            # Return [T,N] advantages, [T] returns
+            self._last_per_agent_adv = per_agent_advantages.detach()
+            return per_agent_advantages.detach(), returns.detach()
+
+        # Default team_average mode: scalar team-level advantage
+        team_reward = (data["rewards"] * active).sum(-1) / valid_count
         advantages, returns = _compute_grouped_gae(
             team_reward, data["values"], next_values, team_dones,
             data["env_ids"], self.gamma, self.gae_lambda,
         )
         if advantages.numel() > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        self._last_per_agent_adv = None
         return advantages.detach(), returns.detach()
 
     def _evaluate_sequence(self, sequence):
@@ -139,7 +176,15 @@ class TAMCategoricalHAPPOTrainer:
             valid = sequence["agent_alive_masks"] * role_mask
             old = sequence["old_log_probs"]
             ratio = torch.exp(out["log_prob"] - old)
-            corrected_advantage = advantages[indices].unsqueeze(-1) * correction[indices]
+            # Select advantage: per-agent [T,N] or team-average [T]
+            if advantages.ndim == 2 and agent_index is not None:
+                adv_slice = advantages[indices, agent_index].unsqueeze(-1)
+            elif advantages.ndim == 2:
+                # Role-level with per-agent advantage: use role-mean
+                adv_slice = (advantages[indices] * role_mask).sum(-1, keepdim=True) / role_mask.sum(-1, keepdim=True).clamp(min=1)
+            else:
+                adv_slice = advantages[indices].unsqueeze(-1)
+            corrected_advantage = adv_slice * correction[indices]
             surrogate1 = ratio * corrected_advantage
             surrogate2 = torch.clamp(
                 ratio,
@@ -289,7 +334,11 @@ class TAMCategoricalHAPPOTrainer:
             return {}
 
         actions_flat = data["actions"].reshape(-1, data["actions"].shape[-1])
-        adv_flat = advantages.unsqueeze(-1).expand_as(data["old_log_probs"]).reshape(-1)
+        # Handle both [T] and [T,N] advantage shapes
+        if advantages.ndim == 2:
+            adv_flat = advantages.reshape(-1)
+        else:
+            adv_flat = advantages.unsqueeze(-1).expand_as(data["old_log_probs"]).reshape(-1)
         neg_mask = valid_flat & (adv_flat < 0.0)
         pos_mask = valid_flat & (adv_flat > 0.0)
 
@@ -338,7 +387,11 @@ class TAMCategoricalHAPPOTrainer:
             return {}
 
         actions_flat = data["actions"].reshape(-1, data["actions"].shape[-1])
-        adv_flat = data["advantages"].unsqueeze(-1).expand_as(data["old_log_probs"]).reshape(-1)
+        # Handle both [T] and [T,N] advantage shapes
+        if data["advantages"].ndim == 2:
+            adv_flat = data["advantages"].reshape(-1)
+        else:
+            adv_flat = data["advantages"].unsqueeze(-1).expand_as(data["old_log_probs"]).reshape(-1)
         neg_mask = valid_flat & (adv_flat < 0.0)
         pos_mask = valid_flat & (adv_flat > 0.0)
 
@@ -469,7 +522,7 @@ class TAMCategoricalHAPPOTrainer:
         mav_actor_loss = float(mav[:, 0].mean()) if len(mav) else 0.0
         uav_actor_loss = float(uav[:, 0].mean()) if len(uav) else 0.0
         red0_active = data["active_masks"][:, 0] > 0.5
-        red0_advantages = advantages[red0_active]
+        red0_advantages = advantages[red0_active] if advantages.ndim == 1 else advantages[red0_active, 0]
         red0_deaths = data.get(
             "death_transition_masks", torch.zeros_like(data["active_masks"])
         )[:, 0] > 0.5
@@ -547,6 +600,11 @@ class TAMCategoricalHAPPOTrainer:
             "correction_factor_mean": float(correction.mean().item()),
             "correction_factor_max": float(correction.max().item()),
             "correction_factor_min": float(correction.min().item()),
+            "advantage_mode": self.advantage_mode,
+            "per_agent_advantage_enabled": int(self.advantage_mode == "per_agent_reward"),
+            "critic_target_mode": "team_average_scalar",
+            "advantage_shape": "[T,N]" if self.advantage_mode == "per_agent_reward" else "[T]",
+            "dilution_ratio_abs": 1.0 / 3.0 if self.advantage_mode == "team_average" else 1.0,
         }
         metrics.update(prob_before_mav)
         metrics.update(prob_before_uav)

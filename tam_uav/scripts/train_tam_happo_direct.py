@@ -813,6 +813,9 @@ def _run_training_main() -> None:
     parser.add_argument("--opponent-policy", default="tam_direct_fsm",
                         choices=["tam_direct_fsm"])
     parser.add_argument("--reward-mode", default="happo_ref_v0")
+    parser.add_argument("--advantage-mode", default="team_average",
+                        choices=["team_average", "per_agent_reward"],
+                        help="Advantage computation mode. team_average=scalar team GAE (default paper-mode). per_agent_reward=per-agent GAE (diagnostic ablation only).")
     parser.add_argument("--ppo-epochs", type=int, default=2)
     parser.add_argument("--entropy-coef", type=float, default=0.02)
     parser.add_argument("--actor-lr", type=float, default=2e-4)
@@ -992,6 +995,7 @@ def _run_training_main() -> None:
         max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
         gamma=args.gamma, gae_lambda=args.gae_lambda,
         happo_update_granularity=granularity,
+        advantage_mode=args.advantage_mode,
         agent_ids=env.red_ids if hasattr(env, 'red_ids') else None,
         **role_update_kwargs,
     )
@@ -1134,7 +1138,10 @@ def _run_training_main() -> None:
             "entropy_coef_effective", "clip_param_effective",
             "gamma_effective", "gae_lambda_effective",
             "max_grad_norm_effective", "ppo_epochs_effective",
-            "paper_hyperparams_passed", "happo_update_granularity",
+            "paper_hyperparams_passed", "advantage_mode",
+            "paper_advantage_mode_passed", "per_agent_advantage_enabled",
+            "critic_target_mode", "dilution_ratio_abs",
+            "happo_update_granularity",
             "agent_update_order", "shared_step_count", "mav_head_step_count",
             "uav_head_step_count", "agent_metrics_json",
             "entropy_mav_raw", "entropy_uav_raw",
@@ -1580,6 +1587,11 @@ def _run_training_main() -> None:
                 f"{float(args.max_grad_norm):.4f}",
                 int(args.ppo_epochs),
                 int(paper_hyperparams_passed),
+                args.advantage_mode,
+                int(args.advantage_mode == "team_average"),
+                int(args.advantage_mode == "per_agent_reward"),
+                "team_average_scalar" if args.advantage_mode == "per_agent_reward" else "team_average",
+                f"{float(stats.get('dilution_ratio_abs', 0.0)):.6f}",
                 str(stats.get("happo_update_granularity", "role")),
                 json.dumps(stats.get("agent_update_order", "role_level") if isinstance(stats.get("agent_update_order"), list) else stats.get("agent_update_order", "role_level")),
                 int(stats.get("shared_step_count", 0)),
@@ -1891,6 +1903,11 @@ def _run_training_main() -> None:
         "ppo_epochs_source": "CLI_arg",
         "paper_hyperparams_explicit": getattr(args, "tam_paper_mode", False),
         "paper_hyperparams_passed": paper_hyperparams_passed,
+        "advantage_mode": args.advantage_mode,
+        "paper_advantage_mode_passed": args.advantage_mode == "team_average",
+        "ablation_used": args.advantage_mode != "team_average",
+        "ablation_reason": ("per_agent_reward_advantage" if args.advantage_mode == "per_agent_reward" else ""),
+        "critic_target_mode": "team_average_scalar",
         **_trainer_contract_meta(policy),
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
