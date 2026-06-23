@@ -66,7 +66,7 @@ def _team_done(terminated, truncated):
 
 # ── config validation ────────────────────────────────────────────────────
 def _validate_f22_config(config_path: str) -> None:
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     atp = cfg.get("aircraft_type_params", {})
     mav_model = atp.get("mav", {}).get("aircraft_model", "")
@@ -296,9 +296,10 @@ def _generate_report(records, output_dir):
         reason = Counter(r["mav_death_reason"] or "survived" for r in recs).most_common(1)[0][0]
         rw = sum(1 for r in recs if r["winner"] == "red")
         bw = sum(1 for r in recs if r["winner"] == "blue")
-        alt_m = np.mean([r["red0_alt_mean"] for r in recs])
-        pitch_m = np.mean([r["red0_pitch_max"] for r in recs])
-        rh = sum(r["red_hits"] for r in recs)
+        pa0 = [r.get("per_agent", {}).get("red_0", {}) for r in recs]
+        alt_m = np.mean([a.get("mean_altitude_m", 0) for a in pa0])
+        pitch_m = np.mean([a.get("max_abs_pitch_deg", 0) for a in pa0])
+        rh = sum(r.get("red_hits", 0) for r in recs)
         lines.append(f"| {mm} {om} | {len(recs)} | {died} | {first_d} | {reason} | {rw} | {bw} | {alt_m:.0f} | {pitch_m:.0f} | {rh} |")
     lines.append("")
 
@@ -339,7 +340,11 @@ def _generate_report(records, output_dir):
         lines.append("")
 
     lines.append("## Root cause assessment")
-    lines.append(f"- **Control/flight-dynamics**: MAV pitch range from per-agent stats above")
+    pa_recs = [r.get("per_agent", {}).get("red_0", {}) for r in records if r["mav_mode"] == "learned_all"]
+    alt_mins = [a.get("min_altitude_m",0) for a in pa_recs]
+    alt_maxs = [a.get("mean_altitude_m",0) for a in pa_recs]
+    pitch_maxs = [a.get("max_abs_pitch_deg",0) for a in pa_recs]
+    lines.append(f"- **Control/flight-dynamics**: MAV pitch max {np.mean(pitch_maxs):.0f} deg, altitude {np.mean(alt_mins):.0f}-{np.mean(alt_maxs):.0f} m")
     lines.append(f"- **Blue tactical pressure**: blue fired {sum(r['blue_fired'] for r in records)} missiles, hit {sum(r['blue_hits'] for r in records)} targets")
     lines.append(f"- **MAV first-death rate {mav_first/n*100:.0f}%** — MAV is priority target")
     lines.append("")
