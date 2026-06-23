@@ -121,6 +121,34 @@ def _transitions_per_rollout(rollout_length: int, num_envs: int) -> int:
     return int(rollout_length) * int(num_envs)
 
 
+def _assert_env_specs_match(reference_env, envs) -> None:
+    checks = [
+        ("red_ids", len(reference_env.red_ids)),
+        ("blue_ids", len(reference_env.blue_ids)),
+        ("action_space", repr(reference_env.action_space)),
+        ("observation_space", repr(reference_env.observation_space)),
+        ("tam_action_distribution", getattr(reference_env, "tam_action_distribution", None)),
+        ("tam_action_levels", getattr(reference_env, "tam_action_levels", None)),
+        ("agent_roles", dict(getattr(reference_env, "agent_roles", {}))),
+    ]
+    for env_idx, env in enumerate(envs):
+        values = {
+            "red_ids": len(env.red_ids),
+            "blue_ids": len(env.blue_ids),
+            "action_space": repr(env.action_space),
+            "observation_space": repr(env.observation_space),
+            "tam_action_distribution": getattr(env, "tam_action_distribution", None),
+            "tam_action_levels": getattr(env, "tam_action_levels", None),
+            "agent_roles": dict(getattr(env, "agent_roles", {})),
+        }
+        for name, expected in checks:
+            if values[name] != expected:
+                raise ValueError(
+                    f"env spec mismatch for {name}: env_idx={env_idx} "
+                    f"expected={expected!r} actual={values[name]!r}"
+                )
+
+
 class HeartbeatLogger:
     def __init__(self, path: str | Path | None, every_steps: int = 50,
                  enabled: bool = False, debug_all: bool = False,
@@ -687,8 +715,10 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int, action
         "biased_mask": False,
         "random_mask_prob": 0.0,
         "num_envs": args.num_envs,
+        "rollout_length": args.rollout_length,
         "rollout_length_per_env": args.rollout_length,
         "transitions_per_rollout": transitions_per_rollout,
+        "multi_env_rollout_mode": "serial_env_batching",
         "init_checkpoint": args.init_checkpoint,
     }
 
@@ -880,13 +910,6 @@ def _run_training_main() -> None:
     args = resolve_tam_update_params(args)
     if args.num_envs < 1:
         raise ValueError("--num-envs must be >= 1")
-    if args.num_envs > 1:
-        raise ValueError(
-            "train_happo_reference.py does not support true parallel envs. "
-            "The previous serial --num-envs rollout batching path is disabled "
-            "because it was misleading. Use scripts/train_happo_reference_parallel.py "
-            "for multiprocessing rollout workers."
-        )
     if args.device == "cuda" and not torch.cuda.is_available():
         args.device = "cpu"
 
@@ -902,9 +925,15 @@ def _run_training_main() -> None:
     (out_dir / "best").mkdir(parents=True, exist_ok=True)
     (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
 
-    env = make_env(args.config, env_type="jsbsim_hetero",
-                   hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
-    envs = [env]
+    envs = [
+        make_env(
+            args.config, env_type="jsbsim_hetero",
+            hetero_reward_mode=args.reward_mode, max_steps=args.max_steps,
+        )
+        for _ in range(args.num_envs)
+    ]
+    env = envs[0]
+    _assert_env_specs_match(env, envs)
     _SINGLE_RUNNER_STATE["envs"] = envs
     adapter = HeteroObsAdapterV2()
     actor_dim = adapter.flat_actor_obs_dim
@@ -953,6 +982,9 @@ def _run_training_main() -> None:
         "tam_action_distribution": action_distribution,
         "action_space": action_space_class,
         "tam_action_levels": action_levels,
+        "num_envs": args.num_envs,
+        "rollout_length": args.rollout_length,
+        "multi_env_rollout_mode": "serial_env_batching",
         "actor_lr_effective": float(args.actor_lr),
         "critic_lr_effective": float(args.critic_lr),
         "entropy_coef_effective": float(args.entropy_coef),
@@ -1865,8 +1897,10 @@ def _run_training_main() -> None:
                             "biased_mask": False,
                             "random_mask_prob": 0.0,
                             "num_envs": args.num_envs,
+                            "rollout_length": args.rollout_length,
                             "rollout_length_per_env": args.rollout_length,
                             "transitions_per_rollout": transitions_per_rollout,
+                            "multi_env_rollout_mode": "serial_env_batching",
                             "init_checkpoint": args.init_checkpoint,
                         }, indent=2), encoding="utf-8")
                 tmp_model.unlink(missing_ok=True)
@@ -1925,8 +1959,10 @@ def _run_training_main() -> None:
         "missile_scripted": True,
         "evasion_scripted": False,
         "num_envs": args.num_envs,
+        "rollout_length": args.rollout_length,
         "rollout_length_per_env": args.rollout_length,
         "transitions_per_rollout": transitions_per_rollout,
+        "multi_env_rollout_mode": "serial_env_batching",
         "init_checkpoint": args.init_checkpoint,
         "total_env_steps_actual": total_steps,
         "episodes": episodes,
