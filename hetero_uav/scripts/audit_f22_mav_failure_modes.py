@@ -99,8 +99,12 @@ def run_episodes(policy, device, config_path, args, adapter, mav_mode, opp_mode,
 
         ep_data = {"episode": ep, "mav_mode": mav_mode, "opp_mode": opp_mode,
                    "init_mav_to_blue_m": init_mav_to_blue}
-        red0_alt, red0_spd, red0_roll, red0_pitch = [], [], [], []
-        red0_act_mean, red0_act_sat = [], []
+        # Per-agent tracking: red_0, red_1, red_2
+        agent_alt = {rid: [] for rid in env.red_ids}
+        agent_spd = {rid: [] for rid in env.red_ids}
+        agent_roll = {rid: [] for rid in env.red_ids}
+        agent_pitch = {rid: [] for rid in env.red_ids}
+        agent_act = {rid: [] for rid in env.red_ids}  # raw actions [a0,a1,a2]
         red_fired, blue_fired, red_hits, blue_hits = 0, 0, 0, 0
         prev_hits = {"red": 0, "blue": 0}
         death_events = []
@@ -160,16 +164,16 @@ def run_episodes(policy, device, config_path, args, adapter, mav_mode, opp_mode,
             ad = {rid: actions[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
             ad.update(opponent.act(obs, env.blue_ids, env=env))
 
-            # Track MAV state
-            mav_sim = env.red_planes.get("red_0")
-            if mav_sim is not None and mav_sim.is_alive:
-                rpy = mav_sim.get_rpy(); vel = mav_sim.get_velocity()
-                red0_alt.append(mav_sim.get_geodetic()[2])
-                red0_spd.append(float(np.linalg.norm(vel)))
-                red0_roll.append(float(np.rad2deg(rpy[0])))
-                red0_pitch.append(float(np.rad2deg(rpy[1])))
-                red0_act_mean.append(float(np.mean(np.abs(raw_act[0]))))
-                red0_act_sat.append(float(np.mean(np.abs(raw_act[0]) >= 0.999)))
+            # Track ALL red agents state + actions
+            for i, rid in enumerate(env.red_ids):
+                sim = env.red_planes.get(rid)
+                if sim is not None and sim.is_alive:
+                    rpy = sim.get_rpy(); vel = sim.get_velocity()
+                    agent_alt[rid].append(sim.get_geodetic()[2])
+                    agent_spd[rid].append(float(np.linalg.norm(vel)))
+                    agent_roll[rid].append(float(np.rad2deg(rpy[0])))
+                    agent_pitch[rid].append(float(np.rad2deg(rpy[1])))
+                    agent_act[rid].append(raw_act[i].copy())
 
             obs, rewards, terminated, truncated, info = env.step(ad)
             step += 1
@@ -222,6 +226,28 @@ def run_episodes(policy, device, config_path, args, adapter, mav_mode, opp_mode,
         if blue_alive == 0 and red_alive > 0: winner = "red"
         elif red_alive == 0 and blue_alive > 0: winner = "blue"
 
+        # Per-agent aggregates
+        per_agent = {}
+        for rid in env.red_ids:
+            aa = np.array(agent_act[rid]) if agent_act[rid] else np.zeros((0, 3))
+            per_agent[rid] = {
+                "max_abs_pitch_deg": float(np.max(np.abs(agent_pitch[rid]))) if agent_pitch[rid] else 0,
+                "max_abs_roll_deg": float(np.max(np.abs(agent_roll[rid]))) if agent_roll[rid] else 0,
+                "min_altitude_m": float(np.min(agent_alt[rid])) if agent_alt[rid] else 0,
+                "mean_altitude_m": float(np.mean(agent_alt[rid])) if agent_alt[rid] else 0,
+                "min_speed_mps": float(np.min(agent_spd[rid])) if agent_spd[rid] else 0,
+                "mean_speed_mps": float(np.mean(agent_spd[rid])) if agent_spd[rid] else 0,
+                "action_pitch_mean": float(np.mean(aa[:, 0])) if aa.size else 0,
+                "action_pitch_min": float(np.min(aa[:, 0])) if aa.size else 0,
+                "action_pitch_max": float(np.max(aa[:, 0])) if aa.size else 0,
+                "action_heading_mean": float(np.mean(aa[:, 1])) if aa.size else 0,
+                "action_heading_min": float(np.min(aa[:, 1])) if aa.size else 0,
+                "action_heading_max": float(np.max(aa[:, 1])) if aa.size else 0,
+                "action_speed_mean": float(np.mean(aa[:, 2])) if aa.size else 0,
+                "action_speed_min": float(np.min(aa[:, 2])) if aa.size else 0,
+                "action_speed_max": float(np.max(aa[:, 2])) if aa.size else 0,
+            }
+
         ep_data.update({
             "ep_len": step,
             "winner": winner,
@@ -230,22 +256,13 @@ def run_episodes(policy, device, config_path, args, adapter, mav_mode, opp_mode,
             "mav_death_step": mav_death_step,
             "mav_death_reason": mav_death_reason,
             "first_death": first_death,
-            "red0_alt_min": float(np.min(red0_alt)) if red0_alt else 0,
-            "red0_alt_max": float(np.max(red0_alt)) if red0_alt else 0,
-            "red0_alt_mean": float(np.mean(red0_alt)) if red0_alt else 0,
-            "red0_spd_min": float(np.min(red0_spd)) if red0_spd else 0,
-            "red0_spd_max": float(np.max(red0_spd)) if red0_spd else 0,
-            "red0_spd_mean": float(np.mean(red0_spd)) if red0_spd else 0,
-            "red0_roll_max": float(np.max(np.abs(red0_roll))) if red0_roll else 0,
-            "red0_pitch_max": float(np.max(np.abs(red0_pitch))) if red0_pitch else 0,
-            "red0_act_mean": float(np.mean(red0_act_mean)) if red0_act_mean else 0,
-            "red0_act_sat": float(np.mean(red0_act_sat)) if red0_act_sat else 0,
             "red_fired": red_fired, "blue_fired": blue_fired,
             "red_hits": red_hits, "blue_hits": blue_hits,
             "blue_launch_targets": dict(blue_launch_targets),
             "blue_hit_targets": dict(blue_hit_targets),
             "blue_first_launch": blue_first,
             "death_events": death_events,
+            "per_agent": per_agent,
         })
         records.append(ep_data)
     return records
@@ -295,8 +312,34 @@ def _generate_report(records, output_dir):
     lines.append("")
 
     # Root cause decomposition
+    # Per-agent comparison (learned_all only)
+    learned = [r for r in records if r["mav_mode"] == "learned_all"]
+    if learned:
+        lines.append("## Per-agent state & action ranges (learned_all)")
+        lines.append("| agent | max_pitch | max_roll | min_alt | mean_alt | min_spd | mean_spd | act_pitch [min/mean/max] | act_speed [min/mean/max] |")
+        lines.append("|---|---|---|---|---|---|---|---|---|")
+        for rid in ["red_0", "red_1", "red_2"]:
+            pa = {}
+            for r in learned:
+                a = r.get("per_agent", {}).get(rid, {})
+                for k, v in a.items():
+                    pa.setdefault(k, []).append(v)
+            if not pa: continue
+            lines.append(
+                f"| {rid} | {np.mean(pa['max_abs_pitch_deg']):.0f} | {np.mean(pa['max_abs_roll_deg']):.0f} | "
+                f"{np.mean(pa['min_altitude_m']):.0f} | {np.mean(pa['mean_altitude_m']):.0f} | "
+                f"{np.mean(pa['min_speed_mps']):.0f} | {np.mean(pa['mean_speed_mps']):.0f} | "
+                f"{np.mean(pa['action_pitch_min']):.2f}/{np.mean(pa['action_pitch_mean']):.2f}/{np.mean(pa['action_pitch_max']):.2f} | "
+                f"{np.mean(pa['action_speed_min']):.2f}/{np.mean(pa['action_speed_mean']):.2f}/{np.mean(pa['action_speed_max']):.2f} |")
+        # red_0 target pitch
+        red0_ap = [r.get("per_agent", {}).get("red_0", {}).get("action_pitch_mean", 0) for r in learned]
+        red0_ap_min = [r.get("per_agent", {}).get("red_0", {}).get("action_pitch_min", 0) for r in learned]
+        lines.append(f"- red_0 target_pitch_deg: mean={np.mean(red0_ap)*90:.1f} min={np.mean(red0_ap_min)*90:.1f}")
+        lines.append(f"- red_0 action_pitch <= 0: {np.mean(red0_ap) <= 0} ({np.mean(red0_ap)*90:.1f} deg)")
+        lines.append("")
+
     lines.append("## Root cause assessment")
-    lines.append(f"- **Control/flight-dynamics**: MAV pitch range {np.mean([r['red0_pitch_max'] for r in records]):.0f} deg, altitude {np.mean([r['red0_alt_min'] for r in records]):.0f}-{np.mean([r['red0_alt_max'] for r in records]):.0f} m")
+    lines.append(f"- **Control/flight-dynamics**: MAV pitch range from per-agent stats above")
     lines.append(f"- **Blue tactical pressure**: blue fired {sum(r['blue_fired'] for r in records)} missiles, hit {sum(r['blue_hits'] for r in records)} targets")
     lines.append(f"- **MAV first-death rate {mav_first/n*100:.0f}%** — MAV is priority target")
     lines.append("")
@@ -380,12 +423,18 @@ def main():
     csv_path = os.path.join(args.output_dir, "episodes.csv")
     fieldnames = ["episode", "mav_mode", "opp_mode", "ep_len", "winner",
                   "mav_alive", "mav_death_step", "mav_death_reason", "first_death",
-                  "red0_alt_min", "red0_alt_max", "red0_alt_mean",
-                  "red0_spd_min", "red0_spd_max", "red0_spd_mean",
-                  "red0_roll_max", "red0_pitch_max",
-                  "red0_act_mean", "red0_act_sat",
                   "red_fired", "blue_fired", "red_hits", "blue_hits",
                   "blue_first_target", "blue_first_step", "blue_first_range"]
+    for rid in ["red_0", "red_1", "red_2"]:
+        fieldnames += [f"{rid}_max_abs_pitch_deg", f"{rid}_max_abs_roll_deg",
+                       f"{rid}_min_altitude_m", f"{rid}_mean_altitude_m",
+                       f"{rid}_min_speed_mps", f"{rid}_mean_speed_mps",
+                       f"{rid}_action_pitch_mean", f"{rid}_action_pitch_min",
+                       f"{rid}_action_pitch_max",
+                       f"{rid}_action_heading_mean", f"{rid}_action_heading_min",
+                       f"{rid}_action_heading_max",
+                       f"{rid}_action_speed_mean", f"{rid}_action_speed_min",
+                       f"{rid}_action_speed_max"]
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
@@ -394,6 +443,15 @@ def main():
             r_out["blue_first_target"] = r.get("blue_first_launch", {}).get("target", "") if r.get("blue_first_launch") else ""
             r_out["blue_first_step"] = r.get("blue_first_launch", {}).get("step", "") if r.get("blue_first_launch") else ""
             r_out["blue_first_range"] = r.get("blue_first_launch", {}).get("range", "") if r.get("blue_first_launch") else ""
+            pa = r.get("per_agent", {})
+            for rid in ["red_0", "red_1", "red_2"]:
+                a = pa.get(rid, {})
+                for k in ["max_abs_pitch_deg","max_abs_roll_deg","min_altitude_m","mean_altitude_m",
+                          "min_speed_mps","mean_speed_mps",
+                          "action_pitch_mean","action_pitch_min","action_pitch_max",
+                          "action_heading_mean","action_heading_min","action_heading_max",
+                          "action_speed_mean","action_speed_min","action_speed_max"]:
+                    r_out[f"{rid}_{k}"] = a.get(k, 0)
             w.writerow(r_out)
     print(f"Saved: {csv_path}")
 
