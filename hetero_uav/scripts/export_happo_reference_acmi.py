@@ -22,6 +22,10 @@ from algorithms.happo import (
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
 )
+from algorithms.happo.hetero_entity_recurrent_policy import (
+    HeteroEntityRecurrentPolicy,
+    validate_entity_policy_meta,
+)
 from algorithms.mappo.opponent_policy import OpponentPolicy
 from scripts.experiment_logging_schema import FILE_SCHEMAS, ensure_schema_files
 
@@ -74,6 +78,15 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
             random_scale_mask=bool(meta.get("random_scale_mask", False)),
             random_mask_prob=float(meta.get("random_mask_prob", 0.25)),
             biased_mask=bool(meta.get("biased_mask", False)),
+        ).to(device)
+    if policy_arch == "hetero_entity_recurrent":
+        validate_entity_policy_meta(meta)
+        return HeteroEntityRecurrentPolicy(
+            entity_dim=int(meta.get("entity_dim", 21)),
+            action_dim=3,
+            hidden_dim=int(meta.get("hidden_dim", 128)),
+            rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+            num_attention_heads=int(meta.get("num_attention_heads", 4)),
         ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(
@@ -275,6 +288,7 @@ def main() -> int:
         return 2
     from uav_env import make_env
     from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
+    from uav_env.JSBSim.adapters.hetero_entity_set_adapter import HeteroEntitySetAdapter
     from uav_env.JSBSim.render_tacview import TacviewLogger
 
     output = _rel(args.output) if args.output else exp_dir / "acmi" / f"{args.checkpoint}_3v2_episode0.acmi"
@@ -287,7 +301,11 @@ def main() -> int:
     policy = _build_policy_from_meta(meta, device)
     policy.load(model, map_location=device)
     policy.eval()
-    adapter = HeteroObsAdapterV2()
+    entity_mode = meta.get("policy_arch") == "hetero_entity_recurrent"
+    if entity_mode:
+        adapter = HeteroEntitySetAdapter()
+    else:
+        adapter = HeteroObsAdapterV2()
     env = make_env(args.config, env_type="jsbsim_hetero")
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 33)
     logger = TacviewLogger(reference_time="2026-01-01T00:00:00Z")
@@ -309,17 +327,30 @@ def main() -> int:
         step = 0
         while True:
             adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
-            actor_obs = np.stack([
-                adapted["actor_obs"].get(rid, np.zeros(adapter.flat_actor_obs_dim, dtype=np.float32))
-                for rid in env.red_ids
-            ])
             with torch.no_grad():
-                out = policy.act(
-                    torch.as_tensor(actor_obs, device=device),
-                    roles=_role_ids(env),
-                    critic_state=torch.as_tensor(adapted["critic_state"], device=device),
-                    deterministic=True,
-                )
+                if entity_mode:
+                    out = policy.act(
+                        torch.as_tensor(adapted["actor_entity_tokens"], device=device),
+                        torch.as_tensor(adapted["actor_keep_mask"], device=device),
+                        torch.as_tensor(adapted["role_ids"], device=device),
+                        torch.as_tensor(adapted["critic_entity_tokens"], device=device),
+                        torch.as_tensor(adapted["critic_keep_mask"], device=device),
+                        deterministic=True,
+                        critic_counts=torch.as_tensor(
+                            adapted.get("critic_counts", np.zeros(4, dtype=np.float32)),
+                            device=device),
+                    )
+                else:
+                    actor_obs = np.stack([
+                        adapted["actor_obs"].get(rid, np.zeros(adapter.flat_actor_obs_dim, dtype=np.float32))
+                        for rid in env.red_ids
+                    ])
+                    out = policy.act(
+                        torch.as_tensor(actor_obs, device=device),
+                        roles=_role_ids(env),
+                        critic_state=torch.as_tensor(adapted["critic_state"], device=device),
+                        deterministic=True,
+                    )
             acts_np = out["action"].cpu().numpy()
             mav_sat.append(float(np.mean(np.abs(acts_np[0:1]) >= 0.999)))
             if len(env.red_ids) > 1:
