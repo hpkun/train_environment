@@ -429,6 +429,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--reset-timeout-sec", type=float, default=300.0)
     parser.add_argument("--step-timeout-sec", type=float, default=120.0)
     parser.add_argument("--worker-startup-delay-sec", type=float, default=0.5)
+    parser.add_argument("--checkpoint-interval-steps", type=int, default=0,
+                        help="Save periodic checkpoint every N steps (0=disabled)")
+    parser.add_argument("--keep-checkpoints", type=int, default=8,
+                        help="Max periodic checkpoints to keep")
     return parser.parse_args()
 
 
@@ -523,6 +527,31 @@ def _run_training(args: argparse.Namespace) -> None:
     (out_dir / "latest").mkdir(parents=True, exist_ok=True)
     (out_dir / "best").mkdir(parents=True, exist_ok=True)
     (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+
+    # Experiment repro info
+    try:
+        import shutil
+        shutil.copy(args.config, out_dir / "config_snapshot.yaml")
+    except Exception:
+        pass
+    try:
+        (out_dir / "args.json").write_text(json.dumps(vars(args), indent=2, default=str))
+    except Exception:
+        pass
+    try:
+        (out_dir / "command.txt").write_text(" ".join(sys.argv) + "\n")
+    except Exception:
+        pass
+    try:
+        import subprocess
+        git_info = {"commit": "", "dirty": ""}
+        r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0: git_info["commit"] = r.stdout.strip()
+        r = subprocess.run(["git", "diff", "--stat"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0: git_info["dirty"] = "yes" if r.stdout.strip() else "clean"
+        (out_dir / "git_info.json").write_text(json.dumps(git_info))
+    except Exception:
+        pass
     _RUNNER_PROGRESS.update({
         "out_dir": out_dir,
         "total_steps": 0,
@@ -567,6 +596,23 @@ def _run_training(args: argparse.Namespace) -> None:
             raise ValueError(
                 f"{args.policy_arch} init checkpoint requires meta.json with policy_arch={args.policy_arch}"
             )
+        # Validate init checkpoint consistency
+        if init_meta_path.exists():
+            init_meta = json.loads(init_meta_path.read_text(encoding="utf-8"))
+            meta_pa = init_meta.get("policy_arch", "")
+            meta_rm = init_meta.get("reward_mode", "")
+            if meta_pa and meta_pa != args.policy_arch:
+                raise ValueError(
+                    f"init checkpoint policy_arch mismatch: "
+                    f"checkpoint={meta_pa!r}, CLI={args.policy_arch!r}. "
+                    f"Checkpoint: {init_meta_path}"
+                )
+            if meta_rm and meta_rm != args.reward_mode:
+                raise ValueError(
+                    f"init checkpoint reward_mode mismatch: "
+                    f"checkpoint={meta_rm!r}, CLI={args.reward_mode!r}. "
+                    f"Checkpoint: {init_meta_path}"
+                )
         _reject_unsafe_random_scale_mask_checkpoint(args.policy_arch, init_meta_path)
     policy = _build_policy(
         args.policy_arch, actor_dim, critic_dim, device,
@@ -1293,6 +1339,35 @@ def _run_training(args: argparse.Namespace) -> None:
                 f"timeout={timeout:.2f} mav={mav_surv:.2f}",
                 flush=True,
             )
+
+            # Periodic checkpoint
+            if args.checkpoint_interval_steps > 0 and total_steps % args.checkpoint_interval_steps == 0:
+                ckpt_dir = out_dir / "checkpoints" / f"step_{total_steps:06d}"
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                policy.save(ckpt_dir / "model.pt")
+                meta = {
+                    "policy_arch": args.policy_arch, "reward_mode": args.reward_mode,
+                    "config": args.config, "opponent_policy": args.opponent_policy,
+                    "init_checkpoint": args.init_checkpoint,
+                    "total_env_steps_actual": total_steps, "episodes": episodes,
+                    "observation_adapter": "HeteroEntitySetAdapter" if entity_mode else "HeteroObsAdapterV2",
+                    "entity_dim": getattr(policy, "entity_dim", None),
+                    "num_envs": args.num_envs,
+                    "rollout_length_per_env": args.rollout_length,
+                    "transitions_per_rollout": transitions_per_rollout,
+                    **_entity_policy_meta(policy),
+                }
+                (ckpt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+                # Also update latest
+                policy.save(out_dir / "latest" / "model.pt")
+                (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2))
+                # Prune old
+                existing = sorted(
+                    [d for d in (out_dir / "checkpoints").iterdir() if d.is_dir() and d.name.startswith("step_")],
+                    key=lambda d: d.name)
+                for old in existing[:-args.keep_checkpoints]:
+                    import shutil
+                    shutil.rmtree(old, ignore_errors=True)
 
             if total_steps - last_eval >= args.eval_interval_steps and args.eval_during_training:
                 last_eval = total_steps

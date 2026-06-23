@@ -75,6 +75,11 @@ MISSILE_EVENTS_COLUMNS = [
     "target_alive_at_launch", "target_alive_at_termination",
     "shooter_speed_mps", "target_speed_mps", "closing_speed_mps",
     "shooter_alt_m", "target_alt_m",
+    "target_selection_mode", "selected_target_score",
+    "selected_target_threat_score", "selected_target_mav_support_score",
+    "selected_target_shot_quality_score", "selected_target_range_m",
+    "selected_target_AO_rad", "selected_target_TA_rad",
+    "selected_target_is_mav_observed", "candidate_count",
 ]
 
 MISSILE_TIMESERIES_COLUMNS = [

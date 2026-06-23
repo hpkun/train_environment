@@ -156,6 +156,16 @@ class RichExperimentLogger:
             "closing_speed_mps": record.get("closing_speed_mps", ""),
             "shooter_alt_m": record.get("shooter_alt_m", ""),
             "target_alt_m": record.get("target_alt_m", ""),
+            "target_selection_mode": record.get("target_selection_mode", ""),
+            "selected_target_score": record.get("selected_target_score", ""),
+            "selected_target_threat_score": record.get("selected_target_threat_score", ""),
+            "selected_target_mav_support_score": record.get("selected_target_mav_support_score", ""),
+            "selected_target_shot_quality_score": record.get("selected_target_shot_quality_score", ""),
+            "selected_target_range_m": record.get("selected_target_range_m", ""),
+            "selected_target_AO_rad": record.get("selected_target_AO_rad", ""),
+            "selected_target_TA_rad": record.get("selected_target_TA_rad", ""),
+            "selected_target_is_mav_observed": record.get("selected_target_is_mav_observed", ""),
+            "candidate_count": record.get("candidate_count", ""),
         }
 
     def write_training_efficiency(self, total_steps: int, nan_detected: bool = False) -> None:
