@@ -1045,8 +1045,15 @@ def _run_training(args: argparse.Namespace) -> None:
                     if isinstance(mt, dict):
                         red_hit_total = int(mt.get("red", {}).get("hit", 0))
                         blue_hit_total = int(mt.get("blue", {}).get("hit", 0))
-                        red_hits += max(red_hit_total - prev_hit_totals[env_idx]["red"], 0)
-                        blue_hits += max(blue_hit_total - prev_hit_totals[env_idx]["blue"], 0)
+                        # Compute delta ONCE, use for both rollout-level and episode-level
+                        # (prev_hit_totals must NOT be updated between the two uses,
+                        #  otherwise episode-level delta is always 0 after the first use).
+                        delta_red = max(red_hit_total - prev_hit_totals[env_idx]["red"], 0)
+                        delta_blue = max(blue_hit_total - prev_hit_totals[env_idx]["blue"], 0)
+                        red_hits += delta_red
+                        blue_hits += delta_blue
+                        current_ep_missile[env_idx]["red_hits"] += delta_red
+                        current_ep_missile[env_idx]["blue_hits"] += delta_blue
                         prev_hit_totals[env_idx]["red"] = red_hit_total
                         prev_hit_totals[env_idx]["blue"] = blue_hit_total
                     # Aggregate per-step reward components and death events
@@ -1065,19 +1072,13 @@ def _run_training(args: argparse.Namespace) -> None:
                             current_ep_red_death[env_idx][reason] += 1
                         else:
                             current_ep_blue_death[env_idx][reason] += 1
-                    # Missile stats
+                    # Missile fired stats (hit deltas computed above with __missile_term__)
                     em = current_ep_missile[env_idx]
                     for aid, ai in (next_info or {}).items():
                         if isinstance(ai, dict):
                             f = int(ai.get("missiles_fired_this_step", 0))
                             if aid.startswith("red_"): em["red_fired"] += f
                             else: em["blue_fired"] += f
-                    mt = next_info.get("__missile_term__", {}) if isinstance(next_info, dict) else {}
-                    if isinstance(mt, dict):
-                        em["red_hits"] += max(int(mt.get("red", {}).get("hit", 0))
-                                             - prev_hit_totals[env_idx]["red"], 0)
-                        em["blue_hits"] += max(int(mt.get("blue", {}).get("hit", 0))
-                                              - prev_hit_totals[env_idx]["blue"], 0)
 
                     if done:
                         outcome = _episode_outcome_from_diag(
