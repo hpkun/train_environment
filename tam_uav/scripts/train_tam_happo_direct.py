@@ -882,6 +882,14 @@ def _run_training_main() -> None:
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--eval-during-training", action="store_true")
     parser.add_argument("--eval-interval-steps", type=int, default=25000)
+    parser.add_argument("--checkpoint-interval-steps", type=int, default=0,
+                        help="Save checkpoints every N steps without running eval subprocess.")
+    parser.add_argument("--keep-checkpoints", type=int, default=10,
+                        help="Max number of checkpoint-interval step_* dirs to keep.")
+    parser.add_argument("--eval-at-end", action="store_true",
+                        help="Run one eval subprocess after training completes.")
+    parser.add_argument("--no-subprocess-eval", action="store_true",
+                        help="Disable eval subprocess even if --eval-during-training is set.")
     parser.add_argument("--eval-at-start", action="store_true")
     parser.add_argument("--train-eval-episodes", type=int, default=1)
     parser.add_argument("--eval-configs", nargs="*", default=None)
@@ -912,6 +920,15 @@ def _run_training_main() -> None:
         raise ValueError("--num-envs must be >= 1")
     if args.device == "cuda" and not torch.cuda.is_available():
         args.device = "cpu"
+
+    # Warning: conflicting flags
+    if args.eval_during_training and args.no_subprocess_eval:
+        print("WARNING: --no-subprocess-eval disables eval subprocess during training; "
+              "checkpoints are still saved if --checkpoint-interval-steps is set.",
+              flush=True)
+    if args.save_eval_checkpoints and (args.no_subprocess_eval or not args.eval_during_training):
+        print("WARNING: --save-eval-checkpoints has no effect without subprocess eval.",
+              flush=True)
 
     from uav_env import make_env
     from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
@@ -1188,9 +1205,10 @@ def _run_training_main() -> None:
             "death_transition_used_for_actor_red_0",
             "nan_detected",
         ])
+        subprocess_eval_wanted = args.eval_during_training and not args.no_subprocess_eval
         eval_writer = None
         eval_f = None
-        if args.eval_during_training:
+        if subprocess_eval_wanted or args.eval_at_start:
             eval_f = (out_dir / "eval_log.csv").open("w", newline="", encoding="utf-8")
             eval_writer = csv.writer(eval_f)
             eval_writer.writerow([
@@ -1757,7 +1775,35 @@ def _run_training_main() -> None:
                 f"loss_mav={stats['actor_loss_mav']:.4f} loss_uav={stats['actor_loss_uav']:.4f}",
                 flush=True,
             )
-            if total_steps - last_eval >= args.eval_interval_steps and args.eval_during_training:
+            # ---- Checkpoint interval saving (no eval subprocess) ----
+            if args.checkpoint_interval_steps > 0 and total_steps > 0:
+                prev_boundary = (total_steps - transitions_per_rollout) // args.checkpoint_interval_steps
+                curr_boundary = total_steps // args.checkpoint_interval_steps
+                if curr_boundary > prev_boundary:
+                    ckpt_dir = out_dir / "checkpoints" / f"step_{total_steps:08d}"
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    policy.save(ckpt_dir / "model.pt")
+                    (ckpt_dir / "meta.json").write_text(json.dumps({
+                        "algorithm": "happo_reference_v0",
+                        "total_env_steps_actual": total_steps,
+                        "iteration": iteration,
+                        "checkpoint_interval_steps": args.checkpoint_interval_steps,
+                    }, indent=2), encoding="utf-8")
+                    # Prune old checkpoints
+                    step_dirs = sorted(
+                        [d for d in (out_dir / "checkpoints").glob("step_*") if d.is_dir()],
+                        key=lambda d: d.name)
+                    for d in step_dirs[:-args.keep_checkpoints]:
+                        for child in d.iterdir():
+                            child.unlink()
+                        d.rmdir()
+            # ---- Eval (subprocess) ----
+            subprocess_eval_enabled = (
+                args.eval_during_training
+                and not args.no_subprocess_eval
+                and total_steps - last_eval >= args.eval_interval_steps
+            )
+            if subprocess_eval_enabled:
                 last_eval = total_steps
                 tmp_model = out_dir / "_tmp_eval.pt"
                 _ckpt_finite = all(
@@ -1910,6 +1956,14 @@ def _run_training_main() -> None:
         if eval_f is not None:
             eval_f.close()
 
+    # ---- Eval-at-end ----
+    if args.eval_at_end:
+        latest_model = out_dir / "latest" / "model.pt"
+        tmp_json = str((out_dir / "_eval_at_end.json").relative_to(ROOT))
+        print("[happo] Running eval-at-end on latest checkpoint...", flush=True)
+        _run_eval(str(latest_model), args, tmp_json)
+        (out_dir / "_eval_at_end.json").unlink(missing_ok=True)
+
     latest_model = out_dir / "latest" / "model.pt"
     policy.save(latest_model)
     meta = {
@@ -1963,6 +2017,10 @@ def _run_training_main() -> None:
         "rollout_length_per_env": args.rollout_length,
         "transitions_per_rollout": transitions_per_rollout,
         "multi_env_rollout_mode": "serial_env_batching",
+        "checkpoint_interval_steps": args.checkpoint_interval_steps,
+        "keep_checkpoints": args.keep_checkpoints,
+        "subprocess_eval_enabled": bool(args.eval_during_training and not args.no_subprocess_eval),
+        "eval_at_end": bool(args.eval_at_end),
         "init_checkpoint": args.init_checkpoint,
         "total_env_steps_actual": total_steps,
         "episodes": episodes,
