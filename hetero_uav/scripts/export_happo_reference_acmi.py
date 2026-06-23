@@ -320,6 +320,12 @@ def main() -> int:
     red0_pitch, red0_roll, red0_alt = [], [], []
     outcome = "unknown"
 
+    # Recurrent hidden state (required for hetero_entity_recurrent policies)
+    _rnn_hidden_size = getattr(policy, "rnn_hidden_size", 0)
+    eval_rnn_hidden = None
+    if _rnn_hidden_size > 0:
+        eval_rnn_hidden = np.zeros((len(env.red_ids), _rnn_hidden_size), dtype=np.float32)
+
     try:
         obs, info = env.reset(seed=args.seed)
         logger.record_frame(0.0, _entries(env) + _missile_entries(env, missile_id_map),
@@ -327,6 +333,15 @@ def main() -> int:
         step = 0
         while True:
             adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
+            act_kw = {}
+            if eval_rnn_hidden is not None:
+                from algorithms.happo.rollout_safety import zero_inactive_hidden
+                active = np.ones(len(env.red_ids), dtype=np.float32)
+                for i, rid in enumerate(env.red_ids):
+                    ai = (info or {}).get(rid, {})
+                    active[i] = 1.0 if ai.get("alive", True) else 0.0
+                eval_rnn_hidden = zero_inactive_hidden(eval_rnn_hidden, active)
+                act_kw["rnn_hidden"] = torch.as_tensor(eval_rnn_hidden, device=device)
             with torch.no_grad():
                 if entity_mode:
                     out = policy.act(
@@ -339,6 +354,7 @@ def main() -> int:
                         critic_counts=torch.as_tensor(
                             adapted.get("critic_counts", np.zeros(4, dtype=np.float32)),
                             device=device),
+                        **act_kw,
                     )
                 else:
                     actor_obs = np.stack([
@@ -352,6 +368,13 @@ def main() -> int:
                         deterministic=True,
                     )
             acts_np = out["action"].cpu().numpy()
+            if eval_rnn_hidden is not None and "rnn_hidden" in out:
+                from algorithms.happo.rollout_safety import zero_inactive_hidden
+                active = np.ones(len(env.red_ids), dtype=np.float32)
+                for i, rid in enumerate(env.red_ids):
+                    ai = (info or {}).get(rid, {})
+                    active[i] = 1.0 if ai.get("alive", True) else 0.0
+                eval_rnn_hidden = zero_inactive_hidden(out["rnn_hidden"].cpu().numpy(), active)
             mav_sat.append(float(np.mean(np.abs(acts_np[0:1]) >= 0.999)))
             if len(env.red_ids) > 1:
                 uav_sat.append(float(np.mean(np.abs(acts_np[1:]) >= 0.999)))
