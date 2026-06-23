@@ -629,3 +629,58 @@ class F22MavEnergyPIDController(PIDController):
                 self.last_throttle_boosted = True
 
         return aileron, elevator, rudder, throttle
+
+
+# ------------------------------------------------------------------
+#  Trimmed PID controller — trim + feedback, no energy guard
+# ------------------------------------------------------------------
+
+class TrimmedPIDController(PIDController):
+    """PID controller with per-axis trims and throttle feedforward.
+
+    Trim values provide the baseline control surface positions for the
+    aircraft at the design flight condition.  The PID loops act as
+    perturbations around these trims.
+
+    No speed-threshold logic, no energy guard, no pitch clamp, no
+    target_velocity boost.  This is a pure trim+feedback design.
+    """
+
+    def __init__(self, dt, debug=False,
+                 roll_kp=None, roll_ki=None, roll_kd=None,
+                 pitch_kp=None, pitch_ki=None, pitch_kd=None,
+                 vel_kp=None, vel_ki=None, vel_kd=None,
+                 elevator_sign=-1,
+                 throttle_min=0.0, throttle_max=1.0,
+                 throttle_trim=0.85,
+                 elevator_trim=0.0,
+                 aileron_trim=0.0,
+                 pitch_trim_deg=0.0,
+                 **_kwargs):
+        super().__init__(
+            dt, debug=debug,
+            roll_kp=roll_kp, roll_ki=roll_ki, roll_kd=roll_kd,
+            pitch_kp=pitch_kp, pitch_ki=pitch_ki, pitch_kd=pitch_kd,
+            vel_kp=vel_kp, vel_ki=vel_ki, vel_kd=vel_kd,
+            elevator_sign=elevator_sign,
+            throttle_min=throttle_min, throttle_max=throttle_max,
+        )
+        self.throttle_trim = float(throttle_trim)
+        self.elevator_trim = float(elevator_trim)
+        self.aileron_trim = float(aileron_trim)
+        self.pitch_trim_deg = float(pitch_trim_deg)
+
+    def compute_control(self, current_rpy, current_velocity,
+                        target_pitch, target_heading, target_velocity,
+                        ned_velocity=None):
+        target_pitch = target_pitch + np.deg2rad(self.pitch_trim_deg)
+        aileron, elevator, rudder, throttle = super().compute_control(
+            current_rpy, current_velocity,
+            target_pitch, target_heading, target_velocity,
+            ned_velocity=ned_velocity,
+        )
+        aileron = float(np.clip(aileron + self.aileron_trim, -1.0, 1.0))
+        elevator = float(np.clip(elevator + self.elevator_trim, -1.0, 1.0))
+        throttle = float(np.clip(self.throttle_trim + throttle,
+                                 self.throttle_min, self.throttle_max))
+        return aileron, elevator, rudder, throttle

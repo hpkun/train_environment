@@ -22,7 +22,7 @@ from .alignment.reward_utils import (
 )
 
 from .simulator import AircraftSimulator, MissileSimulator
-from .pid_controller import PIDController, F22MavEnergyPIDController
+from .pid_controller import PIDController, F22MavEnergyPIDController, TrimmedPIDController
 from .utils import get2d_AO_TA_R
 from .render_tacview import TacviewLogger
 
@@ -745,11 +745,21 @@ class UavCombatEnv(gymnasium.Env):
                         "low_speed_throttle_floor"):
                 if key in profile_cfg:
                     kwargs[key] = profile_cfg[key]
-            # Fallback: if no elevator_sign in config, default to +1 (F-22 convention)
-            # The tuning sweep validates or corrects this.
             if "elevator_sign" not in kwargs:
-                kwargs["elevator_sign"] = +1
+                kwargs["elevator_sign"] = -1
             return F22MavEnergyPIDController(self.physics_dt, **kwargs)
+
+        if profile == "f22_mav_trimmed_pid":
+            kwargs = {}
+            for key in ("roll_kp", "roll_ki", "roll_kd",
+                        "pitch_kp", "pitch_ki", "pitch_kd",
+                        "vel_kp", "vel_ki", "vel_kd",
+                        "elevator_sign", "throttle_min", "throttle_max",
+                        "throttle_trim", "elevator_trim", "aileron_trim",
+                        "pitch_trim_deg"):
+                if key in profile_cfg:
+                    kwargs[key] = profile_cfg[key]
+            return TrimmedPIDController(self.physics_dt, **kwargs)
 
         # Default: standard F-16 PIDController
         kwargs = {}
