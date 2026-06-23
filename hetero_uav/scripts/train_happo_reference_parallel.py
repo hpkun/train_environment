@@ -338,22 +338,25 @@ def _episode_outcome_from_diag(diag: dict, truncated: dict, length: int, max_ste
     blue_alive = int(diag.get("blue_alive", 0))
     timeout = bool((truncated and all(truncated.values())) or length >= max_steps)
     if blue_alive == 0 and red_alive > 0:
-        winner, reason = "red", "blue_eliminated"
+        winner, reason, timeout_adv = "red", "blue_eliminated", ""
     elif red_alive == 0 and blue_alive > 0:
-        winner, reason = "blue", "red_eliminated"
+        winner, reason, timeout_adv = "blue", "red_eliminated", ""
     elif red_alive == 0 and blue_alive == 0:
-        winner, reason = "draw", "mutual_elimination"
+        winner, reason, timeout_adv = "draw", "mutual_elimination", ""
     elif timeout:
         reason = "timeout"
+        winner = "draw"
         if red_alive > blue_alive:
-            winner = "red"
+            timeout_adv = "red_timeout_alive_advantage"
         elif blue_alive > red_alive:
-            winner = "blue"
+            timeout_adv = "blue_timeout_alive_advantage"
         else:
-            winner = "draw"
+            timeout_adv = "timeout_draw"
     else:
-        winner, reason = "none", "ongoing"
-    return {"winner": winner, "end_reason": reason}
+        winner, reason, timeout_adv = "none", "ongoing", ""
+    return {"winner": winner, "end_reason": reason,
+            "timeout_alive_advantage": timeout_adv,
+            "red_alive": red_alive, "blue_alive": blue_alive}
 
 
 def _build_red_alive_mask_from_info(info: dict, proxy: RemoteEnvProxy) -> np.ndarray:
@@ -699,7 +702,7 @@ def _run_training(args: argparse.Namespace) -> None:
             "episodes_completed", "recent_episode_count",
             "avg_episode_length",
             "red_elimination_win", "blue_elimination_win",
-            "red_timeout_win", "blue_timeout_win",
+            "red_timeout_alive_advantage", "blue_timeout_alive_advantage",
             "mav_return_mean", "uav_return_mean",
             "red_death_missile_hit", "red_death_Crash_LowAlt",
             "red_death_Crash_OverG", "red_death_Crash_Extreme",
@@ -1173,8 +1176,8 @@ def _run_training(args: argparse.Namespace) -> None:
             # Extended metrics
             red_elim = sum(1 for r in rec if r["end_reason"] == "blue_eliminated") / n
             blue_elim = sum(1 for r in rec if r["end_reason"] == "red_eliminated") / n
-            red_tout_win = sum(1 for r in rec if r["winner"] == "red" and r["end_reason"] == "timeout") / n
-            blue_tout_win = sum(1 for r in rec if r["winner"] == "blue" and r["end_reason"] == "timeout") / n
+            red_tout_adv = sum(1 for r in rec if r.get("timeout_alive_advantage") == "red_timeout_alive_advantage") / n
+            blue_tout_adv = sum(1 for r in rec if r.get("timeout_alive_advantage") == "blue_timeout_alive_advantage") / n
             mav_return = float(np.mean([r.get("return_mav", 0) for r in rec])) if rec else 0.0
             uav_return = float(np.mean([r.get("return_uav", 0) for r in rec])) if rec else 0.0
             ep_len_mean = float(np.mean([r.get("ep_len", 0) for r in rec])) if rec else 0.0
@@ -1232,7 +1235,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 episodes, n,
                 f"{ep_len_mean:.1f}",
                 f"{red_elim:.4f}", f"{blue_elim:.4f}",
-                f"{red_tout_win:.4f}", f"{blue_tout_win:.4f}",
+                f"{red_tout_adv:.4f}", f"{blue_tout_adv:.4f}",
                 f"{mav_return:.4f}", f"{uav_return:.4f}",
                 red_d.get("missile_hit", 0), red_d.get("Crash_LowAlt", 0),
                 red_d.get("Crash_OverG", 0), red_d.get("Crash_Extreme", 0),
@@ -1288,6 +1291,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 f"ep={episodes} ret={avg_return:+.1f} mavR={mav_return:+.1f} uavR={uav_return:+.1f} "
                 f"win R/B/D={red_win:.2f}/{blue_win:.2f}/{draw:.2f} "
                 f"elim R/B={red_elim:.2f}/{blue_elim:.2f} "
+                f"tout_adv R/B={red_tout_adv:.2f}/{blue_tout_adv:.2f} "
                 f"timeout={timeout:.2f} mav={mav_surv:.2f} alive R/B={red_alive:.1f}/{blue_alive:.1f}",
                 flush=True,
             )

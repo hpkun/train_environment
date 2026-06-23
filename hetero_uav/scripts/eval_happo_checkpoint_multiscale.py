@@ -148,24 +148,27 @@ def _episode_result(env) -> dict:
     blue_dead = len(env.blue_ids) - blue_alive
     mav_alive = bool(env.red_planes.get("red_0") and env.red_planes["red_0"].is_alive)
     if blue_alive == 0 and red_alive > 0:
-        return {"winner": "red", "end_reason": "red_win_elimination",
-                "red_dead": red_dead, "blue_dead": blue_dead, "mav_alive": mav_alive}
+        return {"winner": "red", "end_reason": "blue_eliminated",
+                "red_dead": red_dead, "blue_dead": blue_dead, "mav_alive": mav_alive,
+                "timeout_alive_advantage": ""}
     elif red_alive == 0 and blue_alive > 0:
-        return {"winner": "blue", "end_reason": "blue_win_elimination",
-                "red_dead": red_dead, "blue_dead": blue_dead, "mav_alive": mav_alive}
+        return {"winner": "blue", "end_reason": "red_eliminated",
+                "red_dead": red_dead, "blue_dead": blue_dead, "mav_alive": mav_alive,
+                "timeout_alive_advantage": ""}
     elif red_alive == 0 and blue_alive == 0:
         return {"winner": "draw", "end_reason": "mutual_elimination",
-                "red_dead": red_dead, "blue_dead": blue_dead, "mav_alive": mav_alive}
-    # Timeout: alive-advantage determines winner
+                "red_dead": red_dead, "blue_dead": blue_dead, "mav_alive": mav_alive,
+                "timeout_alive_advantage": ""}
+    # Timeout: always draw (asymmetric counts do NOT make a winner)
     if red_alive > blue_alive:
-        return {"winner": "red_alive_advantage", "end_reason": "timeout",
-                "red_dead": red_dead, "blue_dead": blue_dead, "mav_alive": mav_alive}
+        timeout_adv = "red_timeout_alive_advantage"
     elif blue_alive > red_alive:
-        return {"winner": "blue_alive_advantage", "end_reason": "timeout",
-                "red_dead": red_dead, "blue_dead": blue_dead, "mav_alive": mav_alive}
+        timeout_adv = "blue_timeout_alive_advantage"
     else:
-        return {"winner": "draw", "end_reason": "timeout",
-                "red_dead": red_dead, "blue_dead": blue_dead, "mav_alive": mav_alive}
+        timeout_adv = "timeout_draw"
+    return {"winner": "draw", "end_reason": "timeout",
+            "red_dead": red_dead, "blue_dead": blue_dead, "mav_alive": mav_alive,
+            "timeout_alive_advantage": timeout_adv}
 
 
 def _update_missile_stats(mstats: dict, info: dict, prev_hits: dict) -> None:
@@ -288,9 +291,10 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device) -> dict:
 
     reason_counts = Counter(r["end_reason"] for r in results)
     winner_counts = Counter(r["winner"] for r in results)
+    timeout_adv_counts = Counter(r.get("timeout_alive_advantage", "") for r in results)
     n = max(len(results), 1)
-    num_red = 3  # default; actual value determined by env
-    num_blue = 2
+    num_red = len(env.red_ids)
+    num_blue = len(env.blue_ids)
     red_dead_mean = float(np.mean([r["red_dead"] for r in results]))
     blue_dead_mean = float(np.mean([r["blue_dead"] for r in results]))
     red_kf = blue_dead_mean / max(num_blue, 1)
@@ -302,14 +306,14 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device) -> dict:
         "num_red": num_red, "num_blue": num_blue,
         "avg_return": float(np.mean(returns)),
         "avg_length": float(np.mean(lengths)),
-        "red_win_rate": (winner_counts["red"] + winner_counts["red_alive_advantage"]) / n,
-        "blue_win_rate": (winner_counts["blue"] + winner_counts["blue_alive_advantage"]) / n,
+        "red_win_rate": reason_counts["blue_eliminated"] / n,
+        "blue_win_rate": reason_counts["red_eliminated"] / n,
         "draw_rate": winner_counts["draw"] / n,
         "timeout_rate": reason_counts["timeout"] / n,
-        "red_elimination_win_rate": reason_counts["red_win_elimination"] / n,
-        "blue_elimination_win_rate": reason_counts["blue_win_elimination"] / n,
-        "red_timeout_alive_advantage_rate": winner_counts["red_alive_advantage"] / n,
-        "blue_timeout_alive_advantage_rate": winner_counts["blue_alive_advantage"] / n,
+        "red_elimination_win_rate": reason_counts["blue_eliminated"] / n,
+        "blue_elimination_win_rate": reason_counts["red_eliminated"] / n,
+        "red_timeout_alive_advantage_rate": timeout_adv_counts.get("red_timeout_alive_advantage", 0) / n,
+        "blue_timeout_alive_advantage_rate": timeout_adv_counts.get("blue_timeout_alive_advantage", 0) / n,
         "red_kill_fraction": red_kf,
         "red_loss_fraction": red_lf,
         "net_kill_fraction": red_kf - red_lf,

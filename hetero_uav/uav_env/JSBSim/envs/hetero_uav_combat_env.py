@@ -669,6 +669,32 @@ class HeteroUavCombatEnv(UavCombatEnv):
         # ---- role_v1 / paper_role_reward_v1 overlays ----
         if self.hetero_reward_mode == "paper_role_reward_v1":
             W = self.PAPER_ROLE_REWARD_V1_WEIGHTS
+
+            # ---- Terminal reward correction: zero r_end on timeout ----
+            n_red_alive = sum(1 for s in self.red_planes.values() if s.is_alive)
+            n_blue_alive = sum(1 for s in self.blue_planes.values() if s.is_alive)
+            is_elimination = (n_blue_alive == 0 and n_red_alive > 0) or (n_red_alive == 0 and n_blue_alive > 0)
+            is_timeout = (n_blue_alive > 0 and n_red_alive > 0
+                          and self.current_step >= self.max_steps)
+            for aid in self.agent_ids:
+                comp = components.setdefault(aid, {})
+                comp.setdefault("r_end", 0.0)
+                comp.setdefault("r_end_raw_removed", 0.0)
+                comp.setdefault("terminal_elimination_reward", 0.0)
+                comp.setdefault("terminal_timeout_reward", 0.0)
+            if is_elimination:
+                for aid in self.agent_ids:
+                    components[aid]["terminal_elimination_reward"] = float(
+                        components[aid].get("r_end", 0.0))
+            elif is_timeout:
+                for aid in self.agent_ids:
+                    old = components[aid].get("r_end", 0.0)
+                    if old != 0.0:
+                        components[aid]["r_end_raw_removed"] = float(old)
+                        components[aid]["terminal_timeout_reward"] = 0.0
+                        base_rewards[aid] = base_rewards.get(aid, 0.0) - old
+                        components[aid]["r_end"] = 0.0
+
             PAPER_ROLE_MAV_KEYS = [
                 "mav_safety", "mav_support", "mav_event", "mav_death",
             ]
