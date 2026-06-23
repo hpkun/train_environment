@@ -20,6 +20,8 @@ def make_env(config_path: str | None = None, **kwargs):
     config = _load_yaml(config_path)
     config.update(kwargs)
     env_type = str(config.pop("env_type", "hetero"))
+    # Pop visual-only metadata fields that env constructors don't accept
+    config.pop("acmi_visual_by_role", None)
     if env_type == "jsbsim_brma":
         from .JSBSim.envs.uav_combat_env import UavCombatEnv
 

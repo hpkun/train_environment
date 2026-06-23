@@ -307,6 +307,17 @@ def main() -> int:
     else:
         adapter = HeteroObsAdapterV2()
     env = make_env(args.config, env_type="jsbsim_hetero")
+
+    # Read acmi_visual_by_role from config for visual labelling
+    try:
+        import yaml
+        with open(args.config, encoding="utf-8") as _f:
+            _cfg = yaml.safe_load(_f) or {}
+        acmi_visual = _cfg.get("acmi_visual_by_role", {})
+    except Exception:
+        acmi_visual = {}
+    mav_dynamics_model = env.agent_models.get("red_0", "unknown")
+    mav_visual_model = acmi_visual.get("mav", mav_dynamics_model)
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 33)
     logger = TacviewLogger(reference_time="2026-01-01T00:00:00Z")
     missile_id_map: dict[str, int] = {}
@@ -452,6 +463,10 @@ def main() -> int:
                 "blue_0": _aircraft_name(env, "blue_0"),
             },
             "red_0_visual_label": _aircraft_name(env, "red_0"),
+            "mav_dynamics_model": mav_dynamics_model,
+            "mav_visual_model": mav_visual_model,
+            "mav_role": "mav",
+            "mav_num_missiles": 0,
             "missile_objects_exported": len(missile_id_map),
             "red_missile_objects_exported": red_missile_objects,
             "blue_missile_objects_exported": blue_missile_objects,
