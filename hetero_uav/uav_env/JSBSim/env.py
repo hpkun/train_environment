@@ -219,12 +219,18 @@ class UavCombatEnv(gymnasium.Env):
                  direct_fcs_trim_by_role: dict | None = None,
                  pid_profile_by_role: dict | None = None,
                  pid_profile_config: dict | None = None,
+                 red_target_selection_mode: str = "closest",
                  render_mode=None):
         super().__init__()
+        if red_target_selection_mode not in {"closest", "mav_threat_rank"}:
+            raise ValueError(
+                "red_target_selection_mode must be 'closest' or 'mav_threat_rank'"
+            )
         self.max_num_blue = max_num_blue
         self.max_num_red = max_num_red
         self.num_missiles_per_plane = num_missiles_per_plane
         self.enable_gcas_for_blue = enable_gcas_for_blue
+        self.red_target_selection_mode = red_target_selection_mode
         self.sim_freq = sim_freq
         self.agent_interaction_steps = agent_interaction_steps
         self.max_steps = max_steps
@@ -839,6 +845,190 @@ class UavCombatEnv(gymnasium.Env):
             if sim.is_alive:
                 sim.run()
 
+    @staticmethod
+    def _aircraft_feature(sim: AircraftSimulator) -> np.ndarray:
+        pos = sim.get_position()
+        vel = sim.get_velocity()
+        return np.array([pos[0], pos[1], -pos[2], vel[0], vel[1], -vel[2]])
+
+    def _missile_candidate_metrics(
+        self,
+        shooter: AircraftSimulator,
+        target: AircraftSimulator,
+    ) -> dict:
+        shooter_feat = self._aircraft_feature(shooter)
+        target_feat = self._aircraft_feature(target)
+        ao, ta, range_m = get2d_AO_TA_R(shooter_feat, target_feat)
+        return {
+            "AO_rad": float(ao),
+            "TA_rad": float(ta),
+            "range_m": float(range_m),
+            "range_ok": bool(self.MISSILE_LAUNCH_MIN_RANGE < range_m < self.MISSILE_LAUNCH_RANGE_THRESH),
+            "ao_ok": bool(ao < self.MISSILE_LAUNCH_AO_THRESH),
+            "ta_ok": bool(ta > self.MISSILE_LAUNCH_TA_THRESH),
+        }
+
+    @staticmethod
+    def _clip01(value: float) -> float:
+        return float(np.clip(value, 0.0, 1.0))
+
+    def _red_mav_observes_target(self, target: AircraftSimulator) -> bool:
+        mav = getattr(self, "red_planes", {}).get("red_0")
+        if mav is None or not mav.is_alive:
+            return False
+        try:
+            target_pos = np.asarray(target.get_position(), dtype=np.float64)
+            mav_pos = np.asarray(mav.get_position(), dtype=np.float64)
+            distance = float(np.linalg.norm(target_pos - mav_pos))
+        except Exception:
+            return False
+        return distance <= float(getattr(self, "mav_observation_range_m", 80000.0))
+
+    def _score_target_threat_to_red(self, target: AircraftSimulator) -> float:
+        """Approximate how dangerous a blue target is to alive red aircraft.
+
+        This is only a ranking signal for already launch-eligible targets. It
+        does not relax BRMA launch gates.
+        """
+
+        best = 0.0
+        roles = getattr(self, "agent_roles", {})
+        for red_id, red_sim in getattr(self, "red_planes", {}).items():
+            if red_sim is None or not red_sim.is_alive:
+                continue
+            try:
+                metrics = self._missile_candidate_metrics(target, red_sim)
+            except Exception:
+                continue
+            range_score = 1.0 - self._clip01(
+                (metrics["range_m"] - self.MISSILE_LAUNCH_MIN_RANGE)
+                / max(self.MISSILE_LAUNCH_RANGE_THRESH * 1.5, 1.0)
+            )
+            ao_score = 1.0 - self._clip01(
+                metrics["AO_rad"] / max(self.MISSILE_LAUNCH_AO_THRESH * 1.5, 1e-6)
+            )
+            ta_score = self._clip01(
+                metrics["TA_rad"] / max(np.pi, 1e-6)
+            )
+            role_bonus = 0.25 if roles.get(red_id) == "mav" else 0.10
+            missile_bonus = 0.20 if getattr(target, "num_left_missiles", 0) > 0 else 0.0
+            threat = 0.40 * range_score + 0.25 * ao_score + 0.20 * ta_score + role_bonus + missile_bonus
+            best = max(best, self._clip01(threat))
+        return best
+
+    def _score_mav_aware_target(
+        self,
+        shooter: AircraftSimulator,
+        target: AircraftSimulator,
+        candidate_metrics: dict,
+    ) -> dict:
+        """Score an already launch-eligible red target candidate.
+
+        The score only changes target ranking among candidates that passed the
+        existing AO/range/TA/deconfliction gate.
+        """
+
+        range_span = max(self.MISSILE_LAUNCH_RANGE_THRESH - self.MISSILE_LAUNCH_MIN_RANGE, 1.0)
+        range_mid = 0.5 * (self.MISSILE_LAUNCH_MIN_RANGE + self.MISSILE_LAUNCH_RANGE_THRESH)
+        ao_score = 1.0 - self._clip01(candidate_metrics["AO_rad"] / max(self.MISSILE_LAUNCH_AO_THRESH, 1e-6))
+        ta_score = self._clip01(
+            (candidate_metrics["TA_rad"] - self.MISSILE_LAUNCH_TA_THRESH)
+            / max(np.pi - self.MISSILE_LAUNCH_TA_THRESH, 1e-6)
+        )
+        range_score = 1.0 - self._clip01(abs(candidate_metrics["range_m"] - range_mid) / range_span)
+        shot_quality = self._clip01(0.45 * ao_score + 0.35 * ta_score + 0.20 * range_score)
+        target_threat = self._score_target_threat_to_red(target)
+        mav_observed = self._red_mav_observes_target(target)
+        mav_support = 1.0 if mav_observed else 0.0
+        score = self._clip01(0.50 * shot_quality + 0.35 * target_threat + 0.15 * mav_support)
+        return {
+            "score": score,
+            "shot_quality_score": shot_quality,
+            "target_threat_score": target_threat,
+            "mav_support_score": mav_support,
+            "range_m": float(candidate_metrics["range_m"]),
+            "AO_rad": float(candidate_metrics["AO_rad"]),
+            "TA_rad": float(candidate_metrics["TA_rad"]),
+            "is_mav_observed": bool(mav_observed),
+        }
+
+    def _target_selection_debug(
+        self,
+        mode: str,
+        candidate_count: int,
+        selected_metrics: dict | None,
+    ) -> dict:
+        debug = {
+            "target_selection_mode": mode,
+            "selected_target_score": "",
+            "selected_target_threat_score": "",
+            "selected_target_mav_support_score": "",
+            "selected_target_shot_quality_score": "",
+            "selected_target_range_m": "",
+            "selected_target_AO_rad": "",
+            "selected_target_TA_rad": "",
+            "selected_target_is_mav_observed": "",
+            "candidate_count": int(candidate_count),
+        }
+        if selected_metrics:
+            debug.update({
+                "selected_target_score": float(selected_metrics.get("score", 0.0)),
+                "selected_target_threat_score": float(selected_metrics.get("target_threat_score", 0.0)),
+                "selected_target_mav_support_score": float(selected_metrics.get("mav_support_score", 0.0)),
+                "selected_target_shot_quality_score": float(selected_metrics.get("shot_quality_score", 0.0)),
+                "selected_target_range_m": float(selected_metrics.get("range_m", _nan_float())),
+                "selected_target_AO_rad": float(selected_metrics.get("AO_rad", _nan_float())),
+                "selected_target_TA_rad": float(selected_metrics.get("TA_rad", _nan_float())),
+                "selected_target_is_mav_observed": bool(selected_metrics.get("is_mav_observed", False)),
+            })
+        return debug
+
+    def _select_missile_target(
+        self,
+        aid: str,
+        sim: AircraftSimulator,
+        enemies: dict[str, AircraftSimulator],
+        diag: dict,
+    ) -> tuple[AircraftSimulator | None, float, dict | None, dict]:
+        candidates: list[tuple[AircraftSimulator, dict, dict]] = []
+        for enemy_sim in enemies.values():
+            if not enemy_sim.is_alive:
+                continue
+            diag["alive_enemy_pairs"] += 1
+            if enemy_sim.uid in self._engaged_targets:
+                diag["engaged_blocked"] += 1
+                continue
+            diag["unengaged_enemy_pairs"] += 1
+
+            metrics = self._missile_candidate_metrics(sim, enemy_sim)
+            if metrics["range_ok"]:
+                diag["range_ok_pairs"] += 1
+            if metrics["ao_ok"]:
+                diag["ao_ok_pairs"] += 1
+            if metrics["ta_ok"]:
+                diag["ta_ok_pairs"] += 1
+
+            in_cone = metrics["ao_ok"] and metrics["range_ok"] and metrics["ta_ok"]
+            if in_cone:
+                diag["geometry_ok_pairs"] += 1
+                score = self._score_mav_aware_target(sim, enemy_sim, metrics)
+                candidates.append((enemy_sim, metrics, score))
+
+        mode = "closest"
+        if aid.startswith("red") and self.red_target_selection_mode == "mav_threat_rank":
+            mode = "mav_threat_rank"
+
+        if not candidates:
+            return None, float("inf"), None, self._target_selection_debug(mode, 0, None)
+
+        if mode == "mav_threat_rank":
+            selected = max(candidates, key=lambda item: (item[2]["score"], -item[2]["range_m"]))
+        else:
+            selected = min(candidates, key=lambda item: item[1]["range_m"])
+
+        enemy, metrics, score = selected
+        return enemy, float(metrics["range_m"]), score, self._target_selection_debug(mode, len(candidates), score)
+
     def _check_missile_launch(self):
         """Rule-based missile launch with lock-delay + hot-update deconfliction.
 
@@ -882,48 +1072,11 @@ class UavCombatEnv(gymnasium.Env):
             # missile tracking them AND targets flight-assigned by the
             # coordinated-actions allocator.
 
-            # ---- Find the closest UNENGAGED enemy in the launch cone ----
+            # ---- Find an UNENGAGED enemy in the launch cone ----
             enemies = self.red_planes if sim.color == "Blue" else self.blue_planes
-            best_enemy = None
-            best_distance = float("inf")
-
-            for enemy_sim in enemies.values():
-                if not enemy_sim.is_alive:
-                    continue
-                diag["alive_enemy_pairs"] += 1
-                # --- Target-deconfliction: skip enemies already engaged ---
-                if enemy_sim.uid in self._engaged_targets:
-                    diag["engaged_blocked"] += 1
-                    continue
-                diag["unengaged_enemy_pairs"] += 1
-
-                ego_pos = sim.get_position()
-                ego_vel = sim.get_velocity()
-                enm_pos = enemy_sim.get_position()
-                enm_vel = enemy_sim.get_velocity()
-
-                ego_feat = np.array([ego_pos[0], ego_pos[1], -ego_pos[2],
-                                     ego_vel[0], ego_vel[1], -ego_vel[2]])
-                enm_feat = np.array([enm_pos[0], enm_pos[1], -enm_pos[2],
-                                     enm_vel[0], enm_vel[1], -enm_vel[2]])
-                AO, TA, R = get2d_AO_TA_R(ego_feat, enm_feat)
-                range_ok = self.MISSILE_LAUNCH_MIN_RANGE < R < self.MISSILE_LAUNCH_RANGE_THRESH
-                ao_ok = AO < self.MISSILE_LAUNCH_AO_THRESH
-                ta_ok = TA > self.MISSILE_LAUNCH_TA_THRESH
-                if range_ok:
-                    diag["range_ok_pairs"] += 1
-                if ao_ok:
-                    diag["ao_ok_pairs"] += 1
-                if ta_ok:
-                    diag["ta_ok_pairs"] += 1
-
-                in_cone = (ao_ok and range_ok and ta_ok)
-                if in_cone:
-                    diag["geometry_ok_pairs"] += 1
-
-                if in_cone and R < best_distance:
-                    best_distance = R
-                    best_enemy = enemy_sim
+            best_enemy, best_distance, _best_metrics, selection_debug = self._select_missile_target(
+                aid, sim, enemies, diag
+            )
 
             # ---- Lock-delay state machine ----
             # If the currently locked target becomes engaged, abandon the
@@ -970,7 +1123,7 @@ class UavCombatEnv(gymnasium.Env):
                     and self._missile_cooldown[aid] == 0
                     and not on_kill_cooldown):
                 launch_quality = self._build_launch_quality_record(
-                    sim, best_enemy, best_distance)
+                    sim, best_enemy, best_distance, selection_debug)
                 self._launch_missile(sim, best_enemy, launch_quality)
                 diag["launches"] += 1
                 # ---- HOT-UPDATE: immediately mark target as engaged ----
@@ -987,6 +1140,7 @@ class UavCombatEnv(gymnasium.Env):
         shooter: AircraftSimulator,
         target: AircraftSimulator,
         range_m: float | None = None,
+        target_selection: dict | None = None,
     ) -> dict:
         """Build a launch-quality snapshot without affecting launch decisions."""
 
@@ -1015,7 +1169,7 @@ class UavCombatEnv(gymnasium.Env):
         if range_m is not None:
             r = float(range_m)
 
-        return make_launch_quality_record(
+        record = make_launch_quality_record(
             team=team,
             shooter_team=team,
             shooter_id=shooter.uid,
@@ -1038,6 +1192,9 @@ class UavCombatEnv(gymnasium.Env):
             shooter_num_left_before_launch=int(shooter.num_left_missiles),
             shooter_num_left_after_launch="",
         )
+        if target_selection:
+            record.update(target_selection)
+        return record
 
     def _launch_missile(
         self,

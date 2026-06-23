@@ -11,6 +11,7 @@ blue_agent_types: [attack_uav, attack_uav, attack_uav, attack_uav]
 enable_gcas_for_blue: true
 env_type: jsbsim_hetero
 hetero_reward_mode: paper_role_reward_v1
+red_target_selection_mode: mav_threat_rank
 initial_states:
   blue_0: {altitude_m: 6000, lat: 60.15, lon: 119.98, speed_mps: 250, yaw_deg: 180.0}
   blue_1: {altitude_m: 6000, lat: 60.15, lon: 120.02, speed_mps: 250, yaw_deg: 180.0}
