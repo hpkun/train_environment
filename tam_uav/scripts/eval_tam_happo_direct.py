@@ -189,7 +189,8 @@ def _update_missile_stats(stats: dict, info: dict, env, prev_hits: dict) -> None
 def evaluate_config(policy, cfg_path: str, args, adapter, device,
                     rich_logger=None) -> dict:
     cfg_name = Path(cfg_path).stem
-    env = make_env(cfg_path, env_type="jsbsim_hetero")
+    env = make_env(cfg_path, env_type="jsbsim_hetero",
+                   hetero_reward_mode=args.reward_mode)
     if args.max_steps_override is not None:
         env.max_steps = args.max_steps_override
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 99)
@@ -364,6 +365,7 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--opponent-policy", default="tam_direct_fsm",
                         choices=["tam_direct_fsm"])
+    parser.add_argument("--reward-mode", default="happo_ref_v0")
     parser.add_argument("--configs", nargs="*", default=None)
     parser.add_argument("--summary-json", default=None)
     parser.add_argument("--max-steps-override", type=int, default=None)

@@ -583,6 +583,7 @@ def _run_eval(model_path: str, args, summary_json: str) -> list[dict] | None:
         "--episodes", str(args.train_eval_episodes),
         "--device", str(args.device),
         "--opponent-policy", args.opponent_policy,
+        "--reward-mode", args.reward_mode,
         "--summary-json", summary_json,
         "--configs", *(args.eval_configs or DEFAULT_EVAL_CONFIGS),
     ]

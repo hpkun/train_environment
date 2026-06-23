@@ -537,14 +537,17 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
     def _tam_paper_height_reward(self, altitude_m: float) -> float:
         geometry = self.tam_paper_reward_config["geometry"]
-        minimum = float(geometry["min_altitude_m"])
+        config_min = float(geometry["min_altitude_m"])
+        # Effective floor: do not reward altitudes where env already kills the aircraft.
+        # BATTLEFIELD_ALTITUDE_MIN = 2500 from env.py crash check.
+        effective_min = max(config_min, float(getattr(self, "BATTLEFIELD_ALTITUDE_MIN", 2500.0)))
         optimum = float(geometry["optimal_altitude_m"])
         maximum = float(geometry["max_altitude_m"])
-        if altitude_m < minimum:
+        if altitude_m < effective_min:
             return -1.0
         if altitude_m > maximum:
             return -0.5
-        value = 1.0 - abs(float(altitude_m) - optimum) / (maximum - minimum)
+        value = 1.0 - abs(float(altitude_m) - optimum) / (maximum - effective_min)
         return float(np.clip(value, 0.0, 1.0))
 
     def _tam_paper_alive_blue(self) -> list:
@@ -677,6 +680,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         event_cfg = uav_cfg["event"]
         values = {key: 0.0 for key in TAM_PAPER_UAV_COMPONENT_KEYS}
         values["height_formula_source"] = "paper_undefined_PV_PH_v1_approx"
+        values["tam_uav_height_min_source"] = (
+            f"max(config_min={float(cfg['geometry']['min_altitude_m'])}, "
+            f"env_crash_floor={float(getattr(self, 'BATTLEFIELD_ALTITUDE_MIN', 2500.0))})"
+        )
 
         if sim.is_alive:
             altitude = float(sim.get_geodetic()[2])
@@ -694,7 +701,11 @@ class HeteroUavCombatEnv(UavCombatEnv):
                     speed_rewards.append(self._tam_paper_speed_reward(
                         red_speed, np.linalg.norm(blue.get_velocity())
                     ))
-                    angle_rewards.append(1.0 - (ao + ta) / np.pi)
+                    # Paper AA = pi - TA_env: reward AA ~ pi (tail chase).
+                    # R_A = 1 - (AO + AA) / pi = TA / pi - AO / pi.
+                    # This matches the launch gate: AO small, TA large.
+                    aa_mapped = np.pi - ta
+                    angle_rewards.append(1.0 - (ao + aa_mapped) / np.pi)
                     distance_rewards.append(self._tam_paper_uav_distance_reward(distance))
                 r_speed = max(speed_rewards)
                 r_angle = max(angle_rewards)
@@ -706,6 +717,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 "tam_uav_height": float(weights["height"]) * r_height,
                 "tam_uav_speed": float(weights["speed"]) * r_speed,
                 "tam_uav_angle": float(weights["angle"]) * r_angle,
+                "tam_uav_angle_raw": r_angle,
+                "tam_uav_angle_formula": "1-(AO+AA)/pi where AA=pi-TA_env",
                 "tam_uav_distance": float(weights["distance"]) * r_distance,
                 "tam_uav_dodge": float(weights["dodge"]) * r_dodge,
                 "tam_uav_dodge_angle": r_dodge_angle,
