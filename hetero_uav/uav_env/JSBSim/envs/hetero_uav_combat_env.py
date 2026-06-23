@@ -201,7 +201,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
     def step(self, actions: dict):
         trimmed = self._apply_action_trim(actions)
         obs, rewards, terminated, truncated, info = super().step(trimmed)
-        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0"}:
+        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1"}:
             self._last_step_obs = obs
         return obs, rewards, terminated, truncated, info
 
@@ -210,7 +210,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._mav_death_penalized = False
         self._uav_death_penalized = set()
         obs, info = super().reset(*args, **kwargs)
-        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0"}:
+        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1"}:
             self._last_step_obs = obs
         return obs, info
 
@@ -635,6 +635,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             return base_rewards, components
 
         # ---- role_v1 overlay ----
+        # (only runs for role_v1; paper_role_reward_v1 is handled before this)
         ROLE_MAV_KEYS = [
             "r_role_mav_survival", "r_role_mav_death",
             "r_role_mav_support", "r_role_mav_team_contribution",
@@ -780,6 +781,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
             if mw != 0.0:
                 base_rewards[aid] = base_rewards.get(aid, 0.0) + mw
 
+            return base_rewards, components
+
         # ---- paper_role_reward_v1 overlay ----
         if self.hetero_reward_mode == "paper_role_reward_v1":
             PAPER_ROLE_MAV_KEYS = [
@@ -889,8 +892,6 @@ class HeteroUavCombatEnv(UavCombatEnv):
                     base_rewards[rid] = base_rewards.get(rid, 0.0) + comp["uav_dodge"]
 
             return base_rewards, components
-
-        return base_rewards, components
 
     def _get_info(self, reward_components: dict | None = None) -> dict:
         info = super()._get_info(reward_components)
