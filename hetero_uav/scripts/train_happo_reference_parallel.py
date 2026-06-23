@@ -14,7 +14,7 @@ import multiprocessing as mp
 import os
 import sys
 import time
-from collections import deque
+from collections import defaultdict, deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -658,6 +658,12 @@ def _run_training(args: argparse.Namespace) -> None:
     current_ep_id = [0 for _ in range(args.num_envs)]
     recent = deque(maxlen=100)
     prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(args.num_envs)]
+    # Episode-level aggregation (reward components, death reasons, missile stats)
+    current_ep_reward_comp = [{} for _ in range(args.num_envs)]
+    current_ep_red_death = [defaultdict(int) for _ in range(args.num_envs)]
+    current_ep_blue_death = [defaultdict(int) for _ in range(args.num_envs)]
+    current_ep_missile = [{"red_fired": 0, "blue_fired": 0, "red_hits": 0, "blue_hits": 0}
+                          for _ in range(args.num_envs)]
     nan_detected = False
     best_score = -float("inf")
     eval_best_scores = {"best_3v2": -float("inf"), "best_5v4": -float("inf"), "best_7v6": -float("inf"), "best_combined": -float("inf")}
@@ -690,6 +696,23 @@ def _run_training(args: argparse.Namespace) -> None:
             "action_log_std_uav_mean", "approx_kl_mav", "approx_kl_uav",
             "mask_keep_ratio", "mask_entropy", "masked_entity_count",
             "worker_restart_count", "rollout_aborted_count",
+            "episodes_completed", "recent_episode_count",
+            "avg_episode_length",
+            "red_elimination_win", "blue_elimination_win",
+            "red_timeout_win", "blue_timeout_win",
+            "mav_return_mean", "uav_return_mean",
+            "red_death_missile_hit", "red_death_Crash_LowAlt",
+            "red_death_Crash_OverG", "red_death_Crash_Extreme",
+            "red_death_Crash_NonFiniteState", "red_death_unknown",
+            "mav_death_count", "red_uav_death_count",
+            "blue_death_missile_hit",
+            "mav_safety_sum", "mav_support_sum", "mav_event_sum",
+            "mav_death_reward_sum",
+            "uav_attack_window_sum", "uav_fire_reward_sum",
+            "uav_hit_reward_sum", "uav_low_speed_fire_reward_sum",
+            "uav_death_reward_sum",
+            "red_episode_missiles_fired_mean", "red_episode_missile_hits_mean",
+            "blue_episode_missiles_fired_mean", "blue_episode_missile_hits_mean",
             "nan_detected",
         ])
         eval_writer = None
@@ -1023,9 +1046,41 @@ def _run_training(args: argparse.Namespace) -> None:
                         blue_hits += max(blue_hit_total - prev_hit_totals[env_idx]["blue"], 0)
                         prev_hit_totals[env_idx]["red"] = red_hit_total
                         prev_hit_totals[env_idx]["blue"] = blue_hit_total
+                    # Aggregate per-step reward components and death events
+                    rc = next_info.get("reward_components", {}) if isinstance(next_info, dict) else {}
+                    for aid in env.red_ids:
+                        comp = rc.get(aid, {}) if isinstance(rc, dict) else {}
+                        if isinstance(comp, dict):
+                            for k, v in comp.items():
+                                current_ep_reward_comp[env_idx][k] = (
+                                    current_ep_reward_comp[env_idx].get(k, 0.0) + float(v))
+                    for de in next_info.get("death_events", []) if isinstance(next_info, dict) else []:
+                        if not isinstance(de, dict):
+                            continue
+                        reason = str(de.get("death_reason", "unknown"))
+                        if str(de.get("agent_id", "")).startswith("red_"):
+                            current_ep_red_death[env_idx][reason] += 1
+                        else:
+                            current_ep_blue_death[env_idx][reason] += 1
+                    # Missile stats
+                    em = current_ep_missile[env_idx]
+                    for aid, ai in (next_info or {}).items():
+                        if isinstance(ai, dict):
+                            f = int(ai.get("missiles_fired_this_step", 0))
+                            if aid.startswith("red_"): em["red_fired"] += f
+                            else: em["blue_fired"] += f
+                    mt = next_info.get("__missile_term__", {}) if isinstance(next_info, dict) else {}
+                    if isinstance(mt, dict):
+                        em["red_hits"] += max(int(mt.get("red", {}).get("hit", 0))
+                                             - prev_hit_totals[env_idx]["red"], 0)
+                        em["blue_hits"] += max(int(mt.get("blue", {}).get("hit", 0))
+                                              - prev_hit_totals[env_idx]["blue"], 0)
+
                     if done:
                         outcome = _episode_outcome_from_diag(
                             diag, truncated, current_ep_len[env_idx], proxy.max_steps)
+                        mav_return = float(current_ep_return[env_idx][0])
+                        uav_return = float(current_ep_return[env_idx][1:].mean()) if len(env.red_ids) > 1 else 0.0
                         recent.append({
                             "return": float(current_ep_return[env_idx].mean()),
                             "winner": outcome["winner"],
@@ -1033,10 +1088,22 @@ def _run_training(args: argparse.Namespace) -> None:
                             "mav": bool(diag.get("mav_alive", False)),
                             "red_alive": int(diag.get("red_alive", 0)),
                             "blue_alive": int(diag.get("blue_alive", 0)),
+                            "ep_len": current_ep_len[env_idx],
+                            "return_mav": mav_return,
+                            "return_uav": uav_return,
+                            "reward_comp": dict(current_ep_reward_comp[env_idx]),
+                            "red_death": dict(current_ep_red_death[env_idx]),
+                            "blue_death": dict(current_ep_blue_death[env_idx]),
+                            "missile": dict(current_ep_missile[env_idx]),
                         })
                         episodes += 1
                         current_ep_return[env_idx][:] = 0.0
                         current_ep_len[env_idx] = 0
+                        current_ep_reward_comp[env_idx] = {}
+                        current_ep_red_death[env_idx] = defaultdict(int)
+                        current_ep_blue_death[env_idx] = defaultdict(int)
+                        current_ep_missile[env_idx] = {"red_fired": 0, "blue_fired": 0,
+                                                       "red_hits": 0, "blue_hits": 0}
                         heartbeat.write(
                             "before_reset",
                             iteration=iteration,
@@ -1103,6 +1170,39 @@ def _run_training(args: argparse.Namespace) -> None:
             mav_surv = sum(1 for r in rec if r["mav"]) / n
             red_alive = float(np.mean([r["red_alive"] for r in rec])) if rec else 0.0
             blue_alive = float(np.mean([r["blue_alive"] for r in rec])) if rec else 0.0
+            # Extended metrics
+            red_elim = sum(1 for r in rec if r["end_reason"] == "blue_eliminated") / n
+            blue_elim = sum(1 for r in rec if r["end_reason"] == "red_eliminated") / n
+            red_tout_win = sum(1 for r in rec if r["winner"] == "red" and r["end_reason"] == "timeout") / n
+            blue_tout_win = sum(1 for r in rec if r["winner"] == "blue" and r["end_reason"] == "timeout") / n
+            mav_return = float(np.mean([r.get("return_mav", 0) for r in rec])) if rec else 0.0
+            uav_return = float(np.mean([r.get("return_uav", 0) for r in rec])) if rec else 0.0
+            ep_len_mean = float(np.mean([r.get("ep_len", 0) for r in rec])) if rec else 0.0
+            # Death reasons
+            red_d = defaultdict(int)
+            blue_d = defaultdict(int)
+            for r in rec:
+                for k, v in r.get("red_death", {}).items():
+                    red_d[k] += v
+                for k, v in r.get("blue_death", {}).items():
+                    blue_d[k] += v
+            mav_death = sum(r.get("red_death", {}).get("Crash_LowAlt", 0)
+                           + r.get("red_death", {}).get("Crash_OverG", 0)
+                           + r.get("red_death", {}).get("Crash_Extreme", 0)
+                           + r.get("red_death", {}).get("Crash_NonFiniteState", 0)
+                           + r.get("red_death", {}).get("missile_hit", 0)
+                           + r.get("red_death", {}).get("unknown", 0) for r in rec)
+            # Reward component sums
+            rc_sum = defaultdict(float)
+            for r in rec:
+                for k, v in r.get("reward_comp", {}).items():
+                    rc_sum[k] += v
+            # Missile stats
+            red_mf = float(np.mean([r.get("missile", {}).get("red_fired", 0) for r in rec])) if rec else 0.0
+            red_mh = float(np.mean([r.get("missile", {}).get("red_hits", 0) for r in rec])) if rec else 0.0
+            blue_mf = float(np.mean([r.get("missile", {}).get("blue_fired", 0) for r in rec])) if rec else 0.0
+            blue_mh = float(np.mean([r.get("missile", {}).get("blue_hits", 0) for r in rec])) if rec else 0.0
+
             writer.writerow([
                 iteration, total_steps, f"{avg_return:.4f}", f"{red_win:.4f}",
                 f"{blue_win:.4f}", f"{draw:.4f}", f"{timeout:.4f}",
@@ -1129,6 +1229,23 @@ def _run_training(args: argparse.Namespace) -> None:
                 f"{stats.get('mask_entropy', 0.0):.6f}",
                 f"{stats.get('masked_entity_count', 0.0):.2f}",
                 getattr(vec_env, "worker_restart_count", 0), rollout_aborted_count,
+                episodes, n,
+                f"{ep_len_mean:.1f}",
+                f"{red_elim:.4f}", f"{blue_elim:.4f}",
+                f"{red_tout_win:.4f}", f"{blue_tout_win:.4f}",
+                f"{mav_return:.4f}", f"{uav_return:.4f}",
+                red_d.get("missile_hit", 0), red_d.get("Crash_LowAlt", 0),
+                red_d.get("Crash_OverG", 0), red_d.get("Crash_Extreme", 0),
+                red_d.get("Crash_NonFiniteState", 0), red_d.get("unknown", 0),
+                mav_death, sum(red_d.values()) - mav_death,
+                blue_d.get("missile_hit", 0),
+                f"{rc_sum.get('mav_safety', 0):.4f}", f"{rc_sum.get('mav_support', 0):.4f}",
+                f"{rc_sum.get('mav_event', 0):.4f}", f"{rc_sum.get('mav_death', 0):.4f}",
+                f"{rc_sum.get('uav_attack_window', 0):.4f}", f"{rc_sum.get('uav_fire', 0):.4f}",
+                f"{rc_sum.get('uav_hit', 0):.4f}", f"{rc_sum.get('uav_low_speed_fire', 0):.4f}",
+                f"{rc_sum.get('uav_death', 0):.4f}",
+                f"{red_mf:.2f}", f"{red_mh:.2f}",
+                f"{blue_mf:.2f}", f"{blue_mh:.2f}",
                 int(nan_detected),
             ])
             if rich_logger is not None:
@@ -1161,12 +1278,36 @@ def _run_training(args: argparse.Namespace) -> None:
                     "masked_entity_count": stats.get("masked_entity_count", 0.0),
                     "nan_detected": int(nan_detected),
                 })
-            f.flush()
+            try:
+                f.flush()
+            except Exception:
+                pass
+            # Two-line compact terminal summary
             print(
-                f"[happo-parallel] iter={iteration:04d} steps={total_steps}/{args.total_env_steps} "
-                f"envs={args.num_envs} ret={avg_return:+.2f} red_win={red_win:.2f} "
-                f"blue_win={blue_win:.2f} mav_surv={mav_surv:.2f} "
-                f"loss_mav={stats['actor_loss_mav']:.4f} loss_uav={stats['actor_loss_uav']:.4f}",
+                f"[happo-parallel] it={iteration:04d} step={total_steps}/{args.total_env_steps} "
+                f"ep={episodes} ret={avg_return:+.1f} mavR={mav_return:+.1f} uavR={uav_return:+.1f} "
+                f"win R/B/D={red_win:.2f}/{blue_win:.2f}/{draw:.2f} "
+                f"elim R/B={red_elim:.2f}/{blue_elim:.2f} "
+                f"timeout={timeout:.2f} mav={mav_surv:.2f} alive R/B={red_alive:.1f}/{blue_alive:.1f}",
+                flush=True,
+            )
+            print(
+                f"                 combat Rfire={red_mf:.0f} Rhit={red_mh:.0f} "
+                f"Bfire={blue_mf:.0f} Bhit={blue_mh:.0f} "
+                f"red_death hit/low/G/extreme/nonf/unk="
+                f"{red_d.get('missile_hit',0)}/{red_d.get('Crash_LowAlt',0)}"
+                f"/{red_d.get('Crash_OverG',0)}/{red_d.get('Crash_Extreme',0)}"
+                f"/{red_d.get('Crash_NonFiniteState',0)}/{red_d.get('unknown',0)} "
+                f"rew mav[safe/sup/event/death]="
+                f"{rc_sum.get('mav_safety',0):.1f}/{rc_sum.get('mav_support',0):.1f}"
+                f"/{rc_sum.get('mav_event',0):.1f}/{rc_sum.get('mav_death',0):.1f} "
+                f"uav[window/fire/hit/low/death]="
+                f"{rc_sum.get('uav_attack_window',0):.1f}/{rc_sum.get('uav_fire',0):.1f}"
+                f"/{rc_sum.get('uav_hit',0):.1f}/{rc_sum.get('uav_low_speed_fire',0):.1f}"
+                f"/{rc_sum.get('uav_death',0):.1f} "
+                f"loss={stats['actor_loss_mav']:.3f}/{stats['actor_loss_uav']:.3f} "
+                f"ent={stats['entropy_mav']:.2f}/{stats['entropy_uav']:.2f} "
+                f"wr={getattr(vec_env,'worker_restart_count',0)} ab={rollout_aborted_count}",
                 flush=True,
             )
 
