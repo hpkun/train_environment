@@ -88,6 +88,7 @@ def run_direct_fcs_test(model: str, elev_cmds: list, ail_cmds: list,
                         spd = float(np.linalg.norm(vel))
                         rows.append({
                             "frame": f,
+                            "elevator_cmd": float(elev),
                             "pitch_deg": round(np.rad2deg(rpy[1]), 2),
                             "roll_deg": round(np.rad2deg(rpy[0]), 2),
                             "yaw_deg": round(np.rad2deg(rpy[2]), 2),
@@ -112,6 +113,24 @@ def run_direct_fcs_test(model: str, elev_cmds: list, ail_cmds: list,
                 # if crashed:
                 #     break  # skip further sweeps for this elev
     return results
+
+
+def _f22_pid_kwargs():
+    return {
+        "elevator_sign": -1,
+        "pitch_kp": 1.0,
+        "pitch_ki": 0.0,
+        "pitch_kd": 1.0,
+        "roll_kp": 0.06,
+        "roll_ki": 0.08,
+        "roll_kd": 0.03,
+        "vel_kp": 0.04,
+        "vel_ki": 0.006,
+        "vel_kd": 0.002,
+        "throttle_min": 0.72,
+        "throttle_max": 1.0,
+        "low_speed_throttle_floor": 0.95,
+    }
 
 
 def run_pid_action_test(model: str, action: np.ndarray, duration_sec: float = 30.0,
@@ -215,7 +234,7 @@ def main():
         pid_kwargs = {}
         pid_class = PIDController
         if model == "f22":
-            pid_kwargs = {"elevator_sign": +1}
+            pid_kwargs = _f22_pid_kwargs()
             pid_class = F22MavEnergyPIDController
         r = run_pid_action_test(model, zero_action, duration_sec=20.0,
                                 label=label, pid_class=pid_class, **pid_kwargs)
@@ -228,16 +247,37 @@ def main():
                   f"(max={max(pitches):.0f}) speed: {speeds[0]:.0f}->{speeds[-1]:.0f} "
                   f"alt: {alts[0]:.0f}->{alts[-1]:.0f} crash={r['crashed']}")
 
-    # Also test F22 with elevator_sign=-1
-    r = run_pid_action_test("f22", zero_action, duration_sec=20.0,
-                            label="f22_pid_sign_minus1",
-                            pid_class=F22MavEnergyPIDController, elevator_sign=-1)
-    rows = r["rows"]
-    if rows:
-        pitches = [x["pitch_deg"] for x in rows]
-        speeds = [x["speed_mps"] for x in rows]
-        print(f"  {'f22_pid_sign=-1':30s} pitch: {pitches[0]:5.1f}->{pitches[-1]:5.1f} "
-              f"(max={max(pitches):.0f}) speed: {speeds[0]:.0f}->{speeds[-1]:.0f} crash={r['crashed']}")
+    print()
+    print("=" * 60)
+    print("TEST 2B: F22 PID 200-frame zero/safe action stability")
+    print("=" * 60)
+    fixed_actions = {
+        "f22_zero_action_200": np.array([0.0, 0.0, 0.3], dtype=np.float32),
+        "f22_safe_action_200": np.array([0.05, 0.0, 0.4], dtype=np.float32),
+    }
+    for label, action in fixed_actions.items():
+        r = run_pid_action_test(
+            "f22",
+            action,
+            duration_sec=200.0 / SIM_FREQ,
+            label=label,
+            pid_class=F22MavEnergyPIDController,
+            **_f22_pid_kwargs(),
+        )
+        rows = r["rows"]
+        if rows:
+            pitches = [x["pitch_deg"] for x in rows]
+            rolls = [x["roll_deg"] for x in rows]
+            speeds = [x["speed_mps"] for x in rows]
+            alts = [x["altitude_m"] for x in rows]
+            print(
+                f"  {label:30s} pitch={pitches[0]:5.1f}->{pitches[-1]:5.1f} "
+                f"max_abs_pitch={max(abs(x) for x in pitches):.1f} "
+                f"max_abs_roll={max(abs(x) for x in rolls):.1f} "
+                f"speed={speeds[0]:.0f}->{speeds[-1]:.0f} "
+                f"min_speed={min(speeds):.0f} alt={alts[0]:.0f}->{alts[-1]:.0f} "
+                f"crash={r['crashed']}"
+            )
 
     # ============================================================
     # TEST 3: F22 direct FCS with +1 elevator for 10 sec → read actual alpha/pitch response
@@ -256,7 +296,7 @@ def main():
     csv_path = os.path.join(OUT, "f22_direct_fcs_detailed.csv")
     with open(csv_path, "w", newline="") as f:
         fieldnames = ["label", "frame", "pitch_deg", "roll_deg", "yaw_deg",
-                      "speed_mps", "altitude_m", "alpha_deg", "beta_deg",
+                      "elevator_cmd", "speed_mps", "altitude_m", "alpha_deg", "beta_deg",
                       "qbar", "elev_pos_rad", "ail_pos_rad", "thrust"]
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()

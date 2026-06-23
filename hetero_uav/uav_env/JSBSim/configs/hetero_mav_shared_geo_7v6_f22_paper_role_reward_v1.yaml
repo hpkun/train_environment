@@ -1,6 +1,7 @@
+# F22 MAV paper role reward config - 7v6
 env_type: jsbsim_hetero
 observation_mode: mav_shared_geo
-hetero_reward_mode: happo_ref_v0
+hetero_reward_mode: paper_role_reward_v1
 max_num_red: 7
 max_num_blue: 6
 sim_freq: 60
@@ -9,24 +10,22 @@ max_steps: 1000
 suppress_jsbsim_output: true
 enable_gcas_for_blue: true
 uav_direct_observation_range_m: 10000.0
-mav_observation_range_m: 80000.0
-
+mav_observation_range_m: 80000
 red_agent_types:
-  - mav
-  - attack_uav
-  - attack_uav
-  - attack_uav
-  - attack_uav
-  - attack_uav
-  - attack_uav
+- mav
+- attack_uav
+- attack_uav
+- attack_uav
+- attack_uav
+- attack_uav
+- attack_uav
 blue_agent_types:
-  - attack_uav
-  - attack_uav
-  - attack_uav
-  - attack_uav
-  - attack_uav
-  - attack_uav
-
+- attack_uav
+- attack_uav
+- attack_uav
+- attack_uav
+- attack_uav
+- attack_uav
 aircraft_type_params:
   mav:
     aircraft_model: f22
@@ -48,13 +47,11 @@ aircraft_type_params:
     aircraft_model: f16
     role: interceptor_uav
     num_missiles: 2
-
 action_trim_by_role:
   mav:
     pitch: 0.0
     heading: 0.0
     speed: 0.0
-
 pid_profile_by_role:
   mav: f22_mav_energy_pid
   attack_uav: f16_default
@@ -74,7 +71,6 @@ pid_profile_config:
     throttle_min: 0.72
     throttle_max: 1.0
     low_speed_throttle_floor: 0.95
-
 initial_states:
   red_0: {lon: 120.00, lat: 60.00, altitude_m: 6700, speed_mps: 250, yaw_deg: 0.0}
   red_1: {lon: 119.97, lat: 60.02, altitude_m: 6000, speed_mps: 250, yaw_deg: 0.0}

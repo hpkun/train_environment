@@ -446,7 +446,9 @@ class PIDController:
         # Pitch error → elevator
         # elevator_sign is platform-specific:
         #   F-16 FCS: positive elevator-cmd-norm → pitch DOWN  → sign = −1
-        #   F-22:     positive elevator-cmd-norm → pitch UP    → sign = +1
+        #   F-22 f22.xml CmDh: negative elevator-pos-rad → pitch UP,
+        #   and the external command path maps positive command to positive
+        #   elevator-pos-rad, so the F22 PID profile also uses sign = −1.
         elevator = self.elevator_sign * self._pitch_pid.step(pitch_error, self.dt)
 
         # Velocity error → throttle
@@ -465,11 +467,11 @@ class PIDController:
 
 # Default F22 PID gains (conservative starting point; can be overridden via sweep)
 F22_MAV_ENERGY_DEFAULT_GAINS = {
-    "roll_kp": 0.12,  "roll_ki": 0.45, "roll_kd": 0.04,
-    "pitch_kp": 1.2,  "pitch_ki": 0.45, "pitch_kd": 0.08,
-    "vel_kp": 0.06,   "vel_ki": 0.012,  "vel_kd": 0.003,
+    "roll_kp": 0.06,  "roll_ki": 0.08, "roll_kd": 0.03,
+    "pitch_kp": 1.0,  "pitch_ki": 0.0,  "pitch_kd": 1.0,
+    "vel_kp": 0.04,   "vel_ki": 0.006,  "vel_kd": 0.002,
     "elevator_sign": None,   # MUST be set via sweep before use
-    "throttle_min": 0.65,     # F22 needs higher idle to sustain flight
+    "throttle_min": 0.72,     # F22 needs higher idle to sustain flight
     "throttle_max": 1.0,
 }
 

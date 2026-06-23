@@ -1024,6 +1024,25 @@
                 <output>fcs/elevator-pos-rad</output>
             </aerosurface_scale>
 
+            <!--
+              Hetero-UAV high-level/PID control writes fcs/elevator-cmd-norm
+              directly. The stock closed-loop F-22 pitch controller can leave
+              fcs/elevator-pos-rad at zero for these external commands, so the
+              MAV control path receives no pitch authority. This explicit
+              command-to-surface scale keeps the model name "f22" unchanged and
+              makes fcs/elevator-cmd-norm auditable in direct-FCS diagnostics.
+              Negative elevator-pos-rad produces nose-up pitch moment in the
+              CmDh table below, so PID sign is handled in the controller profile.
+            -->
+            <aerosurface_scale name="fcs/external-elevator-command-position">
+                <input>fcs/elevator-cmd-limiter</input>
+                <range>
+                    <min>-0.5236</min>
+                    <max>0.5236</max>
+                </range>
+                <output>fcs/elevator-pos-rad</output>
+            </aerosurface_scale>
+
             <summer name="fcs/dht-left-pos-rad">
                 <input>-fcs/elevator-pos-rad</input>
                 <input>-fcs/left-aileron-pos-rad</input>
@@ -1520,7 +1539,10 @@
 
             <!-- Throttle filter -->
             <lag_filter name="fcs/throttle1-filter">
-                <input>fcs/throttle-cmd-norm[1]</input>
+                <!-- Hetero-UAV writes one high-level throttle command. Drive
+                     both F119 engines from the same command to avoid silently
+                     running the second engine at idle in training/eval. -->
+                <input>fcs/throttle-cmd-norm</input>
                 <c1>1</c1>
             </lag_filter>
 

@@ -1,5 +1,4 @@
-# F22 MAV 3D PID profile config — 3v2
-# Copies happo_ref_v0 F22 config but uses f22_mav_energy_pid instead of direct_fcs_3d.
+# F22 MAV paper role reward config - 3v2
 action_trim_by_role:
   mav:
     heading: 0.0
@@ -36,39 +35,14 @@ blue_agent_types:
 - attack_uav
 enable_gcas_for_blue: true
 env_type: jsbsim_hetero
-hetero_reward_mode: happo_ref_v0
+hetero_reward_mode: paper_role_reward_v1
 initial_states:
-  blue_0:
-    altitude_m: 6000
-    lat: 60.2
-    lon: 120.0
-    speed_mps: 250
-    yaw_deg: 180.0
-  blue_1:
-    altitude_m: 6000
-    lat: 60.2
-    lon: 120.04
-    speed_mps: 250
-    yaw_deg: 180.0
-  red_0:
-    altitude_m: 6000
-    lat: 59.98
-    lon: 120.02
-    speed_mps: 250
-    yaw_deg: 0.0
-  red_1:
-    altitude_m: 6000
-    lat: 60.0
-    lon: 120.0
-    speed_mps: 250
-    yaw_deg: 0.0
-  red_2:
-    altitude_m: 6000
-    lat: 60.0
-    lon: 120.04
-    speed_mps: 250
-    yaw_deg: 0.0
-mav_observation_range_m: 80000.0
+  blue_0: {altitude_m: 6000, lat: 60.2, lon: 120.0, speed_mps: 250, yaw_deg: 180.0}
+  blue_1: {altitude_m: 6000, lat: 60.2, lon: 120.04, speed_mps: 250, yaw_deg: 180.0}
+  red_0: {altitude_m: 6000, lat: 59.98, lon: 120.02, speed_mps: 250, yaw_deg: 0.0}
+  red_1: {altitude_m: 6000, lat: 60.0, lon: 120.0, speed_mps: 250, yaw_deg: 0.0}
+  red_2: {altitude_m: 6000, lat: 60.0, lon: 120.04, speed_mps: 250, yaw_deg: 0.0}
+mav_observation_range_m: 80000
 max_num_blue: 2
 max_num_red: 3
 max_steps: 1000
@@ -80,14 +54,10 @@ red_agent_types:
 sim_freq: 60
 suppress_jsbsim_output: true
 uav_direct_observation_range_m: 10000.0
-
-# F22 MAV 3D PID profile (not direct-FCS)
 pid_profile_by_role:
   mav: f22_mav_energy_pid
   attack_uav: f16_default
   interceptor_uav: f16_default
-
-# Tuned F22 PID gains (from tune_f22_pid_profile.py sweep)
 pid_profile_config:
   f22_mav_energy_pid:
     elevator_sign: -1

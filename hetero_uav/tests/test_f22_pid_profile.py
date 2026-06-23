@@ -60,9 +60,9 @@ class TestF22MavEnergyPIDController:
         # F22 gains are different from F16 defaults
         assert pid._roll_pid.kp != 0.15   # F16 default
         assert pid._pitch_pid.kp != 2.5   # F16 default
-        assert pid._velocity_pid.kp != 0.04  # F16 default
+        assert pid.throttle_min != 0.0       # F16 default
         # F22 has throttle floor
-        assert pid.throttle_min == 0.65
+        assert pid.throttle_min == 0.72
         assert pid.throttle_max == 1.0
         assert pid.low_speed_throttle_floor == 0.95
 
@@ -230,7 +230,7 @@ class TestF22ProfileEnvIntegration:
         # red_0 = MAV → F22 controller (fallback elevator_sign=+1)
         mav_pid = env.pid_controllers["red_0"]
         assert isinstance(mav_pid, F22MavEnergyPIDController)
-        assert mav_pid.elevator_sign is not None
+        assert mav_pid.elevator_sign == -1
         # red_1 = attack_uav → F16 controller
         uav_pid = env.pid_controllers["red_1"]
         assert isinstance(uav_pid, PIDController)
