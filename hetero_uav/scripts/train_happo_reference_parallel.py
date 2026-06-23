@@ -1285,33 +1285,11 @@ def _run_training(args: argparse.Namespace) -> None:
                 f.flush()
             except Exception:
                 pass
-            # Two-line compact terminal summary
+            # Compact terminal summary (detailed data in train_log.csv)
             print(
                 f"[happo-parallel] it={iteration:04d} step={total_steps}/{args.total_env_steps} "
-                f"ep={episodes} ret={avg_return:+.1f} mavR={mav_return:+.1f} uavR={uav_return:+.1f} "
-                f"win R/B/D={red_win:.2f}/{blue_win:.2f}/{draw:.2f} "
-                f"elim R/B={red_elim:.2f}/{blue_elim:.2f} "
-                f"tout_adv R/B={red_tout_adv:.2f}/{blue_tout_adv:.2f} "
-                f"timeout={timeout:.2f} mav={mav_surv:.2f} alive R/B={red_alive:.1f}/{blue_alive:.1f}",
-                flush=True,
-            )
-            print(
-                f"                 combat Rfire={red_mf:.0f} Rhit={red_mh:.0f} "
-                f"Bfire={blue_mf:.0f} Bhit={blue_mh:.0f} "
-                f"red_death hit/low/G/extreme/nonf/unk="
-                f"{red_d.get('missile_hit',0)}/{red_d.get('Crash_LowAlt',0)}"
-                f"/{red_d.get('Crash_OverG',0)}/{red_d.get('Crash_Extreme',0)}"
-                f"/{red_d.get('Crash_NonFiniteState',0)}/{red_d.get('unknown',0)} "
-                f"rew mav[safe/sup/event/death]="
-                f"{rc_sum.get('mav_safety',0):.1f}/{rc_sum.get('mav_support',0):.1f}"
-                f"/{rc_sum.get('mav_event',0):.1f}/{rc_sum.get('mav_death',0):.1f} "
-                f"uav[window/fire/hit/low/death]="
-                f"{rc_sum.get('uav_attack_window',0):.1f}/{rc_sum.get('uav_fire',0):.1f}"
-                f"/{rc_sum.get('uav_hit',0):.1f}/{rc_sum.get('uav_low_speed_fire',0):.1f}"
-                f"/{rc_sum.get('uav_death',0):.1f} "
-                f"loss={stats['actor_loss_mav']:.3f}/{stats['actor_loss_uav']:.3f} "
-                f"ent={stats['entropy_mav']:.2f}/{stats['entropy_uav']:.2f} "
-                f"wr={getattr(vec_env,'worker_restart_count',0)} ab={rollout_aborted_count}",
+                f"ret={avg_return:+.1f} win R/B/D={red_win:.2f}/{blue_win:.2f}/{draw:.2f} "
+                f"timeout={timeout:.2f} mav={mav_surv:.2f}",
                 flush=True,
             )
 
