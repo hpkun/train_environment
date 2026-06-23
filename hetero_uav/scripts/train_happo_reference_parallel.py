@@ -717,6 +717,7 @@ def _run_training(args: argparse.Namespace) -> None:
     best_score = -float("inf")
     eval_best_scores = {"best_3v2": -float("inf"), "best_5v4": -float("inf"), "best_7v6": -float("inf"), "best_combined": -float("inf")}
     last_eval = -999999 if args.eval_at_start else 0
+    next_checkpoint_step = args.checkpoint_interval_steps if args.checkpoint_interval_steps > 0 else None
     worker_restart_count = 0
     rollout_aborted_count = 0
     consecutive_rollout_abort_count = 0
@@ -1340,16 +1341,27 @@ def _run_training(args: argparse.Namespace) -> None:
                 flush=True,
             )
 
-            # Periodic checkpoint
-            if args.checkpoint_interval_steps > 0 and total_steps % args.checkpoint_interval_steps == 0:
-                ckpt_dir = out_dir / "checkpoints" / f"step_{total_steps:06d}"
+            # Periodic checkpoint (crossing trigger, not modulo)
+            while next_checkpoint_step is not None and total_steps >= next_checkpoint_step:
+                ckpt_dir = out_dir / "checkpoints" / f"step_{next_checkpoint_step:07d}"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
                 policy.save(ckpt_dir / "model.pt")
+                try:
+                    with open(args.config, encoding="utf-8") as _f:
+                        _cfg = __import__("yaml").safe_load(_f) or {}
+                    _rtsm = _cfg.get("red_target_selection_mode", "")
+                except Exception:
+                    _rtsm = ""
                 meta = {
                     "policy_arch": args.policy_arch, "reward_mode": args.reward_mode,
                     "config": args.config, "opponent_policy": args.opponent_policy,
                     "init_checkpoint": args.init_checkpoint,
                     "total_env_steps_actual": total_steps, "episodes": episodes,
+                    "checkpoint_step": next_checkpoint_step,
+                    "red_target_selection_mode": _rtsm,
+                    "resolved_config_path": str(Path(args.config).resolve()),
+                    "checkpoint_interval_steps": args.checkpoint_interval_steps,
+                    "keep_checkpoints": args.keep_checkpoints,
                     "observation_adapter": "HeteroEntitySetAdapter" if entity_mode else "HeteroObsAdapterV2",
                     "entity_dim": getattr(policy, "entity_dim", None),
                     "num_envs": args.num_envs,
@@ -1361,13 +1373,14 @@ def _run_training(args: argparse.Namespace) -> None:
                 # Also update latest
                 policy.save(out_dir / "latest" / "model.pt")
                 (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2))
-                # Prune old
-                existing = sorted(
-                    [d for d in (out_dir / "checkpoints").iterdir() if d.is_dir() and d.name.startswith("step_")],
-                    key=lambda d: d.name)
-                for old in existing[:-args.keep_checkpoints]:
-                    import shutil
-                    shutil.rmtree(old, ignore_errors=True)
+                next_checkpoint_step += args.checkpoint_interval_steps
+            # Prune old periodic checkpoints (not latest, best, eval, emergency)
+            existing = sorted(
+                [d for d in (out_dir / "checkpoints").iterdir() if d.is_dir() and d.name.startswith("step_")],
+                key=lambda d: d.name)
+            for old in existing[:-args.keep_checkpoints]:
+                import shutil
+                shutil.rmtree(old, ignore_errors=True)
 
             if total_steps - last_eval >= args.eval_interval_steps and args.eval_during_training:
                 last_eval = total_steps
@@ -1488,8 +1501,17 @@ def _run_training(args: argparse.Namespace) -> None:
         "episodes": episodes,
         "nan_detected": nan_detected,
         "observation_adapter": "HeteroEntitySetAdapter" if entity_mode else "HeteroObsAdapterV2",
+        "config_snapshot_path": str((out_dir / "config_snapshot.yaml").resolve()),
+        "checkpoint_interval_steps": args.checkpoint_interval_steps,
+        "keep_checkpoints": args.keep_checkpoints,
         **_entity_policy_meta(policy),
     }
+    try:
+        with open(args.config, encoding="utf-8") as _f:
+            _cfg = __import__("yaml").safe_load(_f) or {}
+        meta["red_target_selection_mode"] = _cfg.get("red_target_selection_mode", "")
+    except Exception:
+        meta["red_target_selection_mode"] = ""
     (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     if rich_logger is not None:

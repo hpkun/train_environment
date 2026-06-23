@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from uav_env import make_env
+from algorithms.mappo.opponent_policy import OpponentPolicy
 
 
 DEFAULT_CONFIG = (
@@ -62,7 +63,7 @@ def _active_mask(env, info: dict) -> np.ndarray:
     return active
 
 
-def _policy_actions(policy, adapter, env, obs, info, device, rnn_hidden):
+def _policy_actions(policy, adapter, env, obs, info, device, rnn_hidden, blue_opponent=None):
     if policy is None:
         return _zero_actions(env), rnn_hidden
     import torch
@@ -128,7 +129,10 @@ def _policy_actions(policy, adapter, env, obs, info, device, rnn_hidden):
         rnn_hidden = zero_inactive_hidden(out["rnn_hidden"].detach().cpu().numpy(), active)
     red_actions = zero_inactive_actions(out["action"].detach().cpu().numpy(), active)
     actions = {rid: red_actions[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
-    actions.update(_blue_zero_actions(env))
+    if blue_opponent is not None:
+        actions.update(blue_opponent.act(obs, env.blue_ids, env=env))
+    else:
+        actions.update(_blue_zero_actions(env))
     return actions, rnn_hidden
 
 
@@ -177,6 +181,7 @@ def run_mode(
     policy,
     adapter,
     device: torch.device,
+    blue_policy: str = "zero",
 ) -> dict:
     env = make_env(
         config,
@@ -186,15 +191,19 @@ def run_mode(
     )
     launch_records: list[dict] = []
     done_records: list[dict] = []
+    print(f"[audit] mode={mode} blue={blue_policy} episodes={episodes} max_steps={max_steps}", flush=True)
     try:
         for episode in range(episodes):
+            if episode % 5 == 0:
+                print(f"[audit]   episode {episode}/{episodes}...", flush=True)
             _obs, _info = env.reset(seed=episode)
             obs, info = _obs, _info
             rnn_hidden = None
             if policy is not None and getattr(policy, "rnn_hidden_size", 0) > 0:
                 rnn_hidden = np.zeros((len(env.red_ids), policy.rnn_hidden_size), dtype=np.float32)
             for _ in range(max_steps):
-                actions, rnn_hidden = _policy_actions(policy, adapter, env, obs, info, device, rnn_hidden)
+                blue_opp = OpponentPolicy(mode=blue_policy, seed=episode + 33) if blue_policy != "zero" else None
+                actions, rnn_hidden = _policy_actions(policy, adapter, env, obs, info, device, rnn_hidden, blue_opponent=blue_opp)
                 obs, _rewards, terminated, truncated, info = env.step(actions)
                 launch_records.extend(info.get("__launch_quality_step__", []) or [])
                 done_records.extend(info.get("__launch_quality_done__", []) or [])
@@ -247,18 +256,20 @@ def main() -> int:
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--checkpoint", default=None, help="Optional HAPPO checkpoint to use for red actions.")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--blue-policy", default="zero", choices=["zero", "brma_rule"])
     parser.add_argument("--output-dir", default="outputs/environment_audit/red_target_selection")
     args = parser.parse_args()
 
     policy, adapter, device = _load_policy(args.checkpoint, args.device)
     summaries = [
-        run_mode(args.config, "closest", args.episodes, args.max_steps, policy, adapter, device),
-        run_mode(args.config, "mav_threat_rank", args.episodes, args.max_steps, policy, adapter, device),
+        run_mode(args.config, "closest", args.episodes, args.max_steps, policy, adapter, device, blue_policy=args.blue_policy),
+        run_mode(args.config, "mav_threat_rank", args.episodes, args.max_steps, policy, adapter, device, blue_policy=args.blue_policy),
     ]
     payload = {
         "config": args.config,
         "checkpoint": args.checkpoint or "",
         "policy_source": "checkpoint" if args.checkpoint else "zero_action",
+        "blue_policy": args.blue_policy,
         "episodes": args.episodes,
         "max_steps": args.max_steps,
         "modes": summaries,
