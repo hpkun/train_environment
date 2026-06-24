@@ -7,7 +7,6 @@ import os
 import sys
 import logging
 import numpy as np
-from collections import deque
 from abc import ABC, abstractmethod
 from typing import List, Union
 
@@ -500,7 +499,7 @@ class AircraftSimulator(BaseSimulator):
 
 
 class MissileSimulator(BaseSimulator):
-    """Proportional-navigation missile with physical dynamics."""
+    """Scripted close-range AAM with proportional guidance."""
 
     INACTIVE = -1
     LAUNCHED = 0
@@ -526,24 +525,16 @@ class MissileSimulator(BaseSimulator):
         self._kill_rewarded = False
         self._parent_id: str = ""
         self._target_id: str = ""
-        self._termination_reason: str = ""  # "hit", "p_hit_fail", "timeout", "low_speed", "overshoot", "target_dead"
+        self._termination_reason: str = ""  # "hit", "p_hit_fail", "timeout", "target_dead", "unknown"
 
-        # Missile physical parameters (modern short-range AAM)
-        # Isp=240 → Δv ≈ 568 m/s (rocket equation), peak speed ≈ 850–900 m/s (M2.5+)
-        # cD=0.22 → energy retention over 10 km tail-chase, still lethal at 60 s
+        # Scripted close-range AAM parameters. Fixed speed is a simulation
+        # constant, not a real weapon performance table.
         self._g = 9.81
         self._t_max = 60
-        self._t_thrust = 3
-        self._Isp = 240
-        self._Length = 2.87
-        self._Diameter = 0.127
-        self._cD = 0.22
-        self._m0 = 84
-        self._dm = 6
         self._K = 3
         self._nyz_max = 30
         self._Rc = 300
-        self._v_min = 150
+        self._missile_speed_mps = 600.0
         self._t_arm = 0.15  # warhead safety-arming delay (s) — prevents same-frame detonation at launch
 
     @property
@@ -559,22 +550,8 @@ class MissileSimulator(BaseSimulator):
         return self._status in (MissileSimulator.HIT, MissileSimulator.MISS)
 
     @property
-    def Isp(self):
-        return self._Isp if self._t < self._t_thrust else 0
-
-    @property
     def K(self):
         return self._K  # constant 3.0 — paper §2.1.3 proportional guidance law
-
-    @property
-    def S(self):
-        S0 = np.pi * (self._Diameter / 2) ** 2
-        S0 += np.linalg.norm([np.sin(self._dtheta), np.sin(self._dphi)]) * self._Diameter * self._Length
-        return S0
-
-    @property
-    def rho(self):
-        return 1.225 * np.exp(-self._geodetic[-1] / 9300)
 
     @property
     def target_distance(self) -> float:
@@ -586,17 +563,13 @@ class MissileSimulator(BaseSimulator):
         self.parent_aircraft.launch_missiles.append(self)
         self._geodetic[:] = parent.get_geodetic()
         self._position[:] = parent.get_position()
-        self._velocity[:] = parent.get_velocity()
+        self._velocity[:] = self._initial_velocity(parent)
         self._posture[:] = parent.get_rpy()
         self._posture[0] = 0
+        self._update_posture_from_velocity()
         self.lon0, self.lat0, self.alt0 = parent.lon0, parent.lat0, parent.alt0
         self._t = 0
-        self._m = self._m0
-        self._dtheta, self._dphi = 0, 0
         self._status = MissileSimulator.LAUNCHED
-        self._distance_pre = np.inf
-        self._distance_increment = deque(maxlen=int(5 / self.dt))
-        self._left_t = int(1 / self.dt)
         self.render_explosion = False
 
     def target(self, target: AircraftSimulator):
@@ -607,8 +580,6 @@ class MissileSimulator(BaseSimulator):
     def run(self):
         self._t += self.dt
         action, distance = self._guidance()
-        self._distance_increment.append(distance > self._distance_pre)
-        self._distance_pre = distance
 
         if (distance < self._Rc and self.target_aircraft.is_alive
                 and self._t > self._t_arm):  # warhead must be armed before detonation
@@ -624,12 +595,6 @@ class MissileSimulator(BaseSimulator):
         elif self._t > self._t_max:
             self._status = MissileSimulator.MISS
             self._termination_reason = "timeout"
-        elif np.linalg.norm(self.get_velocity()) < self._v_min:
-            self._status = MissileSimulator.MISS
-            self._termination_reason = "low_speed"
-        elif np.sum(self._distance_increment) >= self._distance_increment.maxlen:
-            self._status = MissileSimulator.MISS
-            self._termination_reason = "overshoot"
         elif not self.target_aircraft.is_alive:
             self._status = MissileSimulator.MISS
             self._termination_reason = "target_dead"
@@ -675,47 +640,68 @@ class MissileSimulator(BaseSimulator):
     def close(self):
         self.target_aircraft = None
 
+    @staticmethod
+    def _unit(vec, fallback=None):
+        arr = np.asarray(vec, dtype=np.float64)
+        norm = float(np.linalg.norm(arr))
+        if np.isfinite(norm) and norm >= 1e-8:
+            return arr / norm
+        if fallback is None:
+            return np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+        return MissileSimulator._unit(fallback)
+
+    @staticmethod
+    def _direction_from_posture(posture):
+        _roll, pitch, yaw = np.asarray(posture, dtype=np.float64)
+        return np.asarray([
+            np.cos(pitch) * np.cos(yaw),
+            np.cos(pitch) * np.sin(yaw),
+            np.sin(pitch),
+        ], dtype=np.float64)
+
+    def _initial_velocity(self, parent: AircraftSimulator):
+        parent_velocity = np.asarray(parent.get_velocity(), dtype=np.float64)
+        parent_speed = float(np.linalg.norm(parent_velocity))
+        if np.isfinite(parent_speed) and parent_speed >= 150.0:
+            direction = self._unit(parent_velocity)
+        else:
+            direction = self._unit(self._direction_from_posture(parent.get_rpy()))
+        return direction * self._missile_speed_mps
+
+    def _update_posture_from_velocity(self):
+        vel = np.asarray(self.get_velocity(), dtype=np.float64)
+        speed = float(np.linalg.norm(vel))
+        if not np.isfinite(speed) or speed < 1e-8:
+            return
+        yaw = float(np.arctan2(vel[1], vel[0]))
+        pitch = float(np.arcsin(np.clip(vel[2] / speed, -1.0, 1.0)))
+        self._posture[:] = np.asarray([0.0, pitch, yaw], dtype=np.float64)
+
     def _guidance(self):
-        """Proportional navigation guidance law."""
-        x_m, y_m, z_m = self.get_position()
-        dx_m, dy_m, dz_m = self.get_velocity()
-        v_m = np.linalg.norm([dx_m, dy_m, dz_m])
-        theta_m = np.arcsin(dz_m / v_m) if v_m > 0 else 0
-        x_t, y_t, z_t = self.target_aircraft.get_position()
-        dx_t, dy_t, dz_t = self.target_aircraft.get_velocity()
-        Rxy = np.linalg.norm([x_m - x_t, y_m - y_t])
-        Rxyz = max(np.linalg.norm([x_m - x_t, y_m - y_t, z_t - z_m]), 1e-8)
+        los = self.target_aircraft.get_position() - self.get_position()
+        distance = float(np.linalg.norm(los))
+        desired_dir = self._unit(los, fallback=self.get_velocity())
+        return desired_dir, max(distance, 1e-8)
 
-        dbeta = ((dy_t - dy_m) * (x_t - x_m) - (dx_t - dx_m) * (y_t - y_m)) / (Rxy ** 2 + 1e-8)
-        deps = ((dz_t - dz_m) * Rxy ** 2 - (z_t - z_m) * (
-            (x_t - x_m) * (dx_t - dx_m) + (y_t - y_m) * (dy_t - dy_m))) / (Rxyz ** 2 * Rxy + 1e-8)
-        ny = self.K * v_m / self._g * np.cos(theta_m) * dbeta
-        nz = self.K * v_m / self._g * deps + np.cos(theta_m)
-        return np.clip([ny, nz], -self._nyz_max, self._nyz_max), Rxyz
+    def _state_trans(self, desired_dir):
+        current_dir = self._unit(self.get_velocity(), fallback=desired_dir)
+        desired_dir = self._unit(desired_dir, fallback=current_dir)
+        dot = float(np.clip(np.sum(current_dir * desired_dir), -1.0, 1.0))
+        angle = float(np.arccos(dot))
 
-    def _state_trans(self, action):
-        """Update missile position, velocity, and attitude."""
+        if angle > 1e-8:
+            max_turn = self.K * self._nyz_max * self._g / max(self._missile_speed_mps, 1.0) * self.dt
+            frac = min(1.0, max_turn / angle)
+            sin_angle = max(float(np.sin(angle)), 1e-8)
+            new_dir = (
+                np.sin((1.0 - frac) * angle) / sin_angle * current_dir
+                + np.sin(frac * angle) / sin_angle * desired_dir
+            )
+            new_dir = self._unit(new_dir, fallback=desired_dir)
+        else:
+            new_dir = desired_dir
+
+        self._velocity[:] = new_dir * self._missile_speed_mps
         self._position[:] += self.dt * self.get_velocity()
         self._geodetic[:] = NEU2LLA(*self.get_position(), self.lon0, self.lat0, self.alt0)
-        v = np.linalg.norm(self.get_velocity())
-        theta, phi = self.get_rpy()[1:]
-        T = self._g * self.Isp * self._dm
-        D = 0.5 * self._cD * self.S * self.rho * v ** 2
-        nx = (T - D) / (self._m * self._g)
-        ny, nz = action
-
-        dv = self._g * (nx - np.sin(theta))
-        self._dphi = self._g / max(v, 1e-8) * (ny / max(np.cos(theta), 1e-8))
-        self._dtheta = self._g / max(v, 1e-8) * (nz - np.cos(theta))
-
-        v += self.dt * dv
-        phi += self.dt * self._dphi
-        theta += self.dt * self._dtheta
-        self._velocity[:] = np.array([
-            v * np.cos(theta) * np.cos(phi),
-            v * np.cos(theta) * np.sin(phi),
-            v * np.sin(theta),
-        ])
-        self._posture[:] = np.array([0, theta, phi])
-        if self._t < self._t_thrust:
-            self._m = self._m - self.dt * self._dm
+        self._update_posture_from_velocity()

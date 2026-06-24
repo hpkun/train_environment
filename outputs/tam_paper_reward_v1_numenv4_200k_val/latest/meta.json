@@ -1,0 +1,1 @@
+{"policy_arch":"tam_categorical_recurrent","actor_obs_dim":96,"critic_state_dim":480,"action_dim":4,"tam_action_distribution":"multidiscrete_categorical","tam_action_levels":40,"action_distribution":"multidiscrete_categorical","action_levels":40,"rnn_hidden_size":128,"entity_dim":19}
