@@ -279,6 +279,8 @@ def main() -> int:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--enable-rich-logging", action="store_true")
     parser.add_argument("--rich-log-dir", default=None)
+    parser.add_argument("--diagnostics-dir", default=None)
+    parser.add_argument("--max-steps", type=int, default=None)
     args = parser.parse_args()
 
     exp_dir = _rel(args.experiment_dir)
@@ -330,6 +332,24 @@ def main() -> int:
     mav_sat, uav_sat = [], []
     red0_pitch, red0_roll, red0_alt = [], [], []
     outcome = "unknown"
+
+    # Diagnostics setup
+    diag_dir = None
+    if args.diagnostics_dir:
+        diag_dir = Path(args.diagnostics_dir)
+    else:
+        diag_dir = output.parent / "diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    red_csv = diag_dir / "red_behavior_timeseries.csv"
+    blue_csv = diag_dir / "blue_behavior_timeseries.csv"
+    red_rows: list[dict] = []
+    blue_rows: list[dict] = []
+    max_steps_limit = args.max_steps or env.max_steps
+    # Per-agent cumulative missile stats for diagnostics
+    red_cum_fired = {rid: 0 for rid in env.red_ids}
+    red_cum_hits = {rid: 0 for rid in env.red_ids}
+    blue_cum_fired = {bid: 0 for bid in env.blue_ids}
+    blue_cum_hits = {bid: 0 for bid in env.blue_ids}
 
     # Recurrent hidden state (required for hetero_entity_recurrent policies)
     _rnn_hidden_size = getattr(policy, "rnn_hidden_size", 0)
@@ -432,6 +452,82 @@ def main() -> int:
             all_entries = _entries(env) + _missile_entries(env, missile_id_map)
             explosions = _missile_explosions(env, missile_id_map, logged_explosions)
             logger.record_frame(step * float(env.env_dt), all_entries, explosions)
+
+            # Per-step diagnostics: red agents
+            sim_time = step * float(env.env_dt)
+            for i, rid in enumerate(env.red_ids):
+                sim = env.red_planes.get(rid)
+                role = env.agent_roles.get(rid, "")
+                visual = acmi_visual.get(role, env.agent_models.get(rid, ""))
+                row = {"episode_id": 0, "step": step, "sim_time_sec": round(sim_time, 2),
+                       "agent_id": rid, "team": "red", "role": role,
+                       "dynamics_model": env.agent_models.get(rid, ""),
+                       "visual_model": visual, "alive": int(sim.is_alive if sim else 0),
+                       "is_mav": int(role == "mav"), "is_uav": int(role == "attack_uav")}
+                if sim and sim.is_alive:
+                    pos = sim.get_position(); vel = sim.get_velocity(); rpy = sim.get_rpy()
+                    row.update({"north_m": round(float(pos[0]), 1), "east_m": round(float(pos[1]), 1),
+                                "altitude_m": round(float(pos[2]), 1),
+                                "speed_mps": round(float(np.linalg.norm(vel)), 1),
+                                "vn_mps": round(float(vel[0]), 1), "ve_mps": round(float(vel[1]), 1),
+                                "vu_mps": round(float(vel[2]), 1),
+                                "roll_deg": round(float(np.rad2deg(rpy[0])), 1),
+                                "pitch_deg": round(float(np.rad2deg(rpy[1])), 1),
+                                "yaw_deg": round(float(np.rad2deg(rpy[2])), 1),
+                                "heading_deg": round(float(np.rad2deg(rpy[2])), 1)})
+                    raw_a = acts_np[i]
+                    row.update({"raw_action_pitch": round(float(raw_a[0]), 4),
+                                "raw_action_heading": round(float(raw_a[1]), 4),
+                                "raw_action_speed": round(float(raw_a[2]), 4),
+                                "target_pitch_deg": round(float(raw_a[0]) * 90, 1),
+                                "target_heading_deg": round(float(raw_a[1]) * 180, 1),
+                                "target_speed_mps": round(102 + (float(raw_a[2]) + 1) / 2 * 306, 1)})
+                    # Missile warning
+                    row["missile_warning"] = int(sim.check_missile_warning() is not None)
+                    red_cum_fired[rid] += int((info.get(rid, {}) or {}).get("missiles_fired_this_step", 0))
+                    row["missiles_fired_this_step"] = int((info.get(rid, {}) or {}).get("missiles_fired_this_step", 0))
+                    row["cumulative_missiles_fired"] = red_cum_fired[rid]
+                    row["cumulative_missile_hits"] = red_cum_hits[rid]
+                    row["missiles_remaining"] = int(getattr(sim, "num_left_missiles", 0))
+                    # Reward components
+                    rc = (info.get("reward_components", {}) or {}).get(rid, {}) or {}
+                    row["step_reward"] = round(float(rc.get("total", 0)), 4)
+                    row["mav_safety_reward"] = round(float(rc.get("mav_safety", rc.get("mav_survival", 0))), 4)
+                    row["mav_support_reward"] = round(float(rc.get("mav_support", 0)), 4)
+                    row["mav_death_reward"] = round(float(rc.get("mav_death", rc.get("death_penalty", 0))), 4)
+                    row["uav_attack_window_reward"] = round(float(rc.get("uav_attack_window", 0)), 4)
+                    row["uav_fire_reward"] = round(float(rc.get("uav_fire", 0)), 4)
+                    row["uav_hit_reward"] = round(float(rc.get("uav_hit", 0)), 4)
+                    row["uav_death_reward"] = round(float(rc.get("uav_death", 0)), 4)
+                red_rows.append(row)
+
+            # Per-step diagnostics: blue agents
+            for i, bid in enumerate(env.blue_ids):
+                sim = env.blue_planes.get(bid)
+                role = env.agent_roles.get(bid, "attack_uav")
+                visual = acmi_visual.get(role, env.agent_models.get(bid, ""))
+                row = {"episode_id": 0, "step": step, "sim_time_sec": round(sim_time, 2),
+                       "agent_id": bid, "team": "blue", "role": role,
+                       "dynamics_model": env.agent_models.get(bid, ""),
+                       "visual_model": visual, "alive": int(sim.is_alive if sim else 0)}
+                if sim and sim.is_alive:
+                    pos = sim.get_position(); vel = sim.get_velocity(); rpy = sim.get_rpy()
+                    row.update({"north_m": round(float(pos[0]), 1), "east_m": round(float(pos[1]), 1),
+                                "altitude_m": round(float(pos[2]), 1),
+                                "speed_mps": round(float(np.linalg.norm(vel)), 1),
+                                "vn_mps": round(float(vel[0]), 1), "ve_mps": round(float(vel[1]), 1),
+                                "vu_mps": round(float(vel[2]), 1),
+                                "roll_deg": round(float(np.rad2deg(rpy[0])), 1),
+                                "pitch_deg": round(float(np.rad2deg(rpy[1])), 1),
+                                "yaw_deg": round(float(np.rad2deg(rpy[2])), 1),
+                                "heading_deg": round(float(np.rad2deg(rpy[2])), 1)})
+                    blue_cum_fired[bid] += int((info.get(bid, {}) or {}).get("missiles_fired_this_step", 0))
+                    row["missiles_fired_this_step"] = int((info.get(bid, {}) or {}).get("missiles_fired_this_step", 0))
+                    row["cumulative_missiles_fired"] = blue_cum_fired[bid]
+                    row["cumulative_missile_hits"] = blue_cum_hits[bid]
+                    row["missiles_remaining"] = int(getattr(sim, "num_left_missiles", 0))
+                    row["opponent_policy"] = args.opponent_policy
+                blue_rows.append(row)
             if _team_done(terminated, truncated):
                 break
             if step > int(getattr(env, "max_steps", 1000)) + 5:
@@ -446,17 +542,63 @@ def main() -> int:
         elif step >= int(getattr(env, "max_steps", 1000)):
             outcome = "timeout"
         logger.write(str(output))
+
+        # Write diagnostic CSVs
+        import csv as _csv
+        if red_rows:
+            with open(red_csv, "w", newline="") as _f:
+                _w = _csv.DictWriter(_f, fieldnames=sorted(red_rows[0].keys()))
+                _w.writeheader(); _w.writerows(red_rows)
+        if blue_rows:
+            with open(blue_csv, "w", newline="") as _f:
+                _w = _csv.DictWriter(_f, fieldnames=sorted(blue_rows[0].keys()))
+                _w.writeheader(); _w.writerows(blue_rows)
+
+        # Extended summary
+        red_behavior = {}
+        if red_rows:
+            for rid in env.red_ids:
+                r_rows = [r for r in red_rows if r["agent_id"] == rid and r["alive"]]
+                alts = [r["altitude_m"] for r in r_rows if "altitude_m" in r]
+                spds = [r["speed_mps"] for r in r_rows if "speed_mps" in r]
+                mw = sum(1 for r in r_rows if r.get("missile_warning")) / max(len(r_rows), 1)
+                red_behavior[rid] = {
+                    "mean_altitude": round(float(np.mean(alts)), 1) if alts else 0,
+                    "final_altitude": round(alts[-1], 1) if alts else 0,
+                    "mean_speed": round(float(np.mean(spds)), 1) if spds else 0,
+                    "missile_warning_fraction": round(mw, 3),
+                    "action_saturation": round(float(np.mean(mav_sat)) if rid == "red_0" else float(np.mean(uav_sat)), 3),
+                }
+        blue_behavior = {}
+        if blue_rows:
+            for bid in env.blue_ids:
+                b_rows = [r for r in blue_rows if r["agent_id"] == bid and r["alive"]]
+                reds = [r for r in red_rows if r["alive"]]
+                if b_rows and reds:
+                    nearest_ranges = []
+                    for br in b_rows:
+                        bn, be = br.get("north_m", 0), br.get("east_m", 0)
+                        min_d = min(np.hypot(rr.get("north_m", 0) - bn, rr.get("east_m", 0) - be) for rr in reds)
+                        nearest_ranges.append(min_d)
+                    blue_behavior[bid] = {"mean_nearest_red_range": round(float(np.mean(nearest_ranges)), 1)}
+
         summary = {
+            "exporter_name": "export_happo_reference_acmi",
+            "exporter_version": "2.0",
             "checkpoint": args.checkpoint,
             "model": str(model),
+            "model_meta_path": str(model.parent / "meta.json"),
             "config": args.config,
-            "outcome": outcome,
-            "steps": step,
-            "red_alive_final": red_alive,
-            "blue_alive_final": blue_alive,
+            "seed": args.seed,
+            "opponent_policy": args.opponent_policy,
+            "policy_arch": meta.get("policy_arch", ""),
+            "reward_mode": meta.get("reward_mode", ""),
+            "red_target_selection_mode": _cfg.get("red_target_selection_mode", "") if isinstance(_cfg, dict) else "",
+            "outcome": outcome, "steps": step,
+            "simulated_time_sec": round(step * float(env.env_dt), 1),
+            "red_alive_final": red_alive, "blue_alive_final": blue_alive,
             "mav_alive": mav_alive,
             "death_order": death_order,
-            "death_reason": "environment_info_not_explicit",
             "aircraft_visual_labels": {
                 "red_0": _aircraft_name(env, "red_0"),
                 "red_1": _aircraft_name(env, "red_1") if len(env.red_ids) > 1 else "",
@@ -465,8 +607,7 @@ def main() -> int:
             "red_0_visual_label": _aircraft_name(env, "red_0"),
             "mav_dynamics_model": mav_dynamics_model,
             "mav_visual_model": mav_visual_model,
-            "mav_role": "mav",
-            "mav_num_missiles": 0,
+            "mav_role": "mav", "mav_num_missiles": 0,
             "missile_objects_exported": len(missile_id_map),
             "red_missile_objects_exported": red_missile_objects,
             "blue_missile_objects_exported": blue_missile_objects,
@@ -482,6 +623,18 @@ def main() -> int:
             "red_0_min_altitude": min(red0_alt) if red0_alt else None,
             "mav_action_saturation_rate": float(np.mean(mav_sat)) if mav_sat else 0.0,
             "uav_action_saturation_rate": float(np.mean(uav_sat)) if uav_sat else 0.0,
+            "red_behavior_mode_summary": red_behavior,
+            "blue_behavior_mode_summary": blue_behavior,
+            "diagnostics_files": {
+                "red_csv": str(red_csv), "blue_csv": str(blue_csv),
+            },
+            "acmi_metadata": {
+                "checkpoint": args.checkpoint, "config": args.config,
+                "policy_arch": meta.get("policy_arch", ""),
+                "opponent_policy": args.opponent_policy,
+                "red_target_selection_mode": _cfg.get("red_target_selection_mode", "") if isinstance(_cfg, dict) else "",
+                "mav_dynamics": mav_dynamics_model, "mav_visual": mav_visual_model,
+            },
             "output_acmi": str(output),
         }
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
