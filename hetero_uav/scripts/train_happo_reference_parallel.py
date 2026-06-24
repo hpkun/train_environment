@@ -1109,8 +1109,12 @@ def _run_training(args: argparse.Namespace) -> None:
                         comp = rc.get(aid, {}) if isinstance(rc, dict) else {}
                         if isinstance(comp, dict):
                             for k, v in comp.items():
+                                try:
+                                    delta = float(v)
+                                except (ValueError, TypeError):
+                                    continue  # skip non-numeric fields (e.g. uav_reward_target_id)
                                 current_ep_reward_comp[env_idx][k] = (
-                                    current_ep_reward_comp[env_idx].get(k, 0.0) + float(v))
+                                    current_ep_reward_comp[env_idx].get(k, 0.0) + delta)
                     for de in next_info.get("death_events", []) if isinstance(next_info, dict) else []:
                         if not isinstance(de, dict):
                             continue
