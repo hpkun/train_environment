@@ -1261,7 +1261,7 @@ def _run_training_main() -> None:
                     "blue_alive_final_mean": blue_alive,
                     "red_missiles_fired_mean": red_fired / max(args.num_envs, 1),
                     "blue_missiles_fired_mean": blue_fired / max(args.num_envs, 1),
-                    "red_missile_hits_mean": hits / max(args.num_envs, 1),
+                    "red_missile_hits_mean": red_hits / max(args.num_envs, 1),
                     "blue_missile_hits_mean": "",
                     "red_dead_mean": red_dead,
                     "blue_dead_mean": blue_dead,
