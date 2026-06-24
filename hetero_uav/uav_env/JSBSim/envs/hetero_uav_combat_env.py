@@ -473,6 +473,20 @@ class HeteroUavCombatEnv(UavCombatEnv):
     PAPER_ROLE_REWARD_PROFILE = "tam_brma_role_reward_refined_v1"
     PAPER_MAV_SHARED_TRACK_LOOKBACK = 15  # env steps for MAV-guided fire/hit history
 
+    def _build_launch_quality_record(self, shooter, target, range_m=None, target_selection=None):
+        record = super()._build_launch_quality_record(shooter, target, range_m=range_m, target_selection=target_selection)
+        if str(shooter.uid).startswith("red_") and self.agent_roles.get(shooter.uid, "") != "mav":
+            tid = target.uid
+            was_guided = self._paper_mav_shared_track_history.get((shooter.uid, tid), -999)
+            record["mav_guided_at_launch"] = (self.current_step - was_guided <= self.PAPER_MAV_SHARED_TRACK_LOOKBACK)
+            record["mav_guided_lookback_steps"] = self.PAPER_MAV_SHARED_TRACK_LOOKBACK
+            record["mav_guided_source"] = "mav_shared_track_history" if record["mav_guided_at_launch"] else ""
+        else:
+            record["mav_guided_at_launch"] = False
+            record["mav_guided_lookback_steps"] = self.PAPER_MAV_SHARED_TRACK_LOOKBACK
+            record["mav_guided_source"] = ""
+        return record
+
     def _paper_add_capped_reward(self, agent_id, key, delta, low, high):
         """Add delta to cumulative, return clipped actual amount added."""
         c = self._paper_reward_cumulative.setdefault(agent_id, {})
@@ -732,13 +746,56 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 for bi, bid in enumerate(self.blue_ids):
                     if bi < src.shape[0] and src[bi, 1] > 0.5:
                         self._paper_mav_shared_track_history[(rid, bid)] = self.current_step
-            # MAV observed history
             if mav_id:
                 mav_obs = self._last_step_obs.get(mav_id, {})
                 obs_mask = np.asarray(mav_obs.get("enemy_observed_mask", []), dtype=np.float32)
                 for bi, bid in enumerate(self.blue_ids):
                     if bi < obs_mask.size and obs_mask[bi] > 0.5:
                         self._paper_mav_observed_history[bid] = self.current_step
+
+            # ---- UAV target selection (BEFORE MAV support for S_guided) ----
+            self._paper_reward_targets_current_step = {}
+            for rid in self.red_ids:
+                if self.agent_roles.get(rid, "") == "mav":
+                    continue
+                sim_u = self.red_planes.get(rid)
+                if sim_u is None or not sim_u.is_alive:
+                    continue
+                obs_u = self._last_step_obs.get(rid, {})
+                enemy_geo = np.asarray(obs_u.get("enemy_geo_states", []), dtype=np.float32)
+                enemy_alive = np.asarray(obs_u.get("enemy_alive_mask", []), dtype=np.float32)
+                enemy_obs = np.asarray(obs_u.get("enemy_observed_mask", []), dtype=np.float32)
+                uav_src = np.asarray(obs_u.get("enemy_track_source", []), dtype=np.float32)
+                best_score, best_j, best_metrics = -1e9, -1, {}
+                if enemy_geo.ndim == 2 and enemy_alive.ndim == 1:
+                    for j in range(min(enemy_geo.shape[0], enemy_alive.shape[0])):
+                        if enemy_alive[j] < 0.5:
+                            continue
+                        observed = (enemy_obs[j] > 0.5 if enemy_obs.size > j else False)
+                        if uav_src.ndim == 2 and uav_src.shape[1] >= 2:
+                            observed = observed or uav_src[j, 0] > 0.5 or uav_src[j, 1] > 0.5
+                        if not observed:
+                            continue
+                        d_norm = abs(float(enemy_geo[j, 2]))
+                        ao_n = abs(float(enemy_geo[j, 3]))
+                        ta_n = abs(float(enemy_geo[j, 4]))
+                        d_km = d_norm * 40000.0 / 1000.0
+                        if d_km <= 5: R_D = 1.0
+                        elif d_km < 10: R_D = 2.0 * np.exp(-0.921 * (d_km - 5.0)) - 1.0
+                        else: R_D = -1.0
+                        S_AO = 1.0 - np.clip(ao_n * 180.0 / 45.0, 0, 1)
+                        S_TA = np.clip((ta_n * 180.0 - 90.0) / 90.0, 0, 1)
+                        R_A = 2.0 * (0.6 * S_AO + 0.4 * S_TA) - 1.0
+                        I_gate = 1.0 if (0.0125 < d_norm < 0.25 and ao_n < 0.25 and ta_n > 0.5) else 0.0
+                        S_mav = 1.0 if (uav_src.ndim == 2 and uav_src.shape[1] >= 2 and uav_src[j, 1] > 0.5) else 0.0
+                        Q_D = (R_D + 1.0) / 2.0; Q_A = (R_A + 1.0) / 2.0
+                        score = 0.40 * Q_D + 0.35 * Q_A + 0.10 * I_gate + 0.15 * S_mav
+                        if score > best_score:
+                            best_score, best_j = score, j
+                            best_metrics = {"R_D": R_D, "R_A": R_A, "I_gate": I_gate, "S_mav": S_mav,
+                                            "d_norm": d_norm, "ao_n": ao_n, "ta_n": ta_n}
+                self._paper_reward_targets_current_step[rid] = {
+                    "best_j": best_j, "best_score": best_score, "best_metrics": best_metrics}
 
             PAPER_MAV_KEYS = [
                 "mav_safety", "mav_safety_dist", "mav_safety_threat", "mav_safety_aspect",
@@ -861,7 +918,12 @@ class HeteroUavCombatEnv(UavCombatEnv):
                         if src.ndim == 2 and src.shape[1] >= 2:
                             shared_total += float(np.sum(src[:, 1] > 0.5))
                     S_shared = shared_total / max(n_uav_alive * max(n_blue_alive, 1), 1)
-                    S_guided = 0.0  # populated via reward target below
+                    # S_guided: UAV reward targets from MAV-shared tracks
+                    guided_count = sum(
+                        1 for r in self.red_ids if r != mav_id
+                        and self._paper_reward_targets_current_step.get(r, {}).get("best_metrics", {}).get("S_mav", 0) > 0.5
+                    )
+                    S_guided = guided_count / max(n_uav_alive, 1) if n_uav_alive > 0 else 0.0
                     S_info_raw = 0.4 * S_observe + 0.4 * S_shared + 0.2 * S_guided
                     S_information = 2.0 * S_info_raw - 1.0
                     R_support = 0.6 * S_pos + 0.4 * S_information
@@ -877,27 +939,28 @@ class HeteroUavCombatEnv(UavCombatEnv):
                     # --- mav event: death, out_zone, assist ---
                     if mav_id not in self._paper_out_zone_penalized:
                         n_m = float(mav_pos[0]); e_m = float(mav_pos[1])
-                        if abs(n_m) > 40000 or abs(e_m) > 40000 or sim.get_geodetic()[2] > 10000:
+                        if abs(n_m) > 40000 or abs(e_m) > 40000 or mav.get_geodetic()[2] > 10000:
                             self._paper_out_zone_penalized.add(mav_id)
                             r_oz = self._paper_add_capped_reward(mav_id, "mav_out_zone", -15.0, -15.0, 0.0)
                             comp["mav_out_zone"] = r_oz
                             base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_oz
-                    # assist: check guided kills
+                    # assist: check guided kills from done records
                     for rid in self.red_ids:
                         if rid == mav_id: continue
-                        kills = int(self._step_kill_count.get(rid, 0))
-                        if kills > 0:
-                            launch_recs = self._paper_role_step_launch_records_for(rid)
-                            for lr in launch_recs:
-                                tid = lr.get("target_id", "")
-                                lookback = self.PAPER_MAV_SHARED_TRACK_LOOKBACK
-                                mav_observed = self._paper_mav_observed_history.get(tid, -999)
-                                was_guided = self._paper_mav_shared_track_history.get((rid, tid), -999)
-                                if (self.current_step - mav_observed <= lookback
-                                        or self.current_step - was_guided <= lookback):
-                                    r_asst = self._paper_add_capped_reward(mav_id, "mav_assist", 2.5, 0.0, 5.0)
-                                    comp["mav_assist"] = comp.get("mav_assist", 0.0) + r_asst
-                                    base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_asst
+                        done_hits = [
+                            r for r in (getattr(self, "_launch_quality_done_step_records", None) or [])
+                            if str(r.get("shooter_id", "")) == str(rid)
+                            and str(r.get("raw_termination_reason", "")) == "hit"]
+                        for lr in done_hits:
+                            tid = lr.get("target_id", "")
+                            lookback = self.PAPER_MAV_SHARED_TRACK_LOOKBACK
+                            mav_observed = self._paper_mav_observed_history.get(tid, -999)
+                            was_guided = self._paper_mav_shared_track_history.get((rid, tid), -999)
+                            if (self.current_step - mav_observed <= lookback
+                                    or self.current_step - was_guided <= lookback):
+                                r_asst = self._paper_add_capped_reward(mav_id, "mav_assist", 2.5, 0.0, 5.0)
+                                comp["mav_assist"] = comp.get("mav_assist", 0.0) + r_asst
+                                base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_asst
                 elif not mav.is_alive:
                     if not self._mav_death_penalized:
                         self._mav_death_penalized = True
@@ -935,53 +998,36 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 uav_src = np.asarray(obs.get("enemy_track_source", []), dtype=np.float32)
                 ego_geo = np.asarray(obs.get("ego_geo_state", []), dtype=np.float32)
 
-                # --- uav_attack: reward target selection ---
-                best_score, best_j = -1e9, -1
-                if enemy_geo.ndim == 2 and enemy_alive.ndim == 1:
-                    for j in range(min(enemy_geo.shape[0], enemy_alive.shape[0])):
-                        if enemy_alive[j] < 0.5: continue
-                        d_km = abs(float(enemy_geo[j, 2])) * 40000.0 / 1000.0
-                        ao_n = abs(float(enemy_geo[j, 3]))
-                        ta_n = abs(float(enemy_geo[j, 4]))
-                        if d_km <= 5: R_D = 1.0
-                        elif d_km < 10: R_D = 2.0 * np.exp(-0.921 * (d_km - 5.0)) - 1.0
-                        else: R_D = -1.0
-                        S_AO = 1.0 - np.clip(ao_n * 180.0 / 45.0, 0, 1)
-                        S_TA = np.clip((ta_n * 180.0 - 90.0) / 90.0, 0, 1)
-                        R_A = 2.0 * (0.6 * S_AO + 0.4 * S_TA) - 1.0
-                        I_gate = 1.0 if (0.0125 < abs(float(enemy_geo[j,2])) < 0.25 and ao_n < 0.25 and ta_n > 0.5) else 0.0
-                        S_mav = 1.0 if (uav_src.ndim == 2 and uav_src.shape[1] >= 2 and uav_src[j, 1] > 0.5) else 0.0
-                        Q_D = (R_D + 1.0) / 2.0; Q_A = (R_A + 1.0) / 2.0
-                        score = 0.40 * Q_D + 0.35 * Q_A + 0.10 * I_gate + 0.15 * S_mav
-                        if score > best_score: best_score, best_j = score, j
-                if best_j >= 0:
-                    r_attack_raw = (0.003 * ((R_D + 1.0) / 2.0 * 2.0 - 1.0)
-                                    + 0.003 * ((R_A + 1.0) / 2.0 * 2.0 - 1.0)
-                                    + 0.002 * I_gate) * (1.0 + 0.25 * (1.0 if (uav_src.ndim == 2 and uav_src.shape[1] >= 2 and uav_src[best_j, 1] > 0.5) else 0.0))
+                # --- uav_attack: use pre-computed reward target ---
+                tgt = self._paper_reward_targets_current_step.get(rid, {})
+                best_j = tgt.get("best_j", -1)
+                best_metrics = tgt.get("best_metrics", {})
+                if best_j >= 0 and best_metrics:
+                    R_D = best_metrics["R_D"]; R_A = best_metrics["R_A"]
+                    I_gate = best_metrics["I_gate"]; S_mav = best_metrics["S_mav"]
+                    r_attack_raw = (0.003 * R_D + 0.003 * R_A + 0.002 * I_gate) * (1.0 + 0.25 * S_mav)
                     r_attack = self._paper_add_capped_reward(rid, "uav_attack", r_attack_raw, -3.0, 5.0)
                     comp["uav_attack"] = r_attack
                     comp["uav_attack_raw"] = round(r_attack_raw, 5)
                     comp["uav_attack_distance"] = round(R_D, 3)
                     comp["uav_attack_angle"] = round(R_A, 3)
                     comp["uav_attack_gate"] = int(I_gate)
-                    comp["uav_attack_mav_shared_multiplier"] = int(uav_src[best_j, 1] > 0.5) if uav_src.ndim == 2 else 0
+                    comp["uav_attack_mav_shared_multiplier"] = int(S_mav)
                     comp["uav_reward_target_id"] = self.blue_ids[best_j] if best_j < len(self.blue_ids) else ""
-                    comp["uav_reward_target_score"] = round(best_score, 3)
-                    comp["uav_reward_target_mav_shared"] = int(uav_src[best_j, 1] > 0.5) if uav_src.ndim == 2 else 0
+                    comp["uav_reward_target_score"] = round(tgt.get("best_score", -1), 3)
+                    comp["uav_reward_target_mav_shared"] = int(S_mav)
                     base_rewards[rid] = base_rewards.get(rid, 0.0) + r_attack
                 else:
                     comp["uav_attack"] = self._paper_add_capped_reward(rid, "uav_attack", -0.001, -3.0, 5.0)
                     base_rewards[rid] = base_rewards.get(rid, 0.0) + comp["uav_attack"]
 
-                # --- uav_fire: direct + MAV-guided, current-step only ---
+                # --- uav_fire: current-step only, no speed filter for scripted AAM ---
                 step_launches = [
                     r for r in (getattr(self, "_launch_quality_step_records", None) or [])
                     if str(r.get("shooter_id", "")) == str(rid)]
                 direct_fire = 0; guided_fire = 0
                 for lr in step_launches:
                     tid = lr.get("target_id", "")
-                    spd = float(lr.get("shooter_speed_mps", 0) or 0)
-                    if spd < 150: continue
                     was_guided = self._paper_mav_shared_track_history.get((rid, tid), -999)
                     if self.current_step - was_guided <= self.PAPER_MAV_SHARED_TRACK_LOOKBACK:
                         guided_fire += 1
@@ -994,18 +1040,21 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 comp["uav_fire_mav_guided_count"] = guided_fire
                 base_rewards[rid] = base_rewards.get(rid, 0.0) + capped
 
-                # --- uav_hit: direct + MAV-guided ---
-                kills = int(self._step_kill_count.get(rid, 0))
-                if kills > 0:
-                    direct_hit = 0; guided_hit = 0
-                    for lr in step_launches:
-                        tid = lr.get("target_id", "")
-                        was_guided = self._paper_mav_shared_track_history.get((rid, tid), -999)
-                        if self.current_step - was_guided <= self.PAPER_MAV_SHARED_TRACK_LOOKBACK:
-                            guided_hit += 1
-                        else:
-                            direct_hit += 1
-                    r_hit = min(12.0 * direct_hit + 15.0 * guided_hit, 30.0)
+                # --- uav_hit: use _launch_quality_done_step_records ---
+                done_launches = [
+                    r for r in (getattr(self, "_launch_quality_done_step_records", None) or [])
+                    if str(r.get("shooter_id", "")) == str(rid)
+                    and str(r.get("raw_termination_reason", "")) == "hit"]
+                direct_hit = 0; guided_hit = 0
+                for lr in done_launches:
+                    tid = lr.get("target_id", "")
+                    was_guided = self._paper_mav_shared_track_history.get((rid, tid), -999)
+                    if self.current_step - was_guided <= self.PAPER_MAV_SHARED_TRACK_LOOKBACK:
+                        guided_hit += 1
+                    else:
+                        direct_hit += 1
+                if direct_hit + guided_hit > 0:
+                    r_hit = 12.0 * direct_hit + 15.0 * guided_hit
                     comp["uav_hit"] = r_hit
                     comp["uav_hit_direct_count"] = direct_hit
                     comp["uav_hit_mav_guided_count"] = guided_hit
