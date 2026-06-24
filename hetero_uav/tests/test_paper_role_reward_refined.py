@@ -106,7 +106,7 @@ class TestTimeoutTerminal:
 
 class TestMavGuidedLaunchRecord:
     def test_launch_record_has_mav_guided(self):
-        """_build_launch_quality_record should include mav_guided_at_launch."""
+        """_build_launch_quality_record should include mav_guided_at_launch and mav_observed_at_launch."""
         from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
         env = HeteroUavCombatEnv(
             max_num_blue=2, max_num_red=3, max_steps=10,
@@ -123,4 +123,113 @@ class TestMavGuidedLaunchRecord:
             assert "mav_guided_at_launch" in record
             assert "mav_guided_lookback_steps" in record
             assert "mav_guided_source" in record
+            assert "mav_observed_at_launch" in record
+            assert "mav_observed_source" in record
         env.close()
+
+    def test_done_hit_uses_mav_guided_at_launch(self):
+        """uav_hit guided/direct split uses launch record mav_guided_at_launch."""
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        env = HeteroUavCombatEnv(
+            max_num_blue=2, max_num_red=3, max_steps=10,
+            hetero_reward_mode="paper_role_reward_v1",
+            observation_mode="mav_shared_geo",
+            red_agent_types=["mav", "attack_uav", "attack_uav"],
+            blue_agent_types=["attack_uav", "attack_uav"],
+        )
+        env.reset(seed=0)
+        # Inject a done hit record with mav_guided_at_launch=True
+        env._launch_quality_done_step_records = [{
+            "shooter_id": "red_1", "target_id": "blue_0",
+            "raw_termination_reason": "hit",
+            "mav_guided_at_launch": True,
+            "mav_observed_at_launch": False,
+        }]
+        env._paper_reset_reward_state()
+        env._last_step_obs = {
+            "red_0": {"enemy_observed_mask": np.zeros(2), "enemy_track_source": np.zeros((2, 2))},
+            "red_1": {"enemy_geo_states": np.zeros((2, 5)), "enemy_alive_mask": np.ones(2),
+                      "enemy_observed_mask": np.ones(2), "enemy_track_source": np.zeros((2, 2)),
+                      "ego_geo_state": np.array([0]*7)},
+            "red_2": {"enemy_geo_states": np.zeros((2, 5)), "enemy_alive_mask": np.ones(2),
+                      "enemy_observed_mask": np.ones(2), "enemy_track_source": np.zeros((2, 2)),
+                      "ego_geo_state": np.array([0]*7)},
+        }
+        for bid in env.blue_ids:
+            env._last_step_obs[bid] = {"ego_geo_state": np.array([0]*7), "ego_role": [0,1,0,0],
+                                       "missile_warning": [0.0], "ally_geo_states": np.zeros((1,5)),
+                                       "ally_roles": np.zeros((1,4)), "ally_alive_mask": np.ones(1),
+                                       "enemy_geo_states": np.zeros((3,5)), "enemy_alive_mask": np.ones(3),
+                                       "enemy_observed_mask": np.ones(3), "enemy_track_source": np.zeros((3,2))}
+        base_rewards, components = {}, {}
+        for aid in env.agent_ids:
+            components[aid] = {}
+        for sim in list(env.red_planes.values()) + list(env.blue_planes.values()):
+            if sim:
+                rpy = sim.get_rpy()
+                components[sim.uid] = {"r_end": 0.0, "r_adv": 0.0, "r_bound": 0.0, "r_alt": 0.0,
+                                       "r_pitch": 0.0, "r_roll": 0.0, "r_vel": 0.0, "r_death": 0.0}
+        env.hetero_reward_mode = "paper_role_reward_v1"
+        rewards, comps = env._compute_rewards()
+        uav = comps.get("red_1", {})
+        assert uav.get("uav_hit_mav_guided_count", 0) == 1, "guided hit should be counted"
+        assert uav.get("uav_hit_direct_count", 0) == 0, "direct hit should be 0"
+        env.close()
+
+    def test_mav_assist_uses_launch_record_flags(self):
+        """MAV assist should use mav_guided_at_launch or mav_observed_at_launch."""
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        env = HeteroUavCombatEnv(
+            max_num_blue=2, max_num_red=3, max_steps=10,
+            hetero_reward_mode="paper_role_reward_v1",
+            observation_mode="mav_shared_geo",
+            red_agent_types=["mav", "attack_uav", "attack_uav"],
+            blue_agent_types=["attack_uav", "attack_uav"],
+        )
+        env.reset(seed=0)
+        env._launch_quality_done_step_records = [{
+            "shooter_id": "red_1", "target_id": "blue_0",
+            "raw_termination_reason": "hit",
+            "mav_guided_at_launch": False,
+            "mav_observed_at_launch": True,
+        }]
+        env._paper_reset_reward_state()
+        env._last_step_obs = {
+            "red_0": {"enemy_observed_mask": np.zeros(2), "enemy_track_source": np.zeros((2, 2))},
+            "red_1": {"enemy_geo_states": np.zeros((2, 5)), "enemy_alive_mask": np.ones(2),
+                      "enemy_observed_mask": np.ones(2), "enemy_track_source": np.zeros((2, 2)),
+                      "ego_geo_state": np.array([0]*7)},
+            "red_2": {"enemy_geo_states": np.zeros((2, 5)), "enemy_alive_mask": np.ones(2),
+                      "enemy_observed_mask": np.ones(2), "enemy_track_source": np.zeros((2, 2)),
+                      "ego_geo_state": np.array([0]*7)},
+        }
+        for bid in env.blue_ids:
+            env._last_step_obs[bid] = {"ego_geo_state": np.array([0]*7), "ego_role": [0,1,0,0],
+                                       "missile_warning": [0.0], "ally_geo_states": np.zeros((1,5)),
+                                       "ally_roles": np.zeros((1,4)), "ally_alive_mask": np.ones(1),
+                                       "enemy_geo_states": np.zeros((3,5)), "enemy_alive_mask": np.ones(3),
+                                       "enemy_observed_mask": np.ones(3), "enemy_track_source": np.zeros((3,2))}
+        for aid in env.agent_ids:
+            components = {}
+            components[aid] = {}
+        for sim in list(env.red_planes.values()) + list(env.blue_planes.values()):
+            if sim:
+                components[sim.uid] = {"r_end": 0.0, "r_adv": 0.0, "r_bound": 0.0, "r_alt": 0.0,
+                                       "r_pitch": 0.0, "r_roll": 0.0, "r_vel": 0.0, "r_death": 0.0}
+        env.hetero_reward_mode = "paper_role_reward_v1"
+        rewards, comps = env._compute_rewards()
+        mav = comps.get("red_0", {})
+        assert mav.get("mav_assist", 0.0) > 0, "MAV assist should be positive with observed_at_launch"
+        env.close()
+
+
+class TestNoUtilsImport:
+    def test_no_utils_import_in_paper_role(self):
+        """paper_role_reward_v1 must not contain 'from .utils import'."""
+        with open("uav_env/JSBSim/envs/hetero_uav_combat_env.py", encoding="utf-8") as f:
+            content = f.read()
+        # The file-level import is fine; the paper_role block must not have its own
+        import_count = content.count("from .utils import")
+        # Count occurrences inside _compute_rewards or paper_role blocks
+        # The file should only have the top-level import in UavCombatEnv
+        assert import_count <= 1, f"Should have at most 1 .utils import, found {import_count}"

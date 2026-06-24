@@ -481,10 +481,15 @@ class HeteroUavCombatEnv(UavCombatEnv):
             record["mav_guided_at_launch"] = (self.current_step - was_guided <= self.PAPER_MAV_SHARED_TRACK_LOOKBACK)
             record["mav_guided_lookback_steps"] = self.PAPER_MAV_SHARED_TRACK_LOOKBACK
             record["mav_guided_source"] = "mav_shared_track_history" if record["mav_guided_at_launch"] else ""
+            mav_observed = self._paper_mav_observed_history.get(tid, -999)
+            record["mav_observed_at_launch"] = (self.current_step - mav_observed <= self.PAPER_MAV_SHARED_TRACK_LOOKBACK)
+            record["mav_observed_source"] = "mav_observed_history" if record["mav_observed_at_launch"] else ""
         else:
             record["mav_guided_at_launch"] = False
             record["mav_guided_lookback_steps"] = self.PAPER_MAV_SHARED_TRACK_LOOKBACK
             record["mav_guided_source"] = ""
+            record["mav_observed_at_launch"] = False
+            record["mav_observed_source"] = ""
         return record
 
     def _paper_add_capped_reward(self, agent_id, key, delta, low, high):
@@ -833,52 +838,19 @@ class HeteroUavCombatEnv(UavCombatEnv):
                     elif d_MB_km <= 40: S_dist = 1.0 - 1.5 * (d_MB_km - 30.0) / 10.0
                     else: S_dist = -1.0
                     S_dist = float(np.clip(S_dist, -1.0, 1.0))
-                    # S_threat
+                    # S_threat — use environment's _missile_candidate_metrics
                     mw = int(mav.check_missile_warning() is not None)
                     blue_can_launch = 0
-                    for b in blue_sims:
-                        d = float(np.linalg.norm(mav_pos - b.get_position()))
-                        if 500 < d < 10000:
-                            from .utils import get2d_AO_TA_R
-                            mav_feat = np.array([mav_pos[0], mav_pos[1], -mav_pos[2],
-                                                 *(mav.get_velocity())], dtype=np.float64)
-                            b_feat = np.array([*b.get_position(), *b.get_velocity()], dtype=np.float64)
-                            AO, TA, _ = (np.pi/2, 0.0, 0.0)  # fallback; approx via velocity body frame
-                            if d > 0:
-                                delta = b.get_position() - mav_pos
-                                mav_vel = mav.get_velocity()
-                                vh = np.hypot(mav_vel[0], mav_vel[1])
-                                rh = np.hypot(delta[0], delta[1])
-                                if vh > 0.1 and rh > 0.1:
-                                    AO = abs(np.arccos(np.clip(
-                                        (mav_vel[0]*delta[0] + mav_vel[1]*delta[1]) / (vh * rh), -1, 1)))
-                            if AO < np.deg2rad(45):
-                                b_vel = b.get_velocity()
-                                bh = np.hypot(b_vel[0], b_vel[1])
-                                if bh > 0.1:
-                                    TA = abs(np.arccos(np.clip(
-                                        (b_vel[0]*delta[0] + b_vel[1]*delta[1]) / (bh * rh), -1, 1)))
-                                if TA > np.pi / 2:
-                                    blue_can_launch = 1
-                                    break
-                    S_threat = -1.0 if (mw or blue_can_launch) else 0.5
-                    # S_aspect
                     S_AO_vals, S_TA_vals = [], []
                     for b in blue_sims:
-                        d = float(np.linalg.norm(mav_pos - b.get_position()))
-                        if d > 0:
-                            delta = b.get_position() - mav_pos
-                            b_vel = b.get_velocity()
-                            bh = np.hypot(b_vel[0], b_vel[1])
-                            rh = np.hypot(delta[0], delta[1])
-                            if bh > 0.1 and rh > 0.1:
-                                AO_b = abs(np.arccos(np.clip(
-                                    (b_vel[0]*delta[0] + b_vel[1]*delta[1]) / (bh * rh), -1, 1)))
-                                S_AO_vals.append(1.0 - np.clip(AO_b / np.deg2rad(45), 0, 1))
-                            if rh > 0.1:
-                                TA_b_est = abs(np.arccos(np.clip(
-                                    (-b_vel[0]*delta[0] - b_vel[1]*delta[1]) / (bh * rh), -1, 1)))
-                                S_TA_vals.append(np.clip((TA_b_est - np.pi/2) / (np.pi/2), 0, 1))
+                        metrics = self._missile_candidate_metrics(b, mav)
+                        if metrics["range_ok"] and metrics["ao_ok"] and metrics["ta_ok"]:
+                            blue_can_launch = 1
+                        AO_rad = metrics.get("AO_rad", np.pi)
+                        TA_rad = metrics.get("TA_rad", 0.0)
+                        S_AO_vals.append(1.0 - np.clip(AO_rad / np.deg2rad(45), 0, 1))
+                        S_TA_vals.append(np.clip((TA_rad - np.pi / 2) / (np.pi / 2), 0, 1))
+                    S_threat = -1.0 if (mw or blue_can_launch) else 0.5
                     G_blue = max([0.5 * a + 0.5 * t for a, t in zip(S_AO_vals, S_TA_vals)]) if S_AO_vals else 0.0
                     S_aspect = 1.0 - 2.0 * G_blue
                     R_safety = 0.5 * S_dist + 0.3 * S_threat + 0.2 * S_aspect
@@ -944,7 +916,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
                             r_oz = self._paper_add_capped_reward(mav_id, "mav_out_zone", -15.0, -15.0, 0.0)
                             comp["mav_out_zone"] = r_oz
                             base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_oz
-                    # assist: check guided kills from done records
+                    # assist: use launch record mav_guided_at_launch or mav_observed_at_launch
                     for rid in self.red_ids:
                         if rid == mav_id: continue
                         done_hits = [
@@ -952,12 +924,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
                             if str(r.get("shooter_id", "")) == str(rid)
                             and str(r.get("raw_termination_reason", "")) == "hit"]
                         for lr in done_hits:
-                            tid = lr.get("target_id", "")
-                            lookback = self.PAPER_MAV_SHARED_TRACK_LOOKBACK
-                            mav_observed = self._paper_mav_observed_history.get(tid, -999)
-                            was_guided = self._paper_mav_shared_track_history.get((rid, tid), -999)
-                            if (self.current_step - mav_observed <= lookback
-                                    or self.current_step - was_guided <= lookback):
+                            if bool(lr.get("mav_guided_at_launch", False)) or bool(lr.get("mav_observed_at_launch", False)):
                                 r_asst = self._paper_add_capped_reward(mav_id, "mav_assist", 2.5, 0.0, 5.0)
                                 comp["mav_assist"] = comp.get("mav_assist", 0.0) + r_asst
                                 base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_asst
@@ -1040,16 +1007,14 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 comp["uav_fire_mav_guided_count"] = guided_fire
                 base_rewards[rid] = base_rewards.get(rid, 0.0) + capped
 
-                # --- uav_hit: use _launch_quality_done_step_records ---
+                # --- uav_hit: use launch record mav_guided_at_launch ---
                 done_launches = [
                     r for r in (getattr(self, "_launch_quality_done_step_records", None) or [])
                     if str(r.get("shooter_id", "")) == str(rid)
                     and str(r.get("raw_termination_reason", "")) == "hit"]
                 direct_hit = 0; guided_hit = 0
                 for lr in done_launches:
-                    tid = lr.get("target_id", "")
-                    was_guided = self._paper_mav_shared_track_history.get((rid, tid), -999)
-                    if self.current_step - was_guided <= self.PAPER_MAV_SHARED_TRACK_LOOKBACK:
+                    if bool(lr.get("mav_guided_at_launch", False)):
                         guided_hit += 1
                     else:
                         direct_hit += 1
