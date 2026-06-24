@@ -123,15 +123,18 @@ def _aircraft_name(env, aid: str) -> str:
     return aid
 
 
-def _entries(env) -> list[dict]:
+def _entries(env, acmi_visual=None) -> list[dict]:
     entries = []
+    visual_map = acmi_visual or {}
     for aid in env.red_ids + env.blue_ids:
         sim = env.red_planes.get(aid) or env.blue_planes.get(aid)
         lon, lat, alt = sim.get_geodetic()
         roll, pitch, yaw = np.asarray(sim.get_rpy(), dtype=np.float64) * (180.0 / np.pi)
+        role = env.agent_roles.get(aid, "")
+        visual_model = visual_map.get(role, env.agent_models.get(aid, ""))
         entries.append({
             "acmi_id": _acmi_id(aid),
-            "type": "Air+FixedWing",
+            "type": f"Air+FixedWing+{visual_model.upper()}" if visual_model else "Air+FixedWing",
             "lon": float(lon),
             "lat": float(lat),
             "alt": float(alt),
@@ -293,10 +296,12 @@ def main() -> int:
     from uav_env.JSBSim.adapters.hetero_entity_set_adapter import HeteroEntitySetAdapter
     from uav_env.JSBSim.render_tacview import TacviewLogger
 
-    output = _rel(args.output) if args.output else exp_dir / "acmi" / f"{args.checkpoint}_3v2_episode0.acmi"
-    summary_path = _rel(args.summary_json) if args.summary_json else output.with_name(output.stem + "_summary.json")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    # Unified output directory: all files go into --output as a folder
+    out_dir = _rel(args.output) if args.output else exp_dir / "acmi" / f"{args.checkpoint}_3v2_episode0"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    acmi_path   = out_dir / "episode.acmi"
+    summary_path = out_dir / "summary.json"
+    diag_dir     = out_dir / "diagnostics"
 
     meta = _load_meta(model)
     device = torch.device(args.device)
@@ -333,12 +338,9 @@ def main() -> int:
     red0_pitch, red0_roll, red0_alt = [], [], []
     outcome = "unknown"
 
-    # Diagnostics setup
-    diag_dir = None
+    # Diagnostics setup (inside output directory)
     if args.diagnostics_dir:
         diag_dir = Path(args.diagnostics_dir)
-    else:
-        diag_dir = output.parent / "diagnostics"
     diag_dir.mkdir(parents=True, exist_ok=True)
     red_csv = diag_dir / "red_behavior_timeseries.csv"
     blue_csv = diag_dir / "blue_behavior_timeseries.csv"
@@ -359,7 +361,7 @@ def main() -> int:
 
     try:
         obs, info = env.reset(seed=args.seed)
-        logger.record_frame(0.0, _entries(env) + _missile_entries(env, missile_id_map),
+        logger.record_frame(0.0, _entries(env, acmi_visual) + _missile_entries(env, missile_id_map),
                             _missile_explosions(env, missile_id_map, logged_explosions))
         step = 0
         while True:
@@ -449,7 +451,7 @@ def main() -> int:
                         blue_missile_objects += 1
 
             # Render frame with aircraft, missiles, and explosions
-            all_entries = _entries(env) + _missile_entries(env, missile_id_map)
+            all_entries = _entries(env, acmi_visual) + _missile_entries(env, missile_id_map)
             explosions = _missile_explosions(env, missile_id_map, logged_explosions)
             logger.record_frame(step * float(env.env_dt), all_entries, explosions)
 
@@ -541,7 +543,7 @@ def main() -> int:
             outcome = "mutual_elimination_draw"
         elif step >= int(getattr(env, "max_steps", 1000)):
             outcome = "timeout"
-        logger.write(str(output))
+        logger.write(str(acmi_path))
 
         # Write diagnostic CSVs
         import csv as _csv
@@ -635,7 +637,7 @@ def main() -> int:
                 "red_target_selection_mode": _cfg.get("red_target_selection_mode", "") if isinstance(_cfg, dict) else "",
                 "mav_dynamics": mav_dynamics_model, "mav_visual": mav_visual_model,
             },
-            "output_acmi": str(output),
+            "output_acmi": str(acmi_path),
         }
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         if args.enable_rich_logging:
@@ -644,8 +646,10 @@ def main() -> int:
     finally:
         if hasattr(env, "close"):
             env.close()
-    print(f"output_acmi: {output}")
-    print(f"output_summary: {summary_path}")
+    print(f"output_dir: {out_dir}")
+    print(f"acmi: {acmi_path}")
+    print(f"summary: {summary_path}")
+    print(f"diagnostics: {diag_dir}")
     print(f"outcome: {outcome}")
     return 0
 
