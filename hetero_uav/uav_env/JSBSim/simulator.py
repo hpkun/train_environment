@@ -662,7 +662,7 @@ class MissileSimulator(BaseSimulator):
     def _initial_velocity(self, parent: AircraftSimulator):
         parent_velocity = np.asarray(parent.get_velocity(), dtype=np.float64)
         parent_speed = float(np.linalg.norm(parent_velocity))
-        if np.isfinite(parent_speed) and parent_speed >= 150.0:
+        if np.isfinite(parent_speed) and parent_speed > 1e-6:
             direction = self._unit(parent_velocity)
         else:
             direction = self._unit(self._direction_from_posture(parent.get_rpy()))

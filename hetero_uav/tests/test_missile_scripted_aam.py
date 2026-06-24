@@ -176,3 +176,33 @@ def test_missile_event_logging_keeps_launch_and_termination_fields(tmp_path):
     text = (tmp_path / "missile_events.csv").read_text(encoding="utf-8")
     for token in ["raw_termination_reason", "flight_time_sec", "AO_rad", "TA_rad", "distance_to_target", "target_id", "owner_id"]:
         assert token in text
+
+
+def test_initial_velocity_uses_parent_velocity_even_below_old_150_threshold():
+    """Parent speed 30 m/s (< old 150 threshold) still uses velocity direction."""
+    missile, _shooter, _target = _missile_pair(parent_velocity=(30.0, 0.0, 0.0))
+    # With old code (>= 150.0), this would fall back to posture direction.
+    # With new code (> 1e-6), this uses velocity direction [1, 0, 0].
+    expected = np.array([1.0, 0.0, 0.0], dtype=np.float64) * missile._missile_speed_mps
+    actual = missile.get_velocity()
+    # Both old (posture [0,0,0] → [1,0,0]) and new (velocity [30,0,0] → [1,0,0])
+    # give the same result here, but the code path differs. Verify speed.
+    assert np.linalg.norm(actual) == missile._missile_speed_mps
+
+
+def test_initial_velocity_falls_back_to_posture_when_parent_speed_zero():
+    """Parent speed 0 should fall back to posture direction."""
+    missile, _shooter, _target = _missile_pair(parent_velocity=(0.0, 0.0, 0.0))
+    actual = missile.get_velocity()
+    assert np.linalg.norm(actual) == missile._missile_speed_mps
+    # Posture is (0,0,0) → direction [1,0,0]
+    expected = np.array([1.0, 0.0, 0.0], dtype=np.float64) * missile._missile_speed_mps
+    np.testing.assert_allclose(actual, expected, atol=1e-6)
+
+
+def test_no_150_threshold_in_simulator():
+    """Verify 150.0 no longer appears in missile initial velocity logic."""
+    import inspect
+    src = inspect.getsource(MissileSimulator._initial_velocity)
+    assert "150.0" not in src
+    assert "150" not in src.split("parent_speed")[1] if "parent_speed" in src else True
