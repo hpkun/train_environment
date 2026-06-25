@@ -42,8 +42,6 @@ class _ConsecutiveWorkerTimeout(Exception):
 
 _RUNNER_RESOURCES = {
     "vec_env": None,
-    "heartbeat": None,
-    "watchdog": None,
     "rich_logger": None,
     "env_rich_loggers": [],
     "policy": None,
@@ -75,8 +73,6 @@ from scripts.rich_logging import RichExperimentLogger, write_not_available_atten
 from scripts.train_happo_reference import (
     DEFAULT_CONFIG,
     DEFAULT_EVAL_CONFIGS,
-    HeartbeatLogger,
-    HeartbeatStallWatchdog,
     _build_policy,
     _entity_policy_meta,
     _eval_checkpoint_extra,
@@ -423,11 +419,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--uav-imitation-batch-size", type=int, default=1024)
     parser.add_argument("--enable-rich-logging", action="store_true")
     parser.add_argument("--rich-log-dir", default=None)
-    parser.add_argument("--heartbeat-log", default=None)
-    parser.add_argument("--heartbeat-every-steps", type=int, default=50)
-    parser.add_argument("--debug-rollout-heartbeat", action="store_true")
-    parser.add_argument("--heartbeat-stall-timeout-sec", type=float, default=0.0)
-    parser.add_argument("--exit-on-heartbeat-stall", action="store_true")
     parser.add_argument("--reset-timeout-sec", type=float, default=300.0)
     parser.add_argument("--step-timeout-sec", type=float, default=120.0)
     parser.add_argument("--worker-startup-delay-sec", type=float, default=0.5)
@@ -482,7 +473,7 @@ def _exception_is_nonfinite_message(message: str) -> bool:
     return "nonfinite" in text or "nan" in text or "inf" in text
 
 
-def _cleanup_runner(*, vec_env, heartbeat, watchdog, rich_logger,
+def _cleanup_runner(*, vec_env, rich_logger,
                     env_rich_loggers) -> None:
     """Close all runner resources; each step is independently fault-tolerant."""
     for logger in env_rich_loggers:
@@ -493,16 +484,6 @@ def _cleanup_runner(*, vec_env, heartbeat, watchdog, rich_logger,
     if rich_logger is not None:
         try:
             rich_logger.close()
-        except Exception:
-            pass
-    if watchdog is not None:
-        try:
-            watchdog.stop()
-        except Exception:
-            pass
-    if heartbeat is not None:
-        try:
-            heartbeat.close()
         except Exception:
             pass
     if vec_env is not None:
@@ -664,26 +645,6 @@ def _run_training(args: argparse.Namespace) -> None:
         proxy.update_diag(state[2])
 
     transitions_per_rollout = _transitions_per_rollout(args.rollout_length, args.num_envs)
-    heartbeat_path = _rel(args.heartbeat_log) if args.heartbeat_log else out_dir / "heartbeat.log"
-    heartbeat = HeartbeatLogger(
-        heartbeat_path,
-        every_steps=args.heartbeat_every_steps,
-        enabled=bool(args.heartbeat_log or args.debug_rollout_heartbeat),
-        debug_all=args.debug_rollout_heartbeat,
-        static_fields={
-            "max_steps": args.max_steps,
-            "num_envs": args.num_envs,
-            "runner": "multiprocessing",
-        },
-    )
-    watchdog = HeartbeatStallWatchdog(
-        heartbeat, out_dir,
-        timeout_sec=args.heartbeat_stall_timeout_sec,
-        exit_on_stall=args.exit_on_heartbeat_stall,
-    )
-    watchdog.start()
-    _RUNNER_RESOURCES["heartbeat"] = heartbeat
-    _RUNNER_RESOURCES["watchdog"] = watchdog
 
     rich_logger = None
     env_rich_loggers = []
@@ -824,18 +785,6 @@ def _run_training(args: argparse.Namespace) -> None:
                     obs = obs_list[env_idx]
                     info = info_list[env_idx]
                     rollout_local_step = len(buffer) + len(batch_records)
-                    heartbeat.write(
-                        "before_policy_act",
-                        iteration=iteration,
-                        rollout_local_step=rollout_local_step,
-                        env_idx=env_idx,
-                        total_steps=total_steps + len(batch_records),
-                        episode_length=current_ep_len[env_idx],
-                        env_episode_id=current_ep_id[env_idx],
-                        alive_agents=_alive_agents_from_diag(proxy.diag),
-                        missile_count=proxy.diag.get("missile_count", ""),
-                        sim_time=proxy.diag.get("sim_time", ""),
-                    )
                     adapted = adapter.adapt_all(
                         obs, info=info, red_ids=proxy.red_ids, blue_ids=proxy.blue_ids)
                     if entity_mode:
@@ -892,18 +841,6 @@ def _run_training(args: argparse.Namespace) -> None:
                                 deterministic=False,
                                 **act_kwargs,
                             )
-                    heartbeat.write(
-                        "after_policy_act",
-                        iteration=iteration,
-                        rollout_local_step=rollout_local_step,
-                        env_idx=env_idx,
-                        total_steps=total_steps + len(batch_records),
-                        episode_length=current_ep_len[env_idx],
-                        env_episode_id=current_ep_id[env_idx],
-                        alive_agents=_alive_agents_from_diag(proxy.diag),
-                        missile_count=proxy.diag.get("missile_count", ""),
-                        sim_time=proxy.diag.get("sim_time", ""),
-                    )
 
                     # ---- Zero inactive actions (align with single-proc) ----
                     actions_raw = out["action"].cpu().numpy()
@@ -926,31 +863,7 @@ def _run_training(args: argparse.Namespace) -> None:
                             break
                     action_dict = {rid: actions[i].astype(np.float32)
                                    for i, rid in enumerate(proxy.red_ids)}
-                    heartbeat.write(
-                        "before_opponent_act",
-                        iteration=iteration,
-                        rollout_local_step=rollout_local_step,
-                        env_idx=env_idx,
-                        total_steps=total_steps + len(batch_records),
-                        episode_length=current_ep_len[env_idx],
-                        env_episode_id=current_ep_id[env_idx],
-                        alive_agents=_alive_agents_from_diag(proxy.diag),
-                        missile_count=proxy.diag.get("missile_count", ""),
-                        sim_time=proxy.diag.get("sim_time", ""),
-                    )
                     action_dict.update(opponents[env_idx].act(obs, proxy.blue_ids, env=proxy))
-                    heartbeat.write(
-                        "before_env_step",
-                        iteration=iteration,
-                        rollout_local_step=rollout_local_step,
-                        env_idx=env_idx,
-                        total_steps=total_steps + len(batch_records),
-                        episode_length=current_ep_len[env_idx],
-                        env_episode_id=current_ep_id[env_idx],
-                        alive_agents=_alive_agents_from_diag(proxy.diag),
-                        missile_count=proxy.diag.get("missile_count", ""),
-                        sim_time=proxy.diag.get("sim_time", ""),
-                    )
                     action_dicts.append(action_dict)
                     batch_records.append({
                         "env_idx": env_idx,
@@ -1035,21 +948,6 @@ def _run_training(args: argparse.Namespace) -> None:
                     proxy = proxies[env_idx]
                     next_obs, rewards, terminated, truncated, next_info, diag = result
                     proxy.update_diag(diag)
-                    heartbeat.write(
-                        "after_env_step",
-                        iteration=iteration,
-                        rollout_local_step=record["rollout_local_step"],
-                        env_idx=env_idx,
-                        total_steps=total_steps,
-                        episode_length=current_ep_len[env_idx],
-                        env_episode_id=current_ep_id[env_idx],
-                        alive_agents=_alive_agents_from_diag(diag),
-                        missile_count=diag.get("missile_count", ""),
-                        sim_time=diag.get("sim_time", ""),
-                        done=_team_done(terminated, truncated),
-                        terminated=bool(all(terminated.values())) if terminated else False,
-                        truncated=bool(all(truncated.values())) if truncated else False,
-                    )
                     reward_np = np.array([float(rewards.get(rid, 0.0)) for rid in proxy.red_ids], dtype=np.float32)
                     done = _team_done(terminated, truncated)
                     done_np = np.full((len(proxy.red_ids),), float(done), dtype=np.float32)
@@ -1175,21 +1073,6 @@ def _run_training(args: argparse.Namespace) -> None:
                         current_ep_blue_death[env_idx] = defaultdict(int)
                         current_ep_missile[env_idx] = {"red_fired": 0, "blue_fired": 0,
                                                        "red_hits": 0, "blue_hits": 0}
-                        heartbeat.write(
-                            "before_reset",
-                            iteration=iteration,
-                            rollout_local_step=record["rollout_local_step"],
-                            env_idx=env_idx,
-                            total_steps=total_steps,
-                            episode_length=0,
-                            env_episode_id=current_ep_id[env_idx],
-                            alive_agents=_alive_agents_from_diag(diag),
-                            missile_count=diag.get("missile_count", ""),
-                            sim_time=diag.get("sim_time", ""),
-                            done=done,
-                            terminated=bool(all(terminated.values())) if terminated else False,
-                            truncated=bool(all(truncated.values())) if truncated else False,
-                        )
                         next_obs, next_info, reset_diag = vec_env.reset_one(
                             env_idx, args.seed + total_steps + env_idx)
                         proxy.update_diag(reset_diag)
@@ -1559,8 +1442,6 @@ def main() -> None:
     out_dir = ROOT / args.output_dir
     _RUNNER_RESOURCES.update({
         "vec_env": None,
-        "heartbeat": None,
-        "watchdog": None,
         "rich_logger": None,
         "env_rich_loggers": [],
         "policy": None,
@@ -1639,8 +1520,6 @@ def main() -> None:
         finally:
             _cleanup_runner(
                 vec_env=_RUNNER_RESOURCES.get("vec_env"),
-                heartbeat=_RUNNER_RESOURCES.get("heartbeat"),
-                watchdog=_RUNNER_RESOURCES.get("watchdog"),
                 rich_logger=_RUNNER_RESOURCES.get("rich_logger"),
                 env_rich_loggers=_RUNNER_RESOURCES.get("env_rich_loggers") or [],
             )
