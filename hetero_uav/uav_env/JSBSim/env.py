@@ -229,6 +229,7 @@ class UavCombatEnv(gymnasium.Env):
                  red_target_selection_mode: str = "closest",
                  missile_launch_range_m: float | None = None,
                  missile_attack_interval_sec: float | None = None,
+                 use_boresight_launch_gate: bool = False,
                  render_mode=None):
         super().__init__()
         if red_target_selection_mode not in {"closest", "mav_threat_rank"}:
@@ -264,6 +265,7 @@ class UavCombatEnv(gymnasium.Env):
             self._missile_attack_interval_sec_effective = effective_interval
         self.missile_cooldown_frames = int(round(effective_interval * self.sim_freq))
         self.missile_lock_delay_frames = int(round(0.25 * self.sim_freq))
+        self.use_boresight_launch_gate = bool(use_boresight_launch_gate)
 
         # Agent ID lists (fixed order for observation construction)
         self.blue_ids = [f"blue_{i}" for i in range(max_num_blue)]
@@ -1140,8 +1142,13 @@ class UavCombatEnv(gymnasium.Env):
                 diag["ta_ok_pairs"] += 1
 
             diag["boresight_ok_pairs"] = diag.get("boresight_ok_pairs", 0) + (1 if metrics.get("boresight_ok_3d", False) else 0)
-            in_cone = bool(metrics.get("launch_geometry_ok_3d", False))
-            if not in_cone and (metrics["ao_ok"] and metrics["range_ok"] and metrics["ta_ok"]):
+            if self.use_boresight_launch_gate:
+                in_cone = bool(metrics.get("launch_geometry_ok_3d", False))
+            else:
+                in_cone = metrics["range_ok"] and metrics["ao_ok"] and metrics["ta_ok"]
+            if not in_cone and metrics["range_ok"] and metrics["ao_ok"] and metrics["ta_ok"] and not self.use_boresight_launch_gate:
+                pass  # BRMA gate allows without boresight
+            if not in_cone and self.use_boresight_launch_gate and (metrics["ao_ok"] and metrics["range_ok"] and metrics["ta_ok"]):
                 diag["geometry_3d_blocked"] = diag.get("geometry_3d_blocked", 0) + 1
             if in_cone:
                 diag["geometry_ok_pairs"] += 1

@@ -471,7 +471,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             for key in HAPPO_REF_V0_REWARD_COMPONENT_KEYS:
                 comp.setdefault(key, 0.0)
 
-    PAPER_ROLE_REWARD_PROFILE = "brma_flight_tam_role_aligned_v1"
+    PAPER_ROLE_REWARD_PROFILE = "brma_uav_tam_mav_event_v1"
     PAPER_MAV_SHARED_TRACK_LOOKBACK = 15  # env steps for MAV-guided fire/hit history
 
     def _build_launch_quality_record(self, shooter, target, range_m=None, target_selection=None):
@@ -677,14 +677,20 @@ class HeteroUavCombatEnv(UavCombatEnv):
         if self.hetero_reward_mode == "paper_role_reward_v1":
             tam_scale = float(getattr(self, "_tam_reward_scale", 0.05))
 
-            # ── Remove BRMA r_adv (situation) and r_end (terminal) for all red ──
+            # ── Remove BRMA r_end (terminal) for ALL red ──
             for rid in self.red_ids:
-                for key_del, log_key in [("r_adv", "r_adv_removed"), ("r_end", "r_end_raw_removed")]:
-                    old = components[rid].get(key_del, 0.0)
-                    if old != 0.0:
-                        components[rid][log_key] = float(old)
-                        base_rewards[rid] = base_rewards.get(rid, 0.0) - old
-                        components[rid][key_del] = 0.0
+                old_end = components[rid].get("r_end", 0.0)
+                if old_end != 0.0:
+                    components[rid]["r_end_raw_removed"] = float(old_end)
+                    base_rewards[rid] = base_rewards.get(rid, 0.0) - old_end
+                    components[rid]["r_end"] = 0.0
+            # ── MAV only: remove BRMA r_adv (situation). UAV keeps BRMA r_adv. ──
+            if mav_id and mav_id in components:
+                old_adv = components[mav_id].get("r_adv", 0.0)
+                if old_adv != 0.0:
+                    components[mav_id]["r_adv_removed"] = float(old_adv)
+                    base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) - old_adv
+                    components[mav_id]["r_adv"] = 0.0
 
             # ── Set up tam_* component keys ──
             for rid in self.red_ids:
