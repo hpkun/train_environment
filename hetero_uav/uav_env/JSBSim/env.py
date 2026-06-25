@@ -240,11 +240,6 @@ class UavCombatEnv(gymnasium.Env):
             self.MISSILE_LAUNCH_RANGE_THRESH = float(missile_launch_range_m)
         else:
             self._missile_launch_range_m_effective = float(self.MISSILE_LAUNCH_RANGE_THRESH)
-        if missile_attack_interval_sec is not None:
-            self._missile_attack_interval_sec_effective = float(missile_attack_interval_sec)
-            self.missile_cooldown_frames = int(round(missile_attack_interval_sec * self.sim_freq))
-        else:
-            self._missile_attack_interval_sec_effective = 0.5
         self.max_num_blue = max_num_blue
         self.max_num_red = max_num_red
         self.num_missiles_per_plane = num_missiles_per_plane
@@ -260,7 +255,14 @@ class UavCombatEnv(gymnasium.Env):
         self.pid_profile_config = dict(pid_profile_config or {})
         self.physics_dt = 1.0 / sim_freq
         self.env_dt = agent_interaction_steps * self.physics_dt
-        self.missile_cooldown_frames = int(round(0.5 * self.sim_freq))
+        # missile_attack_interval_sec: configurable cooldown (TAM-HAPPO paper: 25s)
+        if missile_attack_interval_sec is not None:
+            effective_interval = float(missile_attack_interval_sec)
+            self._missile_attack_interval_sec_effective = effective_interval
+        else:
+            effective_interval = 0.5
+            self._missile_attack_interval_sec_effective = effective_interval
+        self.missile_cooldown_frames = int(round(effective_interval * self.sim_freq))
         self.missile_lock_delay_frames = int(round(0.25 * self.sim_freq))
 
         # Agent ID lists (fixed order for observation construction)
