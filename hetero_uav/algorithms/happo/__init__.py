@@ -1,4 +1,4 @@
-"""Minimal HAPPO reference v0 components."""
+"""HAPPO components: reference v0 + full HAPPO baseline."""
 
 from .happo_buffer import HAPPORolloutBuffer
 from .brma_entity_policy import BRMAEntityHAPPOReferencePolicy, BRMAEntityObservationEncoder
@@ -11,6 +11,8 @@ from .entity_policy import EntityHAPPOReferencePolicy
 from .happo_policy import HAPPOReferencePolicy
 from .hetero_entity_recurrent_policy import HeteroEntityRecurrentPolicy
 from .happo_trainer import HAPPOReferenceTrainer
+from .full_happo_policy import FullHAPPOPolicy
+from .full_happo_trainer import FullHAPPOTrainer
 
 __all__ = [
     "BRMAEntityHAPPOReferencePolicy",
@@ -23,4 +25,6 @@ __all__ = [
     "HeteroEntityRecurrentPolicy",
     "HAPPORolloutBuffer",
     "HAPPOReferenceTrainer",
+    "FullHAPPOPolicy",
+    "FullHAPPOTrainer",
 ]
