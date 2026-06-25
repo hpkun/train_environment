@@ -29,6 +29,8 @@ from algorithms.happo import (
     HAPPOReferencePolicy,
     HAPPORolloutBuffer,
     HAPPOReferenceTrainer,
+    FullHAPPOPolicy,
+    FullHAPPOTrainer,
 )
 from algorithms.happo.rollout_safety import (
     sanitize_policy_inputs,
@@ -348,6 +350,11 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
             num_attention_heads=int(meta.get("num_attention_heads", 4)),
         ).to(device)
+    if policy_arch == "full_happo":
+        return FullHAPPOPolicy(
+            actor_obs_dim=actor_dim, critic_state_dim=critic_dim,
+            action_dim=3, num_agents=3,
+        ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(actor_dim, critic_dim).to(device)
     if policy_arch == "entity_attention":
@@ -468,7 +475,7 @@ def _episode_outcome(env, truncated: dict, length: int) -> dict:
     return {"winner": winner, "end_reason": reason}
 
 
-def _run_eval(model_path: str, args, summary_json: str) -> list[dict] | None:
+def _run_eval(model_path: str, args, summary_json: str, train_num_agents: int = None) -> list[dict] | None:
     cmd = [
         sys.executable, "-u", str(ROOT / "scripts" / "eval_happo_reference.py"),
         "--model", model_path,
@@ -644,8 +651,8 @@ def _run_training_main() -> None:
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"],
-                        help="Policy architecture. Default flat preserves legacy checkpoints.")
+                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent", "full_happo"],
+                        help="Policy architecture. full_happo = paper-aligned HAPPO baseline.")
     parser.add_argument("--brma-random-scale-mask", action="store_true",
                         help="Accepted for compatibility but rejected: unsafe without rollout mask replay.")
     parser.add_argument("--brma-biased-mask", action="store_true",
@@ -754,12 +761,21 @@ def _run_training_main() -> None:
             init_path = ROOT / init_path
         policy.load(init_path, map_location=device)
         print(f"Loaded init_checkpoint: {init_path}", flush=True)
-    trainer = HAPPOReferenceTrainer(
-        policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
-        clip_param=args.clip_param, entropy_coef=args.entropy_coef,
-        max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
-        gamma=args.gamma, gae_lambda=args.gae_lambda,
-    )
+    if args.policy_arch == "full_happo":
+        trainer = FullHAPPOTrainer(
+            policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
+            clip_param=args.clip_param, entropy_coef=args.entropy_coef,
+            max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
+            gamma=args.gamma, gae_lambda=args.gae_lambda,
+            seed=args.seed,
+        )
+    else:
+        trainer = HAPPOReferenceTrainer(
+            policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
+            clip_param=args.clip_param, entropy_coef=args.entropy_coef,
+            max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
+            gamma=args.gamma, gae_lambda=args.gae_lambda,
+        )
     uav_imitation_data = None
     if args.uav_imitation_dataset and args.uav_imitation_coef > 0.0:
         uav_imitation_data = _load_uav_imitation_dataset(args.uav_imitation_dataset)
@@ -1344,6 +1360,22 @@ def _run_training_main() -> None:
                     episode_length="",
                     alive_agents=dict(zip(("red", "blue"), _alive_counts(env))),
                 )
+                if args.policy_arch == "full_happo":
+                    try:
+                        import yaml
+                        filtered = []
+                        for cfg in (args.eval_configs or DEFAULT_EVAL_CONFIGS):
+                            with open(cfg, encoding="utf-8") as f:
+                                c = yaml.safe_load(f) or {}
+                            if c.get("max_num_red", 0) == policy.num_agents:
+                                filtered.append(cfg)
+                            else:
+                                print(f"Skipping eval config {cfg}: full_happo was built for "
+                                      f"{policy.num_agents} red agents but eval has "
+                                      f"{c.get('max_num_red', '?')}.", flush=True)
+                        args.eval_configs = filtered or args.eval_configs
+                    except Exception:
+                        pass
                 records = _run_eval(str(tmp_model), args, tmp_json)
                 heartbeat.write(
                     "after_eval",
