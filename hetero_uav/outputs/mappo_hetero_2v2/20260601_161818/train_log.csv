@@ -1,3 +1,0 @@
-iteration,average_episode_return,average_win_rate,average_mav_survival,average_red_alive,average_blue_alive,average_episode_length,policy_loss,value_loss,entropy
-1,0.6399999856948853,0.0,1.0,2.0,2.0,32,-0.012386223301291466,0.028225683607161045,2.7569655179977417
-2,1.2799999713897705,0.0,1.0,2.0,2.0,64,-0.004590680822730064,0.019325476605445147,2.757341504096985

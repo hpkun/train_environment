@@ -211,6 +211,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._mav_death_penalized = False
         self._uav_death_penalized = set()
         self._paper_reset_reward_state()
+        self._paper_terminal_applied = False
         obs, info = super().reset(*args, **kwargs)
         if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1"}:
             self._last_step_obs = obs
@@ -508,6 +509,213 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._paper_mav_observed_history: dict[str, float] = {}
         self._paper_reward_targets_current_step: dict = {}
 
+    def _compute_brma_uav_tam_mav_event_v1(self, base_rewards, components, mav_id):
+        """paper_role_reward_v1: BRMA flight + UAV keeps r_adv + MAV TAM dense + events + hetero terminal."""
+        tam_scale = float(getattr(self, "_tam_reward_scale", 0.05))
+
+        # ── Remove r_end for ALL red ──
+        for rid in self.red_ids:
+            old = components[rid].get("r_end", 0.0)
+            if old != 0.0:
+                components[rid]["r_end_raw_removed"] = float(old)
+                base_rewards[rid] = base_rewards.get(rid, 0.0) - old
+                components[rid]["r_end"] = 0.0
+
+        # ── MAV only: remove r_adv. UAV keeps BRMA r_adv. ──
+        if mav_id and mav_id in components:
+            old = components[mav_id].get("r_adv", 0.0)
+            if old != 0.0:
+                components[mav_id]["r_adv_removed"] = float(old)
+                base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) - old
+                components[mav_id]["r_adv"] = 0.0
+
+        # ── MAV dense: R_MAV_dense = 0.12*R_safety + 0.08*R_support + 0.01*I(alive) ──
+        if mav_id and mav_id in self.red_planes:
+            mav = self.red_planes[mav_id]
+            comp = components.setdefault(mav_id, {})
+            if mav.is_alive:
+                mav_pos = mav.get_position()
+                blue_sims = [s for s in self.blue_planes.values() if s.is_alive]
+                # R_dist (D_danger=8000m, D_safe=15000m)
+                if blue_sims:
+                    d_min = min(np.linalg.norm(mav_pos - b.get_position()) for b in blue_sims)
+                else:
+                    d_min = 15000.0
+                D_d, D_s = 8000.0, 15000.0
+                if d_min < D_d: R_dist = -1.0
+                elif d_min < D_s: R_dist = -1.0 + 1.2 * (d_min - D_d) / (D_s - D_d)
+                else: R_dist = 0.2
+                R_dist = float(np.clip(R_dist, -1.0, 0.2))
+                # R_threat: missile_warning or blue has BRMA launch window on MAV
+                R_threat = 0.0
+                if mav.check_missile_warning() is not None:
+                    R_threat -= 1.0
+                for b in blue_sims:
+                    m = self._missile_candidate_metrics(b, mav)
+                    if m["range_ok"] and m["ao_ok"] and m["ta_ok"]:
+                        R_threat -= 0.5; break
+                R_threat = float(np.clip(R_threat, -1.0, 0.0))
+                # R_aspect using BRMA-style A(alpha)*D(d)
+                max_AD = 0.0
+                for b in blue_sims:
+                    d_b = float(np.linalg.norm(mav_pos - b.get_position()))
+                    if d_b <= 0: continue
+                    m = self._missile_candidate_metrics(b, mav)
+                    alpha_deg = np.rad2deg(m["AO_rad"])
+                    if alpha_deg <= 4: A_val = 1.0
+                    elif alpha_deg < 35: A_val = 1.0 - (alpha_deg - 4.0) / 31.0
+                    else: A_val = 0.0
+                    D_val = 1.0 if d_b <= 10000 else np.exp(1.0 - d_b / 10000.0)
+                    max_AD = max(max_AD, A_val * D_val)
+                R_aspect = -max_AD
+                R_safety = 0.5*R_dist + 0.3*R_threat + 0.2*R_aspect
+                r_safe = 0.12 * R_safety
+                comp["tam_mav_safety_raw"] = R_safety
+                comp["tam_mav_safety_dist"] = R_dist
+                comp["tam_mav_safety_threat"] = R_threat
+                comp["tam_mav_safety_aspect"] = R_aspect
+                base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_safe
+
+                # R_support = 0.5*R_pos + 0.3*R_aware + 0.2*R_shared
+                uav_poses = [self.red_planes[r].get_position() for r in self.red_ids
+                             if r != mav_id and self.red_planes[r].is_alive]
+                if uav_poses:
+                    d_c = float(np.linalg.norm(mav_pos - np.mean(uav_poses, axis=0)))
+                else:
+                    d_c = 8000.0
+                D_near, D_opt, D_far = 3000.0, 8000.0, 20000.0
+                if d_c < D_near: R_pos = -0.5
+                elif d_c < D_opt: R_pos = (d_c - D_near) / (D_opt - D_near)
+                elif d_c < D_far: R_pos = 1.0 - (d_c - D_opt) / (D_far - D_opt)
+                else: R_pos = -0.5
+                n_blue = max(sum(1 for s in self.blue_planes.values() if s.is_alive), 1)
+                mav_obs = np.asarray(self._last_step_obs.get(mav_id, {}).get("enemy_observed_mask", []), dtype=np.float32)
+                S_observe = float(np.sum(mav_obs > 0.5)) / n_blue
+                shared_total = 0.0
+                n_uav = max(sum(1 for r in self.red_ids if r != mav_id and self.red_planes[r].is_alive), 1)
+                for rid in self.red_ids:
+                    if rid == mav_id: continue
+                    src = np.asarray(self._last_step_obs.get(rid, {}).get("enemy_track_source", []), dtype=np.float32)
+                    if src.ndim == 2 and src.shape[1] >= 2:
+                        shared_total += float(np.sum(src[:, 1] > 0.5))
+                S_shared = shared_total / max(n_uav * n_blue, 1)
+                R_aware = S_observe  # v1: observed ratio
+                R_support = 0.5*R_pos + 0.3*R_aware + 0.2*S_shared
+                r_sup = 0.08 * R_support
+                comp["tam_mav_support_raw"] = R_support
+                comp["tam_mav_support_pos"] = R_pos
+                comp["tam_mav_support_aware"] = R_aware
+                comp["tam_mav_support_shared"] = S_shared
+                base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_sup
+                # alive bonus
+                r_alive = 0.01
+                comp["tam_mav_alive_bonus"] = r_alive
+                base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_alive
+
+                comp["tam_mav_dense_reward"] = float(base_rewards.get(mav_id, 0.0) - max(0.0, base_rewards.get(mav_id, 0.0) - r_safe - r_sup - r_alive))
+
+            # MAV death event (once)
+            elif not mav.is_alive and not self._mav_death_penalized:
+                self._mav_death_penalized = True
+                comp["event_mav_death"] = -6.0
+                base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) - 6.0
+                for rid in self.red_ids:
+                    if rid == mav_id: continue
+                    if self.red_planes[rid].is_alive:
+                        components.setdefault(rid, {})["event_mav_loss_team"] = -1.0
+                        base_rewards[rid] = base_rewards.get(rid, 0.0) - 1.0
+
+        # ── Events: UAV kill + UAV death/crash + out_zone ──
+        step = getattr(self, "current_step", 0)
+        for rid in self.red_ids:
+            if self.agent_roles.get(rid, "") == "mav": continue
+            comp = components.setdefault(rid, {})
+            sim = self.red_planes.get(rid)
+            # UAV kill from done hit records
+            done_hits = [r for r in (getattr(self, "_launch_quality_done_step_records", None) or [])
+                         if str(r.get("shooter_id","")) == str(rid) and str(r.get("raw_termination_reason","")) == "hit"]
+            if done_hits:
+                kill_r = 4.0 * len(done_hits)
+                comp["event_uav_kill"] = kill_r
+                comp["uav_hit_direct_count"] = sum(1 for r in done_hits if not bool(r.get("mav_guided_at_launch", False)))
+                comp["uav_hit_mav_guided_count"] = sum(1 for r in done_hits if bool(r.get("mav_guided_at_launch", False)))
+                base_rewards[rid] = base_rewards.get(rid, 0.0) + kill_r
+                # team kill bonus for all alive red
+                for rid2 in self.red_ids:
+                    if self.red_planes.get(rid2) and self.red_planes[rid2].is_alive:
+                        components.setdefault(rid2, {})["event_team_kill"] = components.setdefault(rid2, {}).get("event_team_kill", 0.0) + 0.5 * len(done_hits)
+                        base_rewards[rid2] = base_rewards.get(rid2, 0.0) + 0.5 * len(done_hits)
+            # UAV death/crash
+            if sim is None or not sim.is_alive:
+                if rid not in self._uav_death_penalized:
+                    self._uav_death_penalized.add(rid)
+                    crash = bool(rid in getattr(env, "_crashed_this_step", set()) if False else False)
+                    death_r = -5.0 if crash else -4.0
+                    comp["event_uav_death" if not crash else "event_uav_crash"] = death_r
+                    base_rewards[rid] = base_rewards.get(rid, 0.0) + death_r
+            # Out zone (once)
+            if sim and sim.is_alive and rid not in self._paper_out_zone_penalized:
+                pos = sim.get_position()
+                if abs(float(pos[0])) > 40000 or abs(float(pos[1])) > 40000 or sim.get_geodetic()[2] > 10000:
+                    self._paper_out_zone_penalized.add(rid)
+                    comp["event_out_zone"] = -2.0
+                    base_rewards[rid] = base_rewards.get(rid, 0.0) - 2.0
+
+        # ── Hetero terminal (once per episode end) ──
+        if not getattr(self, "_paper_terminal_applied", False):
+            n_red = len(self.red_ids); n_blue = len(self.blue_ids)
+            n_red_a = sum(1 for s in self.red_planes.values() if s.is_alive)
+            n_blue_a = sum(1 for s in self.blue_planes.values() if s.is_alive)
+            is_end = (n_blue_a == 0 or n_red_a == 0 or step >= self.max_steps)
+            if is_end:
+                self._paper_terminal_applied = True
+                blue_d = n_blue - n_blue_a; red_d = n_red - n_red_a
+                red_win = (n_blue_a == 0 and n_red_a > 0)
+                red_fail = (n_red_a == 0)
+                mutual = (n_blue_a == 0 and n_red_a == 0)
+                timeout = (not red_win and not red_fail and not mutual)
+                if red_win: R_win = 8.0
+                elif red_fail: R_win = -8.0
+                elif mutual: R_win = 0.0
+                elif timeout: R_win = 4.0 * (blue_d / max(n_blue, 1) - red_d / max(n_red, 1))
+                else: R_win = 0.0
+                R_surv = 2.0 * (n_red_a / max(n_red, 1) - n_blue_a / max(n_blue, 1))
+                mav_alive = bool(mav_id and self.red_planes.get(mav_id) and self.red_planes[mav_id].is_alive)
+                R_mav = 0.0
+                if not red_fail:
+                    R_mav = 1.5 if mav_alive else -2.0
+                R_term = R_win + R_surv + R_mav
+                for rid in self.red_ids:
+                    comp = components.setdefault(rid, {})
+                    comp["terminal_hetero_raw"] = R_term
+                    comp["terminal_win_component"] = R_win
+                    comp["terminal_survival_component"] = R_surv
+                    comp["terminal_mav_component"] = R_mav
+                    comp["terminal_applied"] = 1
+                    base_rewards[rid] = base_rewards.get(rid, 0.0) + R_term
+
+        # ── Log-only fields (active=0) ──
+        for rid in self.red_ids:
+            comp = components.setdefault(rid, {})
+            comp["uav_attack"] = 0.0
+            comp["uav_fire"] = 0.0
+            comp["uav_hit"] = 0.0
+            comp["uav_fire_log"] = 0.0
+            comp["uav_attack_mav_shared_multiplier"] = 0
+            comp["mav_assist"] = 0.0
+            comp["uav_fire_direct_count"] = comp.get("uav_fire_direct_count", 0)
+            comp["uav_fire_mav_guided_count"] = comp.get("uav_fire_mav_guided_count", 0)
+            comp.setdefault("event_total", 0.0)
+
+        # ── Final clipping [-10, 10] for red agents ──
+        for rid in self.red_ids:
+            pre = base_rewards.get(rid, 0.0)
+            base_rewards[rid] = float(np.clip(pre, -10.0, 10.0))
+            components.setdefault(rid, {})["reward_pre_clip"] = pre
+            components.setdefault(rid, {})["reward_clip_delta"] = base_rewards[rid] - pre
+
+        return base_rewards, components
+
     def _compute_rewards(self) -> tuple[dict, dict]:
         """Override to add minimal hetero role-aware overlay."""
         base_rewards, components = super()._compute_rewards()
@@ -673,249 +881,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
             return base_rewards, components
 
-        # ---- paper_role_reward_v1: brma_flight_tam_role_aligned_v1 ----
+        # ---- paper_role_reward_v1: brma_uav_tam_mav_event_v1 ----
         if self.hetero_reward_mode == "paper_role_reward_v1":
-            tam_scale = float(getattr(self, "_tam_reward_scale", 0.05))
-
-            # ── Remove BRMA r_end (terminal) for ALL red ──
-            for rid in self.red_ids:
-                old_end = components[rid].get("r_end", 0.0)
-                if old_end != 0.0:
-                    components[rid]["r_end_raw_removed"] = float(old_end)
-                    base_rewards[rid] = base_rewards.get(rid, 0.0) - old_end
-                    components[rid]["r_end"] = 0.0
-            # ── MAV only: remove BRMA r_adv (situation). UAV keeps BRMA r_adv. ──
-            if mav_id and mav_id in components:
-                old_adv = components[mav_id].get("r_adv", 0.0)
-                if old_adv != 0.0:
-                    components[mav_id]["r_adv_removed"] = float(old_adv)
-                    base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) - old_adv
-                    components[mav_id]["r_adv"] = 0.0
-
-            # ── Set up tam_* component keys ──
-            for rid in self.red_ids:
-                comp = components.setdefault(rid, {})
-                role = self.agent_roles.get(rid, "")
-                if role == "mav":
-                    for k in ("tam_mav_safety_raw","tam_mav_safety","tam_mav_support_raw",
-                              "tam_mav_support","tam_mav_event_raw","tam_mav_event",
-                              "tam_mav_death_event","tam_mav_team_contribution_event",
-                              "mav_out_zone_log"):
-                        comp.setdefault(k, 0.0)
-                else:
-                    for k in ("tam_uav_angle_raw","tam_uav_angle","tam_uav_distance_raw",
-                              "tam_uav_distance","tam_uav_dodge_raw","tam_uav_dodge",
-                              "tam_uav_event_raw","tam_uav_event",
-                              "tam_uav_kill_event_count","tam_uav_death_event",
-                              "tam_uav_out_zone_log","uav_fire_log",
-                              "uav_fire_direct_count","uav_fire_mav_guided_count",
-                              "uav_hit_direct_count","uav_hit_mav_guided_count",
-                              "tam_uav_reward_target_id","tam_uav_reward_target_track_source",
-                              "tam_uav_ATA_3d_rad","tam_uav_AA_3d_rad","tam_uav_range_3d_m"):
-                        comp.setdefault(k, 0.0)
-                # Active reward summary
-                comp.setdefault("active_brma_flight", float(base_rewards.get(rid, 0.0)))
-
-            # ── Update MAV shared track history ──
-            for rid in self.red_ids:
-                if self.agent_roles.get(rid, "") == "mav": continue
-                uav_obs = self._last_step_obs.get(rid, {})
-                src = np.asarray(uav_obs.get("enemy_track_source", []), dtype=np.float32)
-                for bi, bid in enumerate(self.blue_ids):
-                    if bi < src.shape[0] and src[bi, 1] > 0.5:
-                        self._paper_mav_shared_track_history[(rid, bid)] = self.current_step
-            if mav_id:
-                mav_obs = self._last_step_obs.get(mav_id, {})
-                obs_mask = np.asarray(mav_obs.get("enemy_observed_mask", []), dtype=np.float32)
-                for bi, bid in enumerate(self.blue_ids):
-                    if bi < obs_mask.size and obs_mask[bi] > 0.5:
-                        self._paper_mav_observed_history[bid] = self.current_step
-
-            # ── MAV: TAM R_safety + R_support + R_event ──
-            if mav_id and mav_id in self.red_planes:
-                mav = self.red_planes[mav_id]
-                comp = components.setdefault(mav_id, {})
-                if mav.is_alive:
-                    mav_pos = mav.get_position()
-                    blue_sims = [s for s in self.blue_planes.values() if s.is_alive]
-                    # R_safety = 0.5*R_dist + 0.3*R_threat + 0.2*R_aspect
-                    if blue_sims:
-                        d_MB_km = min(np.linalg.norm(mav_pos - b.get_position()) for b in blue_sims) / 1000.0
-                    else:
-                        d_MB_km = 40.0
-                    if d_MB_km < 8: S_dist = -1.0
-                    elif d_MB_km < 15: S_dist = -1.0 + 2.0*(d_MB_km-8)/7.0
-                    elif d_MB_km <= 30: S_dist = 1.0
-                    elif d_MB_km <= 40: S_dist = 1.0 - 1.5*(d_MB_km-30)/10.0
-                    else: S_dist = -1.0
-                    S_dist = float(np.clip(S_dist, -1.0, 1.0))
-                    mw = int(mav.check_missile_warning() is not None)
-                    blue_can_launch = 0
-                    for b in blue_sims:
-                        if self._build_launch_geometry_3d(b, mav).get("launch_geometry_ok_3d", False):
-                            blue_can_launch = 1; break
-                    S_threat = -1.0 if (mw or blue_can_launch) else 0.5
-                    S_AO_vals = []; S_TA_vals = []
-                    for b in blue_sims:
-                        g = self._build_launch_geometry_3d(b, mav)
-                        S_AO_vals.append(1.0 - np.clip(g.get("ATA_3d_rad", np.pi)/np.deg2rad(45), 0, 1))
-                        S_TA_vals.append(np.clip((g.get("TA_3d_rad", 0)-np.pi/2)/(np.pi/2), 0, 1))
-                    G_blue = max(0.5*a+0.5*t for a,t in zip(S_AO_vals, S_TA_vals)) if S_AO_vals else 0.0
-                    S_aspect = 1.0 - 2.0*G_blue
-                    R_safety_raw = 0.5*S_dist + 0.3*S_threat + 0.2*S_aspect
-                    r_safety = tam_scale * R_safety_raw
-                    comp["tam_mav_safety_raw"] = R_safety_raw
-                    comp["tam_mav_safety"] = r_safety
-                    base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_safety
-
-                    # R_support = 0.6*R_pos + 0.4*R_aware
-                    uav_poses = [self.red_planes[r].get_position() for r in self.red_ids
-                                 if r != mav_id and self.red_planes[r].is_alive]
-                    if uav_poses:
-                        c_uav = np.mean(uav_poses, axis=0)
-                        d_MU_km = float(np.linalg.norm(mav_pos - c_uav))/1000.0
-                    else:
-                        d_MU_km = 15.0
-                    if d_MU_km < 5: S_pos = -0.2
-                    elif d_MU_km < 8: S_pos = -0.2 + 1.2*(d_MU_km-5)/3.0
-                    elif d_MU_km <= 22: S_pos = 1.0
-                    elif d_MU_km <= 35: S_pos = 1.0 - 1.5*(d_MU_km-22)/13.0
-                    else: S_pos = -1.0
-                    S_pos = float(np.clip(S_pos, -1.0, 1.0))
-                    n_blue_alive = max(sum(1 for s in self.blue_planes.values() if s.is_alive), 1)
-                    mav_obs_mask = np.asarray(self._last_step_obs.get(mav_id, {}).get("enemy_observed_mask", []), dtype=np.float32)
-                    S_observe = float(np.sum(mav_obs_mask > 0.5)) / n_blue_alive
-                    shared_total = 0.0
-                    n_uav_alive = max(sum(1 for r in self.red_ids if r != mav_id and self.red_planes[r].is_alive), 1)
-                    for rid in self.red_ids:
-                        if rid == mav_id: continue
-                        src = np.asarray(self._last_step_obs.get(rid, {}).get("enemy_track_source", []), dtype=np.float32)
-                        if src.ndim == 2 and src.shape[1] >= 2:
-                            shared_total += float(np.sum(src[:, 1] > 0.5))
-                    S_shared = shared_total / max(n_uav_alive * n_blue_alive, 1)
-                    guided_count = sum(
-                        1 for r in self.red_ids if r != mav_id
-                        and self._paper_reward_targets_current_step.get(r, {}).get("best_metrics", {}).get("S_mav", 0) > 0.5)
-                    S_guided = guided_count / max(n_uav_alive, 1)
-                    S_info_raw = 0.4*S_observe + 0.4*S_shared + 0.2*S_guided
-                    S_aware = 2.0*S_info_raw - 1.0
-                    R_support_raw = 0.6*S_pos + 0.4*S_aware
-                    r_support = tam_scale * R_support_raw
-                    comp["tam_mav_support_raw"] = R_support_raw
-                    comp["tam_mav_support"] = r_support
-                    comp["tam_mav_support_pos"] = S_pos
-                    comp["tam_mav_support_aware"] = S_aware
-                    comp["mav_support_observe_log"] = S_observe
-                    comp["mav_support_shared_log"] = S_shared
-                    comp["mav_support_guided_log"] = S_guided
-                    base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_support
-
-                    # R_event = -I(death)*C_d + bounded team contribution
-                    # Death handled below; assist from done hit records
-                    for rid in self.red_ids:
-                        if rid == mav_id: continue
-                        done_hits = [r for r in (getattr(self, "_launch_quality_done_step_records", None) or [])
-                                     if str(r.get("shooter_id","")) == str(rid) and str(r.get("raw_termination_reason","")) == "hit"]
-                        for _ in done_hits:
-                            raw_event = 200.0  # per kill, capped
-                            r_event = tam_scale * raw_event
-                            comp["tam_mav_team_contribution_event"] = comp.get("tam_mav_team_contribution_event", 0.0) + raw_event
-                            capped = min(comp["tam_mav_team_contribution_event"], 200.0)
-                            comp["tam_mav_event_raw"] = comp.get("tam_mav_event_raw", 0.0) + raw_event
-                            comp["tam_mav_event"] = tam_scale * capped
-                            base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_event
-                elif not mav.is_alive:
-                    if not self._mav_death_penalized:
-                        self._mav_death_penalized = True
-                        raw_death = -200.0
-                        r_death = tam_scale * raw_death
-                        comp["tam_mav_death_event"] = raw_death
-                        comp["tam_mav_event_raw"] = comp.get("tam_mav_event_raw", 0.0) + raw_death
-                        comp["tam_mav_event"] = tam_scale * comp.get("tam_mav_event_raw", 0.0)
-                        base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_death
-                comp["active_tam_mav"] = float(base_rewards.get(mav_id, 0.0) - comp.get("active_brma_flight", 0.0))
-
-            # ── UAV: TAM R_A + R_D + R_DM + R_E ──
-            for rid in self.red_ids:
-                if self.agent_roles.get(rid, "") == "mav": continue
-                sim = self.red_planes.get(rid)
-                comp = components.setdefault(rid, {})
-                if sim is None or not sim.is_alive:
-                    if rid not in self._uav_death_penalized:
-                        self._uav_death_penalized.add(rid)
-                        raw_death = -200.0
-                        r_death = tam_scale * raw_death
-                        comp["tam_uav_death_event"] = raw_death
-                        comp["tam_uav_event_raw"] = comp.get("tam_uav_event_raw", 0.0) + raw_death
-                        comp["tam_uav_event"] = tam_scale * comp.get("tam_uav_event_raw", 0.0)
-                        base_rewards[rid] = base_rewards.get(rid, 0.0) + r_death
-                    continue
-
-                obs = self._last_step_obs.get(rid, {})
-                enemy_geo = np.asarray(obs.get("enemy_geo_states", []), dtype=np.float32)
-                enemy_alive = np.asarray(obs.get("enemy_alive_mask", []), dtype=np.float32)
-                enemy_obs_mask = np.asarray(obs.get("enemy_observed_mask", []), dtype=np.float32)
-                uav_src = np.asarray(obs.get("enemy_track_source", []), dtype=np.float32)
-
-                # TAM R_A + R_D: select best observed target
-                best_score, best_j, best_ata, best_aa, best_range_3d = -1e9, -1, 0.0, 0.0, 0.0
-                if enemy_geo.ndim == 2 and enemy_alive.ndim == 1:
-                    for j in range(min(enemy_geo.shape[0], enemy_alive.shape[0])):
-                        if enemy_alive[j] < 0.5: continue
-                        observed = (enemy_obs_mask.size > j and enemy_obs_mask[j] > 0.5)
-                        if uav_src.ndim == 2 and uav_src.shape[1] >= 1 and not observed:
-                            observed = uav_src[j, 0] > 0.5 or (uav_src.shape[1] >= 2 and uav_src[j, 1] > 0.5)
-                        if not observed: continue
-                        if j < len(self.blue_ids):
-                            b_sim = self.blue_planes.get(self.blue_ids[j])
-                            if b_sim and b_sim.is_alive:
-                                g = self._build_launch_geometry_3d(sim, b_sim)
-                                ATA = g["ATA_3d_rad"]; AA = g["TA_3d_rad"]
-                            else:
-                                ATA = abs(float(enemy_geo[j, 3])) * np.pi; AA = abs(float(enemy_geo[j, 4])) * np.pi
-                        else:
-                            ATA = abs(float(enemy_geo[j, 3])) * np.pi; AA = abs(float(enemy_geo[j, 4])) * np.pi
-                        R_A = 1.0 - (ATA + AA) / np.pi
-                        R = float(g.get("range_3d_m", abs(float(enemy_geo[j, 2])) * 40000)) if j < len(self.blue_ids) else abs(float(enemy_geo[j, 2])) * 40000
-                        R_km = R / 1000.0
-                        if R_km <= 5: R_D = 1.0
-                        elif R_km < 10: R_D = np.exp(-0.921*(R_km - 5.0))
-                        else: R_D = -1.0
-                        score = 15.0 * R_A + 10.0 * R_D
-                        if score > best_score:
-                            best_score, best_j, best_ata, best_aa, best_range_3d = score, j, ATA, AA, R
-
-                if best_j >= 0:
-                    raw_angle = 15.0 * (1.0 - (best_ata + best_aa) / np.pi)
-                    raw_dist = 10.0 * (1.0 if best_range_3d/1000.0 <= 5 else (np.exp(-0.921*(best_range_3d/1000.0-5.0)) if best_range_3d/1000.0 < 10 else -1.0))
-                    r_angle = tam_scale * raw_angle
-                    r_dist = tam_scale * raw_dist
-                    comp["tam_uav_angle_raw"] = raw_angle; comp["tam_uav_angle"] = r_angle
-                    comp["tam_uav_distance_raw"] = raw_dist; comp["tam_uav_distance"] = r_dist
-                    comp["tam_uav_ATA_3d_rad"] = best_ata; comp["tam_uav_AA_3d_rad"] = best_aa
-                    comp["tam_uav_range_3d_m"] = best_range_3d
-                    comp["tam_uav_reward_target_id"] = self.blue_ids[best_j] if best_j < len(self.blue_ids) else ""
-                    comp["tam_uav_reward_target_track_source"] = "direct" if (uav_src.ndim == 2 and uav_src.shape[1] >= 1 and uav_src[best_j, 0] > 0.5) else "mav_shared" if (uav_src.ndim == 2 and uav_src.shape[1] >= 2 and uav_src[best_j, 1] > 0.5) else "unknown"
-                    base_rewards[rid] = base_rewards.get(rid, 0.0) + r_angle + r_dist
-                # R_DM = 0 for now
-                comp["tam_uav_dodge_raw"] = 0.0; comp["tam_uav_dodge"] = 0.0
-                comp["tam_uav_dodge_unavailable_reason"] = "missile_state_not_observable_or_not_stable"
-                # uav_fire = 0 (log only)
-                comp["uav_fire_log"] = 0.0
-                # UAV hit event from done records
-                done_hits = [r for r in (getattr(self, "_launch_quality_done_step_records", None) or [])
-                             if str(r.get("shooter_id","")) == str(rid) and str(r.get("raw_termination_reason","")) == "hit"]
-                if done_hits:
-                    raw_kill = 200.0 * len(done_hits)
-                    comp["tam_uav_kill_event_count"] = len(done_hits)
-                    comp["tam_uav_event_raw"] = comp.get("tam_uav_event_raw", 0.0) + raw_kill
-                    comp["tam_uav_event"] = tam_scale * comp.get("tam_uav_event_raw", 0.0)
-                    base_rewards[rid] = base_rewards.get(rid, 0.0) + tam_scale * raw_kill
-                # Log guided/direct hit counts (no extra active reward)
-                guided_h = sum(1 for r in done_hits if bool(r.get("mav_guided_at_launch", False)))
-                comp["uav_hit_direct_count"] = len(done_hits) - guided_h
-                comp["uav_hit_mav_guided_count"] = guided_h
-                comp["active_tam_uav"] = float(base_rewards.get(rid, 0.0) - comp.get("active_brma_flight", 0.0))
+            return self._compute_brma_uav_tam_mav_event_v1(
+                base_rewards, components, mav_id)
             for rid in self.red_ids:
                 sim = self.red_planes.get(rid)
                 if sim is None or not sim.is_alive:
