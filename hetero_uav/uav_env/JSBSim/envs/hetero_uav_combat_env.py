@@ -612,7 +612,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 comp["tam_mav_alive_bonus"] = r_alive
                 base_rewards[mav_id] = base_rewards.get(mav_id, 0.0) + r_alive
 
-                comp["tam_mav_dense_reward"] = float(base_rewards.get(mav_id, 0.0) - max(0.0, base_rewards.get(mav_id, 0.0) - r_safe - r_sup - r_alive))
+                comp["tam_mav_dense_reward"] = r_safe + r_sup + r_alive
 
             # MAV death event (once)
             elif not mav.is_alive and not self._mav_death_penalized:
@@ -703,8 +703,15 @@ class HeteroUavCombatEnv(UavCombatEnv):
             comp["uav_fire_log"] = 0.0
             comp["uav_attack_mav_shared_multiplier"] = 0
             comp["mav_assist"] = 0.0
-            comp["uav_fire_direct_count"] = comp.get("uav_fire_direct_count", 0)
-            comp["uav_fire_mav_guided_count"] = comp.get("uav_fire_mav_guided_count", 0)
+            # Count current-step fire launches from launch quality records
+            if self.agent_roles.get(rid, "") != "mav":
+                step_launches = [
+                    r for r in (getattr(self, "_launch_quality_step_records", None) or [])
+                    if str(r.get("shooter_id", "")) == str(rid)]
+                comp["uav_fire_direct_count"] = sum(
+                    1 for r in step_launches if not bool(r.get("mav_guided_at_launch", False)))
+                comp["uav_fire_mav_guided_count"] = sum(
+                    1 for r in step_launches if bool(r.get("mav_guided_at_launch", False)))
             comp.setdefault("event_total", 0.0)
 
         # ── Final clipping [-10, 10] for red agents ──
