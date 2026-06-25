@@ -186,6 +186,11 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
                     rich_logger=None) -> dict:
     cfg_name = Path(cfg_path).stem
     env = make_env(cfg_path, env_type="jsbsim_hetero")
+    if hasattr(policy, "num_agents") and int(policy.num_agents) != len(env.red_ids):
+        raise ValueError(
+            f"full_happo policy was built for {policy.num_agents} red agents "
+            f"but eval config {cfg_path} has {len(env.red_ids)}"
+        )
     if args.max_steps_override is not None:
         env.max_steps = args.max_steps_override
     opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 99)

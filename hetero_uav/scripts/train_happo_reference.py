@@ -79,6 +79,22 @@ def _entity_policy_meta(policy) -> dict:
         "observation_adapter": "HeteroEntitySetAdapter",
     }
 
+
+def _full_happo_meta(policy, args=None) -> dict:
+    """Extra meta fields for paper-aligned full HAPPO baseline."""
+    if getattr(policy, "__class__", None).__name__ != "FullHAPPOPolicy":
+        return {}
+    return {
+        "num_agents": int(policy.num_agents),
+        "paper_aligned_happo": True,
+        "parameter_sharing": False,
+        "per_agent_independent_actors": True,
+        "global_v_critic": True,
+        "sequential_correction_factor": True,
+        "happo_update_unit": "agent",
+    }
+
+
 _SINGLE_RUNNER_STATE = {
     "policy": None,
     "output_dir": None,
@@ -536,6 +552,7 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int,
         "uav_imitation_coef": args.uav_imitation_coef,
         "uav_imitation_until_steps": args.uav_imitation_until_steps,
         **_entity_policy_meta(policy),
+        **_full_happo_meta(policy, args),
     }
 
 
@@ -758,6 +775,7 @@ def _run_training_main() -> None:
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
         **_entity_policy_meta(policy),
+        **_full_happo_meta(policy, args),
     }
     if args.init_checkpoint:
         init_path = Path(args.init_checkpoint)
@@ -1308,7 +1326,8 @@ def _run_training_main() -> None:
                     "masked_entity_count": stats.get("masked_entity_count", 0.0),
                     "nan_detected": int(nan_detected),
                 })
-            f.flush()
+            if not f.closed:
+                f.flush()
             heartbeat.write(
                 "after_logging",
                 iteration=iteration,
@@ -1351,6 +1370,7 @@ def _run_training_main() -> None:
                     "biased_mask": bool(getattr(policy, "biased_mask", False)),
                     "random_mask_prob": float(getattr(policy, "random_mask_prob", 0.0)),
                     **_entity_policy_meta(policy),
+        **_full_happo_meta(policy, args),
                 }, indent=2), encoding="utf-8")
                 (out_dir / "meta.json").unlink(missing_ok=True)
                 (tmp_model.parent / "meta.json").write_text(
@@ -1369,30 +1389,27 @@ def _run_training_main() -> None:
                 )
                 eval_configs_for_this_run = args.eval_configs or DEFAULT_EVAL_CONFIGS
                 if args.policy_arch == "full_happo":
-                    try:
-                        import yaml
-                        filtered = []
-                        for cfg in eval_configs_for_this_run:
-                            cfg_path = ROOT / cfg if not Path(cfg).is_absolute() else Path(cfg)
-                            with open(cfg_path, encoding="utf-8") as f:
-                                c = yaml.safe_load(f) or {}
-                            eval_num_red = int(c.get("max_num_red", -1))
-                            if eval_num_red == policy.num_agents:
-                                filtered.append(cfg)
-                            else:
-                                print(f"Skipping eval config {cfg}: full_happo was built for "
-                                      f"{policy.num_agents} red agents but eval has {eval_num_red}.",
-                                      flush=True)
-                        eval_configs_for_this_run = filtered
-                        if not eval_configs_for_this_run:
-                            print("Skipping eval: no eval configs match full_happo num_agents.",
-                                  flush=True)
-                            records = None
+                    import yaml
+                    filtered = []
+                    for cfg in eval_configs_for_this_run:
+                        cfg_path = ROOT / cfg if not Path(cfg).is_absolute() else Path(cfg)
+                        with open(cfg_path, encoding="utf-8") as f:
+                            c = yaml.safe_load(f) or {}
+                        eval_num_red = int(c.get("max_num_red", -1))
+                        if eval_num_red == policy.num_agents:
+                            filtered.append(cfg)
                         else:
-                            records = _run_eval(str(tmp_model), args, tmp_json,
-                                               eval_configs_override=eval_configs_for_this_run)
-                    except Exception:
-                        records = _run_eval(str(tmp_model), args, tmp_json)
+                            print(f"Skipping eval config {cfg}: full_happo was built for "
+                                  f"{policy.num_agents} red agents but eval has {eval_num_red}.",
+                                  flush=True)
+                    eval_configs_for_this_run = filtered
+                    if not eval_configs_for_this_run:
+                        print("Skipping eval: no eval configs match full_happo num_agents.",
+                              flush=True)
+                        records = None
+                    else:
+                        records = _run_eval(str(tmp_model), args, tmp_json,
+                                           eval_configs_override=eval_configs_for_this_run)
                 else:
                     records = _run_eval(str(tmp_model), args, tmp_json)
                 heartbeat.write(
@@ -1479,6 +1496,7 @@ def _run_training_main() -> None:
                             "uav_imitation_coef": args.uav_imitation_coef,
                             "uav_imitation_until_steps": args.uav_imitation_until_steps,
                             **_entity_policy_meta(policy),
+        **_full_happo_meta(policy, args),
                         }, indent=2), encoding="utf-8")
                 tmp_model.unlink(missing_ok=True)
                 (out_dir / "_tmp_eval_meta.json").unlink(missing_ok=True)
@@ -1523,6 +1541,7 @@ def _run_training_main() -> None:
         "episodes": episodes,
         "nan_detected": nan_detected,
         **_entity_policy_meta(policy),
+        **_full_happo_meta(policy, args),
     }
     (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
