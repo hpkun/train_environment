@@ -329,6 +329,7 @@ def _load_checkpoint_meta(model_path: str | Path | None) -> dict:
 
 def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                   device: torch.device, init_checkpoint_meta: str | Path | None = None,
+                  num_agents: int = 3,
                   brma_random_scale_mask: bool = False,
                   brma_biased_mask: bool = False,
                   brma_random_mask_prob: float = 0.25):
@@ -353,7 +354,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
     if policy_arch == "full_happo":
         return FullHAPPOPolicy(
             actor_obs_dim=actor_dim, critic_state_dim=critic_dim,
-            action_dim=3, num_agents=3,
+            action_dim=3, num_agents=num_agents,
         ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(actor_dim, critic_dim).to(device)
@@ -745,7 +746,8 @@ def _run_training_main() -> None:
                            init_checkpoint_meta=init_meta_path,
                            brma_random_scale_mask=args.brma_random_scale_mask,
                            brma_biased_mask=args.brma_biased_mask,
-                           brma_random_mask_prob=args.brma_random_mask_prob)
+                           brma_random_mask_prob=args.brma_random_mask_prob,
+                           num_agents=len(env.red_ids))
     _SINGLE_RUNNER_STATE["policy"] = policy
     _SINGLE_RUNNER_STATE["meta"] = {
         "algorithm": "happo_reference_v0",

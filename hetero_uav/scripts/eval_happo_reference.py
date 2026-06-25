@@ -20,6 +20,7 @@ from algorithms.happo import (
     BRMARecurrentHAPPOReferencePolicy,
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
+    FullHAPPOPolicy,
 )
 from algorithms.happo.hetero_entity_recurrent_policy import (
     HeteroEntityRecurrentPolicy,
@@ -99,6 +100,15 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
             random_scale_mask=bool(meta.get("random_scale_mask", False)),
             random_mask_prob=float(meta.get("random_mask_prob", 0.25)),
             biased_mask=bool(meta.get("biased_mask", False)),
+        ).to(device)
+    if policy_arch == "full_happo":
+        num_agents = int(meta.get("num_agents", 0))
+        if num_agents <= 0:
+            raise ValueError("full_happo checkpoint meta missing num_agents")
+        return FullHAPPOPolicy(
+            actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3, num_agents=num_agents,
         ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(

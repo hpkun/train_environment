@@ -159,8 +159,10 @@ class FullHAPPOTrainer:
             mav_sat = float((means_all[:, 0, :].abs() >= 0.999).float().mean()) if N > 0 else 0.0
             uav_sat = float((means_all[:, 1:, :].abs() >= 0.999).float().mean()) if N > 1 else 0.0
 
-        log_std_vals = torch.stack([p.data for p in self.policy.action_log_stds])
+        log_std_vals = torch.stack([p.data for p in self.policy.action_log_stds])  # [N, action_dim]
         v = metrics["valid_sample_count_per_agent"]
+        ls_mav = log_std_vals[0] if N > 0 else torch.zeros(3)
+        ls_uav = log_std_vals[1:].flatten() if N > 1 else torch.zeros(3)
         return {
             "actor_loss_mean": float(np.mean([metrics["actor_loss_per_agent"][i] for i in range(N) if v[i] > 0])) if any(x > 0 for x in v) else 0.0,
             "actor_loss_per_agent": metrics["actor_loss_per_agent"],
@@ -173,6 +175,12 @@ class FullHAPPOTrainer:
             "action_log_std_min": float(log_std_vals.min().item()),
             "action_log_std_max": float(log_std_vals.max().item()),
             "action_log_std_mean": float(log_std_vals.mean().item()),
+            "action_log_std_mav_min": float(ls_mav.min().item()) if ls_mav.numel() else 0.0,
+            "action_log_std_mav_max": float(ls_mav.max().item()) if ls_mav.numel() else 0.0,
+            "action_log_std_mav_mean": float(ls_mav.mean().item()) if ls_mav.numel() else 0.0,
+            "action_log_std_uav_min": float(ls_uav.min().item()) if ls_uav.numel() else 0.0,
+            "action_log_std_uav_max": float(ls_uav.max().item()) if ls_uav.numel() else 0.0,
+            "action_log_std_uav_mean": float(ls_uav.mean().item()) if ls_uav.numel() else 0.0,
             "actor_loss_mav": metrics["actor_loss_per_agent"][0] if N > 0 else 0.0,
             "actor_loss_uav": float(np.mean(metrics["actor_loss_per_agent"][1:])) if N > 1 else 0.0,
             "entropy_mav": metrics["entropy_per_agent"][0] if N > 0 else 0.0,
