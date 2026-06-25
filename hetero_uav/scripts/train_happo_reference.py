@@ -476,7 +476,9 @@ def _episode_outcome(env, truncated: dict, length: int) -> dict:
     return {"winner": winner, "end_reason": reason}
 
 
-def _run_eval(model_path: str, args, summary_json: str, train_num_agents: int = None) -> list[dict] | None:
+def _run_eval(model_path: str, args, summary_json: str, train_num_agents: int = None,
+              eval_configs_override=None) -> list[dict] | None:
+    configs = eval_configs_override if eval_configs_override is not None else (args.eval_configs or DEFAULT_EVAL_CONFIGS)
     cmd = [
         sys.executable, "-u", str(ROOT / "scripts" / "eval_happo_reference.py"),
         "--model", model_path,
@@ -485,7 +487,7 @@ def _run_eval(model_path: str, args, summary_json: str, train_num_agents: int = 
         "--opponent-policy", args.opponent_policy,
         "--max-steps-override", str(args.max_steps),
         "--summary-json", summary_json,
-        "--configs", *(args.eval_configs or DEFAULT_EVAL_CONFIGS),
+        "--configs", *configs,
     ]
     result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True,
                             encoding="utf-8", errors="replace", timeout=1200)
@@ -1214,11 +1216,14 @@ def _run_training_main() -> None:
             if imitation_active:
                 imitation_batch = _sample_uav_imitation_batch(
                     uav_imitation_data, args.uav_imitation_batch_size, device)
-            stats = trainer.update(
-                buffer,
-                uav_imitation_batch=imitation_batch,
-                uav_imitation_coef=args.uav_imitation_coef if imitation_active else 0.0,
-            )
+            if args.policy_arch == "full_happo":
+                stats = trainer.update(buffer)
+            else:
+                stats = trainer.update(
+                    buffer,
+                    uav_imitation_batch=imitation_batch,
+                    uav_imitation_coef=args.uav_imitation_coef if imitation_active else 0.0,
+                )
             rec = list(recent)
             n = max(len(rec), 1)
             avg_return = float(np.mean([r["return"] for r in rec])) if rec else 0.0
@@ -1362,23 +1367,34 @@ def _run_training_main() -> None:
                     episode_length="",
                     alive_agents=dict(zip(("red", "blue"), _alive_counts(env))),
                 )
+                eval_configs_for_this_run = args.eval_configs or DEFAULT_EVAL_CONFIGS
                 if args.policy_arch == "full_happo":
                     try:
                         import yaml
                         filtered = []
-                        for cfg in (args.eval_configs or DEFAULT_EVAL_CONFIGS):
-                            with open(cfg, encoding="utf-8") as f:
+                        for cfg in eval_configs_for_this_run:
+                            cfg_path = ROOT / cfg if not Path(cfg).is_absolute() else Path(cfg)
+                            with open(cfg_path, encoding="utf-8") as f:
                                 c = yaml.safe_load(f) or {}
-                            if c.get("max_num_red", 0) == policy.num_agents:
+                            eval_num_red = int(c.get("max_num_red", -1))
+                            if eval_num_red == policy.num_agents:
                                 filtered.append(cfg)
                             else:
                                 print(f"Skipping eval config {cfg}: full_happo was built for "
-                                      f"{policy.num_agents} red agents but eval has "
-                                      f"{c.get('max_num_red', '?')}.", flush=True)
-                        args.eval_configs = filtered or args.eval_configs
+                                      f"{policy.num_agents} red agents but eval has {eval_num_red}.",
+                                      flush=True)
+                        eval_configs_for_this_run = filtered
+                        if not eval_configs_for_this_run:
+                            print("Skipping eval: no eval configs match full_happo num_agents.",
+                                  flush=True)
+                            records = None
+                        else:
+                            records = _run_eval(str(tmp_model), args, tmp_json,
+                                               eval_configs_override=eval_configs_for_this_run)
                     except Exception:
-                        pass
-                records = _run_eval(str(tmp_model), args, tmp_json)
+                        records = _run_eval(str(tmp_model), args, tmp_json)
+                else:
+                    records = _run_eval(str(tmp_model), args, tmp_json)
                 heartbeat.write(
                     "after_eval",
                     iteration=iteration,
