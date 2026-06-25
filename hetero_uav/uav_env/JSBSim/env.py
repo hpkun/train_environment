@@ -2070,6 +2070,12 @@ class UavCombatEnv(gymnasium.Env):
             dict(record) for record in self._launch_quality_done_step_records
         ]
         info["death_events"] = [dict(event) for event in self._death_events_step]
+        info["effective_missile_launch_range_m"] = getattr(
+            self, "_missile_launch_range_m_effective", self.MISSILE_LAUNCH_RANGE_THRESH)
+        info["effective_missile_attack_interval_sec"] = getattr(
+            self, "_missile_attack_interval_sec_effective", 0.5)
+        info["use_boresight_launch_gate"] = bool(getattr(
+            self, "use_boresight_launch_gate", False))
         return info
 
     # ------------------------------------------------------------------
