@@ -238,8 +238,13 @@ class UavCombatEnv(gymnasium.Env):
         if missile_launch_range_m is not None:
             self._missile_launch_range_m_effective = float(missile_launch_range_m)
             self.MISSILE_LAUNCH_RANGE_THRESH = float(missile_launch_range_m)
+        else:
+            self._missile_launch_range_m_effective = float(self.MISSILE_LAUNCH_RANGE_THRESH)
         if missile_attack_interval_sec is not None:
             self._missile_attack_interval_sec_effective = float(missile_attack_interval_sec)
+            self.missile_cooldown_frames = int(round(missile_attack_interval_sec * self.sim_freq))
+        else:
+            self._missile_attack_interval_sec_effective = 0.5
         self.max_num_blue = max_num_blue
         self.max_num_red = max_num_red
         self.num_missiles_per_plane = num_missiles_per_plane
@@ -960,13 +965,25 @@ class UavCombatEnv(gymnasium.Env):
                     if obs_mask.size > bi and obs_mask[bi] > 0.5:
                         return True, "direct"
             return False, "unobserved"
-        # Blue side
+        # Blue side: use enemy_track_source / enemy_observed_mask if available
         obs = self._last_step_obs.get(aid, {})
-        enemy_states = np.asarray(obs.get("enemy_states", []), dtype=np.float32)
-        death_mask = np.asarray(obs.get("death_mask", []), dtype=np.int64)
+        src = np.asarray(obs.get("enemy_track_source", []), dtype=np.float32)
+        obs_mask = np.asarray(obs.get("enemy_observed_mask", []), dtype=np.float32)
         for ri, rid in enumerate(self.red_ids):
-            if rid == target_uid and ri < death_mask.size:
-                if death_mask[ri] == 0:
+            if rid == target_uid and ri < max(src.shape[0] if src.ndim == 2 else 0,
+                                              obs_mask.size if obs_mask.ndim == 1 else 0):
+                if src.ndim == 2 and src.shape[1] >= 1 and ri < src.shape[0] and src[ri, 0] > 0.5:
+                    return True, "blue_direct"
+                if obs_mask.ndim == 1 and ri < obs_mask.size and obs_mask[ri] > 0.5:
+                    return True, "blue_direct"
+        # Fallback: legacy obs without track_source
+        death_mask = np.asarray(obs.get("death_mask", []), dtype=np.int64)
+        enemy_states = np.asarray(obs.get("enemy_states", []), dtype=np.float32)
+        for ri, rid in enumerate(self.red_ids):
+            if rid == target_uid:
+                dm_ok = (ri < death_mask.size and death_mask[ri] == 1)
+                es_ok = (ri < enemy_states.shape[0] and not np.allclose(enemy_states[ri], 0))
+                if dm_ok and es_ok:
                     return True, "blue_direct"
         return False, "unobserved"
 
@@ -1120,7 +1137,10 @@ class UavCombatEnv(gymnasium.Env):
             if metrics["ta_ok"]:
                 diag["ta_ok_pairs"] += 1
 
-            in_cone = metrics["ao_ok"] and metrics["range_ok"] and metrics["ta_ok"]
+            diag["boresight_ok_pairs"] = diag.get("boresight_ok_pairs", 0) + (1 if metrics.get("boresight_ok_3d", False) else 0)
+            in_cone = bool(metrics.get("launch_geometry_ok_3d", False))
+            if not in_cone and (metrics["ao_ok"] and metrics["range_ok"] and metrics["ta_ok"]):
+                diag["geometry_3d_blocked"] = diag.get("geometry_3d_blocked", 0) + 1
             if in_cone:
                 diag["geometry_ok_pairs"] += 1
                 score = self._score_mav_aware_target(sim, enemy_sim, metrics)
@@ -1320,6 +1340,10 @@ class UavCombatEnv(gymnasium.Env):
             track_ok, track_source = self._has_launch_track(shooter.uid, target.uid)
         except Exception:
             geo3d = {}; track_ok, track_source = False, "error"
+        # Override AO/TA/range to 3D semantics; legacy 2D saved separately
+        record["AO_rad"] = geo3d.get("ATA_3d_rad", ao)
+        record["TA_rad"] = geo3d.get("TA_3d_rad", ta)
+        record["range_m"] = geo3d.get("range_3d_m", r)
         record.update({
             "launch_track_source": track_source,
             "launch_track_ok": track_ok,
