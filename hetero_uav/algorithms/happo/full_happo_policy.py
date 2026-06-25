@@ -1,11 +1,11 @@
-"""Full HAPPO baseline: independent per-agent actors + shared V-value critic.
+"""Paper-aligned HAPPO baseline: independent per-agent actors + shared V critic.
 
-Aligns with ICLR 2022 HAPPO paper: each agent has its own actor parameters,
-a global shared critic estimates team value, and actor updates use the
-sequential correction factor M.
+ICLR 2022 HAPPO: each agent has its own actor parameters, a global shared
+critic estimates team value, and actor updates use the sequential
+correction factor M.
 
-This is NOT TAM-HAPPO (no GRU, no attention, no entity tokens, no masks)
-and NOT the simplified role-wise HAPPOReferencePolicy.
+Does NOT include: TAM-HAPPO, GRU, attention, entity tokens, masks,
+MAV shared-track special design, BRMA-MAPPO, MAPPO.
 """
 from __future__ import annotations
 
@@ -24,20 +24,19 @@ def _mlp(in_dim: int, out_dim: int) -> nn.Sequential:
 
 
 class FullHAPPOPolicy(nn.Module):
-    """Per-agent independent actors + shared V-value critic.
+    """Paper-aligned HAPPO baseline policy.
 
     Args:
-        actor_obs_dim:    per-agent observation dimension
-        critic_state_dim: centralized critic state dimension
+        actor_obs_dim:    per-agent observation dimension (default 96)
+        critic_state_dim: centralized critic state dimension (default 480)
         action_dim:       action space dimension (default 3)
         num_agents:       number of agents (e.g. 3 for 3v2)
-        hidden_dim:       MLP hidden size (unused; _mlp uses fixed 256->128)
         init_log_std:     initial log std for all agents
     """
 
     def __init__(self, actor_obs_dim: int = 96, critic_state_dim: int = 480,
                  action_dim: int = 3, num_agents: int = 3,
-                 hidden_dim: int = 128, init_log_std: float = -1.204):
+                 init_log_std: float = -1.204):
         super().__init__()
         self.actor_obs_dim = int(actor_obs_dim)
         self.critic_state_dim = int(critic_state_dim)
@@ -56,37 +55,51 @@ class FullHAPPOPolicy(nn.Module):
         ])
         self.critic = _mlp(self.critic_state_dim, 1)
 
+    def _check_agent_count(self, N: int):
+        if N != self.num_agents:
+            raise ValueError(
+                f"FullHAPPOPolicy built for {self.num_agents} agents, got {N}. "
+                f"Train separate HAPPO baselines for each scale."
+            )
+
     def _distribution(self, obs: torch.Tensor, agent_idx: int):
-        """Return Normal distribution for one agent."""
-        mean = self.actors[agent_idx](obs)  # [..., action_dim]
+        mean = self.actors[agent_idx](obs)
         mean = torch.nan_to_num(mean).clamp(-0.999, 0.999)
         std = self.action_log_stds[agent_idx].exp().clamp(min=1e-4)
         while std.dim() < mean.dim():
             std = std.unsqueeze(0)
         return Normal(mean, std), mean
 
-    def act(self, actor_obs: torch.Tensor, critic_state=None,
-            deterministic: bool = False, rnn_hidden=None):
+    def act(self, actor_obs, roles=None, critic_state=None,
+            deterministic: bool = False, rnn_hidden=None, **kwargs):
         """Sample actions for all agents.
 
         Args:
-            actor_obs: [N, actor_dim] or [B, N, actor_dim]
-            critic_state: [critic_dim] or [B, critic_dim]
+            actor_obs: [N, D] or [B, N, D]
+            roles:     ignored (pure HAPPO uses per-agent actors)
+            rnn_hidden: ignored (pure HAPPO has no recurrence)
 
-        Returns dict with keys: action, log_prob, entropy, value, mean
+        Returns dict with keys: action, log_prob, entropy, value, mean.
+        If rnn_hidden is passed, it is returned unchanged.
         """
+        device = next(self.parameters()).device
+        actor_obs = torch.as_tensor(actor_obs, dtype=torch.float32, device=device)
+        if critic_state is not None:
+            critic_state = torch.as_tensor(critic_state, dtype=torch.float32, device=device)
+
         if actor_obs.dim() == 2:
-            # [N, D] -> add batch dim
             actor_obs = actor_obs.unsqueeze(0)
             squeezed = True
         else:
             squeezed = False
 
         B, N, D = actor_obs.shape
-        actions = torch.zeros(B, N, self.action_dim, device=actor_obs.device)
-        log_probs = torch.zeros(B, N, device=actor_obs.device)
-        entropies = torch.zeros(B, N, device=actor_obs.device)
-        means = torch.zeros(B, N, self.action_dim, device=actor_obs.device)
+        self._check_agent_count(N)
+
+        actions = torch.zeros(B, N, self.action_dim, device=device)
+        log_probs = torch.zeros(B, N, device=device)
+        entropies = torch.zeros(B, N, device=device)
+        means = torch.zeros(B, N, self.action_dim, device=device)
 
         for i in range(self.num_agents):
             dist, mean = self._distribution(actor_obs[:, i, :], i)
@@ -112,22 +125,27 @@ class FullHAPPOPolicy(nn.Module):
             out["rnn_hidden"] = rnn_hidden
         return out
 
-    def evaluate_actions(self, actor_obs: torch.Tensor,
-                         critic_state: torch.Tensor,
-                         actions: torch.Tensor):
+    def evaluate_actions(self, actor_obs, critic_state, actions):
         """Evaluate actions for PPO update.
 
         Args:
             actor_obs:    [T, N, D]
             critic_state: [T, Dc]
-            actions:      [T, N, action_dim]
+            actions:      [T, N, A]
 
         Returns: (log_prob [T,N], entropy [T,N], values [T], means [T,N,A])
         """
+        device = next(self.parameters()).device
+        actor_obs = torch.as_tensor(actor_obs, dtype=torch.float32, device=device)
+        critic_state = torch.as_tensor(critic_state, dtype=torch.float32, device=device)
+        actions = torch.as_tensor(actions, dtype=torch.float32, device=device)
+
         T, N = actor_obs.shape[:2]
-        log_probs = torch.zeros(T, N, device=actor_obs.device)
-        entropies = torch.zeros(T, N, device=actor_obs.device)
-        means_t = torch.zeros(T, N, self.action_dim, device=actor_obs.device)
+        self._check_agent_count(N)
+
+        log_probs = torch.zeros(T, N, device=device)
+        entropies = torch.zeros(T, N, device=device)
+        means_t = torch.zeros(T, N, self.action_dim, device=device)
 
         for i in range(self.num_agents):
             dist, mean = self._distribution(actor_obs[:, i, :], i)
@@ -139,23 +157,19 @@ class FullHAPPOPolicy(nn.Module):
         return log_probs, entropies, values, means_t
 
     def evaluate_agent_actions(self, agent_idx: int,
-                                actor_obs_i: torch.Tensor,
-                                actions_i: torch.Tensor):
-        """Evaluate actions for a single agent (used in sequential update).
-
-        Args:
-            agent_idx:   which agent
-            actor_obs_i: [T, D]
-            actions_i:   [T, action_dim]
-
-        Returns: (log_prob_i [T], entropy_i [T], mean_i [T, A])
-        """
+                                actor_obs_i, actions_i):
+        """Evaluate actions for a single agent (sequential update)."""
+        device = next(self.parameters()).device
+        actor_obs_i = torch.as_tensor(actor_obs_i, dtype=torch.float32, device=device)
+        actions_i = torch.as_tensor(actions_i, dtype=torch.float32, device=device)
         dist, mean = self._distribution(actor_obs_i, agent_idx)
         log_prob = dist.log_prob(actions_i).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
         return log_prob, entropy, mean
 
-    def value(self, critic_state: torch.Tensor) -> torch.Tensor:
+    def value(self, critic_state):
+        device = next(self.parameters()).device
+        critic_state = torch.as_tensor(critic_state, dtype=torch.float32, device=device)
         if critic_state.dim() == 1:
             critic_state = critic_state.unsqueeze(0)
         return self.critic(critic_state).squeeze(-1)
