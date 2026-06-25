@@ -46,6 +46,10 @@ LAUNCH_DIAG_KEYS = (
     "cooldown_blocked",
     "kill_cooldown_blocked",
     "engaged_blocked",
+    "track_unobserved_blocked",
+    "mav_shared_track_candidates",
+    "direct_track_candidates",
+    "role_blocked_mav",
     "launches",
 )
 
@@ -178,6 +182,9 @@ class UavCombatEnv(gymnasium.Env):
     KILL_COOLDOWN_STEPS = 3            # env steps — same agent cannot score another kill within 3 steps
     MISSILE_LAUNCH_AO_THRESH = np.deg2rad(45)
     MISSILE_LAUNCH_RANGE_THRESH = 10000.0  # m — paper: photoelectric sensor max range
+    # Overridable via config; stored for meta/info
+    _missile_launch_range_m_effective: float = 10000.0
+    _missile_attack_interval_sec_effective: float = 0.5
     MISSILE_LAUNCH_MIN_RANGE = 500.0      # m — minimum safe launch distance (prevents point-blank self-hit)
     MISSILE_LAUNCH_TA_THRESH = np.pi / 2   # 90° — must be in enemy rear hemisphere (3-9 line)
 
@@ -220,12 +227,19 @@ class UavCombatEnv(gymnasium.Env):
                  pid_profile_by_role: dict | None = None,
                  pid_profile_config: dict | None = None,
                  red_target_selection_mode: str = "closest",
+                 missile_launch_range_m: float | None = None,
+                 missile_attack_interval_sec: float | None = None,
                  render_mode=None):
         super().__init__()
         if red_target_selection_mode not in {"closest", "mav_threat_rank"}:
             raise ValueError(
                 "red_target_selection_mode must be 'closest' or 'mav_threat_rank'"
             )
+        if missile_launch_range_m is not None:
+            self._missile_launch_range_m_effective = float(missile_launch_range_m)
+            self.MISSILE_LAUNCH_RANGE_THRESH = float(missile_launch_range_m)
+        if missile_attack_interval_sec is not None:
+            self._missile_attack_interval_sec_effective = float(missile_attack_interval_sec)
         self.max_num_blue = max_num_blue
         self.max_num_red = max_num_red
         self.num_missiles_per_plane = num_missiles_per_plane
@@ -851,22 +865,110 @@ class UavCombatEnv(gymnasium.Env):
         vel = sim.get_velocity()
         return np.array([pos[0], pos[1], -pos[2], vel[0], vel[1], -vel[2]])
 
+    def _build_launch_geometry_3d(
+        self,
+        shooter: AircraftSimulator,
+        target: AircraftSimulator,
+    ) -> dict:
+        """3D launch geometry: ATA, TA, boresight, range in 3D NEU coordinates."""
+        s_pos = np.asarray(shooter.get_position(), dtype=np.float64)
+        t_pos = np.asarray(target.get_position(), dtype=np.float64)
+        s_vel = np.asarray(shooter.get_velocity(), dtype=np.float64)
+        t_vel = np.asarray(target.get_velocity(), dtype=np.float64)
+        los = t_pos - s_pos
+        range_3d = float(np.linalg.norm(los))
+        range_2d = float(np.hypot(los[0], los[1]))
+        los_u = los / max(range_3d, 1e-9)
+        s_spd = float(np.linalg.norm(s_vel))
+        t_spd = float(np.linalg.norm(t_vel))
+        if s_spd > 0.1:
+            s_dir = s_vel / s_spd
+            ata_3d = float(np.arccos(np.clip(np.dot(s_dir, los_u), -1.0, 1.0)))
+        else:
+            ata_3d = np.pi
+        if t_spd > 0.1:
+            t_dir = t_vel / t_spd
+            ta_3d = float(np.arccos(np.clip(np.dot(t_dir, -los_u), -1.0, 1.0)))
+        else:
+            ta_3d = 0.0
+        # Body forward vector from shooter RPY
+        rpy = shooter.get_rpy()
+        pitch, yaw = float(rpy[1]), float(rpy[2])
+        body_forward = np.array([np.cos(pitch)*np.cos(yaw),
+                                  np.cos(pitch)*np.sin(yaw),
+                                  np.sin(pitch)], dtype=np.float64)
+        boresight_3d = float(np.arccos(np.clip(np.dot(body_forward, los_u), -1.0, 1.0)))
+        # LOS in body frame for elevation/azimuth
+        R_BI = np.linalg.inv(np.array([
+            [np.cos(pitch)*np.cos(yaw), np.cos(pitch)*np.sin(yaw), np.sin(pitch)],
+            [-np.sin(yaw), np.cos(yaw), 0],
+            [-np.sin(pitch)*np.cos(yaw), -np.sin(pitch)*np.sin(yaw), np.cos(pitch)],
+        ])) if abs(np.cos(pitch)) > 1e-9 else np.eye(3)
+        los_body = R_BI @ los_u
+        los_elev_body = float(np.arctan2(-los_body[2], np.hypot(los_body[0], los_body[1])))
+        los_az_body = float(np.arctan2(los_body[1], los_body[0]))
+        # 2D legacy
+        shooter_feat = self._aircraft_feature(shooter)
+        target_feat = self._aircraft_feature(target)
+        ao_2d, ta_2d, r_2d_legacy = get2d_AO_TA_R(shooter_feat, target_feat)
+        # New 3D gates
+        r_ok = bool(self.MISSILE_LAUNCH_MIN_RANGE < range_3d < self.MISSILE_LAUNCH_RANGE_THRESH)
+        ata_ok = bool(ata_3d < self.MISSILE_LAUNCH_AO_THRESH)
+        ta_ok_3d = bool(ta_3d > self.MISSILE_LAUNCH_TA_THRESH)
+        bore_ok = bool(boresight_3d < self.MISSILE_LAUNCH_AO_THRESH)
+        return {
+            "AO_rad": float(ata_3d), "TA_rad": float(ta_3d), "range_m": range_3d,
+            "range_ok": r_ok, "ao_ok": ata_ok, "ta_ok": ta_ok_3d,
+            "ATA_3d_rad": ata_3d, "TA_3d_rad": ta_3d, "boresight_3d_rad": boresight_3d,
+            "range_3d_m": range_3d, "range_2d_m": range_2d,
+            "AO_2d_rad": float(ao_2d), "TA_2d_rad": float(ta_2d),
+            "los_elevation_body_rad": los_elev_body, "los_azimuth_body_rad": los_az_body,
+            "target_relative_altitude_m": float(t_pos[2] - s_pos[2]),
+            "shooter_pitch_rad": float(pitch), "shooter_roll_rad": float(rpy[0]),
+            "range_ok_3d": r_ok, "ata_ok_3d": ata_ok, "ta_ok_3d": ta_ok_3d,
+            "boresight_ok_3d": bore_ok,
+            "launch_geometry_ok_3d": r_ok and ata_ok and ta_ok_3d and bore_ok,
+        }
+
     def _missile_candidate_metrics(
         self,
         shooter: AircraftSimulator,
         target: AircraftSimulator,
     ) -> dict:
-        shooter_feat = self._aircraft_feature(shooter)
-        target_feat = self._aircraft_feature(target)
-        ao, ta, range_m = get2d_AO_TA_R(shooter_feat, target_feat)
-        return {
-            "AO_rad": float(ao),
-            "TA_rad": float(ta),
-            "range_m": float(range_m),
-            "range_ok": bool(self.MISSILE_LAUNCH_MIN_RANGE < range_m < self.MISSILE_LAUNCH_RANGE_THRESH),
-            "ao_ok": bool(ao < self.MISSILE_LAUNCH_AO_THRESH),
-            "ta_ok": bool(ta > self.MISSILE_LAUNCH_TA_THRESH),
-        }
+        """3D launch geometry metrics (compatible with legacy 2D keys)."""
+        return self._build_launch_geometry_3d(shooter, target)
+
+    def _has_launch_track(self, aid: str, target_uid: str) -> tuple[bool, str]:
+        """Check whether shooter has track on target (direct or MAV-shared).
+
+        Returns (has_track, source) where source is one of:
+          direct, mav_shared, blue_direct, unobserved, role_blocked_mav.
+        """
+        role = getattr(self, "agent_roles", {}).get(aid, "")
+        if aid.startswith("red_") and role == "mav":
+            return False, "role_blocked_mav"
+        if aid.startswith("red_"):
+            obs = self._last_step_obs.get(aid, {})
+            src = np.asarray(obs.get("enemy_track_source", []), dtype=np.float32)
+            obs_mask = np.asarray(obs.get("enemy_observed_mask", []), dtype=np.float32)
+            for bi, bid in enumerate(self.blue_ids):
+                if bid == target_uid and bi < src.shape[0]:
+                    if src[bi, 0] > 0.5:
+                        return True, "direct"
+                    if src[bi, 1] > 0.5:
+                        return True, "mav_shared"
+                    if obs_mask.size > bi and obs_mask[bi] > 0.5:
+                        return True, "direct"
+            return False, "unobserved"
+        # Blue side
+        obs = self._last_step_obs.get(aid, {})
+        enemy_states = np.asarray(obs.get("enemy_states", []), dtype=np.float32)
+        death_mask = np.asarray(obs.get("death_mask", []), dtype=np.int64)
+        for ri, rid in enumerate(self.red_ids):
+            if rid == target_uid and ri < death_mask.size:
+                if death_mask[ri] == 0:
+                    return True, "blue_direct"
+        return False, "unobserved"
 
     @staticmethod
     def _clip01(value: float) -> float:
@@ -1000,6 +1102,16 @@ class UavCombatEnv(gymnasium.Env):
                 continue
             diag["unengaged_enemy_pairs"] += 1
 
+            # Track gate: must have direct or MAV-shared track
+            has_track, track_source = self._has_launch_track(aid, enemy_sim.uid)
+            if not has_track:
+                diag["track_unobserved_blocked"] = diag.get("track_unobserved_blocked", 0) + 1
+                continue
+            if track_source == "mav_shared":
+                diag["mav_shared_track_candidates"] = diag.get("mav_shared_track_candidates", 0) + 1
+            else:
+                diag["direct_track_candidates"] = diag.get("direct_track_candidates", 0) + 1
+
             metrics = self._missile_candidate_metrics(sim, enemy_sim)
             if metrics["range_ok"]:
                 diag["range_ok_pairs"] += 1
@@ -1059,6 +1171,14 @@ class UavCombatEnv(gymnasium.Env):
             # Decrement cooldown every physics frame
             if self._missile_cooldown[aid] > 0:
                 self._missile_cooldown[aid] -= 1
+
+            # MAV role block: MAV is sensor platform, never launches
+            role = getattr(self, "agent_roles", {}).get(aid, "")
+            if aid.startswith("red_") and role == "mav":
+                diag["role_blocked_mav"] = diag.get("role_blocked_mav", 0) + 1
+                self._lock_timer[aid] = 0
+                self._lock_target[aid] = None
+                continue
 
             if sim.num_left_missiles <= 0:
                 diag["ammo_empty_blocked"] += 1
@@ -1194,6 +1314,33 @@ class UavCombatEnv(gymnasium.Env):
         )
         if target_selection:
             record.update(target_selection)
+        # Add 3D launch geometry + track source
+        try:
+            geo3d = self._build_launch_geometry_3d(shooter, target)
+            track_ok, track_source = self._has_launch_track(shooter.uid, target.uid)
+        except Exception:
+            geo3d = {}; track_ok, track_source = False, "error"
+        record.update({
+            "launch_track_source": track_source,
+            "launch_track_ok": track_ok,
+            "launch_track_block_reason": "" if track_ok else track_source,
+            "range_3d_m": geo3d.get("range_3d_m", r),
+            "range_2d_m": geo3d.get("range_2d_m", r),
+            "ATA_3d_rad": geo3d.get("ATA_3d_rad", ao),
+            "TA_3d_rad": geo3d.get("TA_3d_rad", ta),
+            "boresight_3d_rad": geo3d.get("boresight_3d_rad", np.nan),
+            "los_elevation_body_rad": geo3d.get("los_elevation_body_rad", np.nan),
+            "los_azimuth_body_rad": geo3d.get("los_azimuth_body_rad", np.nan),
+            "target_relative_altitude_m": geo3d.get("target_relative_altitude_m", np.nan),
+            "launch_geometry_ok_3d": geo3d.get("launch_geometry_ok_3d", False),
+            "range_ok_3d": geo3d.get("range_ok_3d", False),
+            "ata_ok_3d": geo3d.get("ata_ok_3d", False),
+            "ta_ok_3d": geo3d.get("ta_ok_3d", False),
+            "boresight_ok_3d": geo3d.get("boresight_ok_3d", False),
+            "legacy_AO_2d_rad": float(ao),
+            "legacy_TA_2d_rad": float(ta),
+            "legacy_range_2d_m": float(r),
+        })
         return record
 
     def _launch_missile(
