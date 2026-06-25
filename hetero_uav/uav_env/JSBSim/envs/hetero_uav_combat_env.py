@@ -712,7 +712,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
                     1 for r in step_launches if not bool(r.get("mav_guided_at_launch", False)))
                 comp["uav_fire_mav_guided_count"] = sum(
                     1 for r in step_launches if bool(r.get("mav_guided_at_launch", False)))
-            comp.setdefault("event_total", 0.0)
+            comp["event_total"] = sum(
+                comp.get(k, 0.0) for k in ("event_uav_kill", "event_team_kill",
+                    "event_uav_death", "event_uav_crash",
+                    "event_mav_death", "event_mav_loss_team", "event_out_zone"))
 
         # ── Final clipping [-10, 10] for red agents ──
         for rid in self.red_ids:
