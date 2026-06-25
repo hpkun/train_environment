@@ -31,7 +31,7 @@ def _compute_grouped_gae(rewards, values, next_values, dones, env_ids, gamma, la
     return advantages, returns
 
 
-class FullHAPPOTrainer:
+class PureHAPPOTrainer:
     """Paper-aligned HAPPO trainer."""
 
     def __init__(self, policy, actor_lr=5e-4, critic_lr=5e-4,
@@ -82,8 +82,8 @@ class FullHAPPOTrainer:
             nv = nv_data
         else:
             with torch.no_grad():
-                nv_single = self.policy.value(critic_state[-1:])  # shape [1]
-            nv = nv_single.expand(T)  # shape [T] — same bootstrap for all positions
+                nv_single = self.policy.value(critic_state[-1:])
+            nv = nv_single.expand(T)
         advantages, returns = _compute_grouped_gae(
             team_reward, values, nv, team_dones, env_ids, self.gamma, self.gae_lambda)
         if not torch.isfinite(advantages).all() or not torch.isfinite(returns).all():
@@ -159,7 +159,7 @@ class FullHAPPOTrainer:
             mav_sat = float((means_all[:, 0, :].abs() >= 0.999).float().mean()) if N > 0 else 0.0
             uav_sat = float((means_all[:, 1:, :].abs() >= 0.999).float().mean()) if N > 1 else 0.0
 
-        log_std_vals = torch.stack([p.data for p in self.policy.action_log_stds])  # [N, action_dim]
+        log_std_vals = torch.stack([p.data for p in self.policy.action_log_stds])
         v = metrics["valid_sample_count_per_agent"]
         ls_mav = log_std_vals[0] if N > 0 else torch.zeros(3)
         ls_uav = log_std_vals[1:].flatten() if N > 1 else torch.zeros(3)

@@ -1,28 +1,28 @@
-"""Tests for paper-aligned Full HAPPO baseline."""
+"""Tests for paper-aligned pure HAPPO baseline."""
 import numpy as np
 import pytest
 import torch
 
-from algorithms.happo.full_happo_policy import FullHAPPOPolicy
-from algorithms.happo.full_happo_trainer import FullHAPPOTrainer, _compute_grouped_gae
+from algorithms.pure_happo import PureHAPPOPolicy, PureHAPPOTrainer
+from algorithms.pure_happo.trainer import _compute_grouped_gae
 
 
-class TestFullHAPPOPolicy:
+class TestPureHAPPOPolicy:
     def test_independent_actors(self):
-        policy = FullHAPPOPolicy(num_agents=3)
+        policy = PureHAPPOPolicy(num_agents=3)
         assert len(policy.actors) == 3
         assert len(policy.action_log_stds) == 3
         assert policy.actors[0] is not policy.actors[1]
         assert policy.action_log_stds[0] is not policy.action_log_stds[1]
 
     def test_act_shapes(self):
-        policy = FullHAPPOPolicy(num_agents=3)
+        policy = PureHAPPOPolicy(num_agents=3)
         obs = torch.randn(3, 96)
         out = policy.act(obs, critic_state=torch.randn(480))
         assert out["action"].shape == (3, 3)
 
     def test_agent_count_guard(self):
-        policy = FullHAPPOPolicy(num_agents=3)
+        policy = PureHAPPOPolicy(num_agents=3)
         with pytest.raises(ValueError, match="got 5"):
             policy.act(torch.randn(5, 96))
 
@@ -50,10 +50,10 @@ class TestGroupedGAE:
         assert torch.allclose(ret, torch.tensor([5.0]))
 
 
-class TestFullHAPPOTrainer:
+class TestPureHAPPOTrainer:
     def _fake_buffer(self, T=16, N=3):
         from algorithms.happo.happo_buffer import HAPPORolloutBuffer
-        policy = FullHAPPOPolicy(num_agents=N, actor_obs_dim=96, critic_state_dim=480)
+        policy = PureHAPPOPolicy(num_agents=N, actor_obs_dim=96, critic_state_dim=480)
         buf = HAPPORolloutBuffer(T, N, 96, 480, 3, [0, 1, 1])
         for t in range(T):
             obs = torch.randn(N, 96); crit = torch.randn(480)
@@ -68,20 +68,20 @@ class TestFullHAPPOTrainer:
 
     def test_update_no_nan(self):
         buf = self._fake_buffer()
-        trainer = FullHAPPOTrainer(FullHAPPOPolicy(num_agents=3), ppo_epochs=2, seed=42)
+        trainer = PureHAPPOTrainer(PureHAPPOPolicy(num_agents=3), ppo_epochs=2, seed=42)
         m = trainer.update(buf)
         assert np.isfinite(m["actor_loss_mean"])
         assert np.isfinite(m["critic_loss"])
 
     def test_random_order(self):
         buf = self._fake_buffer(T=8)
-        trainer = FullHAPPOTrainer(FullHAPPOPolicy(num_agents=3), ppo_epochs=1, seed=42)
+        trainer = PureHAPPOTrainer(PureHAPPOPolicy(num_agents=3), ppo_epochs=1, seed=42)
         m = trainer.update(buf)
         assert sorted(m["last_update_order"]) == [0, 1, 2]
 
     def test_correction_factor_changes(self):
         buf = self._fake_buffer(T=16)
-        trainer = FullHAPPOTrainer(FullHAPPOPolicy(num_agents=3),
+        trainer = PureHAPPOTrainer(PureHAPPOPolicy(num_agents=3),
                                     actor_lr=3e-3, ppo_epochs=1, seed=42)
         m = trainer.update(buf)
         assert len(m["ratio_after_mean_per_agent"]) == 3
@@ -94,7 +94,7 @@ class TestFullHAPPOTrainer:
         assert m["valid_sample_count_per_agent"][0] > 0
 
     def test_inactive_agent_no_contamination(self):
-        policy = FullHAPPOPolicy(num_agents=3)
+        policy = PureHAPPOPolicy(num_agents=3)
         from algorithms.happo.happo_buffer import HAPPORolloutBuffer
         buf = HAPPORolloutBuffer(8, 3, 96, 480, 3, [0, 1, 1])
         for t in range(8):
@@ -107,7 +107,7 @@ class TestFullHAPPOTrainer:
                       np.random.randn(3).astype(np.float32) * 0.1,
                       np.zeros(3, dtype=np.float32), out["value"].item(),
                       active, env_id=0)
-        trainer = FullHAPPOTrainer(policy, ppo_epochs=1, seed=42)
+        trainer = PureHAPPOTrainer(policy, ppo_epochs=1, seed=42)
         m = trainer.update(buf)
         assert m["valid_sample_count_per_agent"][1] == 0
         assert m["ratio_after_mean_per_agent"][1] == 0.0

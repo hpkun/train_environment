@@ -20,8 +20,8 @@ from algorithms.happo import (
     BRMARecurrentHAPPOReferencePolicy,
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
-    FullHAPPOPolicy,
 )
+from algorithms.pure_happo import PureHAPPOPolicy
 from algorithms.happo.hetero_entity_recurrent_policy import (
     HeteroEntityRecurrentPolicy,
     validate_entity_policy_meta,
@@ -101,11 +101,11 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
             random_mask_prob=float(meta.get("random_mask_prob", 0.25)),
             biased_mask=bool(meta.get("biased_mask", False)),
         ).to(device)
-    if policy_arch == "full_happo":
+    if policy_arch == "pure_happo":
         num_agents = int(meta.get("num_agents", 0))
         if num_agents <= 0:
-            raise ValueError("full_happo checkpoint meta missing num_agents")
-        return FullHAPPOPolicy(
+            raise ValueError("pure_happo checkpoint meta missing num_agents")
+        return PureHAPPOPolicy(
             actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
             critic_state_dim=int(meta.get("critic_state_dim", 480)),
             action_dim=3, num_agents=num_agents,
@@ -188,7 +188,7 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
     env = make_env(cfg_path, env_type="jsbsim_hetero")
     if hasattr(policy, "num_agents") and int(policy.num_agents) != len(env.red_ids):
         raise ValueError(
-            f"full_happo policy was built for {policy.num_agents} red agents "
+            f"pure_happo policy was built for {policy.num_agents} red agents "
             f"but eval config {cfg_path} has {len(env.red_ids)}"
         )
     if args.max_steps_override is not None:

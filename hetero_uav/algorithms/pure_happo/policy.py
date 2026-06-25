@@ -9,7 +9,6 @@ MAV shared-track special design, BRMA-MAPPO, MAPPO.
 """
 from __future__ import annotations
 
-import numpy as np
 import torch
 from torch import nn
 from torch.distributions import Normal
@@ -23,7 +22,7 @@ def _mlp(in_dim: int, out_dim: int) -> nn.Sequential:
     )
 
 
-class FullHAPPOPolicy(nn.Module):
+class PureHAPPOPolicy(nn.Module):
     """Paper-aligned HAPPO baseline policy.
 
     Args:
@@ -58,7 +57,7 @@ class FullHAPPOPolicy(nn.Module):
     def _check_agent_count(self, N: int):
         if N != self.num_agents:
             raise ValueError(
-                f"FullHAPPOPolicy built for {self.num_agents} agents, got {N}. "
+                f"PureHAPPOPolicy built for {self.num_agents} agents, got {N}. "
                 f"Train separate HAPPO baselines for each scale."
             )
 

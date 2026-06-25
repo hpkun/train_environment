@@ -29,9 +29,8 @@ from algorithms.happo import (
     HAPPOReferencePolicy,
     HAPPORolloutBuffer,
     HAPPOReferenceTrainer,
-    FullHAPPOPolicy,
-    FullHAPPOTrainer,
 )
+from algorithms.pure_happo import PureHAPPOPolicy, PureHAPPOTrainer
 from algorithms.happo.rollout_safety import (
     sanitize_policy_inputs,
     zero_inactive_actions,
@@ -80,9 +79,9 @@ def _entity_policy_meta(policy) -> dict:
     }
 
 
-def _full_happo_meta(policy, args=None) -> dict:
-    """Extra meta fields for paper-aligned full HAPPO baseline."""
-    if getattr(policy, "__class__", None).__name__ != "FullHAPPOPolicy":
+def _pure_happo_meta(policy, args=None) -> dict:
+    """Extra meta fields for paper-aligned pure HAPPO baseline."""
+    if getattr(policy, "__class__", None).__name__ != "PureHAPPOPolicy":
         return {}
     return {
         "num_agents": int(policy.num_agents),
@@ -367,8 +366,8 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
             num_attention_heads=int(meta.get("num_attention_heads", 4)),
         ).to(device)
-    if policy_arch == "full_happo":
-        return FullHAPPOPolicy(
+    if policy_arch == "pure_happo":
+        return PureHAPPOPolicy(
             actor_obs_dim=actor_dim, critic_state_dim=critic_dim,
             action_dim=3, num_agents=num_agents,
         ).to(device)
@@ -552,7 +551,7 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int,
         "uav_imitation_coef": args.uav_imitation_coef,
         "uav_imitation_until_steps": args.uav_imitation_until_steps,
         **_entity_policy_meta(policy),
-        **_full_happo_meta(policy, args),
+        **_pure_happo_meta(policy, args),
     }
 
 
@@ -671,8 +670,8 @@ def _run_training_main() -> None:
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent", "full_happo"],
-                        help="Policy architecture. full_happo = paper-aligned HAPPO baseline.")
+                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent", "pure_happo"],
+                        help="Policy architecture. pure_happo = paper-aligned HAPPO baseline.")
     parser.add_argument("--brma-random-scale-mask", action="store_true",
                         help="Accepted for compatibility but rejected: unsafe without rollout mask replay.")
     parser.add_argument("--brma-biased-mask", action="store_true",
@@ -775,7 +774,7 @@ def _run_training_main() -> None:
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
         **_entity_policy_meta(policy),
-        **_full_happo_meta(policy, args),
+        **_pure_happo_meta(policy, args),
     }
     if args.init_checkpoint:
         init_path = Path(args.init_checkpoint)
@@ -783,8 +782,8 @@ def _run_training_main() -> None:
             init_path = ROOT / init_path
         policy.load(init_path, map_location=device)
         print(f"Loaded init_checkpoint: {init_path}", flush=True)
-    if args.policy_arch == "full_happo":
-        trainer = FullHAPPOTrainer(
+    if args.policy_arch == "pure_happo":
+        trainer = PureHAPPOTrainer(
             policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
             clip_param=args.clip_param, entropy_coef=args.entropy_coef,
             max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
@@ -1234,7 +1233,7 @@ def _run_training_main() -> None:
             if imitation_active:
                 imitation_batch = _sample_uav_imitation_batch(
                     uav_imitation_data, args.uav_imitation_batch_size, device)
-            if args.policy_arch == "full_happo":
+            if args.policy_arch == "pure_happo":
                 stats = trainer.update(buffer)
             else:
                 stats = trainer.update(
@@ -1370,7 +1369,7 @@ def _run_training_main() -> None:
                     "biased_mask": bool(getattr(policy, "biased_mask", False)),
                     "random_mask_prob": float(getattr(policy, "random_mask_prob", 0.0)),
                     **_entity_policy_meta(policy),
-        **_full_happo_meta(policy, args),
+        **_pure_happo_meta(policy, args),
                 }, indent=2), encoding="utf-8")
                 (out_dir / "meta.json").unlink(missing_ok=True)
                 (tmp_model.parent / "meta.json").write_text(
@@ -1388,7 +1387,7 @@ def _run_training_main() -> None:
                     alive_agents=dict(zip(("red", "blue"), _alive_counts(env))),
                 )
                 eval_configs_for_this_run = args.eval_configs or DEFAULT_EVAL_CONFIGS
-                if args.policy_arch == "full_happo":
+                if args.policy_arch == "pure_happo":
                     import yaml
                     filtered = []
                     for cfg in eval_configs_for_this_run:
@@ -1399,12 +1398,12 @@ def _run_training_main() -> None:
                         if eval_num_red == policy.num_agents:
                             filtered.append(cfg)
                         else:
-                            print(f"Skipping eval config {cfg}: full_happo was built for "
+                            print(f"Skipping eval config {cfg}: pure_happo was built for "
                                   f"{policy.num_agents} red agents but eval has {eval_num_red}.",
                                   flush=True)
                     eval_configs_for_this_run = filtered
                     if not eval_configs_for_this_run:
-                        print("Skipping eval: no eval configs match full_happo num_agents.",
+                        print("Skipping eval: no eval configs match pure_happo num_agents.",
                               flush=True)
                         records = None
                     else:
@@ -1496,7 +1495,7 @@ def _run_training_main() -> None:
                             "uav_imitation_coef": args.uav_imitation_coef,
                             "uav_imitation_until_steps": args.uav_imitation_until_steps,
                             **_entity_policy_meta(policy),
-        **_full_happo_meta(policy, args),
+        **_pure_happo_meta(policy, args),
                         }, indent=2), encoding="utf-8")
                 tmp_model.unlink(missing_ok=True)
                 (out_dir / "_tmp_eval_meta.json").unlink(missing_ok=True)
@@ -1541,7 +1540,7 @@ def _run_training_main() -> None:
         "episodes": episodes,
         "nan_detected": nan_detected,
         **_entity_policy_meta(policy),
-        **_full_happo_meta(policy, args),
+        **_pure_happo_meta(policy, args),
     }
     (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")

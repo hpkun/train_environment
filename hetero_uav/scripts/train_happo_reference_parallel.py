@@ -66,6 +66,7 @@ from algorithms.happo.rollout_safety import (
     zero_inactive_hidden,
 )
 from algorithms.mappo.opponent_policy import OpponentPolicy
+from algorithms.pure_happo import PureHAPPOTrainer
 from eval_checkpoint_selection import (
     best_metric_name,
     build_eval_checkpoint_meta,
@@ -91,6 +92,7 @@ from scripts.train_happo_reference import (
     _transitions_per_rollout,
     _prune_eval_checkpoints,
     _write_failure_artifacts,
+    _pure_happo_meta,
 )
 
 
@@ -389,7 +391,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"])
+                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent", "pure_happo"])
     parser.add_argument("--brma-random-scale-mask", action="store_true")
     parser.add_argument("--brma-biased-mask", action="store_true")
     parser.add_argument("--brma-random-mask-prob", type=float, default=0.25)
@@ -620,6 +622,7 @@ def _run_training(args: argparse.Namespace) -> None:
         brma_random_scale_mask=args.brma_random_scale_mask,
         brma_biased_mask=args.brma_biased_mask,
         brma_random_mask_prob=args.brma_random_mask_prob,
+        num_agents=len(env.red_ids),
     )
     _RUNNER_RESOURCES["policy"] = policy
     if args.init_checkpoint:
@@ -629,15 +632,28 @@ def _run_training(args: argparse.Namespace) -> None:
         policy.load(init_path, map_location=device)
         print(f"Loaded init_checkpoint: {init_path}", flush=True)
 
-    trainer = HAPPOReferenceTrainer(
-        policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
-        clip_param=args.clip_param, entropy_coef=args.entropy_coef,
-        max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
-        gamma=args.gamma, gae_lambda=args.gae_lambda,
-    )
+    if args.policy_arch == "pure_happo":
+        trainer = PureHAPPOTrainer(
+            policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
+            clip_param=args.clip_param, entropy_coef=args.entropy_coef,
+            max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
+            gamma=args.gamma, gae_lambda=args.gae_lambda,
+            seed=args.seed,
+        )
+    else:
+        trainer = HAPPOReferenceTrainer(
+            policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
+            clip_param=args.clip_param, entropy_coef=args.entropy_coef,
+            max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
+            gamma=args.gamma, gae_lambda=args.gae_lambda,
+        )
     uav_imitation_data = None
     if args.uav_imitation_dataset and args.uav_imitation_coef > 0.0:
-        uav_imitation_data = _load_uav_imitation_dataset(args.uav_imitation_dataset)
+        if args.policy_arch == "pure_happo":
+            print("WARNING: pure_happo does not support UAV imitation. "
+                  "Ignoring --uav-imitation-* flags.", flush=True)
+        else:
+            uav_imitation_data = _load_uav_imitation_dataset(args.uav_imitation_dataset)
 
     opponents = [OpponentPolicy(mode=args.opponent_policy, seed=args.seed + 17 + i)
                  for i in range(args.num_envs)]
@@ -1200,21 +1216,24 @@ def _run_training(args: argparse.Namespace) -> None:
                 "last_worker_timeout_info": last_worker_timeout_info,
             })
 
-            imitation_batch = None
-            imitation_active = (
-                uav_imitation_data is not None
-                and args.uav_imitation_coef > 0.0
-                and (args.uav_imitation_until_steps <= 0
-                     or total_steps <= args.uav_imitation_until_steps)
-            )
-            if imitation_active:
-                imitation_batch = _sample_uav_imitation_batch(
-                    uav_imitation_data, args.uav_imitation_batch_size, device)
-            stats = trainer.update(
-                buffer,
-                uav_imitation_batch=imitation_batch,
-                uav_imitation_coef=args.uav_imitation_coef if imitation_active else 0.0,
-            )
+            if args.policy_arch == "pure_happo":
+                stats = trainer.update(buffer)
+            else:
+                imitation_batch = None
+                imitation_active = (
+                    uav_imitation_data is not None
+                    and args.uav_imitation_coef > 0.0
+                    and (args.uav_imitation_until_steps <= 0
+                         or total_steps <= args.uav_imitation_until_steps)
+                )
+                if imitation_active:
+                    imitation_batch = _sample_uav_imitation_batch(
+                        uav_imitation_data, args.uav_imitation_batch_size, device)
+                stats = trainer.update(
+                    buffer,
+                    uav_imitation_batch=imitation_batch,
+                    uav_imitation_coef=args.uav_imitation_coef if imitation_active else 0.0,
+                )
             rec = list(recent)
             n = max(len(rec), 1)
             avg_return = float(np.mean([r["return"] for r in rec])) if rec else 0.0
@@ -1372,6 +1391,7 @@ def _run_training(args: argparse.Namespace) -> None:
                     "rollout_length_per_env": args.rollout_length,
                     "transitions_per_rollout": transitions_per_rollout,
                     **_entity_policy_meta(policy),
+                    **_pure_happo_meta(policy, args),
                 }
                 (ckpt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
                 # Also update latest
@@ -1405,6 +1425,7 @@ def _run_training(args: argparse.Namespace) -> None:
                     "biased_mask": bool(getattr(policy, "biased_mask", False)),
                     "random_mask_prob": float(getattr(policy, "random_mask_prob", 0.0)),
                     **_entity_policy_meta(policy),
+                    **_pure_happo_meta(policy, args),
                 }
                 (out_dir / "_tmp_eval_meta.json").write_text(json.dumps(tmp_meta, indent=2), encoding="utf-8")
                 (out_dir / "meta.json").unlink(missing_ok=True)
@@ -1509,6 +1530,7 @@ def _run_training(args: argparse.Namespace) -> None:
         "checkpoint_interval_steps": args.checkpoint_interval_steps,
         "keep_checkpoints": args.keep_checkpoints,
         **_entity_policy_meta(policy),
+        **_pure_happo_meta(policy, args),
     }
     try:
         with open(args.config, encoding="utf-8") as _f:
