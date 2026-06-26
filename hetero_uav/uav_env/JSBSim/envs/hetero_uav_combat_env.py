@@ -806,7 +806,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         threat = getattr(sim, "under_missiles", None)
         if not threat:
             return 0.0, 0.0, 0.0
-        best_total, best_angle, best_speed = -2.0, -1.0, 0.0
+        candidates = []
         for missile in list(threat):
             if not getattr(missile, "is_alive", False):
                 continue
@@ -818,15 +818,14 @@ class HeteroUavCombatEnv(UavCombatEnv):
             if los_norm < 1e-6:
                 continue
             cos_angle = float(np.dot(mv, los) / (sp * los_norm) if sp > 1e-6 else 0.0)
-            r_angle = -np.clip(cos_angle, -1.0, 1.0)
-            prev_sp = cache.get(uid, sp)
-            r_speed = (prev_sp - sp) / v_norm_mps
+            r_angle = -float(np.clip(cos_angle, -1.0, 1.0))
+            prev_sp = cache.get(uid)
+            r_speed = 0.0 if prev_sp is None else (prev_sp - sp) / v_norm_mps
             cache[uid] = sp
-            total = r_angle + r_speed
-            if total > best_total:
-                best_total, best_angle, best_speed = total, r_angle, r_speed
-        best_total = max(best_total, best_angle, best_speed)
-        return best_total, best_angle, best_speed
+            candidates.append((r_angle + r_speed, r_angle, r_speed))
+        if not candidates:
+            return 0.0, 0.0, 0.0
+        return max(candidates, key=lambda item: item[0])
 
     def _tam_v2_mav_reward(self, mav_id: str, mav, alive_blue: list, cfg: dict,
                             base_components: dict) -> tuple[float, dict]:

@@ -163,7 +163,22 @@ class TestTamV2GeometryFixes:
         assert 1.3 < ao < 1.9, f"expected AO ~1.57 (90°), got {ao:.3f}"
         assert 1.3 < ta < 1.9, f"expected TA ~1.57 (90°), got {ta:.3f}"
 
-    def test_dodge_los_is_missile_to_aircraft(self):
+    def test_dodge_no_missile_returns_zero(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        import numpy as np
+        env = _make_v2_env()
+        cache = {}
+
+        class MockSim:
+            def get_position(self): return np.array([0.0, 0.0, 5000.0])
+            def get_velocity(self): return np.array([250.0, 0.0, 0.0])
+        sim = MockSim()
+        sim.under_missiles = []
+        total, angle, speed = env._tam_v2_dodge_reward(sim, 1000.0, cache)
+        assert total == 0.0 and angle == 0.0 and speed == 0.0, f"no missile → (0,0,0), got ({total},{angle},{speed})"
+        env.close()
+
+    def test_dodge_threat_is_negative_not_clipped(self):
         from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
         import numpy as np
 
@@ -173,22 +188,45 @@ class TestTamV2GeometryFixes:
             def get_velocity(self): return np.array([-600.0, 0.0, 0.0])  # heading toward aircraft at x=0
 
         class MockSim:
-            under_missiles = None
             def get_position(self): return np.array([0.0, 0.0, 5000.0])
             def get_velocity(self): return np.array([250.0, 0.0, 0.0])
 
-        # env needed for cache dict
         env = _make_v2_env()
-        fake_cache = {}
+        cache = {}
         sim = MockSim()
         sim.under_missiles = [MockMissile()]
-        total, angle, speed = env._tam_v2_dodge_reward(sim, 1000.0, fake_cache)
-        # missile at [1000,0,5000], sim at [0,0,5000]
-        # LOS = sim_pos - missile_pos = [-1000, 0, 0] (points from missile to aircraft)
-        # missile vel = [600,0,0] (same direction as LOS from missile to aircraft)
-        # cos = dot(mv, los) / (sp * |los|) = (600 * 1000 + ...) / (600 * 1000) ≈ 1.0
-        # r_angle = -clip(1.0) = -1.0
-        assert angle < -0.9, f"dodge angle should be negative (missile heading toward aircraft), got {angle}"
+        total, angle, speed = env._tam_v2_dodge_reward(sim, 1000.0, cache)
+        # missile heading toward aircraft: r_angle ≈ -1.0, r_speed = 0 (first sighting)
+        # total = r_angle + r_speed ≈ -1.0 — must NOT be clipped to 0
+        assert total < -0.9, f"threat should give negative total, not clipped, got {total}"
+        env.close()
+
+    def test_dodge_picks_max_candidate(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        import numpy as np
+
+        class MockMissile1:
+            uid = "m1"; is_alive = True
+            def get_position(self): return np.array([1000.0, 0.0, 5000.0])
+            def get_velocity(self): return np.array([-600.0, 0.0, 0.0])  # heading toward: r_angle ≈ -1.0
+
+        class MockMissile2:
+            uid = "m2"; is_alive = True
+            def get_position(self): return np.array([500.0, 500.0, 5000.0])
+            def get_velocity(self): return np.array([600.0, 0.0, 0.0])   # heading away: r_angle ≈ +1.0
+
+        class MockSim:
+            def get_position(self): return np.array([0.0, 0.0, 5000.0])
+            def get_velocity(self): return np.array([250.0, 0.0, 0.0])
+
+        env = _make_v2_env()
+        cache = {}
+        sim = MockSim()
+        sim.under_missiles = [MockMissile1(), MockMissile2()]
+        total, angle, speed = env._tam_v2_dodge_reward(sim, 1000.0, cache)
+        # m2 (heading away) has larger r_angle+r_speed → should be selected
+        assert total > 0.5, f"should pick max candidate (missile heading away), got total={total}"
+        assert angle > 0.5, f"angle should be from the away-heading missile, got {angle}"
         env.close()
 
     def test_v2_metadata_fields_present(self):
