@@ -40,7 +40,30 @@ TERMINAL_KEYS = [
 LOG_ONLY_KEYS = ["uav_attack", "uav_fire", "uav_hit", "uav_fire_log", "uav_attack_mav_shared_multiplier", "mav_assist"]
 COUNT_KEYS = ["uav_fire_direct_count", "uav_fire_mav_guided_count", "uav_hit_direct_count", "uav_hit_mav_guided_count"]
 CLIP_KEYS = ["reward_pre_clip", "reward_clip_delta"]
-ALL_RC_KEYS = BRMA_KEYS + BRMA_REMOVED_KEYS + MAV_TAM_KEYS + EVENT_KEYS + TERMINAL_KEYS + LOG_ONLY_KEYS + COUNT_KEYS + CLIP_KEYS
+
+# TAM paper v2 keys
+TAM_V2_MAV_KEYS = [
+    "tam_v2_mav_safety", "tam_v2_mav_dist", "tam_v2_mav_threat", "tam_v2_mav_aspect",
+    "tam_v2_mav_support", "tam_v2_mav_pos", "tam_v2_mav_aware",
+    "tam_v2_mav_event", "tam_v2_mav_death", "tam_v2_mav_team_bonus",
+    "tam_v2_total",
+]
+TAM_V2_UAV_KEYS = [
+    "tam_v2_uav_height", "tam_v2_uav_speed", "tam_v2_uav_angle",
+    "tam_v2_uav_angle_raw", "tam_v2_uav_distance",
+    "tam_v2_uav_dodge", "tam_v2_uav_dodge_angle", "tam_v2_uav_dodge_speed",
+    "tam_v2_uav_event", "tam_v2_uav_kill", "tam_v2_uav_death",
+    "tam_v2_uav_out_of_zone", "tam_v2_total",
+]
+TAM_V2_LOG_KEYS = [
+    "tam_v2_mav_shared_log", "tam_v2_mav_assist_log",
+    "tam_v2_uav_fire_log", "tam_v2_uav_mav_shared_track_log",
+    "brma_r_adv_log", "brma_r_pitch_log", "brma_r_roll_log",
+    "brma_r_alt_log", "brma_r_bound_log", "brma_r_vel_log",
+]
+TAM_V2_KEYS = TAM_V2_MAV_KEYS + TAM_V2_UAV_KEYS + TAM_V2_LOG_KEYS
+
+ALL_RC_KEYS = BRMA_KEYS + BRMA_REMOVED_KEYS + MAV_TAM_KEYS + EVENT_KEYS + TERMINAL_KEYS + LOG_ONLY_KEYS + COUNT_KEYS + CLIP_KEYS + TAM_V2_KEYS
 ALL_RC_KEYS.append("event_total")
 
 LAUNCH_GEOMETRY_KEYS = [
