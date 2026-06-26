@@ -805,22 +805,33 @@ def _comp_float(r, key, default=0.0):
 
 
 def _compute_contribution_stats(rows: list[dict], keys: list[str],
-                                 total_key: str = "tam_v2_total") -> dict:
-    """Compute signed, absolute, positive, negative stats per component."""
+                                 total_key: str = "tam_v2_total",
+                                 active_group: dict | None = None) -> dict:
+    """Compute signed, absolute, positive, negative stats per component.
+
+    Args:
+        active_group: {"dense_active": [keys], "event_active": [keys]} for
+            computing dense_event_ratio.  If None, ratio is skipped.
+    """
     result = {}
-    n = max(len(rows), 1)
     for key in keys:
         vals = [_comp_float(r, key) for r in rows]
         arr = np.array(vals, dtype=np.float64)
-        pos = np.maximum(arr, 0)
-        neg = np.minimum(arr, 0)
+        pos_arr = np.maximum(arr, 0)
+        neg_arr = np.minimum(arr, 0)
+        pos_sum = float(pos_arr.sum())
+        neg_sum = float(neg_arr.sum())
+        neg_abs_sum = float(np.abs(neg_arr).sum())
         result[key] = {
             "signed_mean": round(float(arr.mean()), 8),
             "abs_mean": round(float(np.abs(arr).mean()), 8),
-            "positive_mean": round(float(pos[pos > 0].mean()) if (pos > 0).any() else 0.0, 8),
-            "negative_mean": round(float(neg[neg < 0].mean()) if (neg < 0).any() else 0.0, 8),
+            "positive_mean": round(float(pos_arr[pos_arr > 0].mean()) if (pos_arr > 0).any() else 0.0, 8),
+            "negative_mean": round(float(neg_arr[neg_arr < 0].mean()) if (neg_arr < 0).any() else 0.0, 8),
             "signed_sum": round(float(arr.sum()), 6),
             "abs_sum": round(float(np.abs(arr).sum()), 6),
+            "positive_sum": round(pos_sum, 6),
+            "negative_sum": round(neg_sum, 6),
+            "negative_abs_sum": round(neg_abs_sum, 6),
             "positive_rate": round(float((arr > 0).mean()), 6),
             "negative_rate": round(float((arr < 0).mean()), 6),
             "nonzero_rate": round(float((arr != 0).mean()), 6),
@@ -828,66 +839,100 @@ def _compute_contribution_stats(rows: list[dict], keys: list[str],
     # Compute shares
     total_signed = sum(result[k]["signed_sum"] for k in keys)
     total_abs = sum(result[k]["abs_sum"] for k in keys)
-    total_pos = sum(max(0, result[k]["signed_sum"]) for k in keys)
-    total_neg_abs = sum(abs(min(0, result[k]["signed_sum"])) for k in keys)
+    total_positive_sum = sum(result[k]["positive_sum"] for k in keys)
+    total_negative_abs_sum = sum(result[k]["negative_abs_sum"] for k in keys)
     for key in keys:
         s = result[key]
         s["signed_share_of_total"] = round(s["signed_sum"] / total_signed, 6) if abs(total_signed) > 1e-12 else None
         s["abs_share_of_total_abs"] = round(s["abs_sum"] / total_abs, 6) if total_abs > 1e-12 else None
-        s["positive_share"] = round(max(0, s["signed_sum"]) / total_pos, 6) if total_pos > 1e-12 else None
-        s["negative_share"] = round(abs(min(0, s["signed_sum"])) / total_neg_abs, 6) if total_neg_abs > 1e-12 else None
-    # Group summary
-    for group_name, group_keys in (("dense_active", MAV_ACTIVE_GROUP.get("dense_active", [])),
-                                    ("event_active", MAV_ACTIVE_GROUP.get("event_active", []))):
-        dense_s = sum(result[k]["abs_sum"] for k in group_keys if k in result)
-        event_s = sum(result[k]["abs_sum"] for k in ("tam_v2_mav_event", "tam_v2_uav_event") if k in result)
-        if group_name == "dense_active" and event_s > 1e-12:
-            result["dense_event_ratio"] = round(dense_s / event_s, 4)
+        s["positive_share"] = round(s["positive_sum"] / total_positive_sum, 6) if total_positive_sum > 1e-12 else None
+        s["negative_share"] = round(s["negative_abs_sum"] / total_negative_abs_sum, 6) if total_negative_abs_sum > 1e-12 else None
+    # Dense/event ratio using active_group
+    if active_group is not None:
+        dense_keys = active_group.get("dense_active", [])
+        event_keys = active_group.get("event_active", [])
+        dense_abs = sum(result[k]["abs_sum"] for k in dense_keys if k in result)
+        event_abs = sum(result[k]["abs_sum"] for k in event_keys if k in result)
+        result["dense_event_ratio"] = round(dense_abs / event_abs, 4) if event_abs > 1e-12 else None
     return result
 
 
 def _classify_phase(flight_rows: list[dict], reward_rows: list[dict]) -> dict[str, list[dict]]:
-    """Classify reward rows into phases: alive_all, pre_crash_100, missile_warning, no_missile_warning."""
+    """Classify reward rows into phases using flight-row alive/missile_warning.
+
+    Phases: alive_all, pre_crash_100, missile_warning, no_missile_warning.
+    All phase assignments use flight_row alive status to exclude dead steps.
+    missile_warning uses flight_row 'missile_warning' field first;
+    falls back to tam_v2_uav_dodge / tam_v2_uav_dodge_angle if missing.
+    """
     phases: dict[str, list] = {"alive_all": [], "pre_crash_100": [], "missile_warning": [], "no_missile_warning": []}
 
-    # Map reward rows by (ep, agent_id, step)
-    rc_map = {}
-    for r in reward_rows:
-        rc_map[(int(r.get("episode", 0)), str(r.get("agent_id", "")), int(r.get("step", 0)))] = r
+    # Build flight-lookup: (ep, agent_id, step) -> {"alive": int, "missile_warning": int}
+    flight_lookup: dict[tuple, dict] = {}
+    for fr in flight_rows:
+        key = (int(fr.get("episode", 0)), str(fr.get("agent_id", "")), int(fr.get("step", 0)))
+        flight_lookup[key] = {
+            "alive": int(fr.get("alive", 1)),
+            "missile_warning": int(fr.get("missile_warning", -1)),  # -1 = missing
+        }
 
-    # Find death steps
+    # Find death steps (first step where alive==0 per agent)
     death_steps: dict[tuple, int] = {}
-    for r in flight_rows:
-        if int(r.get("alive", 1)) == 0:
-            key = (int(r.get("episode", 0)), str(r.get("agent_id", "")))
-            step = int(r.get("step", 0))
-            if key not in death_steps or step < death_steps[key]:
-                death_steps[key] = step
+    for fr in flight_rows:
+        if int(fr.get("alive", 1)) == 0:
+            key_agent = (int(fr.get("episode", 0)), str(fr.get("agent_id", "")))
+            s = int(fr.get("step", 0))
+            if key_agent not in death_steps or s < death_steps[key_agent]:
+                death_steps[key_agent] = s
 
     for r in reward_rows:
         ep = int(r.get("episode", 0))
         aid = str(r.get("agent_id", ""))
         step = int(r.get("step", 0))
-        phases["alive_all"].append(r)
+        fl = flight_lookup.get((ep, aid, step), {"alive": 1, "missile_warning": -1})
+        is_alive = fl["alive"] == 1
 
-        # pre_crash_100
+        # alive_all: only alive steps
+        if is_alive:
+            phases["alive_all"].append(r)
+
+        # pre_crash_100: death-step-relative (use steps before death, alive only)
         dstep = death_steps.get((ep, aid))
-        if dstep is not None and dstep - 100 <= step < dstep:
+        if dstep is not None and dstep - 100 <= step < dstep and is_alive:
             phases["pre_crash_100"].append(r)
 
-        # missile_warning: dodge nonzero or missile_warning flag in flight data
-        dodge_val = _comp_float(r, "tam_v2_uav_dodge")
-        mw_val = _comp_float(r, "tam_v2_uav_dodge_angle")
-        if abs(dodge_val) > 1e-8 or abs(mw_val) > 1e-8:
-            phases["missile_warning"].append(r)
+        # missile_warning: prefer flight_row field, fallback to dodge
+        if not is_alive:
+            continue  # dead steps excluded from mw/non-mw phases
+        fl_mw = fl["missile_warning"]
+        if fl_mw >= 0:
+            # flight row has explicit missile_warning field
+            if fl_mw == 1:
+                phases["missile_warning"].append(r)
+            else:
+                phases["no_missile_warning"].append(r)
         else:
-            phases["no_missile_warning"].append(r)
+            # fallback: use dodge non-zero as proxy
+            dodge_val = _comp_float(r, "tam_v2_uav_dodge")
+            mw_val = _comp_float(r, "tam_v2_uav_dodge_angle")
+            if abs(dodge_val) > 1e-8 or abs(mw_val) > 1e-8:
+                phases["missile_warning"].append(r)
+            else:
+                phases["no_missile_warning"].append(r)
 
     return phases
 
 
+MAV_ATOMIC_EVENT_KEYS = ["tam_v2_mav_death", "tam_v2_mav_team_bonus"]
+UAV_ATOMIC_EVENT_KEYS = ["tam_v2_uav_kill", "tam_v2_uav_death", "tam_v2_uav_out_of_zone"]
+MAV_DENSE_KEYS_CORE = ["tam_v2_mav_safety", "tam_v2_mav_support"]
+UAV_DENSE_KEYS_CORE = ["tam_v2_uav_height", "tam_v2_uav_speed", "tam_v2_uav_angle",
+                        "tam_v2_uav_distance", "tam_v2_uav_dodge"]
+
+
 def _compute_phase_contribution(reward_rows: list[dict], flight_rows: list[dict],
-                                 detail_keys: list[str], total_key: str) -> dict:
+                                 detail_keys: list[str], total_key: str,
+                                 role: str) -> dict:
     """Compute contribution stats per phase for a role."""
     phases = _classify_phase(flight_rows, reward_rows)
     result = {}
@@ -897,61 +942,109 @@ def _compute_phase_contribution(reward_rows: list[dict], flight_rows: list[dict]
             result[phase_name]["count"] = len(rows)
         else:
             result[phase_name] = {"count": 0}
-    # Event-to-100step-dense ratio
+    # Event-to-100step-dense ratio using atomic event keys (no double-counting)
     alive = result.get("alive_all", {})
     if alive and alive.get("count", 0) > 0:
-        dense_keys = [k for k in detail_keys if k not in ("tam_v2_mav_event", "tam_v2_uav_event",
-                                                           "tam_v2_uav_kill", "tam_v2_uav_death",
-                                                           "tam_v2_uav_out_of_zone",
-                                                           "tam_v2_mav_death", "tam_v2_mav_team_bonus")]
-        event_keys = [k for k in detail_keys if "event" in k or "kill" in k or "death" in k or "out_of_zone" in k or "team_bonus" in k]
-        dense_abs_mean = sum(abs(alive.get(k, {}).get("abs_mean", 0)) for k in dense_keys if k in alive)
-        event_abs_sum = sum(alive.get(k, {}).get("abs_sum", 0) for k in event_keys if k in alive)
-        n_events = sum(1 for k in event_keys if k in alive and alive[k].get("nonzero_rate", 0) > 0)
-        if dense_abs_mean > 1e-12 and n_events > 0:
-            event_abs_per_event = event_abs_sum / n_events if n_events > 0 else 0
-            result["event_to_100step_dense_ratio"] = round(event_abs_per_event / (dense_abs_mean * 100), 6) if dense_abs_mean > 1e-12 else None
+        atomic_event_keys = MAV_ATOMIC_EVENT_KEYS if role == "mav" else UAV_ATOMIC_EVENT_KEYS
+        dense_keys = MAV_DENSE_KEYS_CORE if role == "mav" else UAV_DENSE_KEYS_CORE
+        dense_abs_mean_per_step = sum(abs(alive.get(k, {}).get("abs_mean") or 0)
+                                       for k in dense_keys if k in alive)
+        event_abs_sum = sum(alive.get(k, {}).get("abs_sum") or 0
+                           for k in atomic_event_keys if k in alive)
+        # Count event occurrences by non-zero rows, not by key count
+        event_occurrence_count = 0
+        for r in reward_rows:
+            if any(abs(_comp_float(r, k)) > 1e-8 for k in atomic_event_keys):
+                event_occurrence_count += 1
+        event_occurrence_count = max(event_occurrence_count, 1)
+        if dense_abs_mean_per_step > 1e-12 and event_abs_sum > 1e-12:
+            event_abs_per_occurrence = event_abs_sum / event_occurrence_count
+            result["event_to_100step_dense_ratio"] = round(
+                event_abs_per_occurrence / (dense_abs_mean_per_step * 100), 6)
         else:
             result["event_to_100step_dense_ratio"] = None
+    else:
+        result["event_to_100step_dense_ratio"] = None
     return result
 
 
-def _compute_scale_analysis(reward_rows: list[dict], role: str) -> dict:
-    """Simulate different global_scale values. Uses tam_v2_total as baseline at current_scale."""
+def _compute_scale_analysis(reward_rows: list[dict], role: str,
+                             config: dict | None = None) -> dict:
+    """Simulate different global_scale values.
+
+    Reads current global_scale from config; falls back to 0.02 if unavailable.
+    Component values in the dict are raw (post-TAM-weights).
+    total = raw * global_scale, so raw = total / global_scale.
+    """
     scales = [0.02, 0.05, 0.10]
-    current_scale = 0.02  # known from config
-    result = {"simulated_scales": {}, "current_scale": current_scale}
+    # Read current_scale from config
+    current_scale = 0.02
+    scale_source = "fallback"
+    if config is not None:
+        try:
+            cs = config.get("tam_paper_reward_v2", {}).get("global_scale")
+            if cs is not None:
+                current_scale = float(cs)
+                scale_source = "config"
+        except (TypeError, ValueError, AttributeError):
+            pass
+    result = {"simulated_scales": {}, "current_scale": current_scale,
+              "current_scale_source": scale_source}
     detail_keys = (MAV_DETAIL_KEYS if role == "mav" else UAV_DETAIL_KEYS)
 
-    # Compute per-step mean of tam_v2_total (this is at current_scale)
-    total_vals = [_comp_float(r, "tam_v2_total") for r in reward_rows]
-    total_mean = float(np.mean(np.abs(total_vals))) if total_vals else 0.0
-
-    # Compute raw component means (these are post-TAM-weights, pre-global_scale)
-    # We infer them by dividing total by current_scale
-    comp_means = {}
+    # Compute raw (unscaled) component signed/abs means
+    raw_comp_means = {}
+    total_raw_signed = 0.0
+    total_raw_abs = 0.0
     for key in detail_keys:
         vals = [_comp_float(r, key) for r in reward_rows]
-        comp_means[key] = float(np.mean(vals))
+        arr = np.array(vals, dtype=np.float64)
+        raw_comp_means[key] = {
+            "signed_mean": round(float(arr.mean()), 8),
+            "abs_mean": round(float(np.abs(arr).mean()), 8),
+        }
+        total_raw_signed += raw_comp_means[key]["signed_mean"]
+        total_raw_abs += raw_comp_means[key]["abs_mean"]
+    result["raw_total_signed_mean"] = round(total_raw_signed, 8)
+    result["raw_total_abs_mean"] = round(total_raw_abs, 8)
+
+    # Event raw values (before global_scale)
+    event_raw = {}
+    event_key_map = {"mav": {"kill": None, "death": "tam_v2_mav_death",
+                              "out_of_zone": None, "team_bonus": "tam_v2_mav_team_bonus"},
+                     "uav": {"kill": "tam_v2_uav_kill", "death": "tam_v2_uav_death",
+                             "out_of_zone": "tam_v2_uav_out_of_zone", "team_bonus": None}}
+    for ev_name, key in event_key_map.get(role, {}).items():
+        if key:
+            vals = [_comp_float(r, key) for r in reward_rows if abs(_comp_float(r, key)) > 1e-8]
+            event_raw[ev_name] = round(float(np.mean(np.abs(vals))) if vals else 0.0, 6)
+    result["raw_event_values"] = event_raw
 
     for scale in scales:
-        factor = scale / current_scale
-        # The component values in dict are post-weight, pre-scale. Simulated total = mean * scale
-        scaled_total = round(total_mean * factor, 8)
-        scaled_comps = {}
+        factor = scale / current_scale if current_scale > 1e-12 else 1.0
+        est = {}
         for key in detail_keys:
-            scaled_comps[key] = round(comp_means[key] * factor, 8)
-        # Compute abs shares (identical across scales since all multiplied by same factor)
-        abs_sum = sum(abs(v) for v in scaled_comps.values())
+            est[key + "_signed_mean"] = round(raw_comp_means[key]["signed_mean"] * factor, 8)
+            est[key + "_abs_mean"] = round(raw_comp_means[key]["abs_mean"] * factor, 8)
+        # Event scaled estimates
+        est_events = {}
+        for ev_name, raw_val in event_raw.items():
+            est_events[f"estimated_event_{ev_name}"] = round(raw_val * factor, 6)
+        # Abs shares (invariant across scales)
+        abs_sum = sum(abs(est.get(k + "_abs_mean", 0)) for k in detail_keys)
         shares = {}
         for key in detail_keys:
-            shares[key + "_abs_share"] = round(abs(scaled_comps[key]) / abs_sum, 6) if abs_sum > 1e-12 else None
+            shares[key + "_abs_share"] = round(abs(est.get(key + "_abs_mean", 0)) / abs_sum, 6) if abs_sum > 1e-12 else None
 
-        label = "estimated_mav_step_reward_mean" if role == "mav" else "estimated_uav_step_reward_mean"
+        label = "estimated_mav_step_reward_signed_mean" if role == "mav" else "estimated_uav_step_reward_signed_mean"
+        abs_label = "estimated_mav_step_reward_abs_mean" if role == "mav" else "estimated_uav_step_reward_abs_mean"
         result["simulated_scales"][f"{scale:.2f}"] = {
-            "factor_vs_002": round(factor, 4),
-            label: scaled_total,
-            "component_means": scaled_comps,
+            "factor_vs_current": round(factor, 4),
+            label: round(total_raw_signed * factor, 8),
+            abs_label: round(total_raw_abs * factor, 8),
+            "raw_component_means": {k: v for k, v in raw_comp_means.items()},
+            "estimated_scaled_component_means": est,
+            "estimated_events": est_events,
             "abs_shares": shares,
             "dense_event_ratio_preserved": True,
             "note": "global_scale changes absolute magnitude but NOT internal TAM proportions",
@@ -999,15 +1092,15 @@ def _run_contribution_analysis(rollout_result: dict, output_dir: Path) -> dict:
 
     result = {}
 
-    # ── Per-role contribution stats ──
-    mav_stats = _compute_contribution_stats(mav_rc, MAV_DETAIL_KEYS)
-    uav_stats = _compute_contribution_stats(uav_rc, UAV_DETAIL_KEYS)
+    # ── Per-role contribution stats (with active_group for dense/event ratio) ──
+    mav_stats = _compute_contribution_stats(mav_rc, MAV_DETAIL_KEYS, active_group=MAV_ACTIVE_GROUP)
+    uav_stats = _compute_contribution_stats(uav_rc, UAV_DETAIL_KEYS, active_group=UAV_ACTIVE_GROUP)
     result["mav"] = mav_stats
     result["uav"] = uav_stats
 
     # ── Phase analysis ──
-    mav_phase = _compute_phase_contribution(mav_rc, flight_rows, MAV_DETAIL_KEYS, "tam_v2_total")
-    uav_phase = _compute_phase_contribution(uav_rc, flight_rows, UAV_DETAIL_KEYS, "tam_v2_total")
+    mav_phase = _compute_phase_contribution(mav_rc, flight_rows, MAV_DETAIL_KEYS, "tam_v2_total", role="mav")
+    uav_phase = _compute_phase_contribution(uav_rc, flight_rows, UAV_DETAIL_KEYS, "tam_v2_total", role="uav")
     result["mav_phase"] = mav_phase
     result["uav_phase"] = uav_phase
 
@@ -1017,9 +1110,18 @@ def _run_contribution_analysis(rollout_result: dict, output_dir: Path) -> dict:
     result["mav_by_episode"] = mav_ep
     result["uav_by_episode"] = uav_ep
 
-    # ── Scale analysis ──
-    result["mav_scale"] = _compute_scale_analysis(mav_rc, "mav")
-    result["uav_scale"] = _compute_scale_analysis(uav_rc, "uav")
+    # ── Scale analysis (read config from run_dir / latest / meta.json) ──
+    # Try to load config; fall back gracefully
+    reward_config = None
+    try:
+        meta_path = output_dir.parent / "latest" / "meta.json"
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            reward_config = meta
+    except Exception:
+        pass
+    result["mav_scale"] = _compute_scale_analysis(mav_rc, "mav", config=reward_config)
+    result["uav_scale"] = _compute_scale_analysis(uav_rc, "uav", config=reward_config)
 
     # ── Write outputs ──
     (output_dir / "reward_contribution_summary.json").write_text(
@@ -1068,6 +1170,39 @@ def _run_contribution_analysis(rollout_result: dict, output_dir: Path) -> dict:
                     w.writeheader()
                 w.writerows(ep_data)
 
+    # Pre-crash CSV
+    pre_crash_rows = []
+    for role, phase_data in [("mav", mav_phase), ("uav", uav_phase)]:
+        if isinstance(phase_data, dict):
+            pc = phase_data.get("pre_crash_100", {})
+            if isinstance(pc, dict) and pc.get("count", 0) > 0:
+                for r in reward_rows:
+                    ep = int(r.get("episode", 0))
+                    aid = str(r.get("agent_id", ""))
+                    step = int(r.get("step", 0))
+                    if r.get("role") == ("mav" if role == "mav" else "attack_uav"):
+                        pre_crash_rows.append({
+                            "episode": ep, "agent_id": aid, "role": r.get("role", ""),
+                            "step": step, "phase": "pre_crash_100",
+                            **{k: _comp_float(r, k) for k in (MAV_DETAIL_KEYS if role == "mav" else UAV_DETAIL_KEYS)}
+                        })
+    pc_path = output_dir / "reward_contribution_pre_crash.csv"
+    if pre_crash_rows:
+        # Collect union of all keys
+        all_keys = set()
+        for row in pre_crash_rows:
+            all_keys.update(row.keys())
+        base_cols = ["episode", "agent_id", "role", "step", "phase"]
+        ordered = base_cols + sorted(k for k in all_keys if k not in base_cols)
+        with open(pc_path, "w", newline="", encoding="utf-8") as f:
+            w = _csv.DictWriter(f, fieldnames=ordered, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(pre_crash_rows)
+    else:
+        with open(pc_path, "w", newline="", encoding="utf-8") as f:
+            f.write("episode,agent_id,role,step,phase\n")
+        result["pre_crash_rows_written"] = 0
+
     # Scale analysis JSON
     (output_dir / "tam_v2_scale_analysis.json").write_text(
         json.dumps({"mav": result["mav_scale"], "uav": result["uav_scale"]}, indent=2, default=str),
@@ -1083,13 +1218,33 @@ def _run_contribution_analysis(rollout_result: dict, output_dir: Path) -> dict:
         "reward_contribution_by_episode.csv": str(output_dir / "reward_contribution_by_episode.csv"),
         "tam_v2_scale_analysis.json": str(output_dir / "tam_v2_scale_analysis.json"),
         "tam_v2_reward_ratio_report.md": str(output_dir / "tam_v2_reward_ratio_report.md"),
+        "reward_contribution_pre_crash.csv": str(pc_path),
     }
     return result
+
+
+def _fmt(v, prec=4):
+    if v is None:
+        return "N/A"
+    return f"{v:.{prec}f}"
 
 
 def _generate_ratio_report(output_dir: Path, data: dict) -> str:
     lines = [
         "# TAM Paper Reward v2 — Reward Contribution Ratio Report",
+        "",
+        "## 0. Methodology",
+        "",
+        "- **signed contribution**: raw signed mean (positive and negative cancel).",
+        "- **absolute contribution**: abs-mean — the true magnitude regardless of sign.",
+        "- **positive contribution**: positive_sum based share (independently computed).",
+        "- **negative contribution**: negative_abs_sum based share (independently computed).",
+        "- **dense_event_ratio**: computed from abs_sum of dense_active / event_active per role.",
+        "- **event_to_100step_dense_ratio**: uses atomic event keys (death/kill/out_of_zone)",
+        "  to avoid double-counting aggregate event keys. Event occurrence count is by",
+        "  non-zero event rows, not by key count.",
+        "- **phase analysis**: alive_all includes only steps where flight row says alive=1.",
+        "  missile_warning uses flight row field first, then falls back to dodge != 0.",
         "",
         "## 1. MAV Reward Composition",
         "",
@@ -1097,69 +1252,64 @@ def _generate_ratio_report(output_dir: Path, data: dict) -> str:
     mav = data.get("mav", {})
     uav = data.get("uav", {})
 
-    # MAV
-    lines.append("### MAV — Signed Contributions")
-    lines.append("")
-    lines.append("| Component | Signed Mean | Abs Mean | Signed Sum | Abs Share | Pos Rate | Neg Rate |")
-    lines.append("|---|---|---|---|---|---|---|")
-    for key in MAV_DETAIL_KEYS:
-        s = mav.get(key, {})
-        if s:
-            lines.append(f"| {key} | {s.get('signed_mean') or 0:.4f} | {s.get('abs_mean') or 0:.4f} | {s.get('signed_sum') or 0:.2f} | {s.get('abs_share_of_total_abs') or 0:.3f} | {s.get('positive_rate') or 0:.3f} | {s.get('negative_rate') or 0:.3f} |")
-    lines.append("")
+    def _role_section(role_label, detail_keys, stats):
+        lines.append(f"### {role_label} — Signed vs Absolute Contributions")
+        lines.append("")
+        lines.append("| Component | Signed Mean | Abs Mean | Positive Mean | Negative Mean | Abs Share | Pos Share | Neg Share |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for key in detail_keys:
+            s = stats.get(key, {}) if isinstance(stats, dict) else {}
+            if s:
+                l = f"| {key} | {_fmt(s.get('signed_mean'))} | {_fmt(s.get('abs_mean'))} | {_fmt(s.get('positive_mean'))} | {_fmt(s.get('negative_mean'))} | {_fmt(s.get('abs_share_of_total_abs'),3)} | {_fmt(s.get('positive_share'),3)} | {_fmt(s.get('negative_share'),3)} |"
+                lines.append(l)
+        lines.append("")
 
-    # Dominance check
-    max_abs_key = max(MAV_DETAIL_KEYS, key=lambda k: mav.get(k, {}).get("abs_share_of_total_abs", 0) or 0)
-    max_abs_share = mav.get(max_abs_key, {}).get("abs_share_of_total_abs", 0) or 0
-    if max_abs_share > 0.6:
-        lines.append(f"⚠️ **Dominance risk**: `{max_abs_key}` has {max_abs_share:.1%} abs share! Single component dominates.")
-    lines.append("")
+        # Dominance check
+        max_abs_key = max(detail_keys, key=lambda k: stats.get(k, {}).get("abs_share_of_total_abs") or 0)
+        max_abs_share = stats.get(max_abs_key, {}).get("abs_share_of_total_abs") or 0
+        if max_abs_share > 0.6:
+            lines.append(f"⚠️ **Dominance risk**: `{max_abs_key}` has {max_abs_share:.1%} abs share!")
+            lines.append("")
 
-    # Signed near zero but high abs → cancellation
-    total_signed = sum((mav.get(k, {}).get("signed_sum", 0) or 0) for k in MAV_DETAIL_KEYS)
-    total_abs = sum((mav.get(k, {}).get("abs_sum", 0) or 0) for k in MAV_DETAIL_KEYS)
-    if abs(total_signed) < total_abs * 0.1 and total_abs > 1e-6:
-        lines.append(f"⚠️ **Cancellation**: signed total ({total_signed:.2f}) is near zero but abs total is {total_abs:.2f} — positive and negative components are canceling.")
-    lines.append("")
+        # Cancellation check
+        total_signed = sum((stats.get(k, {}).get("signed_sum") or 0) for k in detail_keys)
+        total_abs = sum((stats.get(k, {}).get("abs_sum") or 0) for k in detail_keys)
+        if abs(total_signed) < total_abs * 0.1 and total_abs > 1e-6:
+            lines.append(f"⚠️ **Cancellation**: signed total ({total_signed:.2f}) near zero, abs total is {total_abs:.2f}. Positive/negative components cancel. Use abs_share/positive_share/negative_share for diagnosis.")
+            lines.append("")
+
+        # Dense/event ratio
+        de = stats.get("dense_event_ratio") if isinstance(stats, dict) else None
+        if de is not None:
+            lines.append(f"- dense_event_ratio (abs_sum): {de:.2f}")
+        lines.append("")
+
+    _role_section("MAV", MAV_DETAIL_KEYS, mav)
+    _role_section("UAV", UAV_DETAIL_KEYS, uav)
 
     # MAV sub-components
-    lines.append("### MAV Safety Sub-Components")
+    lines.append("## 2. MAV Sub-Component Breakdown")
     lines.append("")
     for sub in ["tam_v2_mav_dist", "tam_v2_mav_threat", "tam_v2_mav_aspect"]:
         s = mav.get(sub, {})
-        lines.append(f"- **{sub}**: signed_mean={s.get('signed_mean') or 0:.4f}, abs_share={s.get('abs_share_of_total_abs') or 0:.3f}")
-    lines.append("")
-    lines.append("### MAV Support Sub-Components")
+        if s:
+            lines.append(f"- **{sub}**: signed={_fmt(s.get('signed_mean'))}, abs_share={_fmt(s.get('abs_share_of_total_abs'),3)}, pos_share={_fmt(s.get('positive_share'),3)}, neg_share={_fmt(s.get('negative_share'),3)}")
     lines.append("")
     for sub in ["tam_v2_mav_pos", "tam_v2_mav_aware"]:
         s = mav.get(sub, {})
-        lines.append(f"- **{sub}**: signed_mean={s.get('signed_mean') or 0:.4f}, abs_share={s.get('abs_share_of_total_abs') or 0:.3f}")
-    lines.append("")
-
-    # UAV
-    lines.append("## 2. UAV Reward Composition")
-    lines.append("")
-    lines.append("### UAV — Signed Contributions")
-    lines.append("")
-    lines.append("| Component | Signed Mean | Abs Mean | Signed Sum | Abs Share | Pos Rate | Neg Rate |")
-    lines.append("|---|---|---|---|---|---|---|")
-    for key in UAV_DETAIL_KEYS:
-        s = uav.get(key, {})
         if s:
-            lines.append(f"| {key} | {s.get('signed_mean') or 0:.4f} | {s.get('abs_mean') or 0:.4f} | {s.get('signed_sum') or 0:.2f} | {s.get('abs_share_of_total_abs') or 0:.3f} | {s.get('positive_rate') or 0:.3f} | {s.get('negative_rate') or 0:.3f} |")
-    lines.append("")
-
-    max_abs_key_u = max(UAV_DETAIL_KEYS, key=lambda k: uav.get(k, {}).get("abs_share_of_total_abs", 0) or 0)
-    max_abs_share_u = uav.get(max_abs_key_u, {}).get("abs_share_of_total_abs", 0) or 0
-    if max_abs_share_u > 0.6:
-        lines.append(f"⚠️ **Dominance risk**: `{max_abs_key_u}` has {max_abs_share_u:.1%} abs share!")
+            lines.append(f"- **{sub}**: signed={_fmt(s.get('signed_mean'))}, abs_share={_fmt(s.get('abs_share_of_total_abs'),3)}, pos_share={_fmt(s.get('positive_share'),3)}, neg_share={_fmt(s.get('negative_share'),3)}")
     lines.append("")
 
     # Phase analysis
     lines.append("## 3. Phase Analysis")
     lines.append("")
+    lines.append("Missile warning fallback: flight_row 'missile_warning' field → dodge non-zero if missing.")
+    lines.append("")
     for role, phase_data, dkeys in [("MAV", data.get("mav_phase", {}), MAV_DETAIL_KEYS),
                                       ("UAV", data.get("uav_phase", {}), UAV_DETAIL_KEYS)]:
+        if not isinstance(phase_data, dict):
+            continue
         lines.append(f"### {role}")
         for phase in ["alive_all", "pre_crash_100", "missile_warning", "no_missile_warning"]:
             pd = phase_data.get(phase, {})
@@ -1168,31 +1318,38 @@ def _generate_ratio_report(output_dir: Path, data: dict) -> str:
             if isinstance(pd, dict) and count > 0:
                 for key in dkeys[:6]:
                     s = pd.get(key, {})
-                    if s and s.get("abs_mean", 0) > 1e-8:
-                        lines.append(f"- {key}: signed_mean={s.get('signed_mean') or 0:.4f} abs_mean={s.get('abs_mean') or 0:.4f}")
+                    if s and (s.get("abs_mean") or 0) > 1e-8:
+                        lines.append(f"- {key}: signed={_fmt(s.get('signed_mean'))} abs={_fmt(s.get('abs_mean'))}")
         er = phase_data.get("event_to_100step_dense_ratio") if isinstance(phase_data, dict) else None
         if er is not None:
-            lines.append(f"\n- event_to_100step_dense_ratio: {er:.4f}")
+            lines.append(f"\n- event_to_100step_dense_ratio: {er:.4f} (atomic event keys, non-zero row counted, dense_abs_mean * 100)")
+        elif isinstance(phase_data, dict):
+            lines.append(f"\n- event_to_100step_dense_ratio: N/A (no events or no dense steps)")
         lines.append("")
 
     # Scale analysis
     lines.append("## 4. Global Scale Analysis")
     lines.append("")
     mav_scale = data.get("mav_scale", {})
-    lines.append(f"- Current scale: {mav_scale.get('current_scale', 'N/A')}")
+    lines.append(f"- Current scale: {mav_scale.get('current_scale', 'N/A')} (source: {mav_scale.get('current_scale_source', 'N/A')})")
+    lines.append(f"- Raw total signed mean: {_fmt(mav_scale.get('raw_total_signed_mean'))}")
+    lines.append(f"- Raw total abs mean: {_fmt(mav_scale.get('raw_total_abs_mean'))}")
     lines.append("")
     sims = mav_scale.get("simulated_scales", {})
-    lines.append("| Scale | MAV Step Mean | UAV Step Mean | D/E Preserved |")
-    lines.append("|---|---|---|---|")
+    lines.append("| Scale | Factor | MAV Signed | MAV Abs | UAV Signed | UAV Abs | D/E Preserved |")
+    lines.append("|---|---|---|---|---|---|---|")
     uav_scale = data.get("uav_scale", {})
     uav_sims = uav_scale.get("simulated_scales", {})
     for s in ["0.02", "0.05", "0.10"]:
         ms = sims.get(s, {})
         us = uav_sims.get(s, {})
-        mav_mean = ms.get("estimated_mav_step_reward_mean", "N/A")
-        uav_mean = us.get("estimated_uav_step_reward_mean", "N/A")
+        factor = ms.get("factor_vs_current", 1)
+        mav_signed = ms.get("estimated_mav_step_reward_signed_mean", "N/A")
+        mav_abs = ms.get("estimated_mav_step_reward_abs_mean", "N/A")
+        uav_signed = us.get("estimated_uav_step_reward_signed_mean", "N/A")
+        uav_abs = us.get("estimated_uav_step_reward_abs_mean", "N/A")
         preserved = ms.get("dense_event_ratio_preserved", True)
-        lines.append(f"| {s} | {mav_mean} | {uav_mean} | {preserved} |")
+        lines.append(f"| {s} | {factor} | {_fmt(mav_signed,6)} | {_fmt(mav_abs,6)} | {_fmt(uav_signed,6)} | {_fmt(uav_abs,6)} | {preserved} |")
     lines.append("")
     lines.append("Note: `global_scale` changes absolute reward magnitude but does NOT change TAM internal active reward proportions.")
     lines.append("")
