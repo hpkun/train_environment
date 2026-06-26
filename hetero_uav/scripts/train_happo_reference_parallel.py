@@ -394,7 +394,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
                         choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"])
-    parser.add_argument("--reward-mode", default="happo_ref_v0")
+    parser.add_argument("--reward-mode", default=None,
+                        help="Override YAML hetero_reward_mode. If omitted, uses YAML value.")
     parser.add_argument("--ppo-epochs", type=int, default=2)
     parser.add_argument("--entropy-coef", type=float, default=0.02)
     parser.add_argument("--actor-lr", type=float, default=2e-4)
@@ -545,11 +546,39 @@ def _run_training(args: argparse.Namespace) -> None:
         "last_worker_timeout_info": {},
     })
 
+    # Resolve reward_mode: CLI takes priority, but validate against YAML
+    import yaml as _yaml
+    _yaml_cfg = {}
+    _yaml_reward = None
+    try:
+        with open(args.config, encoding="utf-8") as _f:
+            _yaml_cfg = _yaml.safe_load(_f) or {}
+        _yaml_reward = _yaml_cfg.get("hetero_reward_mode")
+    except Exception:
+        pass
+    cli_reward_mode = args.reward_mode  # may be None
+    if cli_reward_mode is None:
+        if _yaml_reward is None:
+            raise ValueError(
+                "No --reward-mode provided and config YAML has no hetero_reward_mode. "
+                "Please specify --reward-mode or fix the config."
+            )
+        resolved_reward_mode = _yaml_reward
+    else:
+        if _yaml_reward is not None and cli_reward_mode != _yaml_reward:
+            raise ValueError(
+                f"CLI --reward-mode={cli_reward_mode!r} conflicts with "
+                f"config YAML hetero_reward_mode={_yaml_reward!r}. "
+                f"Use matching values or omit --reward-mode to use the YAML value."
+            )
+        resolved_reward_mode = cli_reward_mode
+    print(f"[reward-mode] resolved: {resolved_reward_mode}", flush=True)
+
     vec_env = ParallelEnv(
         args.num_envs,
         {
             "config": args.config,
-            "reward_mode": args.reward_mode,
+            "reward_mode": resolved_reward_mode,
             "max_steps": args.max_steps,
         },
         reset_timeout=args.reset_timeout_sec,
@@ -590,10 +619,10 @@ def _run_training(args: argparse.Namespace) -> None:
                     f"checkpoint={meta_pa!r}, CLI={args.policy_arch!r}. "
                     f"Checkpoint: {init_meta_path}"
                 )
-            if meta_rm and meta_rm != args.reward_mode:
+            if meta_rm and meta_rm != resolved_reward_mode:
                 raise ValueError(
                     f"init checkpoint reward_mode mismatch: "
-                    f"checkpoint={meta_rm!r}, CLI={args.reward_mode!r}. "
+                    f"checkpoint={meta_rm!r}, CLI={resolved_reward_mode!r}. "
                     f"Checkpoint: {init_meta_path}"
                 )
         _reject_unsafe_random_scale_mask_checkpoint(args.policy_arch, init_meta_path)
@@ -1259,7 +1288,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 except Exception:
                     _rtsm = ""
                 meta = {
-                    "policy_arch": args.policy_arch, "reward_mode": args.reward_mode,
+                    "policy_arch": args.policy_arch, "reward_mode": resolved_reward_mode,
                     "config": args.config, "opponent_policy": args.opponent_policy,
                     "init_checkpoint": args.init_checkpoint,
                     "total_env_steps_actual": total_steps, "episodes": episodes,
@@ -1382,7 +1411,7 @@ def _run_training(args: argparse.Namespace) -> None:
         "runner": "multiprocessing_parallel",
         "policy_arch": args.policy_arch,
         "config": args.config,
-        "reward_mode": args.reward_mode,
+        "reward_mode": resolved_reward_mode,
         "opponent_policy": args.opponent_policy,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
