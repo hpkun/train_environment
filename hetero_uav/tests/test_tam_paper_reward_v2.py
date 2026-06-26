@@ -303,23 +303,36 @@ class TestTamV2Fixes:
         r2 = HeteroUavCombatEnv._tam_v2_speed_reward(600.0, 250.0)
         assert r2 == 1.0, f"red=600 >> blue=250 should give 1.0, got {r2}"
 
-    def test_height_reward_uses_env_boundaries(self):
+    def test_height_reward_aligned_with_tam_uav(self):
+        """Height reward uses config max directly (12000), NOT clamped to env max (10000)."""
         from uav_env import make_env
         import numpy as np
         env = make_env(
             "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_dynamics_f22_visual_mav_tam_paper_reward_v2.yaml",
         )
         cfg = env.tam_paper_reward_v2_config
-        # Below env min (2500) should return -1
-        r_below = env._tam_v2_height_reward(2000.0, cfg)
-        assert r_below == -1.0, f"below floor should be -1.0, got {r_below}"
-        # Above env max (10000) should return -0.5
-        r_above = env._tam_v2_height_reward(11000.0, cfg)
-        assert r_above == -0.5, f"above ceiling should be -0.5, got {r_above}"
-        # At optimal should return 1.0
-        r_opt = env._tam_v2_height_reward(6000.0, cfg)
-        assert r_opt == 1.0, f"at optimum should be 1.0, got {r_opt}"
+        # Below floor (2500) → -1.0
+        r = env._tam_v2_height_reward(2000.0, cfg)
+        assert r == -1.0, f"below floor: {r}"
+        # At optimum (6000) → 1.0
+        r = env._tam_v2_height_reward(6000.0, cfg)
+        assert r == 1.0, f"at optimum: {r}"
+        # At config max (12000) → 0.0 (clipped) — NOT -0.5
+        # With max=12000, eff_min=2500, denom=9500, at 12000: 1-6000/9500=0.368
+        r = env._tam_v2_height_reward(12000.0, cfg)
+        assert r > 0.0, f"at config max 12000 should be positive, got {r}"
+        # Above config max (13000) → -0.5
+        r = env._tam_v2_height_reward(13000.0, cfg)
+        assert r == -0.5, f"above config max: {r}"
         env.close()
+
+    def test_global_scale_from_config(self):
+        """Config uses global_scale=1.0 aligned with tam_uav."""
+        import yaml
+        with open("uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_dynamics_f22_visual_mav_tam_paper_reward_v2.yaml", encoding="utf-8") as f:
+            c = yaml.safe_load(f)
+        gs = c["tam_paper_reward_v2"]["global_scale"]
+        assert gs == 1.0, f"global_scale should be 1.0 (tam_uav-aligned), got {gs}"
 
     def test_out_of_zone_x_beyond_half_size(self):
         from uav_env import make_env

@@ -791,18 +791,17 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
     def _tam_v2_height_reward(self, altitude_m: float, cfg: dict) -> float:
         g = cfg["geometry"]
-        env_min = float(getattr(self, "BATTLEFIELD_ALTITUDE_MIN", 2500.0))
-        env_max = float(getattr(self, "BATTLEFIELD_ALTITUDE_MAX", 10000.0))
-        eff_min = max(float(g.get("min_altitude_m", 750.0)), env_min)
-        eff_max = min(float(g.get("max_altitude_m", 12000.0)), env_max)
-        config_opt = float(g.get("optimal_altitude_m", 6000.0))
-        optimal = float(np.clip(config_opt, eff_min, eff_max))
-        if altitude_m < eff_min:
+        effective_min = max(float(g.get("min_altitude_m", 750.0)),
+                           float(getattr(self, "BATTLEFIELD_ALTITUDE_MIN", 2500.0)))
+        optimum = float(g.get("optimal_altitude_m", 6000.0))
+        maximum = float(g.get("max_altitude_m", 12000.0))
+        optimum = float(np.clip(optimum, effective_min, maximum))
+        if altitude_m < effective_min:
             return -1.0
-        if altitude_m > eff_max:
+        if altitude_m > maximum:
             return -0.5
-        val = 1.0 - abs(altitude_m - optimal) / (eff_max - eff_min)
-        return float(np.clip(val, 0.0, 1.0))
+        value = 1.0 - abs(float(altitude_m) - optimum) / (maximum - effective_min)
+        return float(np.clip(value, 0.0, 1.0))
 
     def _tam_v2_alive_blue(self) -> list:
         return [sim for bid in self.blue_ids if (sim := self.blue_planes.get(bid)) and sim.is_alive]

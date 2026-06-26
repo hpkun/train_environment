@@ -13,7 +13,7 @@ enable_gcas_for_blue: true
 env_type: jsbsim_hetero
 hetero_reward_mode: tam_paper_reward_v2
 tam_paper_reward_v2:
-  global_scale: 0.02
+  global_scale: 1.0
   geometry:
     missile_range_m: 14000.0
     combat_zone_radius_m: 50000.0
