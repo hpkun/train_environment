@@ -55,13 +55,17 @@ TAM_V2_UAV_KEYS = [
     "tam_v2_uav_event", "tam_v2_uav_kill", "tam_v2_uav_death",
     "tam_v2_uav_out_of_zone", "tam_v2_total",
 ]
+TAM_V2_META_KEYS = [
+    "tam_v2_geometry_feature_semantics", "tam_v2_dodge_los_semantics",
+    "tam_v2_height_formula_source",
+]
 TAM_V2_LOG_KEYS = [
     "tam_v2_mav_shared_log", "tam_v2_mav_assist_log",
     "tam_v2_uav_fire_log", "tam_v2_uav_mav_shared_track_log",
     "brma_r_adv_log", "brma_r_pitch_log", "brma_r_roll_log",
     "brma_r_alt_log", "brma_r_bound_log", "brma_r_vel_log",
 ]
-TAM_V2_KEYS = TAM_V2_MAV_KEYS + TAM_V2_UAV_KEYS + TAM_V2_LOG_KEYS
+TAM_V2_KEYS = TAM_V2_MAV_KEYS + TAM_V2_UAV_KEYS + TAM_V2_LOG_KEYS + TAM_V2_META_KEYS
 
 ALL_RC_KEYS = BRMA_KEYS + BRMA_REMOVED_KEYS + MAV_TAM_KEYS + EVENT_KEYS + TERMINAL_KEYS + LOG_ONLY_KEYS + COUNT_KEYS + CLIP_KEYS + TAM_V2_KEYS
 ALL_RC_KEYS.append("event_total")

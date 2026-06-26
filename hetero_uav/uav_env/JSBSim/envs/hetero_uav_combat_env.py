@@ -761,15 +761,13 @@ class HeteroUavCombatEnv(UavCombatEnv):
     # ── TAM Paper Reward v2 ───────────────────────────────────────────
 
     @staticmethod
-    def _tam_v2_feature(sim, entity):
-        """Feature vector for 2D AO/TA geometry (aligned with tam_uav)."""
-        pos = sim.get_position()
-        vel = sim.get_velocity()
-        epos = entity.get_position()
-        evel = entity.get_velocity()
+    def _tam_v2_feature(sim) -> np.ndarray:
+        """Absolute feature vector for 2D AO/TA geometry (aligned with tam_uav)."""
+        position = np.asarray(sim.get_position(), dtype=np.float64)
+        velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
         return np.array([
-            epos[0] - pos[0], epos[1] - pos[1], -(epos[2] - pos[2]),
-            evel[0] - vel[0], evel[1] - vel[1], -(evel[2] - vel[2]),
+            position[0], position[1], -position[2],
+            velocity[0], velocity[1], -velocity[2],
         ], dtype=np.float64)
 
     @staticmethod
@@ -812,12 +810,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         for missile in list(threat):
             if not getattr(missile, "is_alive", False):
                 continue
-            uid = getattr(missile, "uid", str(id(missile)))
+            uid = str(getattr(missile, "uid", getattr(missile, "_uid", id(missile))))
             mv = np.array(missile.get_velocity(), dtype=np.float64)
             sp = np.linalg.norm(mv)
-            spos = np.array(sim.get_position(), dtype=np.float64)
-            mpos = np.array(missile.get_position(), dtype=np.float64)
-            los = mpos - spos
+            los = np.array(sim.get_position(), dtype=np.float64) - np.array(missile.get_position(), dtype=np.float64)
             los_norm = np.linalg.norm(los)
             if los_norm < 1e-6:
                 continue
@@ -860,10 +856,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
             vals["tam_v2_mav_threat"] = r_threat
 
             # aspect: for each blue heading toward MAV (TA < pi/4), penalize
+            mav_feat = HeteroUavCombatEnv._tam_v2_feature(mav)
             for b in alive_blue:
-                b_feat = HeteroUavCombatEnv._tam_v2_feature(mav, b)
-                ao, ta, _r = get2d_AO_TA_R(
-                    HeteroUavCombatEnv._tam_v2_feature(mav, mav), b_feat)
+                b_feat = HeteroUavCombatEnv._tam_v2_feature(b)
+                ao, ta, _r = get2d_AO_TA_R(mav_feat, b_feat)
                 if ta < np.pi / 4:
                     r_aspect -= (1.0 - ta / (np.pi / 4))
             vals["tam_v2_mav_aspect"] = r_aspect
@@ -872,9 +868,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
             mav_obs_range = getattr(self, "mav_observation_range_m", 80000.0)
             r_aware = 0.0
             for b in alive_blue:
-                b_feat = HeteroUavCombatEnv._tam_v2_feature(mav, b)
-                ao, _ta, _r = get2d_AO_TA_R(
-                    HeteroUavCombatEnv._tam_v2_feature(mav, mav), b_feat)
+                b_feat = HeteroUavCombatEnv._tam_v2_feature(b)
+                ao, _ta, _r = get2d_AO_TA_R(mav_feat, b_feat)
                 d = float(np.linalg.norm(b.get_position() - mav_pos))
                 if d < mav_obs_range and ao < np.pi / 2:
                     r_aware += 0.3 * (1.0 - ao / (np.pi / 2))
@@ -930,6 +925,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
         vals["brma_r_vel_log"] = orig_brma.get("r_vel", 0.0)
         vals["tam_v2_mav_shared_log"] = 0.0
         vals["tam_v2_mav_assist_log"] = 0.0
+        vals["tam_v2_geometry_feature_semantics"] = "absolute"
+        vals["tam_v2_height_formula_source"] = "tam_uav_paper_approx_not_exact_formula"
 
         gs = float(cfg["global_scale"])
         total = (vals["tam_v2_mav_safety"] + vals["tam_v2_mav_support"] + vals["tam_v2_mav_event"]) * gs
@@ -963,10 +960,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         # ── Angle ──
         if alive_blue:
             best_angle_raw = -1.0
+            red_feat = HeteroUavCombatEnv._tam_v2_feature(sim)
             for b in alive_blue:
-                b_feat = HeteroUavCombatEnv._tam_v2_feature(sim, b)
-                self_feat = HeteroUavCombatEnv._tam_v2_feature(sim, sim)
-                ao, ta, _r = get2d_AO_TA_R(self_feat, b_feat)
+                b_feat = HeteroUavCombatEnv._tam_v2_feature(b)
+                ao, ta, _r = get2d_AO_TA_R(red_feat, b_feat)
                 aa = np.pi - ta  # aspect angle
                 angle_val = 1.0 - (ao + aa) / np.pi
                 if angle_val > best_angle_raw:
@@ -1022,10 +1019,11 @@ class HeteroUavCombatEnv(UavCombatEnv):
         vals["brma_r_vel_log"] = orig_brma.get("r_vel", 0.0)
         vals["tam_v2_uav_fire_log"] = 0.0
         vals["tam_v2_uav_mav_shared_track_log"] = 0.0
+        vals["tam_v2_geometry_feature_semantics"] = "absolute"
+        vals["tam_v2_dodge_los_semantics"] = "missile_to_aircraft"
+        vals["tam_v2_height_formula_source"] = "tam_uav_paper_approx_not_exact_formula"
 
         gs = float(cfg["global_scale"])
-        total = sum(vals.get(k, 0.0) for k in TAM_PAPER_V2_UAV_COMPONENT_KEYS if k in vals) * gs
-        # Re-compute to include only dense + event component sum
         dense_event = (
             vals["tam_v2_uav_height"] + vals["tam_v2_uav_speed"] + vals["tam_v2_uav_angle"]
             + vals["tam_v2_uav_distance"] + vals["tam_v2_uav_dodge"] + vals["tam_v2_uav_event"]

@@ -119,3 +119,90 @@ class TestTamPaperV2DoesNotModifyCore:
         env = _make_v2_env()
         assert env.observation_mode == "mav_shared_geo"
         env.close()
+
+
+class TestTamV2GeometryFixes:
+    """Verify _tam_v2_feature is absolute, not relative, and callers are correct."""
+
+    def test_feature_is_absolute_single_arg(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        import inspect
+        sig = inspect.signature(HeteroUavCombatEnv._tam_v2_feature)
+        params = list(sig.parameters.keys())
+        assert params == ["sim"], f"expected ['sim'], got {params}"
+
+    def test_feature_returns_absolute_not_zero(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        import numpy as np
+        # Use a mock sim
+        class MockSim:
+            def get_position(self): return np.array([100.0, 200.0, 3000.0])
+            def get_velocity(self): return np.array([250.0, 0.0, -5.0])
+        feat = HeteroUavCombatEnv._tam_v2_feature(MockSim())
+        assert feat[0] == 100.0, f"expected abs x, got {feat[0]}"
+        assert feat[2] == -3000.0, f"expected -z (up), got {feat[2]}"
+        assert feat[3] == 250.0, f"expected abs vx, got {feat[3]}"
+
+    def test_ao_ta_uses_absolute_features(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        from uav_env.JSBSim.utils import get2d_AO_TA_R
+        import numpy as np
+
+        class MockSim:
+            def __init__(self, x, y, z, vx, vy, vz):
+                self.pos = np.array([x, y, z]); self.vel = np.array([vx, vy, vz])
+            def get_position(self): return self.pos
+            def get_velocity(self): return self.vel
+
+        red = MockSim(0, 0, 6000, 0, 250, 0)        # heading north (vy=250)
+        blue = MockSim(5000, 0, 6000, 0, 250, 0)      # heading north (vy=250), 5km east
+        rf = HeteroUavCombatEnv._tam_v2_feature(red)
+        bf = HeteroUavCombatEnv._tam_v2_feature(blue)
+        ao, ta, rng = get2d_AO_TA_R(rf, bf)
+        # Both heading north, blue 5km east → AO should ~90 deg, TA should ~90 deg
+        assert 1.3 < ao < 1.9, f"expected AO ~1.57 (90°), got {ao:.3f}"
+        assert 1.3 < ta < 1.9, f"expected TA ~1.57 (90°), got {ta:.3f}"
+
+    def test_dodge_los_is_missile_to_aircraft(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        import numpy as np
+
+        class MockMissile:
+            uid = "m1"; is_alive = True
+            def get_position(self): return np.array([1000.0, 0.0, 5000.0])
+            def get_velocity(self): return np.array([-600.0, 0.0, 0.0])  # heading toward aircraft at x=0
+
+        class MockSim:
+            under_missiles = None
+            def get_position(self): return np.array([0.0, 0.0, 5000.0])
+            def get_velocity(self): return np.array([250.0, 0.0, 0.0])
+
+        # env needed for cache dict
+        env = _make_v2_env()
+        fake_cache = {}
+        sim = MockSim()
+        sim.under_missiles = [MockMissile()]
+        total, angle, speed = env._tam_v2_dodge_reward(sim, 1000.0, fake_cache)
+        # missile at [1000,0,5000], sim at [0,0,5000]
+        # LOS = sim_pos - missile_pos = [-1000, 0, 0] (points from missile to aircraft)
+        # missile vel = [600,0,0] (same direction as LOS from missile to aircraft)
+        # cos = dot(mv, los) / (sp * |los|) = (600 * 1000 + ...) / (600 * 1000) ≈ 1.0
+        # r_angle = -clip(1.0) = -1.0
+        assert angle < -0.9, f"dodge angle should be negative (missile heading toward aircraft), got {angle}"
+        env.close()
+
+    def test_v2_metadata_fields_present(self):
+        env = _make_v2_env()
+        env.reset(seed=0)
+        for _ in range(3):
+            actions = {rid: np.zeros(3, dtype=np.float32) for rid in env.red_ids}
+            from algorithms.mappo.opponent_policy import OpponentPolicy
+            opp = OpponentPolicy(mode="brma_rule", seed=0)
+            actions.update(opp.act(env._last_step_obs, env.blue_ids, env=env))
+            obs, rewards, terminated, truncated, info = env.step(actions)
+        rc = info.get("reward_components", {})
+        for uid in ("red_0", "red_1"):
+            comp = rc.get(uid, {})
+            assert "tam_v2_geometry_feature_semantics" in comp, f"{uid} missing geometry semantics"
+            assert "tam_v2_height_formula_source" in comp, f"{uid} missing height formula source"
+        env.close()
