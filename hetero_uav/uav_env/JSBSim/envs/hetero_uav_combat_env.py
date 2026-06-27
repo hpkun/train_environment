@@ -1728,8 +1728,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
         total_red_kills = sum(int(self._step_kill_count.get(rid, 0)) for rid in self.red_ids)
 
         # ── Team-wide shared events ──
-        # Detect UAV first-death this step → team_uav_loss_shared
-        team_uav_loss = 0.0
+        # Count UAV first-deaths this step → team_uav_loss_shared
+        num_uav_first_deaths = 0
         mav_loss_to_uav = 0.0
         for rid in self.red_ids:
             sim = self.red_planes.get(rid)
@@ -1741,7 +1741,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
                     mav_loss_to_uav = float(cfg["uav"]["event"].get("mav_loss_to_uav", -160.0))
             else:
                 if not sim.is_alive and rid not in self._tam_brma_scripted_uav_death_penalized:
-                    team_uav_loss = float(cfg["uav"]["event"].get("team_uav_loss_shared", -30.0))
+                    num_uav_first_deaths += 1
+        team_uav_loss = num_uav_first_deaths * float(cfg["uav"]["event"].get("team_uav_loss_shared", -30.0))
+        team_kill_shared_per_agent = float(cfg["uav"]["event"].get("team_kill_shared", 30.0)) * total_red_kills
 
         for rid in self.red_ids:
             sim = self.red_planes.get(rid)
@@ -1768,13 +1770,16 @@ class HeteroUavCombatEnv(UavCombatEnv):
             # ── Event ──
             self._tam_brma_v1_events(vals, rid, sim, role, total_red_kills, cfg)
 
-            # Inject team shared death events
+            # Inject team shared events (applies to ALL red agents)
             if role != "mav":
+                vals["tam_brma_v1_uav_event"] = vals.get("tam_brma_v1_uav_event", 0.0) + team_kill_shared_per_agent
                 if team_uav_loss != 0.0:
                     vals["tam_brma_v1_uav_event"] = vals.get("tam_brma_v1_uav_event", 0.0) + team_uav_loss
                 if mav_loss_to_uav != 0.0:
                     vals["tam_brma_v1_uav_event"] = vals.get("tam_brma_v1_uav_event", 0.0) + mav_loss_to_uav
             else:
+                vals["tam_brma_v1_mav_event"] = vals.get("tam_brma_v1_mav_event", 0.0) + team_kill_shared_per_agent
+                vals["tam_brma_v1_mav_team_kill_shared"] = team_kill_shared_per_agent
                 if team_uav_loss != 0.0:
                     vals["tam_brma_v1_mav_event"] = vals.get("tam_brma_v1_mav_event", 0.0) + team_uav_loss
 
@@ -1995,9 +2000,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 vals["tam_brma_v1_uav_death"] = penalty
             else:
                 vals["tam_brma_v1_uav_death"] = 0.0
-            # Team shared
-            r_event += float(uav_ev.get("team_kill_shared", 30.0)) * total_red_kills
-            vals["tam_brma_v1_uav_team_kill_shared"] = float(uav_ev.get("team_kill_shared", 30.0)) * total_red_kills
+            # team_kill_shared is added at dispatch level (applies to ALL red agents)
         vals["tam_brma_v1_uav_event" if role != "mav" else "tam_brma_v1_mav_event"] = r_event
 
     # ── end TAM-BRMA Scripted Reward v1 ────────────────────────────────

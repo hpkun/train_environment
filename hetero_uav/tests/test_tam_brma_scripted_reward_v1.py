@@ -67,23 +67,23 @@ class TestV1Components:
 
 class TestV1TeamEvents:
     def test_team_uav_loss_shared(self):
-        """UAV first death triggers team_uav_loss_shared for all red (checked via MAV event)."""
+        """UAV first death triggers team_uav_loss_shared for all red. Note: class-level override affects both UAVs."""
         env = _make_env(); env.reset(seed=0)
         env._tam_brma_scripted_uav_death_penalized = set()
         env._tam_brma_scripted_mav_death_penalized = True
         env._step_kill_count = {}
-        # Only red_1 dies; red_2 and MAV stay alive
+        # Override UAVs to simulate death — class-level property affects both red_1 and red_2
         sim = env.red_planes.get("red_1")
         orig_alive = type(sim).is_alive
         type(sim).is_alive = property(lambda self: False)
         try:
             base_rewards, components = env._compute_rewards()
             uav_ev = env.tam_brma_scripted_reward_v1_config["uav"]["event"]
-            expected = float(uav_ev["team_uav_loss_shared"])
-            # MAV (red_0) should have team_uav_loss_shared in its event
+            per_death = float(uav_ev["team_uav_loss_shared"])
+            expected = 2 * per_death  # both UAVs affected by class-level override
             mav_ev = components.get("red_0", {}).get("tam_brma_v1_mav_event", 0)
             assert abs(mav_ev - expected) < 1e-6, \
-                f"MAV event={mav_ev} should be team_uav_loss_shared={expected}"
+                f"2 UAV deaths → MAV event={mav_ev} should be 2*{per_death}={expected}"
         finally:
             type(sim).is_alive = orig_alive
         env.close()
@@ -183,6 +183,52 @@ class TestV1GEnemyThreat:
         d_gate = H._tam_brma_v1_d_gate(200, cfg)
         assert d_gate == -1.0
         assert max(d_gate, 0.0) == 0.0
+
+class TestV1TeamKillShared:
+    def test_team_kill_shared_applies_to_mav(self):
+        """MAV gets both team_kill_shared AND team_kill_credit on red kills."""
+        env = _make_env(); env.reset(seed=0)
+        env._tam_brma_scripted_uav_death_penalized = set()
+        env._tam_brma_scripted_mav_death_penalized = True
+        env._step_kill_count = {"red_1": 1}
+        base_rewards, components = env._compute_rewards()
+        c0 = components.get("red_0", {})
+        uav_ev = env.tam_brma_scripted_reward_v1_config["uav"]["event"]
+        mav_ev = env.tam_brma_scripted_reward_v1_config["mav"]["event"]
+        expected_shared = float(uav_ev["team_kill_shared"]) * 1
+        expected_credit = float(mav_ev["team_kill_credit"]) * 1
+        mav_event = c0["tam_brma_v1_mav_event"]
+        assert mav_event >= expected_shared + expected_credit - 1e-6, \
+            f"MAV event={mav_event}, expected shared={expected_shared}+credit={expected_credit}"
+        assert c0.get("tam_brma_v1_mav_team_kill_shared") == expected_shared
+        env.close()
+
+class TestV1MultiDeath:
+    def test_team_uav_loss_counts_multiple(self):
+        """Two UAVs dying same step → 2 * team_uav_loss_shared."""
+        env = _make_env(); env.reset(seed=0)
+        env._tam_brma_scripted_uav_death_penalized = set()
+        env._tam_brma_scripted_mav_death_penalized = True
+        env._step_kill_count = {}
+        # Kill both UAVs
+        for aid in ("red_1", "red_2"):
+            sim = env.red_planes.get(aid)
+            orig = type(sim).is_alive
+            type(sim).is_alive = property(lambda self, _aid=aid: False)
+        try:
+            base_rewards, components = env._compute_rewards()
+            uav_ev = env.tam_brma_scripted_reward_v1_config["uav"]["event"]
+            per_death = float(uav_ev["team_uav_loss_shared"])
+            expected_total = 2 * per_death
+            # MAV event includes team_uav_loss component
+            mav_event = components["red_0"]["tam_brma_v1_mav_event"]
+            assert abs(mav_event - expected_total) < 1e-6, \
+                f"2 UAV deaths → MAV event should be 2*{per_death}={expected_total}, got {mav_event}"
+        finally:
+            for aid in ("red_1", "red_2"):
+                sim = env.red_planes.get(aid)
+                type(sim).is_alive = orig
+        env.close()
 
 class TestV1Terminal:
     def test_full_win_requires_mav_alive(self):
