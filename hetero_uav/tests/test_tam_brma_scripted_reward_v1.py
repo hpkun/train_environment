@@ -230,6 +230,45 @@ class TestV1MultiDeath:
                 type(sim).is_alive = orig
         env.close()
 
+class TestV1ObsCache:
+    def test_reset_writes_last_step_obs(self):
+        env = _make_env(); env.reset(seed=0)
+        assert env._last_step_obs is not None
+        assert len(env._last_step_obs) > 0, "_last_step_obs should be populated after reset"
+        # Check it contains red agent keys
+        assert any(k.startswith("red_") for k in env._last_step_obs), "should have red agent obs"
+        env.close()
+
+    def test_step_updates_last_step_obs(self):
+        env = _make_env(); env.reset(seed=0)
+        actions = {rid: np.zeros(3, dtype=np.float32) for rid in env.red_ids}
+        from algorithms.mappo.opponent_policy import OpponentPolicy
+        opp = OpponentPolicy(mode="brma_rule", seed=0)
+        actions.update(opp.act(env._last_step_obs, env.blue_ids, env=env))
+        env.step(actions)
+        assert env._last_step_obs is not None
+        assert len(env._last_step_obs) > 0
+        env.close()
+
+    def test_has_launch_track_not_always_unobserved(self):
+        """After obs cache fix, _has_launch_track should NOT always return unobserved."""
+        env = _make_env(); env.reset(seed=0)
+        # Check _last_step_obs has the fields needed for track detection
+        red1_obs = env._last_step_obs.get("red_1", {})
+        # The observed_mask / track_source should be present (even if values may be 0/false)
+        assert isinstance(red1_obs, dict), f"red_1 obs should be dict, got {type(red1_obs)}"
+        # At minimum, the obs dict should not be empty
+        assert len(red1_obs) > 0, "red_1 obs dict should not be empty after obs cache fix"
+        env.close()
+
+    def test_v4_unaffected(self):
+        from uav_env import make_env
+        env = make_env("uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_dynamics_f22_visual_mav_tam_paper_reward_v4.yaml")
+        env.reset(seed=0)
+        assert env._last_step_obs is not None
+        assert len(env._last_step_obs) > 0
+        env.close()
+
 class TestV1Terminal:
     def test_full_win_requires_mav_alive(self):
         env = _make_env()

@@ -246,10 +246,17 @@ class HeteroUavCombatEnv(UavCombatEnv):
             ]
         return trimmed
 
+    def _needs_last_step_obs_cache(self) -> bool:
+        return self.hetero_reward_mode in {
+            "minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1",
+            "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4",
+            "tam_brma_scripted_reward_v1",
+        }
+
     def step(self, actions: dict):
         trimmed = self._apply_action_trim(actions)
         obs, rewards, terminated, truncated, info = super().step(trimmed)
-        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4"}:
+        if self._needs_last_step_obs_cache():
             self._last_step_obs = obs
         return obs, rewards, terminated, truncated, info
 
@@ -267,7 +274,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._tam_brma_scripted_mav_death_penalized: bool = False
         self._tam_brma_scripted_uav_death_penalized: set[str] = set()
         obs, info = super().reset(*args, **kwargs)
-        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4"}:
+        if self._needs_last_step_obs_cache():
             self._last_step_obs = obs
         return obs, info
 
