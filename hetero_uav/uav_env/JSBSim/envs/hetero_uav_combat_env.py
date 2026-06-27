@@ -1178,16 +1178,16 @@ class HeteroUavCombatEnv(UavCombatEnv):
                         r_aware += 0.3 * (1.0 - ao / (np.pi / 2))
                 vals["tam_v2_mav_aware"] = r_aware
 
-                # ── v3 continuous r_pos ──
+                # r_pos: tam_uav-aligned linear formula
                 sup_w = cfg["mav"]["support_weights"]
                 d_opt = float(cfg["mav"]["d_opt_m"])
                 d_max_mav = float(cfg["mav"]["d_max_m"])
                 blue_centroid = np.mean([b.get_position() for b in alive_blue], axis=0)
                 d_b = float(np.linalg.norm(blue_centroid - mav_pos))
-                if d_b <= d_opt:
-                    r_pos = np.cos(np.pi * d_b / (2.0 * d_opt))  # 1.0 at d=0, 0.0 at d=d_opt
+                if d_b < d_opt:
+                    r_pos = d_b / d_opt - 1.0  # negative when closer than d_opt
                 elif d_b < d_max_mav:
-                    r_pos = -0.5 * (d_b - d_opt) / (d_max_mav - d_opt)  # 0.0 → -0.5
+                    r_pos = 1.0 - (d_b - d_opt) / (d_max_mav - d_opt)
                 else:
                     r_pos = -0.5
                 vals["tam_v2_mav_pos"] = r_pos
@@ -1214,7 +1214,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         per_kill = min(float(cfg["mav"]["team_kill_bonus"]), float(cfg["mav"].get("team_kill_bonus_cap", 200.0)))
         vals["tam_v2_mav_team_bonus"] = team_kills * per_kill
         r_event += team_kills * per_kill
-        oz_penalty = self._tam_v3_out_of_zone_penalty(mav, mav_id, cfg)
+        if mav.is_alive:
+            oz_penalty = self._tam_v3_out_of_zone_penalty(mav, mav_id, cfg)
+        else:
+            oz_penalty = 0.0
         r_event += oz_penalty
         vals["tam_v2_mav_event"] = r_event
 
@@ -1299,7 +1302,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
             vals["tam_v2_uav_death"] = float(ev["death"])
         else:
             vals["tam_v2_uav_death"] = 0.0
-        oz_penalty = self._tam_v3_out_of_zone_penalty(sim, aid, cfg)
+        if sim.is_alive:
+            oz_penalty = self._tam_v3_out_of_zone_penalty(sim, aid, cfg)
+        else:
+            oz_penalty = 0.0
         r_event += oz_penalty
         vals["tam_v2_uav_out_of_zone"] = oz_penalty
         vals["tam_v2_uav_event"] = r_event

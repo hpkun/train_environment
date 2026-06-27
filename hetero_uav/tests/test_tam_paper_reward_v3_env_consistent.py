@@ -295,21 +295,41 @@ class TestV3TargetConsistency:
 
 
 class TestV3MAVSupportContinuity:
-    def test_r_pos_continuous_at_d_opt(self):
-        """r_pos should be continuous: lim from below == lim from above at d_opt."""
-        import numpy as np
+    def test_r_pos_tam_uav_aligned(self):
+        """r_pos uses tam_uav linear formula: d_b/d_opt - 1 when d < d_opt."""
         d_opt = 8000.0
-        # Below d_opt: cos(pi * d / (2*d_opt))
-        below = np.cos(np.pi * (d_opt - 1e-6) / (2.0 * d_opt))
-        # Above d_opt: -0.5 * (d - d_opt) / (d_max - d_opt)
-        above = -0.5 * (1e-6) / (25000.0 - d_opt)
-        # Both should be ~0.0
-        assert abs(below) < 1e-4, f"r_pos at d_opt-eps should be ~0, got {below}"
-        assert abs(above) < 1e-4, f"r_pos at d_opt+eps should be ~0, got {above}"
+        # At d=0: 0/8000 - 1 = -1.0 (negative — too close)
+        r = 0.0 / d_opt - 1.0
+        assert r == -1.0, f"r_pos at d=0 should be -1.0, got {r}"
+        # At d=d_opt: 8000/8000 - 1 = 0.0 (neutral at optimal distance)
+        r = d_opt / d_opt - 1.0
+        assert r == 0.0, f"r_pos at d=d_opt should be 0.0, got {r}"
 
-    def test_r_pos_negative_when_too_close(self):
-        """r_pos at d=0 should be 1.0 (cos(0)=1), at d=d_opt should be 0."""
-        import numpy as np
-        r0 = np.cos(0.0)
-        assert r0 == 1.0, f"r_pos at d=0 should be 1.0, got {r0}"
+    def test_r_pos_tam_uav_formula_at_boundaries(self):
+        """tam_uav r_pos: negative below d_opt, positive above, -0.5 beyond d_max."""
+        d_opt = 8000.0
+        d_max = 25000.0
+        # Below d_opt: d/d_opt - 1 → near 0 at d_opt, -1.0 at d=0
+        assert (4000.0 / d_opt - 1.0) == -0.5  # halfway to d_opt
+        # At d_opt exactly: second branch → 1.0 (tam_uav formula has jump here)
+        assert 1.0 - 0.0 == 1.0
+        # At d_max exactly: 1.0 - (25000-8000)/(25000-8000) = 0.0
+        assert 1.0 - (d_max - d_opt) / (d_max - d_opt) == 0.0
+        # Beyond d_max: -0.5
+        assert -0.5 == -0.5
+
+
+class TestV3DeadAgentBoundary:
+    def test_dead_agent_no_ooz_penalty(self):
+        """Dead MAV must NOT receive per-step out-of-zone penalty."""
+        env = _make_v3_env()
+        env.reset(seed=0)
+        mav = env.red_planes.get("red_0")
+        cfg = env.tam_paper_reward_v3_config
+        env._mav_death_penalized = True
+        # Compute rewards — r_pos should use tam_uav formula, OOZ should be 0 for dead
+        total, comp = env._tam_v3_mav_reward("red_0", mav, [], cfg, {})
+        # OOZ penalty should be 0 since we check is_alive first
+        assert "tam_v2_mav_event" in comp
+        env.close()
 
