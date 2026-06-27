@@ -192,3 +192,45 @@ class TestV3RewardComponents:
         c1 = rc.get("red_1", {})
         assert c1.get("tam_v2_height_formula_source") == "tam_paper_v3_env_consistent"
         env.close()
+
+
+class TestV3DistanceReward:
+    def test_launch_window_peak_3to7km(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        for d in [3000.0, 5000.0, 7000.0]:
+            r = HeteroUavCombatEnv._tam_v3_uav_distance_reward(d)
+            assert r >= 0.99, f"d={d/1000:.0f}km should be peak (~1.0), got {r:.3f}"
+
+    def test_too_close_penalized(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        r = HeteroUavCombatEnv._tam_v3_uav_distance_reward(200.0)
+        assert r < 0.0, f"200m too close → negative, got {r}"
+
+    def test_approach_phase_not_strongly_negative(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        r = HeteroUavCombatEnv._tam_v3_uav_distance_reward(12000.0)
+        assert r > -0.5, f"12km approach → soft penalty, got {r}"
+
+    def test_disengaged_strongly_negative(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        r = HeteroUavCombatEnv._tam_v3_uav_distance_reward(20000.0)
+        assert r == -1.0, f"20km disengaged → -1.0, got {r}"
+
+    def test_launch_window_boundary_10km(self):
+        from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+        r = HeteroUavCombatEnv._tam_v3_uav_distance_reward(10000.0)
+        assert r > 0.0, f"10km (end of launch window) should still be positive, got {r}"
+
+
+class TestV3MAVSupport:
+    def test_d_opt_is_8000m(self):
+        import yaml
+        with open("uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_dynamics_f22_visual_mav_tam_paper_reward_v3.yaml", encoding="utf-8") as f:
+            c = yaml.safe_load(f)
+        assert c["tam_paper_reward_v3"]["mav"]["d_opt_m"] == 8000.0
+
+    def test_d_max_is_25000m(self):
+        import yaml
+        with open("uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_dynamics_f22_visual_mav_tam_paper_reward_v3.yaml", encoding="utf-8") as f:
+            c = yaml.safe_load(f)
+        assert c["tam_paper_reward_v3"]["mav"]["d_max_m"] == 25000.0

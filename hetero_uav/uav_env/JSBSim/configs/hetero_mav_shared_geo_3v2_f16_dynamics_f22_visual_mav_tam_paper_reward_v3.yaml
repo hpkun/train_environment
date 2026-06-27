@@ -24,8 +24,8 @@ tam_paper_reward_v3:
   mav:
     d_danger_m: 5000.0
     d_safe_m: 14000.0
-    d_opt_m: 10000.0
-    d_max_m: 30000.0
+    d_opt_m: 8000.0
+    d_max_m: 25000.0
     death_penalty: 200.0
     team_kill_bonus: 200.0
     team_kill_bonus_cap: 200.0

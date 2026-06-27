@@ -777,6 +777,22 @@ class HeteroUavCombatEnv(UavCombatEnv):
         ], dtype=np.float64)
 
     @staticmethod
+    def _tam_v3_uav_distance_reward(distance_m: float) -> float:
+        """Launch-window-aligned: peak 3-7km, positive 0.5-10km, soft decay beyond."""
+        d_km = distance_m / 1000.0
+        if d_km <= 0.5:
+            return -0.5  # too close, sub-min-launch-range
+        if d_km <= 3.0:
+            return 0.5 + 0.5 * (d_km - 0.5) / 2.5  # 0.5 → 1.0
+        if d_km <= 7.0:
+            return 1.0  # optimal engagement
+        if d_km <= 10.0:
+            return 1.0 - 0.8 * (d_km - 7.0) / 3.0  # 1.0 → 0.2
+        if d_km <= 15.0:
+            return 0.2 - 0.7 * (d_km - 10.0) / 5.0  # 0.2 → -0.5
+        return -1.0  # disengaged
+
+    @staticmethod
     def _tam_v2_uav_distance_reward(distance_m: float) -> float:
         d_km = distance_m / 1000.0
         if d_km <= 5.0:
@@ -1157,7 +1173,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 vals["tam_v2_uav_angle"] = w["angle"] * max(best_angle_raw, -1.0)
                 dists = [float(np.linalg.norm(b.get_position() - sim_pos)) for b in alive_blue]
                 vals["tam_v2_uav_distance"] = w["distance"] * max(
-                    self._tam_v2_uav_distance_reward(d) for d in dists)
+                    self._tam_v3_uav_distance_reward(d) for d in dists)
             else:
                 for k in ("tam_v2_uav_speed", "tam_v2_uav_angle", "tam_v2_uav_angle_raw", "tam_v2_uav_distance"):
                     vals[k] = 0.0
