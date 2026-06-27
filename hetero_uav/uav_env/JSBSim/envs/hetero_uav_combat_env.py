@@ -128,7 +128,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
-        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2"}:
+        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3"}:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
         self._tam_reward_scale = float(kwargs.pop("tam_reward_scale", 0.05))
@@ -137,6 +137,11 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.tam_paper_reward_v2_config = deepcopy(_tam_cfg)
         if hetero_reward_mode == "tam_paper_reward_v2" and not self.tam_paper_reward_v2_config:
             raise ValueError("tam_paper_reward_v2 mode requires tam_paper_reward_v2 config block")
+        # TAM paper reward v3 config (env-consistent)
+        _tam_v3_cfg = kwargs.pop("tam_paper_reward_v3", None) or {}
+        self.tam_paper_reward_v3_config = deepcopy(_tam_v3_cfg)
+        if hetero_reward_mode == "tam_paper_reward_v3" and not self.tam_paper_reward_v3_config:
+            raise ValueError("tam_paper_reward_v3 mode requires tam_paper_reward_v3 config block")
         # Cached per-step obs for reward overlay (minimal_v1 / role_v1)
         self._last_step_obs: dict = {}
         # First-death detection for MAV — penalize once per episode
@@ -232,7 +237,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
     def step(self, actions: dict):
         trimmed = self._apply_action_trim(actions)
         obs, rewards, terminated, truncated, info = super().step(trimmed)
-        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2"}:
+        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3"}:
             self._last_step_obs = obs
         return obs, rewards, terminated, truncated, info
 
@@ -244,8 +249,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._paper_terminal_applied = False
         self._tam_v2_out_of_zone_penalized = set()
         self._tam_v2_missile_speed_cache = {}
+        self._tam_v3_out_of_zone_active: set[str] = set()
         obs, info = super().reset(*args, **kwargs)
-        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2"}:
+        if self.hetero_reward_mode in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3"}:
             self._last_step_obs = obs
         return obs, info
 
@@ -1070,6 +1076,161 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
     # ── end TAM paper reward v2 ────────────────────────────────────────
 
+    # ── TAM Paper Reward v3 (env-consistent) ───────────────────────────
+    # Same TAM-HAPPO categories as v2, but formulas adapted to current
+    # JSBSim 3v2 environment boundaries (BATTLEFIELD_ALTITUDE_MIN=2500,
+    # BATTLEFIELD_ALTITUDE_MAX=10000, BATTLEFIELD_HALF_SIZE=40000).
+
+    def _tam_v3_height_reward(self, altitude_m: float, cfg: dict) -> float:
+        """Env-consistent: ceiling at BATTLEFIELD_ALTITUDE_MAX=10000m."""
+        g = cfg["geometry"]
+        env_min = float(getattr(self, "BATTLEFIELD_ALTITUDE_MIN", 2500.0))
+        env_max = float(getattr(self, "BATTLEFIELD_ALTITUDE_MAX", 10000.0))
+        eff_min = max(float(g.get("min_altitude_m", 750.0)), env_min)
+        eff_max = env_max  # NOT config max — env boundary
+        optimum = float(np.clip(float(g.get("optimal_altitude_m", 6000.0)), eff_min, eff_max))
+        if altitude_m < eff_min:
+            return -1.0
+        if altitude_m > eff_max:
+            return -1.0  # strongly negative above env ceiling
+        val = 1.0 - abs(float(altitude_m) - optimum) / (eff_max - eff_min)
+        return float(np.clip(val, 0.0, 1.0))
+
+    @staticmethod
+    def _tam_v3_speed_reward(red_speed: float, blue_speed: float) -> float:
+        """Env-consistent: penalise near-stall speeds (<100 m/s)."""
+        red_speed = max(float(red_speed), 1e-8)
+        if red_speed < 100.0:
+            return -1.0  # near stall — cannot manoeuvre
+        blue_speed = float(blue_speed)
+        if blue_speed < 0.5 * red_speed:
+            return 1.0
+        if blue_speed <= 1.5 * red_speed:
+            return 2.0 - 2.0 * blue_speed / red_speed
+        return -1.0
+
+    def _tam_v3_out_of_zone_penalty(self, sim, aid: str) -> float:
+        """Env-consistent continuous boundary penalty. -2 per step out of zone."""
+        half = float(getattr(self, "BATTLEFIELD_HALF_SIZE", 40000.0))
+        alt_max = float(getattr(self, "BATTLEFIELD_ALTITUDE_MAX", 10000.0))
+        alt_min = float(getattr(self, "BATTLEFIELD_ALTITUDE_MIN", 2500.0))
+        pos = np.asarray(sim.get_position(), dtype=np.float64)
+        alt = float(sim.get_geodetic()[2])
+        if abs(float(pos[0])) > half or abs(float(pos[1])) > half or alt > alt_max or alt < alt_min:
+            if aid not in self._tam_v3_out_of_zone_active:
+                self._tam_v3_out_of_zone_active.add(aid)
+            return -2.0  # per-step continuous penalty
+        return 0.0
+
+    def _tam_v3_mav_reward(self, mav_id: str, mav, alive_blue: list, cfg: dict,
+                            base_components: dict) -> tuple[float, dict]:
+        """MAV reward — same structure as v2, unchanged formulas."""
+        return self._tam_v2_mav_reward(mav_id, mav, alive_blue, cfg, base_components)
+
+    def _tam_v3_uav_reward(self, aid: str, sim, alive_blue: list, cfg: dict,
+                            base_components: dict) -> tuple[float, dict]:
+        """UAV reward — v2 structure with v3 height/speed/out-of-zone."""
+        vals: dict[str, float] = {}
+        w = cfg["uav"]["reward_weights"]
+        v_norm = float(cfg["uav"].get("v_norm_mps", 1000.0))
+        sim_pos = np.array(sim.get_position(), dtype=np.float64)
+        sim_vel = np.array(sim.get_velocity(), dtype=np.float64)
+        sim_sp = float(np.linalg.norm(sim_vel))
+        alt = float(sim.get_geodetic()[2])
+
+        if sim.is_alive:
+            vals["tam_v2_uav_height"] = w["height"] * self._tam_v3_height_reward(alt, cfg)
+            if alive_blue:
+                blue_speeds = [float(np.linalg.norm(b.get_velocity())) for b in alive_blue]
+                vals["tam_v2_uav_speed"] = w["speed"] * max(
+                    self._tam_v3_speed_reward(sim_sp, bs) for bs in blue_speeds)
+                best_angle_raw = -1.0
+                red_feat = HeteroUavCombatEnv._tam_v2_feature(sim)
+                for b in alive_blue:
+                    b_feat = HeteroUavCombatEnv._tam_v2_feature(b)
+                    ao, ta, _r = get2d_AO_TA_R(red_feat, b_feat)
+                    aa = np.pi - ta
+                    av = 1.0 - (ao + aa) / np.pi
+                    if av > best_angle_raw:
+                        best_angle_raw = av
+                vals["tam_v2_uav_angle_raw"] = best_angle_raw
+                vals["tam_v2_uav_angle"] = w["angle"] * max(best_angle_raw, -1.0)
+                dists = [float(np.linalg.norm(b.get_position() - sim_pos)) for b in alive_blue]
+                vals["tam_v2_uav_distance"] = w["distance"] * max(
+                    self._tam_v2_uav_distance_reward(d) for d in dists)
+            else:
+                for k in ("tam_v2_uav_speed", "tam_v2_uav_angle", "tam_v2_uav_angle_raw", "tam_v2_uav_distance"):
+                    vals[k] = 0.0
+            d_total, d_angle, d_speed = self._tam_v2_dodge_reward(sim, v_norm, self._tam_v2_missile_speed_cache)
+            vals["tam_v2_uav_dodge"] = w["dodge"] * d_total
+            vals["tam_v2_uav_dodge_angle"] = d_angle
+            vals["tam_v2_uav_dodge_speed"] = d_speed
+        else:
+            for k in ("tam_v2_uav_height", "tam_v2_uav_speed", "tam_v2_uav_angle",
+                      "tam_v2_uav_angle_raw", "tam_v2_uav_distance",
+                      "tam_v2_uav_dodge", "tam_v2_uav_dodge_angle", "tam_v2_uav_dodge_speed"):
+                vals[k] = 0.0
+
+        # ── Event (v3: continuous out-of-zone) ──
+        ev = cfg["uav"]["event"]
+        r_event = 0.0
+        kills = int(self._step_kill_count.get(aid, 0))
+        r_event += kills * float(ev["kill_enemy"])
+        vals["tam_v2_uav_kill"] = kills * float(ev["kill_enemy"])
+        if (not sim.is_alive) and aid not in self._uav_death_penalized:
+            r_event += float(ev["death"])
+            self._uav_death_penalized.add(aid)
+            vals["tam_v2_uav_death"] = float(ev["death"])
+        else:
+            vals["tam_v2_uav_death"] = 0.0
+        oz_penalty = self._tam_v3_out_of_zone_penalty(sim, aid)
+        r_event += oz_penalty
+        vals["tam_v2_uav_out_of_zone"] = oz_penalty
+        vals["tam_v2_uav_event"] = r_event
+
+        # Log-only
+        orig_brma = base_components.get(aid, {})
+        vals["brma_r_adv_log"] = orig_brma.get("r_adv", 0.0)
+        vals["brma_r_pitch_log"] = orig_brma.get("r_pitch", 0.0)
+        vals["brma_r_roll_log"] = orig_brma.get("r_roll", 0.0)
+        vals["brma_r_alt_log"] = orig_brma.get("r_alt", 0.0)
+        vals["brma_r_bound_log"] = orig_brma.get("r_bound", 0.0)
+        vals["brma_r_vel_log"] = orig_brma.get("r_vel", 0.0)
+        vals["tam_v2_uav_fire_log"] = 0.0
+        vals["tam_v2_uav_mav_shared_track_log"] = 0.0
+        vals["tam_v2_geometry_feature_semantics"] = "absolute"
+        vals["tam_v2_dodge_los_semantics"] = "missile_to_aircraft"
+        vals["tam_v2_height_formula_source"] = "tam_paper_v3_env_consistent"
+
+        gs = float(cfg["global_scale"])
+        dense_event = (
+            vals["tam_v2_uav_height"] + vals["tam_v2_uav_speed"] + vals["tam_v2_uav_angle"]
+            + vals["tam_v2_uav_distance"] + vals["tam_v2_uav_dodge"] + vals["tam_v2_uav_event"]
+        )
+        total = dense_event * gs
+        vals["tam_v2_total"] = total
+        return total, vals
+
+    def _compute_tam_paper_reward_v3(self, base_rewards: dict, components: dict):
+        cfg = self.tam_paper_reward_v3_config
+        alive_blue = self._tam_v2_alive_blue()
+        mav_id = next((
+            aid for aid in self.red_ids if self.agent_roles.get(aid) == "mav"
+        ), self.red_ids[0] if self.red_ids else None)
+        for rid in self.red_ids:
+            sim = self.red_planes.get(rid)
+            if sim is None:
+                continue
+            if rid == mav_id:
+                reward, comp = self._tam_v3_mav_reward(rid, sim, alive_blue, cfg, components)
+            else:
+                reward, comp = self._tam_v3_uav_reward(rid, sim, alive_blue, cfg, components)
+            base_rewards[rid] = reward
+            components[rid] = comp
+        return base_rewards, components
+
+    # ── end TAM paper reward v3 ────────────────────────────────────────
+
     def _compute_rewards(self) -> tuple[dict, dict]:
         """Override to add minimal hetero role-aware overlay."""
         base_rewards, components = super()._compute_rewards()
@@ -1077,6 +1238,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
         if self.hetero_reward_mode not in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1"}:
             if self.hetero_reward_mode == "tam_paper_reward_v2":
                 return self._compute_tam_paper_reward_v2(base_rewards, components)
+            if self.hetero_reward_mode == "tam_paper_reward_v3":
+                return self._compute_tam_paper_reward_v3(base_rewards, components)
             return base_rewards, components
 
         mav_id = self.red_ids[0] if self.red_ids else None
