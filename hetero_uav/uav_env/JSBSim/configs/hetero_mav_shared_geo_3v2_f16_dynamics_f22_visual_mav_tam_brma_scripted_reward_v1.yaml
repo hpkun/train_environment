@@ -1,0 +1,78 @@
+# MAIN EXPERIMENT CONFIG — 3v2
+# MAV uses F16 dynamics, F22 ACMI visual label. All PID = f16_default.
+action_trim_by_role:
+  mav: {heading: 0.0, pitch: 0.0, speed: 0.0}
+agent_interaction_steps: 12
+aircraft_type_params:
+  attack_uav:  {aircraft_model: f16, role: attack_uav,  num_missiles: 2}
+  interceptor_uav: {aircraft_model: f16, role: interceptor_uav, num_missiles: 2}
+  mav:          {aircraft_model: f16, role: mav, num_missiles: 0}
+  scout_uav:    {aircraft_model: f16, role: scout_uav, num_missiles: 0}
+blue_agent_types: [attack_uav, attack_uav]
+enable_gcas_for_blue: true
+env_type: jsbsim_hetero
+hetero_reward_mode: tam_brma_scripted_reward_v1
+tam_brma_scripted_reward_v1:
+  flight_scale: 5.0
+  gate:
+    ao_thresh_deg: 45
+    ta_thresh_deg: 90
+    min_range_m: 500
+    opt_range_m: 5000
+    launch_range_m: 10000
+    enemy_threat_weight: 0.8
+  mav:
+    safety_weight: 0.7
+    support_weight: 0.4
+    aware_weight: 0.3
+    d_danger_m: 5000
+    d_safe_m: 14000
+    d_far_m: 35000
+    link_distance_m: 12000
+    rear_distance_m: 15000
+    event:
+      team_kill_credit: 40
+      death: -300
+      noncombat_loss: -300
+  uav:
+    gate_sit_weight: 0.8
+    event:
+      kill_enemy: 160
+      death: -160
+      noncombat_loss: -180
+      team_kill_shared: 30
+      team_uav_loss_shared: -30
+      mav_loss_to_uav: -160
+  terminal:
+    full_win: 300
+    costly_win: 50
+    loss: -300
+    timeout_blue_kill_scale: 150
+    timeout_mav_dead_penalty: -100
+    timeout_uav_loss_scale: -60
+red_target_selection_mode: mav_threat_rank
+initial_states:
+  blue_0: {altitude_m: 6000, lat: 60.2, lon: 120.0,  speed_mps: 250, yaw_deg: 180.0}
+  blue_1: {altitude_m: 6000, lat: 60.2, lon: 120.04, speed_mps: 250, yaw_deg: 180.0}
+  red_0:  {altitude_m: 6500, lat: 59.98, lon: 120.02, speed_mps: 230, yaw_deg: 0.0}
+  red_1:  {altitude_m: 6000, lat: 60.0,  lon: 120.0,  speed_mps: 250, yaw_deg: 0.0}
+  red_2:  {altitude_m: 6000, lat: 60.0,  lon: 120.04, speed_mps: 250, yaw_deg: 0.0}
+mav_observation_range_m: 80000
+max_num_blue: 2
+max_num_red: 3
+max_steps: 1000
+observation_mode: mav_shared_geo
+red_agent_types: [mav, attack_uav, attack_uav]
+sim_freq: 60
+suppress_jsbsim_output: true
+uav_direct_observation_range_m: 10000.0
+
+pid_profile_by_role:
+  mav: f16_default
+  attack_uav: f16_default
+  interceptor_uav: f16_default
+
+# Visual only — ACMI rendering, no effect on simulation dynamics
+acmi_visual_by_role:
+  mav: f22
+  attack_uav: f16
