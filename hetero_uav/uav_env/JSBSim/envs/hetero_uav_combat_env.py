@@ -1727,6 +1727,22 @@ class HeteroUavCombatEnv(UavCombatEnv):
         # ── Team-wide event accumulators ──
         total_red_kills = sum(int(self._step_kill_count.get(rid, 0)) for rid in self.red_ids)
 
+        # ── Team-wide shared events ──
+        # Detect UAV first-death this step → team_uav_loss_shared
+        team_uav_loss = 0.0
+        mav_loss_to_uav = 0.0
+        for rid in self.red_ids:
+            sim = self.red_planes.get(rid)
+            if sim is None:
+                continue
+            role = self.agent_roles.get(rid, "")
+            if role == "mav":
+                if not sim.is_alive and not self._tam_brma_scripted_mav_death_penalized:
+                    mav_loss_to_uav = float(cfg["uav"]["event"].get("mav_loss_to_uav", -160.0))
+            else:
+                if not sim.is_alive and rid not in self._tam_brma_scripted_uav_death_penalized:
+                    team_uav_loss = float(cfg["uav"]["event"].get("team_uav_loss_shared", -30.0))
+
         for rid in self.red_ids:
             sim = self.red_planes.get(rid)
             if sim is None:
@@ -1752,11 +1768,32 @@ class HeteroUavCombatEnv(UavCombatEnv):
             # ── Event ──
             self._tam_brma_v1_events(vals, rid, sim, role, total_red_kills, cfg)
 
+            # Inject team shared death events
+            if role != "mav":
+                if team_uav_loss != 0.0:
+                    vals["tam_brma_v1_uav_event"] = vals.get("tam_brma_v1_uav_event", 0.0) + team_uav_loss
+                if mav_loss_to_uav != 0.0:
+                    vals["tam_brma_v1_uav_event"] = vals.get("tam_brma_v1_uav_event", 0.0) + mav_loss_to_uav
+            else:
+                if team_uav_loss != 0.0:
+                    vals["tam_brma_v1_mav_event"] = vals.get("tam_brma_v1_mav_event", 0.0) + team_uav_loss
+
             # ── Terminal ──
             vals["tam_brma_v1_team_terminal"] = team_outcome
 
-            # ── Total ──
-            total = sum(v for k, v in vals.items() if k.startswith("tam_brma_v1_") and v != 0.0)
+            # ── Total (only active components, NOT diagnostics) ──
+            if role == "mav":
+                total = (vals.get("tam_brma_v1_flight", 0.0)
+                         + vals.get("tam_brma_v1_mav_safe", 0.0)
+                         + vals.get("tam_brma_v1_mav_support", 0.0)
+                         + vals.get("tam_brma_v1_mav_aware", 0.0)
+                         + vals.get("tam_brma_v1_mav_event", 0.0)
+                         + vals.get("tam_brma_v1_team_terminal", 0.0))
+            else:
+                total = (vals.get("tam_brma_v1_flight", 0.0)
+                         + vals.get("tam_brma_v1_uav_gate_sit", 0.0)
+                         + vals.get("tam_brma_v1_uav_event", 0.0)
+                         + vals.get("tam_brma_v1_team_terminal", 0.0))
             vals["tam_brma_v1_total"] = total
             base_rewards[rid] = total
             components[rid] = vals
@@ -1911,8 +1948,21 @@ class HeteroUavCombatEnv(UavCombatEnv):
             r_aware /= n_b
         vals["tam_brma_v1_mav_aware"] = float(mav_cfg.get("aware_weight", 0.3)) * r_aware
 
+    def _tam_brma_v1_read_death_reason(self, aid: str) -> str:
+        """Read death reason from env state — checked before info is populated."""
+        dr = getattr(self, "_death_reasons", {})
+        reason = dr.get(aid, "")
+        if reason:
+            return reason
+        events = getattr(self, "_death_events_step", [])
+        for ev in (events or []):
+            if isinstance(ev, dict) and ev.get("agent_id") == aid:
+                return str(ev.get("death_reason", ""))
+        return ""
+
     def _tam_brma_v1_events(self, vals: dict, aid: str, sim, role: str,
-                             total_red_kills: int, cfg: dict):
+                             total_red_kills: int, cfg: dict,
+                             mav_id: str = None):
         uav_ev = cfg["uav"]["event"]
         mav_ev = cfg["mav"]["event"]
         r_event = 0.0
@@ -1920,12 +1970,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
             team_kill_credit = float(mav_ev.get("team_kill_credit", 40.0))
             r_event += team_kill_credit * total_red_kills
             if not sim.is_alive and not self._tam_brma_scripted_mav_death_penalized:
-                # Check for noncombat loss
-                death_reason = ""
-                info_aid = getattr(self, "_last_info", {}).get(aid, {})
-                if isinstance(info_aid, dict):
-                    death_reason = str(info_aid.get("death_reason", ""))
-                is_noncombat = any(kw in death_reason.lower()
+                reason = self._tam_brma_v1_read_death_reason(aid)
+                is_noncombat = any(kw in reason.lower()
                                    for kw in ("crash", "lowalt", "overg", "extreme", "boundary", "out_of_zone"))
                 penalty = float(mav_ev.get("noncombat_loss", -300.0) if is_noncombat
                                 else mav_ev.get("death", -300.0))
@@ -1940,11 +1986,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
             vals["tam_brma_v1_uav_kill"] = kills * float(uav_ev.get("kill_enemy", 160.0))
             if not sim.is_alive and aid not in self._tam_brma_scripted_uav_death_penalized:
                 self._tam_brma_scripted_uav_death_penalized.add(aid)
-                death_reason = ""
-                info_aid = getattr(self, "_last_info", {}).get(aid, {})
-                if isinstance(info_aid, dict):
-                    death_reason = str(info_aid.get("death_reason", ""))
-                is_noncombat = any(kw in death_reason.lower()
+                reason = self._tam_brma_v1_read_death_reason(aid)
+                is_noncombat = any(kw in reason.lower()
                                    for kw in ("crash", "lowalt", "overg", "extreme", "boundary", "out_of_zone"))
                 penalty = float(uav_ev.get("noncombat_loss", -180.0) if is_noncombat
                                 else uav_ev.get("death", -160.0))
