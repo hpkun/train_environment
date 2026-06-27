@@ -231,6 +231,49 @@ def percentile(vals: list[float], pct: float) -> float:
     return vals[idx]
 
 
+def pearson_corr(xs: Iterable[float], ys: Iterable[float]) -> float:
+    x = [safe_float(v) for v in xs]
+    y = [safe_float(v) for v in ys]
+    if len(x) != len(y) or len(x) < 2:
+        return 0.0
+    mx = sum(x) / len(x)
+    my = sum(y) / len(y)
+    vx = sum((v - mx) ** 2 for v in x)
+    vy = sum((v - my) ** 2 for v in y)
+    if vx <= 1e-12 or vy <= 1e-12:
+        return 0.0
+    cov = sum((a - mx) * (b - my) for a, b in zip(x, y))
+    return cov / (vx * vy) ** 0.5
+
+
+def classify_launch_first_failed_gate(row: dict) -> str:
+    gates = [
+        ("track", "has_track"),
+        ("range", "range_ok_3d"),
+        ("ata", "ata_ok_3d"),
+        ("ta", "ta_ok_3d"),
+        ("boresight", "boresight_ok_3d"),
+        ("geometry", "launch_geometry_ok_3d"),
+    ]
+    for label, key in gates:
+        if int(safe_float(row.get(key))) != 1:
+            return label
+    if int(safe_float(row.get("lock_mature", 0))) != 1:
+        return "lock_mature"
+    if int(safe_float(row.get("actual_launch", 0))) != 1:
+        return "launch"
+    return "passed"
+
+
+def summarize_first_failed_gate(rows: list[dict]) -> list[dict]:
+    counts = Counter(classify_launch_first_failed_gate(r) for r in rows)
+    total = max(len(rows), 1)
+    return [
+        {"first_failed_gate": gate, "count": count, "rate": count / total}
+        for gate, count in sorted(counts.items())
+    ]
+
+
 def source_line_hits(path: Path, patterns: dict[str, str]) -> list[dict]:
     if not path.exists():
         return []
@@ -247,4 +290,3 @@ def source_line_hits(path: Path, patterns: dict[str, str]) -> list[dict]:
                 })
                 break
     return out
-
