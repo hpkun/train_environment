@@ -178,13 +178,43 @@ def run_deterministic_rollout(checkpoint_path: str, config_path: str,
                     target = env.blue_planes.get(target_id)
                     if not target or not target.is_alive: continue
                     try:
-                        lm = env._missile_candidate_metrics(shooter, target)
-                    except Exception:
-                        lm = {}
-                    try:
                         g3d = env._build_launch_geometry_3d(shooter, target)
                     except Exception:
                         g3d = {}
+
+                    # Track: use env._has_launch_track directly (NOT geometry method)
+                    hlt_raw = (False, "unobserved")
+                    try:
+                        hlt_raw = env._has_launch_track(shooter_id, target_id)
+                    except Exception:
+                        pass
+                    has_track = bool(hlt_raw[0]) if isinstance(hlt_raw, tuple) else bool(hlt_raw)
+                    track_source = str(hlt_raw[1]) if isinstance(hlt_raw, tuple) and len(hlt_raw) > 1 else ("mav_shared" if has_track else "unobserved")
+
+                    # Obs raw fields for trace
+                    obs_s = env._last_step_obs.get(shooter_id, {})
+                    ets = obs_s.get("enemy_track_source", None)
+                    eom = obs_s.get("enemy_observed_mask", None)
+                    b_idx = 0 if target_id == "blue_0" else 1
+                    obs_track_direct = 0; obs_track_shared = 0
+                    if ets is not None and len(ets) > b_idx:
+                        ts_row = ets[b_idx]
+                        obs_track_direct = int(ts_row[0]) if len(ts_row) > 0 else 0
+                        obs_track_shared = int(ts_row[1]) if len(ts_row) > 1 else 0
+                    obs_observed = int(eom[b_idx]) if eom is not None and len(eom) > b_idx else 0
+
+                    # Dynamic trace: mismatch flag
+                    trace_flag = "NO_TRACK_EXPECTED"
+                    if not obs_s:
+                        trace_flag = "OBS_MISSING"
+                    elif obs_track_direct:
+                        trace_flag = "OK_DIRECT" if has_track else "OBS_DIRECT_BUT_HAS_TRACK_FALSE"
+                    elif obs_track_shared:
+                        trace_flag = "OK_MAV_SHARED" if has_track else "OBS_SHARED_BUT_HAS_TRACK_FALSE"
+                    elif has_track:
+                        trace_flag = "HAS_TRACK_BUT_NO_OBS_SOURCE"
+                    else:
+                        trace_flag = "NO_TRACK_EXPECTED"
 
                     # Reward geometry (2D AO/TA from tam_brma_v1)
                     from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv as H
@@ -208,10 +238,8 @@ def run_deterministic_rollout(checkpoint_path: str, config_path: str,
                     d_e = H._tam_brma_v1_d_gate(dist_e, cfg)
                     g_enemy = a_e * t_e * max(d_e, 0.0)
 
-                    # Track / lock info
-                    has_track = bool(lm.get("has_track", False))
-                    track_source = str(lm.get("track_source", "none"))
-                    engaged = bool(lm.get("target_engaged", False))
+                    # Track / lock info (already computed above from _has_launch_track)
+                    engaged = False  # not available from geometry
 
                     # Real 3D gate
                     r3_ok = bool(g3d.get("range_ok_3d", False))
@@ -235,9 +263,15 @@ def run_deterministic_rollout(checkpoint_path: str, config_path: str,
                         "shooter_role": env.agent_roles.get(shooter_id,""),
                         "target_alive": int(target.is_alive),
                         "has_track": int(has_track), "track_source": track_source,
+                        "obs_track_direct_raw": obs_track_direct,
+                        "obs_track_mav_shared_raw": obs_track_shared,
+                        "obs_observed_mask_raw": obs_observed,
+                        "trace_flag": trace_flag,
                         "target_engaged": int(engaged),
-                        "range_3d_m": round(float(lm.get("range_3d_m", r2 or 0)),1),
-                        "range_2d_m": round(float(lm.get("range_2d_m", r2 or 0)),1),
+                        "range_3d_m": round(float(g3d.get("range_3d_m", r2 or 0)),1),
+                        "range_2d_m": round(float(g3d.get("range_2d_m", r2 or 0)),1),
+                        "shooter_alive": int(shooter.is_alive),
+                        "mav_alive": int(env.red_planes.get("red_0").is_alive if env.red_planes.get("red_0") else False),
                         "AO_2d_rad": round(float(ao2),4),
                         "TA_2d_rad": round(float(ta2),4),
                         "ATA_3d_rad": round(float(g3d.get("ATA_3d_rad",0)),4),
@@ -365,21 +399,25 @@ def _write_csv(path, rows, fieldnames):
 def _launch_breakdown(launch_rows: list[dict]) -> dict:
     if not launch_rows: return {}
     n = len(launch_rows)
+    trace_counts = {}
+    for r in launch_rows:
+        tf = r.get("trace_flag", "unknown")
+        trace_counts[tf] = trace_counts.get(tf, 0) + 1
     return {
         "total_pairs": n,
         "track_ok_pairs": sum(1 for r in launch_rows if r.get("has_track")),
+        "track_direct": sum(1 for r in launch_rows if r.get("track_source") == "direct"),
+        "track_mav_shared": sum(1 for r in launch_rows if r.get("track_source") == "mav_shared"),
         "range_ok_pairs": sum(1 for r in launch_rows if r.get("range_ok_3d")),
         "ata_ok_pairs": sum(1 for r in launch_rows if r.get("ata_ok_3d")),
         "ta_ok_pairs": sum(1 for r in launch_rows if r.get("ta_ok_3d")),
         "boresight_ok_pairs": sum(1 for r in launch_rows if r.get("boresight_ok_3d")),
         "geometry_ok_pairs": sum(1 for r in launch_rows if r.get("launch_geometry_ok_3d")),
         "reward_g_own_positive": sum(1 for r in launch_rows if _sf(r.get("reward_g_own")) > 0.01),
-        "reward_g_own_positive_no_geom": sum(1 for r in launch_rows if _sf(r.get("reward_g_own")) > 0.01 and not r.get("launch_geometry_ok_3d")),
         "mismatch_reward_pos_geom_false": sum(1 for r in launch_rows if r.get("mismatch_type") == "reward_positive_real_geometry_false"),
-        "mismatch_reward_pos_track_false": sum(1 for r in launch_rows if r.get("mismatch_type") == "reward_positive_track_false"),
-        "mismatch_reward_zero_geom_true": sum(1 for r in launch_rows if r.get("mismatch_type") == "reward_zero_real_geometry_true"),
         "mismatch_aligned_positive": sum(1 for r in launch_rows if r.get("mismatch_type") == "aligned_positive"),
         "mismatch_aligned_negative": sum(1 for r in launch_rows if r.get("mismatch_type") == "aligned_negative"),
+        **{f"trace_{k}": v for k, v in sorted(trace_counts.items())},
     }
 
 def _gate_reward_vs_real(launch_rows: list[dict]) -> list[dict]:
