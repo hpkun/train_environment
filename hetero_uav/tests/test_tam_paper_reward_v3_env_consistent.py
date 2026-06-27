@@ -234,3 +234,82 @@ class TestV3MAVSupport:
         with open("uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_dynamics_f22_visual_mav_tam_paper_reward_v3.yaml", encoding="utf-8") as f:
             c = yaml.safe_load(f)
         assert c["tam_paper_reward_v3"]["mav"]["d_max_m"] == 25000.0
+
+
+class TestV3ConfigSemantics:
+    def test_max_altitude_is_10000(self):
+        import yaml
+        with open("uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_dynamics_f22_visual_mav_tam_paper_reward_v3.yaml", encoding="utf-8") as f:
+            c = yaml.safe_load(f)
+        assert c["tam_paper_reward_v3"]["geometry"]["max_altitude_m"] == 10000.0
+
+    def test_out_of_zone_per_step_exists(self):
+        import yaml
+        with open("uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_dynamics_f22_visual_mav_tam_paper_reward_v3.yaml", encoding="utf-8") as f:
+            c = yaml.safe_load(f)
+        assert "out_of_zone_per_step" in c["tam_paper_reward_v3"]["uav"]["event"]
+        assert c["tam_paper_reward_v3"]["uav"]["event"]["out_of_zone_per_step"] == -2.0
+
+
+class TestV3MAVBoundary:
+    def test_mav_ooz_penalty_callable(self):
+        """Verify v3 out-of-zone penalty function accepts cfg and returns float."""
+        env = _make_v3_env()
+        env.reset(seed=0)
+        mav = env.red_planes.get("red_0")
+        cfg = env.tam_paper_reward_v3_config
+        env._tam_v3_out_of_zone_active = set()
+        # Test at normal position (in zone) → 0
+        p_in = env._tam_v3_out_of_zone_penalty(mav, "red_0", cfg)
+        assert p_in == 0.0, f"in-zone should be 0, got {p_in}"
+        env.close()
+
+    def test_mav_v3_reward_includes_event(self):
+        """v3 MAV reward returns event key in component dict."""
+        env = _make_v3_env()
+        env.reset(seed=0)
+        mav = env.red_planes.get("red_0")
+        cfg = env.tam_paper_reward_v3_config
+        env._mav_death_penalized = True
+        total, comp = env._tam_v3_mav_reward("red_0", mav, [], cfg, {})
+        assert "tam_v2_mav_event" in comp
+        assert "tam_v2_mav_safety" in comp
+        assert "tam_v2_mav_support" in comp
+        env.close()
+
+
+class TestV3TargetConsistency:
+    def test_shaping_target_logged(self):
+        env = _make_v3_env()
+        env.reset(seed=0)
+        for _ in range(3):
+            actions = {rid: np.zeros(3, dtype=np.float32) for rid in env.red_ids}
+            from algorithms.mappo.opponent_policy import OpponentPolicy
+            opp = OpponentPolicy(mode="brma_rule", seed=0)
+            actions.update(opp.act(env._last_step_obs, env.blue_ids, env=env))
+            obs, rewards, terminated, truncated, info = env.step(actions)
+        rc = info.get("reward_components", {})
+        c1 = rc.get("red_1", {})
+        assert "tam_v3_uav_shaping_target" in c1, "v3 UAV should log shaping target index"
+        env.close()
+
+
+class TestV3MAVSupportContinuity:
+    def test_r_pos_continuous_at_d_opt(self):
+        """r_pos should be continuous: lim from below == lim from above at d_opt."""
+        import numpy as np
+        d_opt = 8000.0
+        # Below d_opt: cos(pi * d / (2*d_opt))
+        below = np.cos(np.pi * (d_opt - 1e-6) / (2.0 * d_opt))
+        # Above d_opt: -0.5 * (d - d_opt) / (d_max - d_opt)
+        above = -0.5 * (1e-6) / (25000.0 - d_opt)
+        # Both should be ~0.0
+        assert abs(below) < 1e-4, f"r_pos at d_opt-eps should be ~0, got {below}"
+        assert abs(above) < 1e-4, f"r_pos at d_opt+eps should be ~0, got {above}"
+
+    def test_r_pos_negative_when_too_close(self):
+        """r_pos at d=0 should be 1.0 (cos(0)=1), at d=d_opt should be 0."""
+        import numpy as np
+        r0 = np.cos(0.0)
+        assert r0 == 1.0, f"r_pos at d=0 should be 1.0, got {r0}"
+

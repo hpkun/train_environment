@@ -1125,8 +1125,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
             return 2.0 - 2.0 * blue_speed / red_speed
         return -1.0
 
-    def _tam_v3_out_of_zone_penalty(self, sim, aid: str) -> float:
-        """Env-consistent continuous boundary penalty. -2 per step out of zone."""
+    def _tam_v3_out_of_zone_penalty(self, sim, aid: str, cfg: dict) -> float:
+        """Env-consistent continuous boundary penalty, configurable per step."""
         half = float(getattr(self, "BATTLEFIELD_HALF_SIZE", 40000.0))
         alt_max = float(getattr(self, "BATTLEFIELD_ALTITUDE_MAX", 10000.0))
         alt_min = float(getattr(self, "BATTLEFIELD_ALTITUDE_MIN", 2500.0))
@@ -1135,17 +1135,110 @@ class HeteroUavCombatEnv(UavCombatEnv):
         if abs(float(pos[0])) > half or abs(float(pos[1])) > half or alt > alt_max or alt < alt_min:
             if aid not in self._tam_v3_out_of_zone_active:
                 self._tam_v3_out_of_zone_active.add(aid)
-            return -2.0  # per-step continuous penalty
+            return float(cfg["uav"]["event"].get("out_of_zone_per_step", -2.0))
         return 0.0
 
     def _tam_v3_mav_reward(self, mav_id: str, mav, alive_blue: list, cfg: dict,
                             base_components: dict) -> tuple[float, dict]:
-        """MAV reward — same structure as v2, unchanged formulas."""
-        return self._tam_v2_mav_reward(mav_id, mav, alive_blue, cfg, base_components)
+        """MAV reward — v2 structure + v3 continuous boundary penalty + continuous r_pos."""
+        vals: dict[str, float] = {}
+        mav_pos = np.array(mav.get_position(), dtype=np.float64)
+        mav_vel = np.array(mav.get_velocity(), dtype=np.float64)
+        sw = cfg["mav"]["safety_weights"]
+        d_danger = float(cfg["mav"]["d_danger_m"])
+        d_safe = float(cfg["mav"]["d_safe_m"])
+        r_dist = 0.0; r_threat = 0.0; r_aspect = 0.0; r_aware = 0.0; r_pos = 0.0
+        if mav.is_alive:
+            if alive_blue:
+                distances = [float(np.linalg.norm(b.get_position() - mav_pos)) for b in alive_blue]
+                near_d = min(distances)
+                if near_d <= d_danger:
+                    r_dist = -(1.0 - near_d / d_danger)
+                elif near_d < d_safe:
+                    r_dist = -0.5 * (1.0 - (near_d - d_danger) / (d_safe - d_danger))
+                else:
+                    r_dist = 0.2
+                vals["tam_v2_mav_dist"] = r_dist
+                threat_missiles = getattr(mav, "under_missiles", None)
+                r_threat = -1.0 if (threat_missiles and any(getattr(m, "is_alive", False) for m in threat_missiles)) else 0.0
+                vals["tam_v2_mav_threat"] = r_threat
+                mav_feat = HeteroUavCombatEnv._tam_v2_feature(mav)
+                for b in alive_blue:
+                    b_feat = HeteroUavCombatEnv._tam_v2_feature(b)
+                    ao, ta, _r = get2d_AO_TA_R(mav_feat, b_feat)
+                    if ta < np.pi / 4:
+                        r_aspect -= (1.0 - ta / (np.pi / 4))
+                vals["tam_v2_mav_aspect"] = r_aspect
+                mav_obs_range = getattr(self, "mav_observation_range_m", 80000.0)
+                for b in alive_blue:
+                    b_feat = HeteroUavCombatEnv._tam_v2_feature(b)
+                    ao, _ta, _r = get2d_AO_TA_R(mav_feat, b_feat)
+                    d = float(np.linalg.norm(b.get_position() - mav_pos))
+                    if d < mav_obs_range and ao < np.pi / 2:
+                        r_aware += 0.3 * (1.0 - ao / (np.pi / 2))
+                vals["tam_v2_mav_aware"] = r_aware
+
+                # ── v3 continuous r_pos ──
+                sup_w = cfg["mav"]["support_weights"]
+                d_opt = float(cfg["mav"]["d_opt_m"])
+                d_max_mav = float(cfg["mav"]["d_max_m"])
+                blue_centroid = np.mean([b.get_position() for b in alive_blue], axis=0)
+                d_b = float(np.linalg.norm(blue_centroid - mav_pos))
+                if d_b <= d_opt:
+                    r_pos = np.cos(np.pi * d_b / (2.0 * d_opt))  # 1.0 at d=0, 0.0 at d=d_opt
+                elif d_b < d_max_mav:
+                    r_pos = -0.5 * (d_b - d_opt) / (d_max_mav - d_opt)  # 0.0 → -0.5
+                else:
+                    r_pos = -0.5
+                vals["tam_v2_mav_pos"] = r_pos
+                vals["tam_v2_mav_support"] = sup_w["pos"] * r_pos + sup_w["aware"] * r_aware
+            else:
+                for k in ("tam_v2_mav_dist", "tam_v2_mav_threat", "tam_v2_mav_aspect", "tam_v2_mav_aware",
+                          "tam_v2_mav_pos", "tam_v2_mav_safety", "tam_v2_mav_support"):
+                    vals[k] = 0.0
+            vals["tam_v2_mav_safety"] = sw["dist"] * r_dist + sw["threat"] * r_threat + sw["aspect"] * r_aspect
+        else:
+            for k in ("tam_v2_mav_dist", "tam_v2_mav_threat", "tam_v2_mav_aspect", "tam_v2_mav_aware",
+                      "tam_v2_mav_safety", "tam_v2_mav_pos", "tam_v2_mav_support"):
+                vals[k] = 0.0
+
+        # ── Event (v3: continuous out-of-zone applies to MAV too) ──
+        r_event = 0.0
+        if (not mav.is_alive) and (not self._mav_death_penalized):
+            r_event -= float(cfg["mav"]["death_penalty"])
+            self._mav_death_penalized = True
+            vals["tam_v2_mav_death"] = -float(cfg["mav"]["death_penalty"])
+        else:
+            vals["tam_v2_mav_death"] = 0.0
+        team_kills = sum(int(self._step_kill_count.get(rid, 0)) for rid in self.red_ids if rid != mav_id)
+        per_kill = min(float(cfg["mav"]["team_kill_bonus"]), float(cfg["mav"].get("team_kill_bonus_cap", 200.0)))
+        vals["tam_v2_mav_team_bonus"] = team_kills * per_kill
+        r_event += team_kills * per_kill
+        oz_penalty = self._tam_v3_out_of_zone_penalty(mav, mav_id, cfg)
+        r_event += oz_penalty
+        vals["tam_v2_mav_event"] = r_event
+
+        # Log-only
+        orig_brma = base_components.get(mav_id, {})
+        vals["brma_r_adv_log"] = orig_brma.get("r_adv", 0.0)
+        vals["brma_r_pitch_log"] = orig_brma.get("r_pitch", 0.0)
+        vals["brma_r_roll_log"] = orig_brma.get("r_roll", 0.0)
+        vals["brma_r_alt_log"] = orig_brma.get("r_alt", 0.0)
+        vals["brma_r_bound_log"] = orig_brma.get("r_bound", 0.0)
+        vals["brma_r_vel_log"] = orig_brma.get("r_vel", 0.0)
+        vals["tam_v2_mav_shared_log"] = 0.0
+        vals["tam_v2_mav_assist_log"] = 0.0
+        vals["tam_v2_geometry_feature_semantics"] = "absolute"
+        vals["tam_v2_height_formula_source"] = "tam_paper_v3_env_consistent"
+
+        gs = float(cfg["global_scale"])
+        total = (vals["tam_v2_mav_safety"] + vals["tam_v2_mav_support"] + vals["tam_v2_mav_event"]) * gs
+        vals["tam_v2_total"] = total
+        return total, vals
 
     def _tam_v3_uav_reward(self, aid: str, sim, alive_blue: list, cfg: dict,
                             base_components: dict) -> tuple[float, dict]:
-        """UAV reward — v2 structure with v3 height/speed/out-of-zone."""
+        """UAV reward — v2 structure with v3 height/speed/out-of-zone + per-target consistency."""
         vals: dict[str, float] = {}
         w = cfg["uav"]["reward_weights"]
         v_norm = float(cfg["uav"].get("v_norm_mps", 1000.0))
@@ -1156,27 +1249,33 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
         if sim.is_alive:
             vals["tam_v2_uav_height"] = w["height"] * self._tam_v3_height_reward(alt, cfg)
+            best_target_idx = -1
             if alive_blue:
-                blue_speeds = [float(np.linalg.norm(b.get_velocity())) for b in alive_blue]
-                vals["tam_v2_uav_speed"] = w["speed"] * max(
-                    self._tam_v3_speed_reward(sim_sp, bs) for bs in blue_speeds)
-                best_angle_raw = -1.0
                 red_feat = HeteroUavCombatEnv._tam_v2_feature(sim)
-                for b in alive_blue:
+                best_combined = -1e9
+                candidates = []
+                for idx, b in enumerate(alive_blue):
                     b_feat = HeteroUavCombatEnv._tam_v2_feature(b)
-                    ao, ta, _r = get2d_AO_TA_R(red_feat, b_feat)
+                    ao, ta, dist_m = get2d_AO_TA_R(red_feat, b_feat)
                     aa = np.pi - ta
-                    av = 1.0 - (ao + aa) / np.pi
-                    if av > best_angle_raw:
-                        best_angle_raw = av
+                    speed_raw = self._tam_v3_speed_reward(sim_sp, float(np.linalg.norm(b.get_velocity())))
+                    angle_raw = 1.0 - (ao + aa) / np.pi
+                    dist_raw = self._tam_v3_uav_distance_reward(dist_m)
+                    # Normalised weights for combined score
+                    w_norm = float(w["speed"]) + float(w["angle"]) + float(w["distance"])
+                    combined = (float(w["speed"]) * speed_raw + float(w["angle"]) * angle_raw
+                                + float(w["distance"]) * dist_raw) / max(w_norm, 1e-8)
+                    candidates.append((combined, idx, speed_raw, angle_raw, dist_raw))
+                best = max(candidates, key=lambda x: x[0])
+                _, best_target_idx, best_speed_raw, best_angle_raw, best_dist_raw = best
+                vals["tam_v2_uav_speed"] = w["speed"] * best_speed_raw
                 vals["tam_v2_uav_angle_raw"] = best_angle_raw
                 vals["tam_v2_uav_angle"] = w["angle"] * max(best_angle_raw, -1.0)
-                dists = [float(np.linalg.norm(b.get_position() - sim_pos)) for b in alive_blue]
-                vals["tam_v2_uav_distance"] = w["distance"] * max(
-                    self._tam_v3_uav_distance_reward(d) for d in dists)
+                vals["tam_v2_uav_distance"] = w["distance"] * best_dist_raw
             else:
                 for k in ("tam_v2_uav_speed", "tam_v2_uav_angle", "tam_v2_uav_angle_raw", "tam_v2_uav_distance"):
                     vals[k] = 0.0
+            vals["tam_v3_uav_shaping_target"] = float(best_target_idx)
             d_total, d_angle, d_speed = self._tam_v2_dodge_reward(sim, v_norm, self._tam_v2_missile_speed_cache)
             vals["tam_v2_uav_dodge"] = w["dodge"] * d_total
             vals["tam_v2_uav_dodge_angle"] = d_angle
@@ -1186,6 +1285,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
                       "tam_v2_uav_angle_raw", "tam_v2_uav_distance",
                       "tam_v2_uav_dodge", "tam_v2_uav_dodge_angle", "tam_v2_uav_dodge_speed"):
                 vals[k] = 0.0
+            vals["tam_v3_uav_shaping_target"] = -1.0
 
         # ── Event (v3: continuous out-of-zone) ──
         ev = cfg["uav"]["event"]
@@ -1199,7 +1299,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             vals["tam_v2_uav_death"] = float(ev["death"])
         else:
             vals["tam_v2_uav_death"] = 0.0
-        oz_penalty = self._tam_v3_out_of_zone_penalty(sim, aid)
+        oz_penalty = self._tam_v3_out_of_zone_penalty(sim, aid, cfg)
         r_event += oz_penalty
         vals["tam_v2_uav_out_of_zone"] = oz_penalty
         vals["tam_v2_uav_event"] = r_event
