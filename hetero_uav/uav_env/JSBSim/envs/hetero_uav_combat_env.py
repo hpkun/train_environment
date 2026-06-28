@@ -285,7 +285,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         return total, vals
 
     def _tam_v6v3_mav_reward(self, mav_id: str, mav, alive_blue: list, cfg: dict,
-                              base_components: dict) -> tuple[float, dict]:
+                              base_components: dict,
+                              mav_log_track: float = 0.0,
+                              mav_log_fire: float = 0.0,
+                              mav_log_hit: float = 0.0) -> tuple[float, dict]:
         prefix = "tam_v6v3_mav"
         vals: dict[str, float] = {}
         if mav.is_alive:
@@ -371,9 +374,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
         vals[f"{prefix}_team_credit_used"] = self._tam_v6v3_mav_team_credit_used
         vals[f"{prefix}_event"] = vals[f"{prefix}_death"] + credit
         vals[f"{prefix}_terminal"] = 0.0
-        vals[f"{prefix}_shared_track_usage_log"] = 0.0
-        vals[f"{prefix}_red_fire_with_mav_track_log"] = 0.0
-        vals[f"{prefix}_red_hit_with_mav_track_log"] = 0.0
+        vals[f"{prefix}_shared_track_usage_log"] = mav_log_track
+        vals[f"{prefix}_red_fire_with_mav_track_log"] = mav_log_fire
+        vals[f"{prefix}_red_hit_with_mav_track_log"] = mav_log_hit
         total = (
             vals[f"{prefix}_flight"]
             + vals[f"{prefix}_safety"]
@@ -414,12 +417,45 @@ class HeteroUavCombatEnv(UavCombatEnv):
         if round_over and not self._tam_v6v3_terminal_applied:
             terminal = self._tam_v6v3_terminal_outcome(cfg)
             self._tam_v6v3_terminal_applied = True
+        # ── MAV log-only fields: shared track usage ──
+        mav_shared_track_usage = 0.0
+        mav_red_fire_with_mav_track = 0.0
+        mav_red_hit_with_mav_track = 0.0
+        obs = getattr(self, "_last_step_obs", {})
+        if obs:
+            red_uav_track_count = 0
+            for uid in self.red_ids:
+                if self.agent_roles.get(uid) == "mav":
+                    continue
+                uav_obs = obs.get(uid, {})
+                ets = uav_obs.get("enemy_track_source", None)
+                if ets is not None:
+                    for ts_row in ets:
+                        if len(ts_row) > 1 and int(ts_row[1]) == 1:
+                            red_uav_track_count += 1
+            if red_uav_track_count > 0:
+                mav_shared_track_usage = float(red_uav_track_count) / max(len(self.red_ids) - 1, 1)
+        launch_step = getattr(self, "_launch_quality_step_records", None)
+        if launch_step:
+            for rec in launch_step:
+                if isinstance(rec, dict) and str(rec.get("launch_track_source", "")) == "mav_shared":
+                    mav_red_fire_with_mav_track += 1.0
+        launch_done = getattr(self, "_launch_quality_done_step_records", None)
+        if launch_done:
+            for rec in launch_done:
+                if (isinstance(rec, dict)
+                        and str(rec.get("launch_track_source", "")) == "mav_shared"
+                        and str(rec.get("raw_termination_reason", "")) == "hit"):
+                    mav_red_hit_with_mav_track += 1.0
         for rid in self.red_ids:
             sim = self.red_planes.get(rid)
             if sim is None:
                 continue
             if rid == mav_id:
-                _, comp = self._tam_v6v3_mav_reward(rid, sim, alive_blue, cfg, components)
+                _, comp = self._tam_v6v3_mav_reward(rid, sim, alive_blue, cfg, components,
+                                                     mav_shared_track_usage,
+                                                     mav_red_fire_with_mav_track,
+                                                     mav_red_hit_with_mav_track)
                 event_key = "tam_v6v3_mav_event"
                 term_key = "tam_v6v3_mav_terminal"
                 total_key = "tam_v6v3_mav_total"
@@ -429,9 +465,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 term_key = "tam_v6v3_uav_terminal"
                 total_key = "tam_v6v3_uav_total"
             comp[term_key] = terminal
-            comp[event_key] += terminal
             comp[total_key] += terminal * float(cfg.get("global_scale", 1.0))
             comp["tam_v6v3_terminal"] = terminal
+            comp["tam_v6v3_terminal_per_agent"] = terminal
+            comp["tam_v6v3_terminal_team_mean_log"] = terminal
             comp["tam_v6v3_total"] = comp[total_key]
             base_rewards[rid] = comp[total_key]
             components[rid] = comp
@@ -513,7 +550,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 "rear_factor_mean_log": 0.0,
             }
         own_adv = enemy_threat = 0.0
-        own_no_rear = own_td15 = rear_sum = 0.0
+        own_no_rear = own_td15 = rear_sum = 0.0; rear_error_count = 0
         ego_pos = sim.get_position()
         ego_rpy = sim.get_rpy()
         for blue in alive_blue:
@@ -526,18 +563,22 @@ class HeteroUavCombatEnv(UavCombatEnv):
             ta_ji = ta_angle_advantage_fixed(np.rad2deg(q_ji))
             td_env = self._tam_v6v3_td_env(d_3d, cfg)
             td15 = self._tam_v6v3_td_brma15_log(d_3d)
+            rear_err_i = 0
             try:
                 rear_ij = self._tam_v6v3_launch_rear_factor(
                     self._build_launch_geometry_3d(sim, blue)["TA_rad"], cfg)
                 rear_ji = self._tam_v6v3_launch_rear_factor(
                     self._build_launch_geometry_3d(blue, sim)["TA_rad"], cfg)
             except Exception:
-                rear_ij = rear_ji = 1.0
+                rear_floor = float(cfg.get("situation", {}).get("rear_floor", 0.2))
+                rear_ij = rear_ji = rear_floor
+                rear_err_i = 1
             own_adv += ta_ij * td_env * rear_ij
             enemy_threat += ta_ji * td_env * rear_ji
             own_no_rear += ta_ij * td_env
             own_td15 += ta_ij * td15
             rear_sum += rear_ij
+            rear_error_count += rear_err_i
         if bool(scfg.get("normalize_by_alive_blue", True)):
             denom = max(len(alive_blue), 1)
             own_adv /= denom
@@ -545,6 +586,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             own_no_rear /= denom
             own_td15 /= denom
             rear_sum /= denom
+            rear_error_count /= denom
         raw = own_adv - float(scfg.get("enemy_threat_weight", 0.8)) * enemy_threat
         return raw, own_adv, enemy_threat, {
             "own_adv_td10_rear_log": own_adv,
@@ -552,6 +594,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "own_adv_td10_no_rear_log": own_no_rear,
             "own_adv_td15_log": own_td15,
             "rear_factor_mean_log": rear_sum,
+            "rear_error_count_log": float(rear_error_count),
         }
 
     @staticmethod

@@ -281,3 +281,107 @@ def test_v4_still_unaffected():
     finally:
         env.close()
 
+
+def _make_v6v3_env(**overrides):
+    from uav_env import make_env
+    return make_env(CFG_PATH, **overrides)
+
+
+class TestV6TerminalNotInEvent:
+    def test_terminal_separate_from_event(self):
+        """terminal must NOT mix into event component."""
+        env = _make_v6v3_env()
+        env.reset(seed=0)
+        # Force terminal by making max_steps=1
+        env.max_steps = 1
+        env.current_step = 1
+        env._tam_v6v3_terminal_applied = False
+        base_rewards, components = env._compute_rewards()
+        c0 = components.get("red_0", {})
+        c1 = components.get("red_1", {})
+        # MAV event = death + team_credit only, NOT terminal
+        mav_ev = c0.get("tam_v6v3_mav_event", 0)
+        mav_term = c0.get("tam_v6v3_mav_terminal", 0)
+        assert abs(mav_ev - (c0.get("tam_v6v3_mav_death", 0) + c0.get("tam_v6v3_mav_team_credit_delta", 0))) < 1e-6, \
+            f"MAV event={mav_ev} should not include terminal={mav_term}"
+        # UAV event = kill + death only, NOT terminal
+        uav_ev = c1.get("tam_v6v3_uav_event", 0)
+        uav_term = c1.get("tam_v6v3_uav_terminal", 0)
+        assert abs(uav_ev - (c1.get("tam_v6v3_uav_kill", 0) + c1.get("tam_v6v3_uav_death", 0))) < 1e-6, \
+            f"UAV event={uav_ev} should not include terminal={uav_term}"
+        # Terminal exists separately
+        assert c0.get("tam_v6v3_terminal") is not None
+        assert c0["tam_v6v3_terminal"] == c1["tam_v6v3_terminal"]
+        env.close()
+
+
+class TestV6RearFallback:
+    def test_rear_fallback_uses_rear_floor(self):
+        """When _build_launch_geometry_3d raises, rear factor = rear_floor, not 1.0."""
+        env = _make_v6v3_env()
+        env.reset(seed=0)
+        cfg = env.tam_paper_reward_v6_jsbsim_aligned_v3_config
+        rear_floor = float(cfg.get("situation", {}).get("rear_floor", 0.2))
+        # Monkeypatch to always raise
+        orig = env._build_launch_geometry_3d
+        def _raise(*a, **kw):
+            raise RuntimeError("injected")
+        env._build_launch_geometry_3d = _raise
+        try:
+            sim = env.red_planes.get("red_1")
+            raw, own, threat, logs = env._tam_v6v3_situation_reward(sim, cfg)
+            assert logs["rear_factor_mean_log"] == rear_floor, \
+                f"rear fallback should be {rear_floor}, got {logs['rear_factor_mean_log']}"
+            assert logs["rear_error_count_log"] > 0, \
+                f"rear_error_count_log should be >0 on error, got {logs['rear_error_count_log']}"
+        finally:
+            env._build_launch_geometry_3d = orig
+        env.close()
+
+
+class TestV6LogOnlyNotInTotal:
+    def test_log_only_not_in_total(self):
+        """Log-only fields must not affect reward total."""
+        env = _make_v6v3_env()
+        env.reset(seed=0)
+        env.max_steps = 100
+        env.current_step = 1
+        env._tam_v6v3_terminal_applied = False
+        base_rewards, components = env._compute_rewards()
+        c0 = components.get("red_0", {})
+        # MAV total = flight + safety + support + event + terminal (NOT log-only)
+        expected = (c0.get("tam_v6v3_mav_flight", 0)
+                    + c0.get("tam_v6v3_mav_safety", 0)
+                    + c0.get("tam_v6v3_mav_support", 0)
+                    + c0.get("tam_v6v3_mav_event", 0)
+                    + c0.get("tam_v6v3_mav_terminal", 0))
+        assert abs(c0["tam_v6v3_mav_total"] - expected) < 1e-6, \
+            f"MAV total={c0['tam_v6v3_mav_total']} != expected={expected}"
+        env.close()
+
+
+class TestV6MAVSharedTrackLog:
+    def test_shared_track_usage_log_nonzero(self):
+        """When UAV obs has mav_shared track_source, log should be > 0."""
+        env = _make_v6v3_env()
+        env.reset(seed=0)
+        # Set up fake obs with mav_shared track
+        env._last_step_obs = {
+            "red_1": {
+                "enemy_track_source": [[0, 1], [0, 1]],  # two mav_shared
+            },
+            "red_2": {
+                "enemy_track_source": [[0, 1], [1, 0]],  # one mav_shared, one direct
+            },
+        }
+        env.max_steps = 100
+        env.current_step = 1
+        env._tam_v6v3_terminal_applied = False
+        base_rewards, components = env._compute_rewards()
+        c0 = components.get("red_0", {})
+        usage = c0.get("tam_v6v3_mav_shared_track_usage_log", 0)
+        assert usage > 0.0, f"shared track usage should be > 0 with mav_shared obs, got {usage}"
+        # Should be (2+1)/(3 blue targets? actually 2 UAVs with track counts) / 2 UAVs
+        assert usage <= 2.0, f"shared track usage should be <= 2, got {usage}"
+        env.close()
+
