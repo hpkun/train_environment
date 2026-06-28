@@ -387,7 +387,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent", "pure_happo"])
+                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent", "pure_happo", "pure_happo_tanh"])
     parser.add_argument("--brma-random-scale-mask", action="store_true")
     parser.add_argument("--brma-biased-mask", action="store_true")
     parser.add_argument("--brma-random-mask-prob", type=float, default=0.25)
@@ -642,7 +642,7 @@ def _run_training(args: argparse.Namespace) -> None:
         policy.load(init_path, map_location=device)
         print(f"Loaded init_checkpoint: {init_path}", flush=True)
 
-    if args.policy_arch == "pure_happo":
+    if args.policy_arch in {"pure_happo", "pure_happo_tanh"}:
         trainer = PureHAPPOTrainer(
             policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
             clip_param=args.clip_param, entropy_coef=args.entropy_coef,
@@ -659,8 +659,8 @@ def _run_training(args: argparse.Namespace) -> None:
         )
     uav_imitation_data = None
     if args.uav_imitation_dataset and args.uav_imitation_coef > 0.0:
-        if args.policy_arch == "pure_happo":
-            print("WARNING: pure_happo does not support UAV imitation. "
+        if args.policy_arch in {"pure_happo", "pure_happo_tanh"}:
+            print("WARNING: pure_happo/pure_happo_tanh does not support UAV imitation. "
                   "Ignoring --uav-imitation-* flags.", flush=True)
         else:
             uav_imitation_data = _load_uav_imitation_dataset(args.uav_imitation_dataset)
@@ -1128,7 +1128,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 "last_worker_timeout_info": last_worker_timeout_info,
             })
 
-            if args.policy_arch == "pure_happo":
+            if args.policy_arch in {"pure_happo", "pure_happo_tanh"}:
                 stats = trainer.update(buffer)
             else:
                 imitation_batch = None

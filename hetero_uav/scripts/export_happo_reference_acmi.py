@@ -93,10 +93,11 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
             int(meta.get("actor_obs_dim", 96)),
             int(meta.get("critic_state_dim", 480)),
         ).to(device)
-    if policy_arch == "pure_happo":
-        from algorithms.pure_happo import PureHAPPOPolicy
+    if policy_arch in {"pure_happo", "pure_happo_tanh"}:
+        from algorithms.pure_happo import PureHAPPOPolicy, PureHAPPOTanhPolicy
         num_agents = int(meta.get("num_agents", 3))
-        return PureHAPPOPolicy(
+        cls = PureHAPPOTanhPolicy if policy_arch == "pure_happo_tanh" else PureHAPPOPolicy
+        return cls(
             actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
             critic_state_dim=int(meta.get("critic_state_dim", 480)),
             action_dim=3, num_agents=num_agents,

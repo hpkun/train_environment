@@ -178,3 +178,105 @@ class PureHAPPOPolicy(nn.Module):
 
     def load(self, path: str, map_location=None):
         self.load_state_dict(torch.load(path, map_location=map_location, weights_only=True))
+
+
+class PureHAPPOTanhPolicy(PureHAPPOPolicy):
+    """Pure-HAPPO with tanh-squashed Gaussian action accounting.
+
+    This keeps the independent actor / centralized critic structure from
+    ``PureHAPPOPolicy`` but uses the same transformed distribution for rollout
+    and PPO replay. The historical ``PureHAPPOPolicy`` clamp behavior is left
+    unchanged for baseline compatibility.
+    """
+
+    tanh_eps = 1e-6
+    raw_action_limit = 4.0
+
+    def _squashed_log_prob(self, dist: Normal, raw_action: torch.Tensor) -> torch.Tensor:
+        squashed = torch.tanh(raw_action)
+        correction = torch.log(1.0 - squashed.pow(2) + self.tanh_eps)
+        return (dist.log_prob(raw_action) - correction).sum(dim=-1)
+
+    def _atanh_action(self, action: torch.Tensor) -> torch.Tensor:
+        action = action.clamp(-1.0 + self.tanh_eps, 1.0 - self.tanh_eps)
+        return 0.5 * (torch.log1p(action) - torch.log1p(-action))
+
+    def act(self, actor_obs, roles=None, critic_state=None,
+            deterministic: bool = False, rnn_hidden=None, **kwargs):
+        device = next(self.parameters()).device
+        actor_obs = torch.as_tensor(actor_obs, dtype=torch.float32, device=device)
+        if critic_state is not None:
+            critic_state = torch.as_tensor(critic_state, dtype=torch.float32, device=device)
+
+        if actor_obs.dim() == 2:
+            actor_obs = actor_obs.unsqueeze(0)
+            squeezed = True
+        else:
+            squeezed = False
+
+        B, N, _D = actor_obs.shape
+        self._check_agent_count(N)
+
+        actions = torch.zeros(B, N, self.action_dim, device=device)
+        raw_actions = torch.zeros(B, N, self.action_dim, device=device)
+        log_probs = torch.zeros(B, N, device=device)
+        entropies = torch.zeros(B, N, device=device)
+        means = torch.zeros(B, N, self.action_dim, device=device)
+
+        for i in range(self.num_agents):
+            dist, mean = self._distribution(actor_obs[:, i, :], i)
+            raw = mean if deterministic else dist.rsample()
+            raw = raw.clamp(-self.raw_action_limit, self.raw_action_limit)
+            action = torch.tanh(raw)
+            actions[:, i, :] = action
+            raw_actions[:, i, :] = raw
+            log_probs[:, i] = self._squashed_log_prob(dist, raw)
+            entropies[:, i] = dist.entropy().sum(dim=-1)
+            means[:, i, :] = mean
+
+        value = self.value(critic_state) if critic_state is not None else None
+        out = {
+            "action": actions.squeeze(0) if squeezed else actions,
+            "raw_action": raw_actions.squeeze(0) if squeezed else raw_actions,
+            "log_prob": log_probs.squeeze(0) if squeezed else log_probs,
+            "entropy": entropies.squeeze(0) if squeezed else entropies,
+            "value": value,
+            "mean": means.squeeze(0) if squeezed else means,
+        }
+        if rnn_hidden is not None:
+            out["rnn_hidden"] = rnn_hidden
+        return out
+
+    def evaluate_actions(self, actor_obs, critic_state, actions):
+        device = next(self.parameters()).device
+        actor_obs = torch.as_tensor(actor_obs, dtype=torch.float32, device=device)
+        critic_state = torch.as_tensor(critic_state, dtype=torch.float32, device=device)
+        actions = torch.as_tensor(actions, dtype=torch.float32, device=device)
+
+        T, N = actor_obs.shape[:2]
+        self._check_agent_count(N)
+
+        log_probs = torch.zeros(T, N, device=device)
+        entropies = torch.zeros(T, N, device=device)
+        means_t = torch.zeros(T, N, self.action_dim, device=device)
+        raw_actions = self._atanh_action(actions)
+
+        for i in range(self.num_agents):
+            dist, mean = self._distribution(actor_obs[:, i, :], i)
+            log_probs[:, i] = self._squashed_log_prob(dist, raw_actions[:, i, :])
+            entropies[:, i] = dist.entropy().sum(dim=-1)
+            means_t[:, i, :] = mean
+
+        values = self.value(critic_state)
+        return log_probs, entropies, values, means_t
+
+    def evaluate_agent_actions(self, agent_idx: int,
+                                actor_obs_i, actions_i):
+        device = next(self.parameters()).device
+        actor_obs_i = torch.as_tensor(actor_obs_i, dtype=torch.float32, device=device)
+        actions_i = torch.as_tensor(actions_i, dtype=torch.float32, device=device)
+        dist, mean = self._distribution(actor_obs_i, agent_idx)
+        raw_action = self._atanh_action(actions_i)
+        log_prob = self._squashed_log_prob(dist, raw_action)
+        entropy = dist.entropy().sum(dim=-1)
+        return log_prob, entropy, mean

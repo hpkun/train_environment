@@ -21,7 +21,7 @@ from algorithms.happo import (
     EntityHAPPOReferencePolicy,
     HAPPOReferencePolicy,
 )
-from algorithms.pure_happo import PureHAPPOPolicy
+from algorithms.pure_happo import PureHAPPOPolicy, PureHAPPOTanhPolicy
 from algorithms.happo.hetero_entity_recurrent_policy import (
     HeteroEntityRecurrentPolicy,
     validate_entity_policy_meta,
@@ -106,6 +106,15 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
         if num_agents <= 0:
             raise ValueError("pure_happo checkpoint meta missing num_agents")
         return PureHAPPOPolicy(
+            actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3, num_agents=num_agents,
+        ).to(device)
+    if policy_arch == "pure_happo_tanh":
+        num_agents = int(meta.get("num_agents", 0))
+        if num_agents <= 0:
+            raise ValueError("pure_happo_tanh checkpoint meta missing num_agents")
+        return PureHAPPOTanhPolicy(
             actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
             critic_state_dim=int(meta.get("critic_state_dim", 480)),
             action_dim=3, num_agents=num_agents,

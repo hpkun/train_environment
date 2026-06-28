@@ -1,6 +1,9 @@
 import math
 
 import numpy as np
+import subprocess
+import sys
+from pathlib import Path
 import pytest
 import torch
 from torch.distributions import Normal
@@ -11,6 +14,26 @@ from scripts.full_review_audit_utils import (
     pearson_corr,
     summarize_first_failed_gate,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_low_level_closure_scripts_help():
+    scripts = [
+        "scripts/audit_pure_happo_cloned_update.py",
+        "scripts/audit_reward_3d_gate_shadow.py",
+        "scripts/sweep_pure_happo_checkpoints_low_level.py",
+        "scripts/run_low_level_audit_subprocess.py",
+    ]
+    for script in scripts:
+        result = subprocess.run(
+            [sys.executable, script, "--help"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
 
 
 def _cfg():

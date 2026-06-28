@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import sys
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -52,11 +53,12 @@ def _find_run_dir() -> Path:
 
 
 def _load_policy(checkpoint: Path, device: torch.device):
-    from algorithms.pure_happo import PureHAPPOPolicy
+    from algorithms.pure_happo import PureHAPPOPolicy, PureHAPPOTanhPolicy
 
     meta_path = checkpoint.parent / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
-    policy = PureHAPPOPolicy(
+    cls = PureHAPPOTanhPolicy if meta.get("policy_arch") == "pure_happo_tanh" else PureHAPPOPolicy
+    policy = cls(
         actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
         critic_state_dim=int(meta.get("critic_state_dim", 480)),
         action_dim=int(meta.get("action_dim", 3)),
@@ -88,6 +90,93 @@ def _write_md(path: Path, title: str, content: str) -> None:
     path.write_text(f"# {title}\n\n{content.strip()}\n", encoding="utf-8")
 
 
+def _safe_len(obj) -> int:
+    try:
+        return len(obj)
+    except Exception:
+        return 0
+
+
+def _live_state(env=None, *, episode=None, step=None, phase="", last_successful_phase="",
+                obs=None, actions=None, exception: BaseException | None = None) -> dict:
+    red_alive = blue_alive = missile_count = 0
+    current_time = current_step = 0
+    if env is not None:
+        try:
+            red_alive = sum(1 for sim in env.red_planes.values() if sim.is_alive)
+            blue_alive = sum(1 for sim in env.blue_planes.values() if sim.is_alive)
+        except Exception:
+            pass
+        try:
+            missile_count = _safe_len(getattr(env, "missiles", []))
+        except Exception:
+            pass
+        for attr in ("current_time", "time", "sim_time"):
+            try:
+                current_time = float(getattr(env, attr))
+                break
+            except Exception:
+                pass
+        for attr in ("current_step", "step_count", "_step_count"):
+            try:
+                current_step = int(getattr(env, attr))
+                break
+            except Exception:
+                pass
+    payload = {
+        "episode": episode,
+        "step": step,
+        "phase": phase,
+        "last_successful_phase": last_successful_phase,
+        "obs_keys": sorted(list(obs.keys())) if isinstance(obs, dict) else [],
+        "action_dict_keys": sorted(list(actions.keys())) if isinstance(actions, dict) else [],
+        "red_alive_count": red_alive,
+        "blue_alive_count": blue_alive,
+        "missile_count": missile_count,
+        "current_time": current_time,
+        "current_step": current_step,
+    }
+    if exception is not None:
+        payload.update({
+            "exception_type": type(exception).__name__,
+            "exception_message": str(exception),
+            "traceback": traceback.format_exc(),
+        })
+    return payload
+
+
+def _write_live_state(output_dir: Path, payload: dict) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "live_rollout_last_state.json").write_text(
+        json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def _write_live_crash_report(output_dir: Path, payload: dict) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "live_rollout_crash_report.json").write_text(
+        json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    _write_md(
+        output_dir / "live_rollout_crash_report.md",
+        "Live Rollout Crash Report",
+        "\n".join([
+            f"- episode: {payload.get('episode')}",
+            f"- step: {payload.get('step')}",
+            f"- phase: `{payload.get('phase')}`",
+            f"- last_successful_phase: `{payload.get('last_successful_phase')}`",
+            f"- exception: `{payload.get('exception_type')}: {payload.get('exception_message')}`",
+            f"- obs_keys: `{payload.get('obs_keys')}`",
+            f"- action_dict_keys: `{payload.get('action_dict_keys')}`",
+            f"- red_alive_count: {payload.get('red_alive_count')}",
+            f"- blue_alive_count: {payload.get('blue_alive_count')}",
+            f"- missile_count: {payload.get('missile_count')}",
+            "",
+            "```text",
+            str(payload.get("traceback", "")),
+            "```",
+        ]),
+    )
+
+
 def _policy_distribution_rows(policy, actor_obs_np: np.ndarray, device: torch.device, deterministic: bool) -> tuple[np.ndarray, np.ndarray, list[dict]]:
     actor_obs = torch.as_tensor(actor_obs_np, dtype=torch.float32, device=device)
     rows = []
@@ -96,9 +185,18 @@ def _policy_distribution_rows(policy, actor_obs_np: np.ndarray, device: torch.de
     for agent_idx in range(policy.num_agents):
         dist, mean = policy._distribution(actor_obs[agent_idx:agent_idx + 1], agent_idx)
         raw = mean if deterministic else dist.sample()
-        executed = raw.clamp(-1.0, 1.0)
-        lp_current_dim = dist.log_prob(executed).detach().cpu().numpy()[0]
-        lp_raw_dim = dist.log_prob(raw).detach().cpu().numpy()[0]
+        if hasattr(policy, "_squashed_log_prob"):
+            raw = raw.clamp(-getattr(policy, "raw_action_limit", 4.0), getattr(policy, "raw_action_limit", 4.0))
+            executed = torch.tanh(raw)
+            correction = torch.log(1.0 - executed.pow(2) + getattr(policy, "tanh_eps", 1e-6))
+            lp_current_dim = (dist.log_prob(raw) - correction).detach().cpu().numpy()[0]
+            lp_raw_dim = lp_current_dim.copy()
+            distribution = "tanh_squashed_gaussian"
+        else:
+            executed = raw.clamp(-1.0, 1.0)
+            lp_current_dim = dist.log_prob(executed).detach().cpu().numpy()[0]
+            lp_raw_dim = dist.log_prob(raw).detach().cpu().numpy()[0]
+            distribution = "clamped_gaussian_legacy"
         mean_np = mean.detach().cpu().numpy()[0]
         std_np = dist.stddev.detach().cpu().numpy()[0]
         raw_np = raw.detach().cpu().numpy()[0]
@@ -122,13 +220,14 @@ def _policy_distribution_rows(policy, actor_obs_np: np.ndarray, device: torch.de
                 "near_boundary": int(abs(exec_np[dim]) >= 0.95),
                 "mean_saturation": int(abs(mean_np[dim]) >= 0.999),
                 "sampled_action_saturation": int(abs(exec_np[dim]) >= 0.999),
+                "bounded_action_distribution": distribution,
             })
     return actions, old_log_probs, rows
 
 
 def collect_short_rollout(run_dir: Path, checkpoint: Path, config: str, output_dir: Path,
                           episodes: int, max_steps: int, stochastic: bool, device_str: str,
-                          live_gate: bool = False):
+                          live_gate: bool = False, debug_live_crash: bool = False):
     from uav_env import make_env
     from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
     from algorithms.mappo.opponent_policy import OpponentPolicy
@@ -146,59 +245,93 @@ def collect_short_rollout(run_dir: Path, checkpoint: Path, config: str, output_d
     ep_summaries = []
     total_transition = 0
 
-    for ep in range(episodes):
-        obs, info = env.reset(seed=1000 + ep)
-        ep_red_fire = ep_red_hit = ep_blue_fire = ep_blue_hit = 0
-        prev_hits = {"red": 0, "blue": 0}
-        for step in range(max_steps):
-            adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
-            actor_obs_np = np.stack([
-                adapted["actor_obs"].get(rid, np.zeros(96, dtype=np.float32))
-                for rid in env.red_ids
-            ]).astype(np.float32)
-            critic_state_np = np.asarray(adapted["critic_state"], dtype=np.float32)
-            with torch.no_grad():
-                value = float(policy.value(torch.as_tensor(critic_state_np, device=device)).detach().cpu().numpy()[0])
-            actions_np, old_lp_np, dist_rows = _policy_distribution_rows(
-                policy, actor_obs_np, device, deterministic=not stochastic)
-            for row in dist_rows:
-                row.update({"episode": ep, "step": step, "stochastic": int(stochastic)})
-            action_rows.extend(dist_rows)
+    last_successful_phase = "init"
+    obs = {}
+    env_actions = {}
+    ep = step = None
+    try:
+        for ep in range(episodes):
+            phase = "env.reset"
+            if debug_live_crash:
+                _write_live_state(output_dir, _live_state(env, episode=ep, step=0, phase=phase, last_successful_phase=last_successful_phase))
+            obs, info = env.reset(seed=1000 + ep)
+            last_successful_phase = phase
+            ep_red_fire = ep_red_hit = ep_blue_fire = ep_blue_hit = 0
+            prev_hits = {"red": 0, "blue": 0}
+            for step in range(max_steps):
+                phase = "adapter.adapt_all"
+                if debug_live_crash:
+                    _write_live_state(output_dir, _live_state(env, episode=ep, step=step, phase=phase, last_successful_phase=last_successful_phase, obs=obs))
+                adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
+                last_successful_phase = phase
+                actor_obs_np = np.stack([
+                    adapted["actor_obs"].get(rid, np.zeros(96, dtype=np.float32))
+                    for rid in env.red_ids
+                ]).astype(np.float32)
+                critic_state_np = np.asarray(adapted["critic_state"], dtype=np.float32)
+                phase = "policy.value"
+                if debug_live_crash:
+                    _write_live_state(output_dir, _live_state(env, episode=ep, step=step, phase=phase, last_successful_phase=last_successful_phase, obs=obs))
+                with torch.no_grad():
+                    value = float(policy.value(torch.as_tensor(critic_state_np, device=device)).detach().cpu().numpy()[0])
+                last_successful_phase = phase
+                phase = "policy.act"
+                actions_np, old_lp_np, dist_rows = _policy_distribution_rows(
+                    policy, actor_obs_np, device, deterministic=not stochastic)
+                last_successful_phase = phase
+                for row in dist_rows:
+                    row.update({"episode": ep, "step": step, "stochastic": int(stochastic)})
+                action_rows.extend(dist_rows)
 
-            red_actions = {rid: actions_np[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
-            blue_actions = opponent.act(obs, env.blue_ids, env=env)
-            env_actions = dict(red_actions)
-            env_actions.update(blue_actions)
+                red_actions = {rid: actions_np[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
+                phase = "opponent.act"
+                if debug_live_crash:
+                    _write_live_state(output_dir, _live_state(env, episode=ep, step=step, phase=phase, last_successful_phase=last_successful_phase, obs=obs, actions=red_actions))
+                blue_actions = opponent.act(obs, env.blue_ids, env=env)
+                last_successful_phase = phase
+                env_actions = dict(red_actions)
+                env_actions.update(blue_actions)
 
-            # Gate/reachability checks can call expensive geometry helpers.  The
-            # default audit uses existing audit_trace gate CSVs; live_gate is for
-            # targeted debugging only.
-            if live_gate:
-                gate_rows.extend(_gate_rows(env, ep, step, HeteroUavCombatEnv, get2d_AO_TA_R))
-                reward_shadow_rows.extend(_reward_shadow_rows(env, ep, step, HeteroUavCombatEnv, get2d_AO_TA_R))
-            obs_rows.extend(_obs_rows(env, adapted, ep, step))
+                if live_gate:
+                    phase = "geometry._gate_rows"
+                    if debug_live_crash:
+                        _write_live_state(output_dir, _live_state(env, episode=ep, step=step, phase=phase, last_successful_phase=last_successful_phase, obs=obs, actions=env_actions))
+                    gate_rows.extend(_gate_rows(env, ep, step, HeteroUavCombatEnv, get2d_AO_TA_R))
+                    last_successful_phase = phase
+                    phase = "geometry._reward_shadow_rows"
+                    reward_shadow_rows.extend(_reward_shadow_rows(env, ep, step, HeteroUavCombatEnv, get2d_AO_TA_R))
+                    last_successful_phase = phase
+                obs_rows.extend(_obs_rows(env, adapted, ep, step))
 
-            next_obs, rewards, terminated, truncated, next_info = env.step(env_actions)
-            next_adapted = adapter.adapt_all(next_obs, info=next_info, red_ids=env.red_ids, blue_ids=env.blue_ids)
-            with torch.no_grad():
-                next_value = float(policy.value(torch.as_tensor(np.asarray(next_adapted["critic_state"], dtype=np.float32), device=device)).detach().cpu().numpy()[0])
-                log_probs_eval, _, values_eval, _ = policy.evaluate_actions(
-                    torch.as_tensor(actor_obs_np[None, ...], device=device),
-                    torch.as_tensor(critic_state_np[None, ...], device=device),
-                    torch.as_tensor(actions_np[None, ...], device=device),
-                )
-            recomputed_lp = log_probs_eval.detach().cpu().numpy()[0]
-            value_eval = float(values_eval.detach().cpu().numpy()[0])
-            active_mask = _alive_mask(env)
-            team_done = float(all(terminated.values()) or all(truncated.values()))
-            rew_np = np.asarray([float(rewards.get(rid, 0.0)) for rid in env.red_ids], dtype=np.float32)
-            team_reward = float((rew_np * active_mask).sum() / max(active_mask.sum(), 1.0))
+                phase = "env.step"
+                if debug_live_crash:
+                    _write_live_state(output_dir, _live_state(env, episode=ep, step=step, phase=phase, last_successful_phase=last_successful_phase, obs=obs, actions=env_actions))
+                next_obs, rewards, terminated, truncated, next_info = env.step(env_actions)
+                last_successful_phase = phase
+                phase = "adapter.adapt_all.next"
+                next_adapted = adapter.adapt_all(next_obs, info=next_info, red_ids=env.red_ids, blue_ids=env.blue_ids)
+                last_successful_phase = phase
+                phase = "policy.evaluate_actions"
+                with torch.no_grad():
+                    next_value = float(policy.value(torch.as_tensor(np.asarray(next_adapted["critic_state"], dtype=np.float32), device=device)).detach().cpu().numpy()[0])
+                    log_probs_eval, _, values_eval, _ = policy.evaluate_actions(
+                        torch.as_tensor(actor_obs_np[None, ...], device=device),
+                        torch.as_tensor(critic_state_np[None, ...], device=device),
+                        torch.as_tensor(actions_np[None, ...], device=device),
+                    )
+                last_successful_phase = phase
+                recomputed_lp = log_probs_eval.detach().cpu().numpy()[0]
+                value_eval = float(values_eval.detach().cpu().numpy()[0])
+                active_mask = _alive_mask(env)
+                team_done = float(all(terminated.values()) or all(truncated.values()))
+                rew_np = np.asarray([float(rewards.get(rid, 0.0)) for rid in env.red_ids], dtype=np.float32)
+                team_reward = float((rew_np * active_mask).sum() / max(active_mask.sum(), 1.0))
 
-            rc = next_info.get("reward_components", {})
-            uav_gate = sum(float(rc.get(rid, {}).get("tam_brma_v1_uav_gate_sit", 0.0)) for rid in env.red_ids if rid != "red_0")
-            mav_comp = sum(float(rc.get("red_0", {}).get(k, 0.0)) for k in ("tam_brma_v1_mav_safe", "tam_brma_v1_mav_support", "tam_brma_v1_mav_aware"))
-            event_terminal = sum(float(rc.get(rid, {}).get("tam_brma_v1_uav_event", 0.0)) + float(rc.get(rid, {}).get("tam_brma_v1_mav_event", 0.0)) + float(rc.get(rid, {}).get("tam_brma_v1_team_terminal", 0.0)) for rid in env.red_ids)
-            credit_rows.append({
+                rc = next_info.get("reward_components", {})
+                uav_gate = sum(float(rc.get(rid, {}).get("tam_brma_v1_uav_gate_sit", 0.0)) for rid in env.red_ids if rid != "red_0")
+                mav_comp = sum(float(rc.get("red_0", {}).get(k, 0.0)) for k in ("tam_brma_v1_mav_safe", "tam_brma_v1_mav_support", "tam_brma_v1_mav_aware"))
+                event_terminal = sum(float(rc.get(rid, {}).get("tam_brma_v1_uav_event", 0.0)) + float(rc.get(rid, {}).get("tam_brma_v1_mav_event", 0.0)) + float(rc.get(rid, {}).get("tam_brma_v1_team_terminal", 0.0)) for rid in env.red_ids)
+                credit_rows.append({
                 "episode": ep,
                 "step": step,
                 "team_reward": team_reward,
@@ -207,10 +340,10 @@ def collect_short_rollout(run_dir: Path, checkpoint: Path, config: str, output_d
                 "event_terminal_sum": event_terminal,
                 "uav_gate_share_abs": abs(uav_gate) / max(abs(team_reward), 1e-8),
                 "event_terminal_share_abs": abs(event_terminal) / max(abs(team_reward), 1e-8),
-            })
+                })
 
-            for i, rid in enumerate(env.red_ids):
-                buffer_rows.append({
+                for i, rid in enumerate(env.red_ids):
+                    buffer_rows.append({
                     "transition_id": total_transition,
                     "episode": ep,
                     "step": step,
@@ -233,26 +366,26 @@ def collect_short_rollout(run_dir: Path, checkpoint: Path, config: str, output_d
                     "value_eval": value_eval,
                     "next_value": next_value,
                     "bootstrap_used": int(not team_done),
-                })
-            total_transition += 1
+                    })
+                total_transition += 1
 
-            mt_info = next_info.get("__missile_term__", {})
-            for aid in env.agent_ids:
-                fired = int((next_info.get(aid, {}) or {}).get("missiles_fired_this_step", 0))
-                if aid.startswith("red_"):
-                    ep_red_fire += fired
-                else:
-                    ep_blue_fire += fired
-            if isinstance(mt_info, dict):
-                for side in ("red", "blue"):
-                    hits = int(mt_info.get(side, {}).get("hit", 0))
-                    if side == "red":
-                        ep_red_hit += max(0, hits - prev_hits[side])
+                mt_info = next_info.get("__missile_term__", {})
+                for aid in env.agent_ids:
+                    fired = int((next_info.get(aid, {}) or {}).get("missiles_fired_this_step", 0))
+                    if aid.startswith("red_"):
+                        ep_red_fire += fired
                     else:
-                        ep_blue_hit += max(0, hits - prev_hits[side])
-                    prev_hits[side] = hits
+                        ep_blue_fire += fired
+                if isinstance(mt_info, dict):
+                    for side in ("red", "blue"):
+                        hits = int(mt_info.get(side, {}).get("hit", 0))
+                        if side == "red":
+                            ep_red_hit += max(0, hits - prev_hits[side])
+                        else:
+                            ep_blue_hit += max(0, hits - prev_hits[side])
+                        prev_hits[side] = hits
 
-            traj_rows.append({
+                traj_rows.append({
                 "episode": ep,
                 "step": step,
                 "red_fire": ep_red_fire,
@@ -260,15 +393,15 @@ def collect_short_rollout(run_dir: Path, checkpoint: Path, config: str, output_d
                 "blue_fire": ep_blue_fire,
                 "blue_hit": ep_blue_hit,
                 "team_done": team_done,
-            })
+                })
 
-            obs, info = next_obs, next_info
-            if team_done:
-                break
+                obs, info = next_obs, next_info
+                if team_done:
+                    break
 
-        red_alive = sum(1 for sim in env.red_planes.values() if sim.is_alive)
-        blue_alive = sum(1 for sim in env.blue_planes.values() if sim.is_alive)
-        ep_summaries.append({
+            red_alive = sum(1 for sim in env.red_planes.values() if sim.is_alive)
+            blue_alive = sum(1 for sim in env.blue_planes.values() if sim.is_alive)
+            ep_summaries.append({
             "episode": ep,
             "steps": step + 1,
             "stochastic": int(stochastic),
@@ -280,10 +413,18 @@ def collect_short_rollout(run_dir: Path, checkpoint: Path, config: str, output_d
             "blue_fire": ep_blue_fire,
             "blue_hit": ep_blue_hit,
             "outcome": "red_win" if blue_alive == 0 else "blue_win" if red_alive == 0 else "timeout",
-        })
-
-    if hasattr(env, "close"):
-        env.close()
+            })
+    except BaseException as exc:
+        payload = _live_state(
+            env, episode=ep, step=step, phase=locals().get("phase", ""),
+            last_successful_phase=last_successful_phase, obs=obs,
+            actions=env_actions, exception=exc)
+        _write_live_state(output_dir, payload)
+        _write_live_crash_report(output_dir, payload)
+        raise
+    finally:
+        if hasattr(env, "close"):
+            env.close()
 
     return {
         "meta": meta,
@@ -409,7 +550,7 @@ def _gate_rows(env, ep: int, step: int, H, get2d) -> list[dict]:
             g_own = a_own * t_rear * d_gate
             lock_key = (shooter_id, target_id)
             lock_steps = getattr(env, "_missile_lock_steps", {}).get(lock_key, 0)
-            lock_mature = int(lock_steps * env.dt >= getattr(env, "MISSILE_LOCK_DELAY_SEC", 0.25))
+            lock_mature = int(lock_steps * env.env_dt >= getattr(env, "MISSILE_LOCK_DELAY_SEC", 0.25))
             rows.append({
                 "episode": ep,
                 "step": step,
@@ -807,6 +948,8 @@ def main():
                         help="Call live env launch geometry helpers instead of reusing audit_trace.")
     parser.add_argument("--collect-rollout", action="store_true",
                         help="Run env.step rollout. Default uses reset snapshot plus existing audit_trace.")
+    parser.add_argument("--debug-live-crash", action="store_true",
+                        help="Write phase-level live rollout crash reports and last state.")
     parser.add_argument("--snapshot-samples", type=int, default=256)
     args = parser.parse_args()
 
@@ -820,8 +963,8 @@ def main():
     config = _default_config(run_dir, meta)
 
     if args.collect_rollout:
-        det = collect_short_rollout(run_dir, latest, config, output_dir, args.episodes, args.max_steps, stochastic=False, device_str=args.device, live_gate=args.live_gate)
-        stoch = collect_short_rollout(run_dir, latest, config, output_dir, args.episodes, args.max_steps, stochastic=True, device_str=args.device, live_gate=args.live_gate)
+        det = collect_short_rollout(run_dir, latest, config, output_dir, args.episodes, args.max_steps, stochastic=False, device_str=args.device, live_gate=args.live_gate, debug_live_crash=args.debug_live_crash)
+        stoch = collect_short_rollout(run_dir, latest, config, output_dir, args.episodes, args.max_steps, stochastic=True, device_str=args.device, live_gate=args.live_gate, debug_live_crash=args.debug_live_crash)
     else:
         det = collect_initial_snapshot(latest, config, args.snapshot_samples, stochastic=False, device_str=args.device)
         stoch = collect_initial_snapshot(latest, config, args.snapshot_samples, stochastic=True, device_str=args.device)
