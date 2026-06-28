@@ -65,6 +65,7 @@ AIRCRAFT_TIMESERIES_COLUMNS = [
 MISSILE_EVENTS_COLUMNS = [
     "run_id", "scenario", "episode_id", "step", "sim_time", "event_type",
     "missile_id", "owner_id", "owner_team", "target_id", "target_team",
+    "team", "shooter_id", "shooter_role", "target_role", "hit",
     "lon", "lat", "altitude", "distance_to_target", "hit_success",
     "death_caused",
     "raw_termination_reason",
