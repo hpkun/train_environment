@@ -1034,6 +1034,13 @@ def _run_training(args: argparse.Namespace) -> None:
                             step=total_steps,
                             sim_time=diag.get("sim_time", 0.0),
                         )
+                        env_rich_loggers[env_idx].write_reward_components(
+                            next_info,
+                            scenario=Path(args.config).stem,
+                            episode_id=current_ep_id[env_idx],
+                            step=total_steps,
+                            sim_time=diag.get("sim_time", 0.0),
+                        )
                     for aid in proxy.agent_ids:
                         fired = int(next_info.get(aid, {}).get("missiles_fired_this_step", 0))
                         if aid.startswith("red_"):

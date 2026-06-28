@@ -649,9 +649,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
         if not np.isfinite(speed):
             return -1.0
         if speed < vmin:
-            return float(np.clip((speed - vmin) / max(vmin, 1e-6), -1.0, 0.0))
+            return -1.0
         if speed > vmax:
-            return float(np.clip(-(speed - vmax) / max(vmax, 1e-6), -1.0, 0.0))
+            return -1.0
         return 0.0
 
     def _tam_v7_out_of_zone(self, sim) -> bool:

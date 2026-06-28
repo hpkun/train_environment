@@ -7,12 +7,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.experiment_logging_schema import MISSILE_EVENTS_COLUMNS
+from scripts.experiment_logging_schema import MISSILE_EVENTS_COLUMNS, REWARD_COMPONENT_COLUMNS
 from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
 
 
@@ -175,6 +176,24 @@ def test_v7_distance_uses_effective_launch_range_not_hardcoded():
     assert env._tam_v7_distance_advantage(20000.0, env.tam_paper_reward_v7_role_aligned_config) == pytest.approx(1.0)
 
 
+def test_v7_speed_raw_uses_velocity_envelope_strong_penalty():
+    env = _bare_env()
+    assert env._tam_v7_speed_raw(42.0) == pytest.approx(-1.0)
+    assert env._tam_v7_speed_raw(59.0) == pytest.approx(-1.0)
+    assert env._tam_v7_speed_raw(101.0) == pytest.approx(-1.0)
+    assert env._tam_v7_speed_raw(250.0) == pytest.approx(0.0)
+    assert env._tam_v7_speed_raw(409.0) == pytest.approx(-1.0)
+
+
+def test_v7_config_exposes_mav_distance_params():
+    cfg = yaml.safe_load((ROOT / CFG_PATH).read_text(encoding="utf-8"))
+    reward_cfg = cfg["tam_paper_reward_v7_role_aligned"]
+    assert reward_cfg["mav_safety"]["d_danger_m"] == pytest.approx(5000.0)
+    assert reward_cfg["mav_safety"]["d_safe_m"] == pytest.approx(14000.0)
+    assert reward_cfg["mav_support"]["d_opt_m"] == pytest.approx(8000.0)
+    assert reward_cfg["mav_support"]["d_max_m"] == pytest.approx(25000.0)
+
+
 def test_uav_first_out_of_zone_once_and_mav_no_out_of_zone_event():
     env = _bare_env()
     cfg = env.tam_paper_reward_v7_role_aligned_config
@@ -306,9 +325,14 @@ def test_v6v3_and_v4_old_modes_unaffected():
 
 
 def test_logger_schema_exposes_v7_and_missile_diagnostic_fields():
+    single = (ROOT / "scripts" / "train_happo_reference.py").read_text(encoding="utf-8")
     parallel = (ROOT / "scripts" / "train_happo_reference_parallel.py").read_text(encoding="utf-8")
-    assert "tam_v7_mav_safety_sum" in parallel
-    assert "tam_v7_uav_situation_sum" in parallel
+    for source in (single, parallel):
+        assert "tam_v7_mav_safety_sum" in source
+        assert "tam_v7_uav_situation_sum" in source
+        assert "tam_v7_uav_altitude_sum" in source
+        assert "tam_v7_mav_boundary_sum" in source
+        assert "tam_v7_total_sum" in source
     for field in (
         "shooter_id",
         "shooter_role",
@@ -321,3 +345,17 @@ def test_logger_schema_exposes_v7_and_missile_diagnostic_fields():
         "raw_termination_reason",
     ):
         assert field in MISSILE_EVENTS_COLUMNS
+
+
+def test_rich_reward_schema_exposes_v7_component_fields():
+    for field in (
+        "tam_v7_total",
+        "tam_v7_uav_altitude",
+        "tam_v7_uav_boundary",
+        "tam_v7_uav_first_out_of_zone",
+        "tam_v7_mav_safety",
+        "tam_v7_mav_support",
+        "tam_v7_mav_team_credit_delta",
+        "tam_v7_terminal_per_agent",
+    ):
+        assert field in REWARD_COMPONENT_COLUMNS

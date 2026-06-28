@@ -42,10 +42,13 @@ class RichExperimentLogger:
         self._train_writer.writeheader()
         self._missile_file = (directory / "missile_events.csv").open("a", newline="", encoding="utf-8")
         self._missile_writer = csv.DictWriter(self._missile_file, fieldnames=MISSILE_EVENTS_COLUMNS)
+        self._reward_file = (directory / "reward_components.csv").open("a", newline="", encoding="utf-8")
+        self._reward_writer = csv.DictWriter(self._reward_file, fieldnames=FILE_SCHEMAS["reward_components.csv"])
 
     def close(self) -> None:
         self._train_file.close()
         self._missile_file.close()
+        self._reward_file.close()
 
     def write_train_metrics(self, row: dict[str, Any]) -> None:
         elapsed = max(time.time() - self.start_time, 1e-9)
@@ -103,6 +106,49 @@ class RichExperimentLogger:
         for row in rows:
             self._missile_writer.writerow(row)
         self._missile_file.flush()
+
+    def write_reward_components(
+        self,
+        info: dict[str, Any],
+        *,
+        scenario: str,
+        episode_id: int | str,
+        step: int | str,
+        sim_time: float | str = "",
+    ) -> None:
+        """Write per-agent reward component diagnostics from env info."""
+        components = info.get("reward_components", {}) if isinstance(info, dict) else {}
+        if not isinstance(components, dict) or not components:
+            return
+        for agent_id, comp in components.items():
+            if not isinstance(comp, dict):
+                continue
+            role = ""
+            agent_info = info.get(agent_id, {}) if isinstance(info, dict) else {}
+            if isinstance(agent_info, dict):
+                role = str(agent_info.get("role", ""))
+            payload = {col: "" for col in FILE_SCHEMAS["reward_components.csv"]}
+            payload.update({
+                "run_id": self.run_id,
+                "scenario": scenario,
+                "episode_id": episode_id,
+                "step": step,
+                "sim_time": sim_time,
+                "agent_id": agent_id,
+                "role": role,
+                "total_reward": comp.get("tam_v7_total", comp.get("total_reward", "")),
+                "mav_survival_reward": comp.get("mav_survival", ""),
+                "mav_support_reward": comp.get("mav_support", comp.get("tam_v7_mav_support", "")),
+                "uav_attack_reward": comp.get("uav_attack_window", ""),
+                "uav_fire_reward": comp.get("uav_fire", ""),
+                "uav_hit_reward": comp.get("uav_hit", ""),
+                "event_reward": comp.get("tam_v7_event", comp.get("event", "")),
+            })
+            for key, value in comp.items():
+                if key in payload:
+                    payload[key] = value
+            self._reward_writer.writerow(payload)
+        self._reward_file.flush()
 
     def _missile_row(
         self,

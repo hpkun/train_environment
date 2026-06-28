@@ -866,6 +866,7 @@ def _run_training_main() -> None:
     current_ep_return = [np.zeros(len(env.red_ids), dtype=np.float32) for _ in range(args.num_envs)]
     current_ep_len = [0 for _ in range(args.num_envs)]
     current_ep_id = [0 for _ in range(args.num_envs)]
+    current_ep_reward_comp = [{} for _ in range(args.num_envs)]
     prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(args.num_envs)]
     recent = deque(maxlen=100)
     best_score = -float("inf")
@@ -902,6 +903,15 @@ def _run_training_main() -> None:
             "action_log_std_uav_max", "action_log_std_uav_mean",
             "approx_kl_mav", "approx_kl_uav",
             "mask_keep_ratio", "mask_entropy", "masked_entity_count",
+            "tam_v7_mav_flight_sum", "tam_v7_mav_safety_sum",
+            "tam_v7_mav_support_sum", "tam_v7_mav_event_sum",
+            "tam_v7_mav_terminal_sum", "tam_v7_mav_total_sum",
+            "tam_v7_uav_flight_sum", "tam_v7_uav_situation_sum",
+            "tam_v7_uav_event_sum", "tam_v7_uav_terminal_sum",
+            "tam_v7_uav_total_sum", "tam_v7_total_sum",
+            "tam_v7_uav_altitude_sum", "tam_v7_uav_speed_sum",
+            "tam_v7_uav_boundary_sum", "tam_v7_mav_altitude_sum",
+            "tam_v7_mav_speed_sum", "tam_v7_mav_boundary_sum",
             "nan_detected",
         ])
         eval_writer = None
@@ -1158,8 +1168,28 @@ def _run_training_main() -> None:
                     total_steps += 1
                     _SINGLE_RUNNER_STATE["total_steps"] = total_steps
                     _SINGLE_RUNNER_STATE["episode_id"] = current_ep_id[env_idx]
+                    rc = next_info.get("reward_components", {}) if isinstance(next_info, dict) else {}
+                    for aid in rollout_env.red_ids:
+                        comp = rc.get(aid, {}) if isinstance(rc, dict) else {}
+                        if not isinstance(comp, dict):
+                            continue
+                        for key, value in comp.items():
+                            try:
+                                delta = float(value)
+                            except (TypeError, ValueError):
+                                continue
+                            current_ep_reward_comp[env_idx][key] = (
+                                current_ep_reward_comp[env_idx].get(key, 0.0) + delta
+                            )
                     if rich_logger is not None:
                         rich_logger.write_missile_events(
+                            next_info,
+                            scenario=Path(args.config).stem,
+                            episode_id=current_ep_id[env_idx],
+                            step=total_steps,
+                            sim_time=_sim_time(rollout_env),
+                        )
+                        rich_logger.write_reward_components(
                             next_info,
                             scenario=Path(args.config).stem,
                             episode_id=current_ep_id[env_idx],
@@ -1190,10 +1220,12 @@ def _run_training_main() -> None:
                             "mav": _mav_alive(rollout_env),
                             "red_alive": ra,
                             "blue_alive": ba,
+                            "reward_comp": dict(current_ep_reward_comp[env_idx]),
                         })
                         episodes += 1
                         current_ep_return[env_idx][:] = 0.0
                         current_ep_len[env_idx] = 0
+                        current_ep_reward_comp[env_idx] = {}
                         heartbeat.write(
                             "before_reset",
                             iteration=iteration,
@@ -1264,6 +1296,10 @@ def _run_training_main() -> None:
             mav_surv = sum(1 for r in rec if r["mav"]) / n
             red_alive = float(np.mean([r["red_alive"] for r in rec])) if rec else 0.0
             blue_alive = float(np.mean([r["blue_alive"] for r in rec])) if rec else 0.0
+            rc_sum = {}
+            for r in rec:
+                for key, value in r.get("reward_comp", {}).items():
+                    rc_sum[key] = rc_sum.get(key, 0.0) + float(value)
             writer.writerow([
                 iteration, total_steps, f"{avg_return:.4f}", f"{red_win:.4f}",
                 f"{blue_win:.4f}", f"{draw:.4f}", f"{timeout:.4f}",
@@ -1289,6 +1325,24 @@ def _run_training_main() -> None:
                 f"{stats.get('mask_keep_ratio', 1.0):.6f}",
                 f"{stats.get('mask_entropy', 0.0):.6f}",
                 f"{stats.get('masked_entity_count', 0.0):.2f}",
+                f"{rc_sum.get('tam_v7_mav_flight', 0):.4f}",
+                f"{rc_sum.get('tam_v7_mav_safety', 0):.4f}",
+                f"{rc_sum.get('tam_v7_mav_support', 0):.4f}",
+                f"{rc_sum.get('tam_v7_mav_event', 0):.4f}",
+                f"{rc_sum.get('tam_v7_mav_terminal', 0):.4f}",
+                f"{rc_sum.get('tam_v7_mav_total', 0):.4f}",
+                f"{rc_sum.get('tam_v7_uav_flight', 0):.4f}",
+                f"{rc_sum.get('tam_v7_uav_situation', 0):.4f}",
+                f"{rc_sum.get('tam_v7_uav_event', 0):.4f}",
+                f"{rc_sum.get('tam_v7_uav_terminal', 0):.4f}",
+                f"{rc_sum.get('tam_v7_uav_total', 0):.4f}",
+                f"{rc_sum.get('tam_v7_total', 0):.4f}",
+                f"{rc_sum.get('tam_v7_uav_altitude', 0):.4f}",
+                f"{rc_sum.get('tam_v7_uav_speed', 0):.4f}",
+                f"{rc_sum.get('tam_v7_uav_boundary', 0):.4f}",
+                f"{rc_sum.get('tam_v7_mav_altitude', 0):.4f}",
+                f"{rc_sum.get('tam_v7_mav_speed', 0):.4f}",
+                f"{rc_sum.get('tam_v7_mav_boundary', 0):.4f}",
                 int(nan_detected),
             ])
             if rich_logger is not None:
