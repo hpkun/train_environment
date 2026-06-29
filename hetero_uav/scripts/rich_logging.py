@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from scripts.experiment_logging_schema import (
     FILE_SCHEMAS,
     MISSILE_EVENTS_COLUMNS,
@@ -111,17 +113,23 @@ class RichExperimentLogger:
             self._aircraft_writer.writerow(row)
         self._aircraft_file.flush()
 
-    def write_episode_reward_components(self, episode_id: int, agent_id: str,
-                                          role: str, team: str,
-                                          episode_length: int, episode_return: float,
+    def write_episode_reward_components(self, *,
+                                          scenario: str,
+                                          episode_id: int | str,
+                                          agent_id: str,
+                                          role: str,
+                                          team: str,
+                                          episode_length: int,
+                                          episode_return: float,
                                           component_sums: dict,
                                           launch_stats: dict | None = None,
                                           final_state: dict | None = None,
-                                          outcome: str = "", end_reason: str = "") -> None:
+                                          outcome: str = "",
+                                          end_reason: str = "") -> None:
         """Write per-agent episode-level reward component aggregates."""
         payload = {col: "" for col in FILE_SCHEMAS["episode_reward_components.csv"]}
         payload.update({
-            "run_id": self.run_id, "scenario": "", "episode_id": episode_id,
+            "run_id": self.run_id, "scenario": scenario, "episode_id": episode_id,
             "agent_id": agent_id, "role": role, "team": team,
             "episode_length": episode_length, "episode_return": episode_return,
         })

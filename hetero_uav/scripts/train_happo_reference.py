@@ -867,6 +867,14 @@ def _run_training_main() -> None:
     current_ep_len = [0 for _ in range(args.num_envs)]
     current_ep_id = [0 for _ in range(args.num_envs)]
     current_ep_reward_comp = [{} for _ in range(args.num_envs)]
+    current_ep_reward_comp_by_agent = [
+        {rid: {} for rid in env.red_ids}
+        for _ in range(args.num_envs)
+    ]
+    current_ep_launch_stats = [
+        {"red_launch_count": 0, "red_hit_count": 0, "blue_launch_count": 0, "blue_hit_count": 0}
+        for _ in range(args.num_envs)
+    ]
     prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(args.num_envs)]
     recent = deque(maxlen=100)
     best_score = -float("inf")
@@ -1181,6 +1189,38 @@ def _run_training_main() -> None:
                             current_ep_reward_comp[env_idx][key] = (
                                 current_ep_reward_comp[env_idx].get(key, 0.0) + delta
                             )
+                    # Per-agent episode accumulators (for episode_reward_components.csv)
+                    for rid in rollout_env.red_ids:
+                        comp = rc.get(rid, {}) if isinstance(rc, dict) else {}
+                        if not isinstance(comp, dict):
+                            continue
+                        agent_acc = current_ep_reward_comp_by_agent[env_idx].setdefault(rid, {})
+                        for key, value in comp.items():
+                            if not key.startswith("tam_v7_"):
+                                continue
+                            try:
+                                delta = float(value)
+                            except (TypeError, ValueError):
+                                continue
+                            if key == "tam_v7_mav_team_credit_used":
+                                agent_acc["tam_v7_mav_team_credit_used_max"] = max(
+                                    agent_acc.get("tam_v7_mav_team_credit_used_max", delta), delta)
+                            elif key in ("tam_v7_blue_loss_frac", "tam_v7_red_loss_weighted"):
+                                agent_acc[key + "_last"] = delta
+                            else:
+                                sum_key = key + "_sum"
+                                agent_acc[sum_key] = agent_acc.get(sum_key, 0.0) + delta
+                    # Episode-local launch stats
+                    for aid in rollout_env.agent_ids:
+                        fired = int(next_info.get(aid, {}).get("missiles_fired_this_step", 0))
+                        if aid.startswith("red_"):
+                            current_ep_launch_stats[env_idx]["red_launch_count"] += fired
+                        else:
+                            current_ep_launch_stats[env_idx]["blue_launch_count"] += fired
+                    mt = next_info.get("__missile_term__", {})
+                    if isinstance(mt, dict):
+                        current_ep_launch_stats[env_idx]["red_hit_count"] += int(mt.get("red", {}).get("hit", 0))
+                        current_ep_launch_stats[env_idx]["blue_hit_count"] += int(mt.get("blue", {}).get("hit", 0))
                     if rich_logger is not None:
                         rich_logger.write_missile_events(
                             next_info,
@@ -1230,9 +1270,37 @@ def _run_training_main() -> None:
                             "reward_comp": dict(current_ep_reward_comp[env_idx]),
                         })
                         episodes += 1
+                        # Write per-agent episode reward components
+                        if rich_logger is not None:
+                            for rid in rollout_env.red_ids:
+                                agent_idx = rollout_env.red_ids.index(rid)
+                                ep_ret_val = float(current_ep_return[env_idx][agent_idx])
+                                rich_logger.write_episode_reward_components(
+                                    scenario=Path(args.config).stem,
+                                    episode_id=current_ep_id[env_idx],
+                                    agent_id=rid,
+                                    role=rollout_env.agent_roles.get(rid, ""),
+                                    team="red",
+                                    episode_length=current_ep_len[env_idx],
+                                    episode_return=ep_ret_val,
+                                    component_sums=current_ep_reward_comp_by_agent[env_idx].get(rid, {}),
+                                    launch_stats=dict(current_ep_launch_stats[env_idx]),
+                                    final_state={
+                                        "mav_alive_final": int(_mav_alive(rollout_env)),
+                                        "red_alive_final": ra,
+                                        "blue_alive_final": ba,
+                                    },
+                                    outcome=outcome["winner"],
+                                    end_reason=outcome["end_reason"],
+                                )
                         current_ep_return[env_idx][:] = 0.0
                         current_ep_len[env_idx] = 0
                         current_ep_reward_comp[env_idx] = {}
+                        current_ep_reward_comp_by_agent[env_idx] = {rid: {} for rid in rollout_env.red_ids}
+                        current_ep_launch_stats[env_idx] = {
+                            "red_launch_count": 0, "red_hit_count": 0,
+                            "blue_launch_count": 0, "blue_hit_count": 0,
+                        }
                         heartbeat.write(
                             "before_reset",
                             iteration=iteration,

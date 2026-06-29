@@ -106,7 +106,7 @@ class TestV7MockWriting:
             assert vals["red_0"] == "0.05"
             assert vals["red_1"] == "-0.1"
 
-    def test_episode_reward_components_writes(self):
+    def test_episode_reward_components_writes_scenario(self):
         import numpy as np
         from scripts.rich_logging import RichExperimentLogger
         from scripts.experiment_logging_schema import ensure_schema_files
@@ -118,6 +118,7 @@ class TestV7MockWriting:
                                           num_envs=1, rollout_length_per_env=256,
                                           transitions_per_rollout=256)
             logger.write_episode_reward_components(
+                scenario="test_scenario",
                 episode_id=0, agent_id="red_0", role="mav", team="red",
                 episode_length=500, episode_return=-200.0,
                 component_sums={"tam_v7_total_sum": -200.0, "tam_v7_mav_safety_sum": -30.0,
@@ -128,5 +129,22 @@ class TestV7MockWriting:
             with open(d / "episode_reward_components.csv") as f:
                 rows = list(csv.DictReader(f))
             assert len(rows) == 1
+            assert rows[0]["scenario"] == "test_scenario"
             assert rows[0]["tam_v7_total_sum"] == "-200.0"
             assert rows[0]["outcome"] == "timeout"
+            assert rows[0]["end_reason"] == "max_steps"
+
+
+class TestV7SingleRunnerPresence:
+    def test_single_runner_has_per_agent_accumulators(self):
+        import inspect
+        import scripts.train_happo_reference as mod
+        src = inspect.getsource(mod)
+        assert "current_ep_reward_comp_by_agent" in src
+        assert "write_episode_reward_components" in src
+        assert "tam_v7_mav_team_credit_used_max" in src
+        # loss fields are dynamically keyed (key + "_last") in the runner
+        from scripts.experiment_logging_schema import EPISODE_REWARD_COMPONENTS_COLUMNS
+        assert "tam_v7_red_loss_weighted_last" in EPISODE_REWARD_COMPONENTS_COLUMNS
+        assert "tam_v7_blue_loss_frac_last" in EPISODE_REWARD_COMPONENTS_COLUMNS
+        assert "current_ep_launch_stats" in src
