@@ -875,6 +875,10 @@ def _run_training_main() -> None:
         {"red_launch_count": 0, "red_hit_count": 0, "blue_launch_count": 0, "blue_hit_count": 0}
         for _ in range(args.num_envs)
     ]
+    current_ep_hit_totals = [
+        {"red": 0, "blue": 0}
+        for _ in range(args.num_envs)
+    ]
     prev_hit_totals = [{"red": 0, "blue": 0} for _ in range(args.num_envs)]
     recent = deque(maxlen=100)
     best_score = -float("inf")
@@ -1219,8 +1223,14 @@ def _run_training_main() -> None:
                             current_ep_launch_stats[env_idx]["blue_launch_count"] += fired
                     mt = next_info.get("__missile_term__", {})
                     if isinstance(mt, dict):
-                        current_ep_launch_stats[env_idx]["red_hit_count"] += int(mt.get("red", {}).get("hit", 0))
-                        current_ep_launch_stats[env_idx]["blue_hit_count"] += int(mt.get("blue", {}).get("hit", 0))
+                        red_hit_ep = int(mt.get("red", {}).get("hit", 0))
+                        blue_hit_ep = int(mt.get("blue", {}).get("hit", 0))
+                        red_delta = max(red_hit_ep - current_ep_hit_totals[env_idx]["red"], 0)
+                        blue_delta = max(blue_hit_ep - current_ep_hit_totals[env_idx]["blue"], 0)
+                        current_ep_launch_stats[env_idx]["red_hit_count"] += red_delta
+                        current_ep_launch_stats[env_idx]["blue_hit_count"] += blue_delta
+                        current_ep_hit_totals[env_idx]["red"] = red_hit_ep
+                        current_ep_hit_totals[env_idx]["blue"] = blue_hit_ep
                     if rich_logger is not None:
                         rich_logger.write_missile_events(
                             next_info,
@@ -1301,6 +1311,7 @@ def _run_training_main() -> None:
                             "red_launch_count": 0, "red_hit_count": 0,
                             "blue_launch_count": 0, "blue_hit_count": 0,
                         }
+                        current_ep_hit_totals[env_idx] = {"red": 0, "blue": 0}
                         heartbeat.write(
                             "before_reset",
                             iteration=iteration,

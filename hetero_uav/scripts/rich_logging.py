@@ -85,7 +85,6 @@ class RichExperimentLogger:
                     pass
                 try:
                     vel = sim.get_velocity()
-                    import numpy as np
                     spd = float(np.linalg.norm(vel))
                     row["velocity"] = spd; row["speed"] = spd
                 except Exception:
@@ -94,18 +93,31 @@ class RichExperimentLogger:
                     row["mach"] = float(getattr(sim, "mach", 0)) if hasattr(sim, "mach") else ""
                 except Exception:
                     pass
+            # Action fields (read-only, no pipeline changes)
+            try:
+                raw_acts = getattr(env, "_last_raw_actions", None) or {}
+                eff_acts = getattr(env, "_last_effective_actions", None) or {}
+                raw = raw_acts.get(aid)
+                eff = eff_acts.get(aid)
+                if raw is not None and len(raw) >= 3:
+                    row["action_raw_0"] = raw[0]; row["action_raw_1"] = raw[1]; row["action_raw_2"] = raw[2]
+                if eff is not None and len(eff) >= 3:
+                    row["action_pitch"] = eff[0]; row["action_heading"] = eff[1]; row["action_speed"] = eff[2]
+            except Exception:
+                pass
             # nearest enemy
             try:
-                enemies = env.blue_planes if team == "red" else env.red_planes
-                min_d = 1e12; nearest_id = ""
-                for eid, esim in enemies.items():
-                    if not (esim and getattr(esim, "is_alive", False)):
-                        continue
-                    d = float(np.linalg.norm(np.array(sim.get_position()) - np.array(esim.get_position())))
-                    if d < min_d:
-                        min_d = d; nearest_id = eid
-                row["nearest_enemy_id"] = nearest_id
-                row["nearest_enemy_distance"] = min_d if min_d < 1e11 else ""
+                if sim is not None:
+                    enemies = env.blue_planes if team == "red" else env.red_planes
+                    min_d = 1e12; nearest_id = ""
+                    for eid, esim in enemies.items():
+                        if not (esim and getattr(esim, "is_alive", False)):
+                            continue
+                        d = float(np.linalg.norm(np.array(sim.get_position()) - np.array(esim.get_position())))
+                        if d < min_d:
+                            min_d = d; nearest_id = eid
+                    row["nearest_enemy_id"] = nearest_id
+                    row["nearest_enemy_distance"] = min_d if min_d < 1e11 else ""
             except Exception:
                 pass
             rows.append(row)
