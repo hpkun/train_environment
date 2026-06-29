@@ -55,7 +55,7 @@ def apply_random_scale_mask(
 class BRMABiasedMaskGenerator(nn.Module):
     """Learned keep-probability generator adapted from the parent BRMA module."""
 
-    def __init__(self, entity_dim: int = 19, hidden_dim: int = 128,
+    def __init__(self, entity_dim: int = 30, hidden_dim: int = 128,
                  temperature: float = 0.5):
         super().__init__()
         self.temperature = float(temperature)
@@ -123,7 +123,7 @@ class BRMARecurrentMaskedHAPPOReferencePolicy(BRMARecurrentHAPPOReferencePolicy)
 
     def __init__(
         self,
-        entity_dim: int = 19,
+        entity_dim: int = 30,
         critic_state_dim: int = 480,
         action_dim: int = 3,
         hidden_dim: int = 128,

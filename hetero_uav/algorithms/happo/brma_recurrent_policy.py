@@ -52,7 +52,7 @@ class BRMARecurrentHAPPOReferencePolicy(nn.Module):
 
     def __init__(
         self,
-        entity_dim: int = 19,
+        entity_dim: int = 30,
         critic_state_dim: int = 480,
         action_dim: int = 3,
         hidden_dim: int = 128,

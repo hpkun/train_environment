@@ -397,7 +397,8 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                     "entity_attention cannot load a flat checkpoint; use an "
                     "entity_attention checkpoint or omit --init-checkpoint"
                 )
-        entity_dim = int(meta.get("entity_dim", 19))
+        entity_dim = int(meta.get("entity_dim", 30))
+        full_geometry = entity_dim >= 30
         return EntityHAPPOReferencePolicy(entity_dim=entity_dim, critic_state_dim=critic_dim).to(device)
     if policy_arch == "brma_entity":
         meta = {}
@@ -410,7 +411,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                     "brma_entity cannot load a flat or entity_attention checkpoint; "
                     "use a brma_entity checkpoint or omit --init-checkpoint"
                 )
-        entity_dim = int(meta.get("entity_dim", 19))
+        entity_dim = int(meta.get("entity_dim", 30))
         return BRMAEntityHAPPOReferencePolicy(
             entity_dim=entity_dim,
             critic_state_dim=critic_dim,
@@ -427,7 +428,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                     "brma_recurrent cannot load a flat or entity_attention checkpoint; "
                     "use a brma_recurrent or brma_entity checkpoint or omit --init-checkpoint"
                 )
-        entity_dim = int(meta.get("entity_dim", 19))
+        entity_dim = int(meta.get("entity_dim", 30))
         rnn_hidden_size = int(meta.get("rnn_hidden_size", 128))
         return BRMARecurrentHAPPOReferencePolicy(
             entity_dim=entity_dim,
@@ -446,7 +447,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                     "brma_recurrent_masked cannot load flat, entity_attention, brma_entity, "
                     "or brma_recurrent checkpoints; use a masked checkpoint or omit --init-checkpoint"
                 )
-        entity_dim = int(meta.get("entity_dim", 19))
+        entity_dim = int(meta.get("entity_dim", 30))
         rnn_hidden_size = int(meta.get("rnn_hidden_size", 128))
         return BRMARecurrentMaskedHAPPOReferencePolicy(
             entity_dim=entity_dim,

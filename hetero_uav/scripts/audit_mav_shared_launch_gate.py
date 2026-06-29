@@ -36,9 +36,16 @@ def _write(path: Path, text: str) -> None:
 
 
 def _lock_ready(env, shooter_id: str, target_id: str) -> bool:
+    """Use frame-based lock timer matching the real environment gate (env.py L1263).
+
+    The environment tracks ``_lock_timer`` in physics frames and compares against
+    ``missile_lock_delay_frames``.  Seconds-based constants like
+    ``MISSILE_LOCK_DELAY_SEC`` are NOT used in the launch gate.
+    """
     lock_target = getattr(env, "_lock_target", {}).get(shooter_id)
-    lock_timer = float(getattr(env, "_lock_timer", {}).get(shooter_id, 0.0))
-    return bool(lock_target == target_id and lock_timer >= float(getattr(env, "MISSILE_LOCK_DELAY_SEC", 0.25)))
+    lock_timer = int(getattr(env, "_lock_timer", {}).get(shooter_id, 0))
+    lock_delay_frames = int(getattr(env, "missile_lock_delay_frames", 15))
+    return bool(lock_target == target_id and lock_timer >= lock_delay_frames)
 
 
 def _cooldown_ready(env, shooter_id: str) -> bool:
@@ -67,7 +74,12 @@ def _candidate_rows(env, policy: str, episode: int, step: int) -> list[dict[str,
             range_ok = bool(metrics.get("range_ok", False))
             ao_ok = bool(metrics.get("ao_ok", False))
             ta_ok = bool(metrics.get("ta_ok", False))
-            geometry_ok = bool(range_ok and ao_ok and ta_ok)
+            boresight_ok = bool(metrics.get("boresight_ok_3d", False))
+            use_boresight = bool(getattr(env, "use_boresight_launch_gate", False))
+            if use_boresight:
+                geometry_ok = bool(range_ok and ao_ok and ta_ok and boresight_ok)
+            else:
+                geometry_ok = bool(range_ok and ao_ok and ta_ok)
             launch_candidate = bool(has_track and not engaged and ammo_ready and geometry_ok)
             launch_allowed_now = bool(launch_candidate and cooldown_ready and lock_ready)
             if not has_track:
@@ -103,6 +115,9 @@ def _candidate_rows(env, policy: str, episode: int, step: int) -> list[dict[str,
                 "range_ok": int(range_ok),
                 "ao_ok": int(ao_ok),
                 "ta_ok": int(ta_ok),
+                "boresight_ok": int(boresight_ok),
+                "use_boresight_gate": int(use_boresight),
+                "geometry_ok": int(geometry_ok),
                 "cooldown_ready": cooldown_ready,
                 "lock_ready": lock_ready,
                 "ammo_ready": ammo_ready,
@@ -130,6 +145,7 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path) -> N
                         shooter_id = str(rec.get("shooter_id", rec.get("shooter", "")))
                         if not shooter_id.startswith("red"):
                             continue
+                        track_source = rec.get("launch_track_source", rec.get("track_source", "unknown"))
                         event_rows.append({
                             "policy": policy,
                             "episode": ep,
@@ -137,7 +153,14 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path) -> N
                             "event": "launch",
                             "shooter_id": shooter_id,
                             "target_id": rec.get("target_id", ""),
-                            "track_source": rec.get("track_source", ""),
+                            "track_source": track_source,
+                            "launch_track_ok": rec.get("launch_track_ok", ""),
+                            "launch_track_block_reason": rec.get("launch_track_block_reason", ""),
+                            "launch_geometry_ok_3d": rec.get("launch_geometry_ok_3d", ""),
+                            "range_ok_3d": rec.get("range_ok_3d", ""),
+                            "ata_ok_3d": rec.get("ata_ok_3d", ""),
+                            "ta_ok_3d": rec.get("ta_ok_3d", ""),
+                            "boresight_ok_3d": rec.get("boresight_ok_3d", ""),
                             "range_m": rec.get("range_m", rec.get("range_3d_m", "")),
                             "AO_rad": rec.get("AO_rad", rec.get("AO_3d_rad", "")),
                             "TA_rad": rec.get("TA_rad", rec.get("TA_3d_rad", "")),
@@ -148,6 +171,7 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path) -> N
                         shooter_id = str(rec.get("shooter_id", rec.get("shooter", "")))
                         if not shooter_id.startswith("red"):
                             continue
+                        track_source = rec.get("launch_track_source", rec.get("track_source", "unknown"))
                         event_rows.append({
                             "policy": policy,
                             "episode": ep,
@@ -155,7 +179,14 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path) -> N
                             "event": "termination",
                             "shooter_id": shooter_id,
                             "target_id": rec.get("target_id", ""),
-                            "track_source": rec.get("track_source", ""),
+                            "track_source": track_source,
+                            "launch_track_ok": rec.get("launch_track_ok", ""),
+                            "launch_track_block_reason": rec.get("launch_track_block_reason", ""),
+                            "launch_geometry_ok_3d": rec.get("launch_geometry_ok_3d", ""),
+                            "range_ok_3d": rec.get("range_ok_3d", ""),
+                            "ata_ok_3d": rec.get("ata_ok_3d", ""),
+                            "ta_ok_3d": rec.get("ta_ok_3d", ""),
+                            "boresight_ok_3d": rec.get("boresight_ok_3d", ""),
                             "range_m": rec.get("range_m", rec.get("range_3d_m", "")),
                             "AO_rad": rec.get("AO_rad", rec.get("AO_3d_rad", "")),
                             "TA_rad": rec.get("TA_rad", rec.get("TA_3d_rad", "")),
@@ -176,7 +207,8 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path) -> N
     _write_csv(output_dir / "launch_gate_by_track_source.csv", gate_rows, [
         "policy", "episode", "step", "red_id", "blue_id", "track_source",
         "has_track", "range_m", "AO_rad", "TA_rad", "boresight_3d_rad",
-        "range_ok", "ao_ok", "ta_ok", "cooldown_ready", "lock_ready",
+        "range_ok", "ao_ok", "ta_ok", "boresight_ok", "use_boresight_gate",
+        "geometry_ok", "cooldown_ready", "lock_ready",
         "ammo_ready", "engaged", "launch_candidate", "launch_allowed_now",
         "block_reason",
     ])
@@ -200,6 +232,7 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path) -> N
     ])
     _write_csv(output_dir / "launch_events_by_track_source.csv", event_summary, [
         "policy", "track_source", "launch_count", "termination_count", "hit_count",
+        "launch_track_ok_rate", "geometry_ok_3d_rate",
     ])
     _write_report(output_dir, quality_rows, event_summary)
     _write_alignment_note(output_dir)
@@ -266,12 +299,19 @@ def _aggregate_events(rows):
         grouped[(row["policy"], row.get("track_source") or "unknown")].append(row)
     out = []
     for (policy, source), items in sorted(grouped.items()):
+        launch_items = [r for r in items if r["event"] == "launch"]
         out.append({
             "policy": policy,
             "track_source": source,
-            "launch_count": sum(1 for r in items if r["event"] == "launch"),
+            "launch_count": len(launch_items),
             "termination_count": sum(1 for r in items if r["event"] == "termination"),
             "hit_count": sum(int(r.get("hit") == 1) for r in items),
+            "launch_track_ok_rate": float(np.mean([
+                int(r.get("launch_track_ok") == 1 or r.get("launch_track_ok") == "True")
+                for r in launch_items])) if launch_items else 0.0,
+            "geometry_ok_3d_rate": float(np.mean([
+                int(r.get("launch_geometry_ok_3d") == 1 or r.get("launch_geometry_ok_3d") == "True")
+                for r in launch_items])) if launch_items else 0.0,
         })
     return out
 
@@ -279,6 +319,11 @@ def _aggregate_events(rows):
 def _write_report(output_dir: Path, quality_rows, event_rows) -> None:
     lines = [
         "# MAV Shared Launch Gate Audit",
+        "",
+        "> **Correction note:** 上一版 audit 的 `lock_ready` / event `track_source` 统计存在脚本层误差，本版已修正。",
+        "> - `lock_ready` 现在使用 `env._lock_timer` (physics frames) 与 `env.missile_lock_delay_frames` 比较，不再误用秒数 `MISSILE_LOCK_DELAY_SEC`。",
+        "> - launch/termination event 现在读取 `launch_track_source` 字段，不再误读 `track_source`。",
+        "> - `geometry_ok` 现在尊重 `use_boresight_launch_gate` 配置。",
         "",
         "This audit keeps the existing BRMA-style fire-control gates unchanged and only groups candidate quality by direct vs MAV-shared track source.",
         "",

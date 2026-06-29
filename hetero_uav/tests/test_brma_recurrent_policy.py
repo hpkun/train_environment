@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_brma_recurrent_policy_forward_shapes():
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
-    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
     actor_obs = torch.zeros((3, policy.flat_actor_obs_dim), dtype=torch.float32)
     out = policy.act(actor_obs, roles=[0, 1, 1], deterministic=True)
 
@@ -32,7 +32,7 @@ def test_brma_recurrent_policy_forward_shapes():
 def test_brma_recurrent_policy_hidden_state_shapes():
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
-    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
     actor_obs = torch.zeros((2, policy.flat_actor_obs_dim), dtype=torch.float32)
 
     # Zero hidden init
@@ -52,7 +52,7 @@ def test_brma_recurrent_policy_hidden_state_shapes():
 def test_brma_recurrent_done_reset_hidden_state():
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
-    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
     actor_obs = torch.randn((2, policy.flat_actor_obs_dim), dtype=torch.float32)
 
     h0 = policy.init_hidden(2)
@@ -75,7 +75,7 @@ def test_brma_recurrent_done_reset_hidden_state():
 def test_brma_recurrent_evaluate_actions_batch():
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
-    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
     actor_obs = torch.zeros((4, 3, policy.flat_actor_obs_dim), dtype=torch.float32)
     roles = torch.tensor([[0, 1, 1]] * 4)
     critic = torch.zeros((4, 480), dtype=torch.float32)
@@ -96,10 +96,10 @@ def test_brma_recurrent_evaluate_actions_batch():
 def test_brma_recurrent_policy_save_load_roundtrip(tmp_path):
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
-    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
     path = tmp_path / "model.pt"
     policy.save(path)
-    loaded = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    loaded = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
     loaded.load(path, map_location="cpu")
     h0 = loaded.init_hidden(3)
     out = loaded.act(torch.zeros((3, policy.flat_actor_obs_dim)), roles=[0, 1, 1], deterministic=True, rnn_hidden=h0)
@@ -166,7 +166,7 @@ def test_run_brma_recurrent_smoke_dry_run():
 def test_brma_entity_tests_still_pass():
     """Verify brma_entity policy is unaffected."""
     from algorithms.happo.brma_entity_policy import BRMAEntityHAPPOReferencePolicy
-    policy = BRMAEntityHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3)
+    policy = BRMAEntityHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3)
     actor_obs = torch.zeros((3, policy.flat_actor_obs_dim), dtype=torch.float32)
     out = policy.act(actor_obs, roles=[0, 1, 1], deterministic=True)
     assert out["action"].shape == (3, 3)
@@ -178,7 +178,7 @@ def test_recurrent_replay_hidden_is_pre_action():
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
     torch.manual_seed(42)
-    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
     policy.eval()
 
     actor_obs = torch.randn((2, policy.flat_actor_obs_dim), dtype=torch.float32)
@@ -227,3 +227,26 @@ def test_flat_policy_tests_still_pass():
     out = policy.act(actor_obs, roles=[0, 1, 1], deterministic=True)
     assert out["action"].shape == (3, 3)
     assert "rnn_hidden" not in out
+
+
+def test_brma_entity_dim_19_old_checkpoint_compat():
+    """entity_dim=19 still works for old checkpoint loading (full-geometry truncated)."""
+    from algorithms.happo.brma_entity_policy import BRMAEntityHAPPOReferencePolicy
+    policy = BRMAEntityHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3)
+    assert policy.entity_dim == 19
+    actor_obs = torch.zeros((3, policy.flat_actor_obs_dim), dtype=torch.float32)
+    out = policy.act(actor_obs, roles=[0, 1, 1], deterministic=True)
+    assert out["action"].shape == (3, 3)
+
+
+def test_brma_entity_dim_30_default_full_geometry():
+    """Default entity_dim=30 must accommodate full-geometry from enemy_flat_dim=18."""
+    from algorithms.happo.brma_entity_policy import BRMAEntityHAPPOReferencePolicy
+    policy = BRMAEntityHAPPOReferencePolicy(critic_state_dim=480, action_dim=3)
+    assert policy.entity_dim == 30
+    assert policy.enemy_flat_dim == 18
+    # entity_dim=30 >= 19 + (18-7) = 30, so all full-geometry fits
+    extra_slots = policy.entity_dim - 19
+    assert extra_slots >= (policy.enemy_flat_dim - 7), (
+        f"entity_dim={policy.entity_dim} cannot hold all enemy_flat_dim={policy.enemy_flat_dim} dims"
+    )

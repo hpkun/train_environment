@@ -39,7 +39,7 @@ class BRMAEntityObservationEncoder(nn.Module):
     `keep_mask` uses True for visible entities and False for ignored/dead/pad.
     """
 
-    def __init__(self, entity_dim: int = 19, hidden_size: int = 128,
+    def __init__(self, entity_dim: int = 30, hidden_size: int = 128,
                  num_heads: int = 4, dropout: float = 0.0):
         super().__init__()
         self.entity_dim = int(entity_dim)
@@ -88,7 +88,7 @@ class BRMAEntityHAPPOReferencePolicy(nn.Module):
 
     def __init__(
         self,
-        entity_dim: int = 19,
+        entity_dim: int = 30,
         critic_state_dim: int = 480,
         action_dim: int = 3,
         hidden_dim: int = 128,
