@@ -1,0 +1,13 @@
+side,metric,sum
+red,range_ok,0.0
+red,ao_ok,0.0
+red,ta_ok,0.0
+red,boresight_ok,0.0
+red,track_ok,0.0
+red,geometry_ok,0.0
+blue,range_ok,0.0
+blue,ao_ok,0.0
+blue,ta_ok,0.0
+blue,boresight_ok,0.0
+blue,track_ok,0.0
+blue,geometry_ok,0.0

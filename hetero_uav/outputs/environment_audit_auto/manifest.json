@@ -1,0 +1,10 @@
+{
+  "output_dir": "C:\\Users\\HPK\\Desktop\\train_environment\\hetero_uav\\outputs\\environment_audit_auto",
+  "configs": [
+    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_dynamics_f22_visual_mav_tam_paper_reward_v7_role_aligned.yaml",
+    "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_dynamics_f22_visual_mav_brma_paper_homogeneous_v1.yaml",
+    "uav_env/JSBSim/configs/hetero_3v2_all_attack_uav_brma_paper_homogeneous_v1.yaml"
+  ],
+  "episodes": 3,
+  "max_steps": 1000
+}

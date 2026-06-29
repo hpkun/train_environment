@@ -1,0 +1,8 @@
+policy,first_launch_red,first_launch_blue,first_hit_red,first_hit_blue,episodes
+zero_action_red_vs_blue_rule,0,3,0,3,9
+level_flight_red_vs_blue_rule,0,0,0,0,9
+straight_chase_red_vs_blue_rule,6,0,6,0,9
+oracle_geometry_red_vs_blue_rule,6,0,6,0,9
+red_rule_vs_blue_zero,6,0,6,0,9
+blue_rule_only_strength_probe,0,0,0,0,9
+red_rule_vs_blue_rule_symmetric_all_attack,0,0,0,0,3
