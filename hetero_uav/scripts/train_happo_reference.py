@@ -407,7 +407,9 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                   num_agents: int = 3,
                   brma_random_scale_mask: bool = False,
                   brma_biased_mask: bool = False,
-                  brma_random_mask_prob: float = 0.25):
+                  brma_random_mask_prob: float = 0.25,
+                  max_allies: int | None = None,
+                  max_enemies: int | None = None):
     if policy_arch == "hetero_entity_recurrent":
         from algorithms.happo.hetero_entity_recurrent_policy import (
             HeteroEntityRecurrentPolicy,
@@ -450,8 +452,11 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                     "entity_attention checkpoint or omit --init-checkpoint"
                 )
         entity_dim = int(meta.get("entity_dim", 30))
-        full_geometry = entity_dim >= 30
-        return EntityHAPPOReferencePolicy(entity_dim=entity_dim, critic_state_dim=critic_dim).to(device)
+        _ma = int(max_allies) if max_allies is not None else 4
+        _me = int(max_enemies) if max_enemies is not None else 4
+        return EntityHAPPOReferencePolicy(
+            entity_dim=entity_dim, critic_state_dim=critic_dim,
+            max_allies=_ma, max_enemies=_me).to(device)
     if policy_arch == "brma_entity":
         meta = {}
         if init_checkpoint_meta is not None:
@@ -464,10 +469,13 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                     "use a brma_entity checkpoint or omit --init-checkpoint"
                 )
         entity_dim = int(meta.get("entity_dim", 30))
+        _ma = int(max_allies) if max_allies is not None else 4
+        _me = int(max_enemies) if max_enemies is not None else 4
         return BRMAEntityHAPPOReferencePolicy(
             entity_dim=entity_dim,
             critic_state_dim=critic_dim,
             action_dim=3,
+            max_allies=_ma, max_enemies=_me,
         ).to(device)
     if policy_arch == "brma_recurrent":
         meta = {}
@@ -482,11 +490,14 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                 )
         entity_dim = int(meta.get("entity_dim", 30))
         rnn_hidden_size = int(meta.get("rnn_hidden_size", 128))
+        _ma = int(max_allies) if max_allies is not None else 4
+        _me = int(max_enemies) if max_enemies is not None else 4
         return BRMARecurrentHAPPOReferencePolicy(
             entity_dim=entity_dim,
             critic_state_dim=critic_dim,
             action_dim=3,
             rnn_hidden_size=rnn_hidden_size,
+            max_allies=_ma, max_enemies=_me,
         ).to(device)
     if policy_arch == "brma_recurrent_masked":
         meta = {}
@@ -501,6 +512,8 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                 )
         entity_dim = int(meta.get("entity_dim", 30))
         rnn_hidden_size = int(meta.get("rnn_hidden_size", 128))
+        _ma = int(max_allies) if max_allies is not None else 4
+        _me = int(max_enemies) if max_enemies is not None else 4
         return BRMARecurrentMaskedHAPPOReferencePolicy(
             entity_dim=entity_dim,
             critic_state_dim=critic_dim,
@@ -509,6 +522,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
             random_scale_mask=bool(meta.get("random_scale_mask", brma_random_scale_mask)),
             random_mask_prob=float(meta.get("random_mask_prob", brma_random_mask_prob)),
             biased_mask=bool(meta.get("biased_mask", brma_biased_mask)),
+            max_allies=_ma, max_enemies=_me,
         ).to(device)
     raise ValueError(f"unsupported --policy-arch: {policy_arch}")
 
@@ -832,7 +846,9 @@ def _run_training_main() -> None:
                            brma_random_scale_mask=args.brma_random_scale_mask,
                            brma_biased_mask=args.brma_biased_mask,
                            brma_random_mask_prob=args.brma_random_mask_prob,
-                           num_agents=len(env.red_ids))
+                           num_agents=len(env.red_ids),
+                           max_allies=getattr(adapter, "max_allies", None),
+                           max_enemies=getattr(adapter, "max_enemies", None))
     _SINGLE_RUNNER_STATE["policy"] = policy
     _SINGLE_RUNNER_STATE["meta"] = {
         "algorithm": "happo_reference_v0",
@@ -866,6 +882,12 @@ def _run_training_main() -> None:
         )
     uav_imitation_data = None
     if args.uav_imitation_dataset and args.uav_imitation_coef > 0.0:
+        if actor_dim != 96:
+            raise ValueError(
+                "legacy 96-dim imitation dataset is incompatible with canonical "
+                "mav_shared_geo full-geometry actor obs; imitation is disabled "
+                "for current main experiments"
+            )
         uav_imitation_data = _load_uav_imitation_dataset(args.uav_imitation_dataset)
         print(
             f"Loaded uav_imitation_dataset: {_rel(args.uav_imitation_dataset)} "

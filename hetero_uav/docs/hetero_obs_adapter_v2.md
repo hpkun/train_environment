@@ -1,10 +1,15 @@
 # HeteroObsAdapterV2
 
 `HeteroObsAdapterV2` consumes `observation_mode = "mav_shared_geo"` raw
-observations. It is an incremental adapter; v1 remains available for
+observations. It is a canonical full-geometry adapter; v1 remains available for
 `brma_sensor` observations.
 
-## Dimensions
+## Dimensions (fixed 5V4 capacity)
+
+Training main path uses a **fixed 5V4-capacity adapter**. Small scenarios (e.g.
+3V2) are zero-padded to this capacity. Some audit scripts may use native scenario
+capacity — audit dimensions and training dimensions can differ and should not be
+confused.
 
 - `max_red = 5`
 - `max_blue = 4`
@@ -12,40 +17,46 @@ observations. It is an incremental adapter; v1 remains available for
 - `max_enemies = 4`
 - `ego_feature_dim = 12`
 - `ally_entity_dim = 9`
-- `enemy_entity_dim = 7`
-- `flat_actor_obs_dim = 96`
-- `critic_state_dim = 480`
+- `enemy_entity_dim = 18`
+- `flat_actor_obs_dim = 140`
+- `critic_state_dim = 700`
 
-## Flattening Order
+### Enemy entity composition (18 dims)
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 5 | `enemy_geo_states` (compact relative: speed_diff, delta_h, dist, ata, aa) |
+| 5 | 2 | `enemy_track_source` (own_sensor=1,0 / mav_shared=0,1 / unavailable=0,0) |
+| 7 | 3 | `enemy_relative_pos_xyz` |
+| 10 | 3 | `enemy_relative_vel_xyz` |
+| 13 | 2 | `enemy_bearing_elevation` |
+| 15 | 2 | `enemy_speed_heading` |
+| 17 | 1 | `enemy_full_geo_valid_mask` |
+
+### Flat actor obs layout
 
 ```text
 flat_actor_obs =
-  ego_feature
-  + ally_entities flattened
-  + enemy_entities flattened
-  + ally_valid_mask
-  + ally_alive_mask
-  + enemy_valid_mask
-  + enemy_alive_mask
-  + enemy_observed_mask
+  ego_feature(12)
+  + ally_entities_flattened(max_allies * 9)
+  + enemy_entities_flattened(max_enemies * 18)
+  + ally_valid_mask(max_allies)
+  + ally_alive_mask(max_allies)
+  + enemy_valid_mask(max_enemies)
+  + enemy_alive_mask(max_enemies)
+  + enemy_observed_mask(max_enemies)
 ```
 
-`ego_feature`:
+### Ego feature (12 dims)
 
 ```text
 ego_geo_state(7) + ego_role(4) + missile_warning(1)
 ```
 
-`ally_entity`:
+### Ally entity (9 dims)
 
 ```text
 ally_geo_state(5) + ally_role(4)
-```
-
-`enemy_entity`:
-
-```text
-enemy_geo_state(5) + enemy_track_source(2)
 ```
 
 ## Source Priority
@@ -77,20 +88,16 @@ use `valid=0, alive=0, observed=0`.
 The adapter uses raw `ally_alive_mask` and `enemy_alive_mask` from the
 environment. It does not infer alive status from geometry or observed status.
 
-## Difference From V1
+## Legacy (pre-full-geometry) dimensions
 
-V1 consumes BRMA-style `ego_state`, `ally_states`, and `enemy_states`, producing
-a 140-dimensional actor input and 700-dimensional critic state.
-
-V2 consumes geometric fields:
-
-- `ego_geo_state`
-- `ally_geo_states`
-- `enemy_geo_states`
-- `enemy_observed_mask`
-- `enemy_track_source`
-
-It produces a 96-dimensional actor input and 480-dimensional critic state.
+> **Historical note**: The pre-full-geometry V2 adapter used:
+> - `enemy_entity_dim = 7` (compact geo only)
+> - `flat_actor_obs_dim = 96`
+> - `critic_state_dim = 480`
+>
+> These are **no longer used** by the canonical `mav_shared_geo` training path.
+> Checkpoints with these dimensions may still load for backward compatibility
+> but will report `full_geometry_features_used = false`.
 
 ## Boundaries
 

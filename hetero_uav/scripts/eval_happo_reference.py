@@ -61,7 +61,31 @@ def _role_ids(env) -> list[int]:
     return [0 if env.agent_roles.get(rid) == "mav" else 1 for rid in env.red_ids]
 
 
+def _require_full_geometry_entity_dim(meta: dict, policy_arch: str) -> None:
+    """Block full-geometry checkpoints from silently falling back to entity_dim=19."""
+    if policy_arch not in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"}:
+        return
+    full_geo = bool(meta.get("mav_shared_full_geometry", False)
+                    or meta.get("full_geometry_features_used", False))
+    if not full_geo:
+        return
+    entity_dim = meta.get("entity_dim")
+    if entity_dim is None:
+        raise ValueError(
+            f"{policy_arch} checkpoint declares full-geometry but entity_dim is missing; "
+            "expected entity_dim>=30 to preserve enemy token 19:30."
+        )
+    entity_dim = int(entity_dim)
+    if entity_dim < 30:
+        raise ValueError(
+            f"{policy_arch} checkpoint declares full-geometry but entity_dim={entity_dim}; "
+            "expected entity_dim>=30 to preserve enemy token 19:30."
+        )
+
+
 def _build_policy_from_meta(meta: dict, device: torch.device):
+    policy_arch = meta.get("policy_arch", "flat")
+    _require_full_geometry_entity_dim(meta, policy_arch)
     policy_arch = meta.get("policy_arch", "flat")
     if policy_arch == "hetero_entity_recurrent":
         validate_entity_policy_meta(meta)
@@ -72,42 +96,48 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
             rnn_hidden_size=int(meta["rnn_hidden_size"]),
             num_attention_heads=int(meta.get("num_attention_heads", 4)),
         ).to(device)
+    _ama = int(meta.get("adapter_max_allies", meta.get("max_allies", 4)))
+    _ame = int(meta.get("adapter_max_enemies", meta.get("max_enemies", 4)))
     if policy_arch == "entity_attention":
         return EntityHAPPOReferencePolicy(
-            entity_dim=int(meta.get("entity_dim", 19)),
-            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            entity_dim=int(meta.get("entity_dim", 30)),
+            critic_state_dim=int(meta.get("critic_state_dim")),
             action_dim=3,
+            max_allies=_ama, max_enemies=_ame,
         ).to(device)
     if policy_arch == "brma_entity":
         return BRMAEntityHAPPOReferencePolicy(
-            entity_dim=int(meta.get("entity_dim", 19)),
-            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            entity_dim=int(meta.get("entity_dim", 30)),
+            critic_state_dim=int(meta.get("critic_state_dim")),
             action_dim=3,
+            max_allies=_ama, max_enemies=_ame,
         ).to(device)
     if policy_arch == "brma_recurrent":
         return BRMARecurrentHAPPOReferencePolicy(
-            entity_dim=int(meta.get("entity_dim", 19)),
-            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            entity_dim=int(meta.get("entity_dim", 30)),
+            critic_state_dim=int(meta.get("critic_state_dim")),
             action_dim=3,
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
+            max_allies=_ama, max_enemies=_ame,
         ).to(device)
     if policy_arch == "brma_recurrent_masked":
         return BRMARecurrentMaskedHAPPOReferencePolicy(
-            entity_dim=int(meta.get("entity_dim", 19)),
-            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            entity_dim=int(meta.get("entity_dim", 30)),
+            critic_state_dim=int(meta.get("critic_state_dim")),
             action_dim=3,
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
             random_scale_mask=bool(meta.get("random_scale_mask", False)),
             random_mask_prob=float(meta.get("random_mask_prob", 0.25)),
             biased_mask=bool(meta.get("biased_mask", False)),
+            max_allies=_ama, max_enemies=_ame,
         ).to(device)
     if policy_arch == "pure_happo":
         num_agents = int(meta.get("num_agents", 0))
         if num_agents <= 0:
             raise ValueError("pure_happo checkpoint meta missing num_agents")
         return PureHAPPOPolicy(
-            actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
-            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            actor_obs_dim=int(meta.get("actor_obs_dim")),
+            critic_state_dim=int(meta.get("critic_state_dim")),
             action_dim=3, num_agents=num_agents,
         ).to(device)
     if policy_arch == "pure_happo_tanh":
@@ -115,14 +145,14 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
         if num_agents <= 0:
             raise ValueError("pure_happo_tanh checkpoint meta missing num_agents")
         return PureHAPPOTanhPolicy(
-            actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
-            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            actor_obs_dim=int(meta.get("actor_obs_dim")),
+            critic_state_dim=int(meta.get("critic_state_dim")),
             action_dim=3, num_agents=num_agents,
         ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(
-            actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
-            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            actor_obs_dim=int(meta.get("actor_obs_dim")),
+            critic_state_dim=int(meta.get("critic_state_dim")),
         ).to(device)
     raise ValueError(f"unsupported checkpoint policy_arch: {policy_arch}")
 
