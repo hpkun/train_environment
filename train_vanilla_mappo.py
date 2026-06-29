@@ -1660,87 +1660,129 @@ def main():
 
         # ---- Rollout ----
         for step in range(num_steps):
-            actions_list = []
-
             # Fetch engaged-targets sets from all envs (one pipe round-trip)
             engaged_sets = vec_env.env_method("refresh_engaged_targets")
             blue_own_positions_list, blue_own_headings_list = (
                 _fetch_blue_own_kinematics(vec_env))
 
+            # ---- Phase 1: per-env blue actions + collect red obs for batching ----
+            # env_actions_builders stores per-env data needed to finalize actions after batched inference
+            env_actions_builders = []  # list of dicts
+            # Batched actor inputs
+            all_red_obs_flat = []        # list of np.ndarray for alive agents across ALL envs
+            all_rnn_hidden_in = []       # corresponding RNN hidden states
+            alive_map = []               # list of (env_idx, agent_idx) tuples for split-back
+            # Batched critic inputs
+            all_global_obs_np = []       # per-env global obs for centralized critic batch
+            # Per-env dead-agent records (store_step for dead agents)
+            env_dead_records = []        # per-env list of (agent_idx, obs_flat)
+
             for env_idx in range(config.num_envs):
                 env_obs = raw_obs_list[env_idx]
-                # Guard against empty obs from a dead worker that couldn't be restarted
                 if not env_obs or len(env_obs) == 0:
-                    env_actions = {aid: np.zeros(config.action_dim, dtype=np.float32)
-                                   for aid in red_ids + blue_ids}
-                    actions_list.append(env_actions)
+                    env_actions_builders.append({"dead": True})
+                    all_global_obs_np.append(np.zeros(global_obs_dim, dtype=np.float32))
+                    env_dead_records.append([])
                     continue
-                env_actions = {}
 
-                # 蓝方协同目标分配 + 引导律 (GCAS / 导弹规避在 env 层自动保护)
+                # ---- Blue rule-based actions (fast CPU, per-env) ----
                 blue_obs_dict = {bid: env_obs[bid] for bid in blue_ids}
-                env_actions.update(blue_coordinated_actions(
+                blue_actions = blue_coordinated_actions(
                     blue_obs_dict, config.num_blue, config.num_red,
                     engaged_targets=engaged_sets[env_idx],
                     own_positions=blue_own_positions_list[env_idx],
-                    own_headings=blue_own_headings_list[env_idx]))
+                    own_headings=blue_own_headings_list[env_idx])
 
-                # 红方 Actor 采样 + 全局观测构建
-                red_obs_flat_all = []  # all agents (alive/dead) for global state
-                red_obs_tensors = []
-                alive_red_indices = []
+                # ---- Red: collect alive agents for batched actor forward pass ----
+                red_obs_flat_all = []
+                alive_agent_indices = []
+                dead_agent_records = []
                 for i, rid in enumerate(red_ids):
                     obs_np = env_obs[rid]
                     obs_flat = _flatten_obs(obs_np)
                     red_obs_flat_all.append(obs_flat)
                     alive = not np.allclose(obs_np["ego_state"], 0.0)
                     if alive:
-                        red_obs_tensors.append(obs_flat)
-                        alive_red_indices.append(i)
+                        all_red_obs_flat.append(obs_flat)
+                        all_rnn_hidden_in.append(rnn_hidden_actor[env_idx, i])
+                        alive_map.append((env_idx, i))
+                        alive_agent_indices.append(i)
                     else:
-                        env_actions[rid] = np.zeros(config.action_dim, dtype=np.float32)
-                        buffer.store_step(step, env_idx, i, obs_flat,
-                                          np.zeros(config.action_dim, dtype=np.float32),
-                                          0.0, 0.0, 0.0, 1.0, alive=False)
+                        dead_agent_records.append((i, obs_flat))
 
-                if alive_red_indices:
-                    obs_batch = torch.as_tensor(
-                        np.stack(red_obs_tensors), dtype=torch.float32, device=device)
-                    batch_rnn_a = torch.as_tensor(
-                        rnn_hidden_actor[env_idx, alive_red_indices], device=device)
+                all_global_obs_np.append(np.concatenate(red_obs_flat_all))
+                env_actions_builders.append({
+                    "dead": False,
+                    "blue_actions": blue_actions,
+                    "alive_indices": alive_agent_indices,
+                })
+                env_dead_records.append(dead_agent_records)
 
-                    with torch.no_grad():
-                        action_dist, new_rnn_a = actor(obs_batch, batch_rnn_a)
-                        action_raw = action_dist.sample()
-                        # Clamp to [-1, 1] before env / log_prob (Gaussian tail guard)
-                        action = action_raw.clamp(-0.999, 0.999)
-                        log_prob = action_dist.log_prob(action).sum(dim=-1)
-                    _accumulate_action_clip_totals(
-                        iter_action_clip,
-                        action_raw.cpu().numpy(),
-                        action.cpu().numpy(),
-                    )
+            # ---- Phase 2: batched actor forward pass (all alive agents, all envs) ----
+            if all_red_obs_flat:
+                obs_batch = torch.as_tensor(
+                    np.stack(all_red_obs_flat), dtype=torch.float32, device=device)
+                batch_rnn_a = torch.as_tensor(
+                    np.stack(all_rnn_hidden_in), dtype=torch.float32, device=device)
 
-                    for k, i in enumerate(alive_red_indices):
-                        rid = red_ids[i]
-                        env_actions[rid] = action[k].cpu().numpy()
-                        rnn_hidden_actor[env_idx, i] = new_rnn_a[k].cpu().numpy()
-                        buffer.store_step(step, env_idx, i,
-                                          red_obs_tensors[k],
-                                          action[k].cpu().numpy(),
-                                          0.0, 0.0,  # value filled below
-                                          log_prob[k].item(), 0.0, alive=True)
-
-                # ---- Centralized critic: global state V(s) shared by all agents ----
-                global_obs_np = np.concatenate(red_obs_flat_all)  # (global_obs_dim,)
-                global_obs_t = torch.as_tensor(
-                    global_obs_np, dtype=torch.float32, device=device).unsqueeze(0)
                 with torch.no_grad():
-                    v_global = critic(global_obs_t).item()
-                # All red agents (alive and dead) share the centralized value
-                for i in range(config.num_red):
-                    if buffer.alive[step, env_idx, i]:
-                        buffer.values[step, env_idx, i] = v_global
+                    action_dist, new_rnn_a = actor(obs_batch, batch_rnn_a)
+                    action_raw = action_dist.sample()
+                    action = action_raw.clamp(-0.999, 0.999)
+                    log_prob = action_dist.log_prob(action).sum(dim=-1)
+
+                _accumulate_action_clip_totals(
+                    iter_action_clip,
+                    action_raw.cpu().numpy(),
+                    action.cpu().numpy(),
+                )
+                actions_np = action.cpu().numpy()
+                log_probs_np = log_prob.cpu().numpy()
+                new_rnn_np = new_rnn_a.cpu().numpy()
+            else:
+                actions_np = np.array([])
+                log_probs_np = np.array([])
+                new_rnn_np = np.array([])
+
+            # ---- Phase 3: batched centralized critic forward pass (all envs) ----
+            global_obs_batch = torch.as_tensor(
+                np.stack(all_global_obs_np), dtype=torch.float32, device=device)
+            with torch.no_grad():
+                v_global_all = critic(global_obs_batch).squeeze(-1).cpu().numpy()  # [num_envs]
+
+            # ---- Phase 4: build per-env action dicts and fill buffer ----
+            actions_list = []
+            for env_idx in range(config.num_envs):
+                builder = env_actions_builders[env_idx]
+                if builder.get("dead"):
+                    env_actions = {aid: np.zeros(config.action_dim, dtype=np.float32)
+                                   for aid in red_ids + blue_ids}
+                    actions_list.append(env_actions)
+                    continue
+
+                env_actions = dict(builder["blue_actions"])
+                v_global = float(v_global_all[env_idx])
+
+                # Dead agents: zero actions, store to buffer
+                for agent_idx_i, obs_flat in env_dead_records[env_idx]:
+                    rid = red_ids[agent_idx_i]
+                    env_actions[rid] = np.zeros(config.action_dim, dtype=np.float32)
+                    buffer.store_step(step, env_idx, agent_idx_i, obs_flat,
+                                      np.zeros(config.action_dim, dtype=np.float32),
+                                      0.0, 0.0, 0.0, 1.0, alive=False)
+
+                # Alive agents: assign batched actions, store to buffer
+                for k, (batch_env, agent_idx_i) in enumerate(alive_map):
+                    if batch_env != env_idx:
+                        continue
+                    rid = red_ids[agent_idx_i]
+                    env_actions[rid] = actions_np[k]
+                    rnn_hidden_actor[env_idx, agent_idx_i] = new_rnn_np[k]
+                    # Get obs_flat for buffer storage
+                    obs_flat = all_red_obs_flat[k]
+                    buffer.store_step(step, env_idx, agent_idx_i, obs_flat,
+                                      actions_np[k], 0.0, v_global,
+                                      float(log_probs_np[k]), 0.0, alive=True)
 
                 actions_list.append(env_actions)
 
@@ -1842,23 +1884,26 @@ def main():
         # 保存 rollout 结束后的 RNN 状态 (用于 GAE bootstrap)
         buffer.rnn_actor_final = rnn_hidden_actor.copy()
 
-        # 计算 GAE bootstrap 值: centralized V(s_T) shared by all agents
+        # 计算 GAE bootstrap 值: centralized V(s_T) — batched across all envs
+        bootstrap_global_obs_list = []
         for env_idx in range(config.num_envs):
             env_obs = raw_obs_list[env_idx]
             if not env_obs or len(env_obs) == 0:
+                bootstrap_global_obs_list.append(np.zeros(global_obs_dim, dtype=np.float32))
                 continue
-            # Build global obs from all red agents' final observations
             global_obs_parts = []
             for rid in red_ids:
                 if rid in env_obs:
                     global_obs_parts.append(_flatten_obs(env_obs[rid]))
                 else:
                     global_obs_parts.append(np.zeros(obs_dim, dtype=np.float32))
-            global_obs_np = np.concatenate(global_obs_parts)
-            global_obs_t = torch.as_tensor(global_obs_np, dtype=torch.float32,
-                                           device=device).unsqueeze(0)
-            with torch.no_grad():
-                v_bootstrap = critic(global_obs_t).item()
+            bootstrap_global_obs_list.append(np.concatenate(global_obs_parts))
+        bootstrap_obs_batch = torch.as_tensor(
+            np.stack(bootstrap_global_obs_list), dtype=torch.float32, device=device)
+        with torch.no_grad():
+            v_bootstrap_all = critic(bootstrap_obs_batch).squeeze(-1).cpu().numpy()
+        for env_idx in range(config.num_envs):
+            v_bootstrap = float(v_bootstrap_all[env_idx])
             for i in range(config.num_red):
                 buffer.bootstrap_values[env_idx, i] = v_bootstrap
 
