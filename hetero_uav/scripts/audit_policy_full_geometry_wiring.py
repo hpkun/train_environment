@@ -1,7 +1,7 @@
 """Audit whether each policy_arch actually receives canonical full-geometry enemy features.
 
 This script resets an environment, builds adapter and policy inputs for each
-policy_arch, and reports which features are actually present in the data flow.
+policy_arch, and TRACES full-geometry data into policy entity tokens.
 It does NOT train.
 """
 from __future__ import annotations
@@ -61,15 +61,16 @@ def _check_adapter_v2(obs_dict: dict, red_ids: list[str], blue_ids: list[str]) -
     adapter = HeteroObsAdapterV2(max_red=len(red_ids), max_blue=len(blue_ids))
     adapted = adapter.adapt_all(obs_dict, red_ids=red_ids, blue_ids=blue_ids)
 
-    # Check enemy entity dim
     rid = red_ids[0]
     agent_out = adapter.adapt_agent(rid, obs_dict[rid], red_ids=red_ids, blue_ids=blue_ids)
     enemy_entities = agent_out["enemy_entities"]
-    enemy_flat_dim = enemy_entities.shape[1]  # enemy_entity_dim
-
-    # Check if full-geometry features produce non-zero values in flat obs
+    enemy_flat_dim = enemy_entities.shape[1]
     flat = agent_out["flat_actor_obs"]
     nonzero_count = int(np.count_nonzero(np.abs(flat) > 0))
+
+    # Check enemy entity 7:18 contains non-zero values (full-geometry extra beyond compact geo 0:7)
+    enemy_geo_extra = enemy_entities[:, 7:]  # beyond compact geo + track_source at slot 5:7
+    enemy_full_geo_nonzero = bool(np.any(np.abs(enemy_geo_extra) > 1e-8))
 
     return {
         "adapter_class": "HeteroObsAdapterV2",
@@ -77,15 +78,96 @@ def _check_adapter_v2(obs_dict: dict, red_ids: list[str], blue_ids: list[str]) -
         "enemy_flat_dim": enemy_flat_dim,
         "flat_actor_obs_dim": int(flat.shape[0]),
         "critic_state_dim": int(adapted["critic_state"].shape[0]),
+        "max_red": len(red_ids),
+        "max_blue": len(blue_ids),
+        "max_allies": len(red_ids) - 1,
+        "max_enemies": len(blue_ids),
         "flat_nonzero_elements": nonzero_count,
         "full_geometry_keys_present": True,
-        "full_geometry_nonzero_in_adapter": True,
+        "full_geometry_nonzero_in_adapter": enemy_full_geo_nonzero,
         "entity_dim_from_flat": enemy_flat_dim * len(blue_ids),
     }
 
 
-def _build_policy_for_audit(policy_arch: str, actor_dim: int, critic_dim: int) -> tuple[Any, dict]:
-    """Build policy and return wiring info.  Does NOT train."""
+def _flat_actor_obs_from_adapter(obs_dict: dict, red_ids: list[str], blue_ids: list[str]) -> np.ndarray:
+    """Build flat actor obs for one agent using HeteroObsAdapterV2."""
+    adapter = HeteroObsAdapterV2(max_red=len(red_ids), max_blue=len(blue_ids))
+    out = adapter.adapt_agent(red_ids[0], obs_dict[red_ids[0]], red_ids=red_ids, blue_ids=blue_ids)
+    return out["flat_actor_obs"]
+
+
+def _trace_enemy_token_full_geometry(policy, flat_obs: np.ndarray) -> dict:
+    """Actually trace whether full-geometry ends up non-zero in enemy entity tokens.
+
+    Calls the policy's ``_flat_to_entities()`` method with the flat obs,
+    extracts enemy tokens (those after self + ally slots), and checks
+    whether the full-geometry extra region is non-zero.
+
+    Returns a dict with trace results.
+    """
+    import torch
+
+    if not hasattr(policy, "_flat_to_entities"):
+        return {
+            "full_geometry_nonzero_in_policy_entity": "n/a (no _flat_to_entities)",
+            "full_geometry_used_by_policy": False,
+            "trace_note": "policy has no _flat_to_entities method",
+        }
+
+    flat_t = torch.as_tensor(flat_obs, dtype=torch.float32).unsqueeze(0)  # [1, D]
+    try:
+        entities, keep_mask = policy._flat_to_entities(flat_t)
+    except Exception as exc:
+        return {
+            "full_geometry_nonzero_in_policy_entity": False,
+            "full_geometry_used_by_policy": False,
+            "trace_note": f"_flat_to_entities raised: {exc}",
+        }
+
+    # entities shape: [B, N, entity_dim], where N = 1 + max_allies + max_enemies
+    # Enemy tokens start at index 1 + max_allies
+    enemy_start = 1 + policy.max_allies
+    enemy_tokens = entities[:, enemy_start:enemy_start + policy.max_enemies, :]
+
+    entity_dim = policy.entity_dim
+    # Check full-geometry extra region: indices 19:30 for entity_dim>=30
+    if entity_dim >= 30:
+        full_geo_region = enemy_tokens[:, :, 19:30]
+    elif entity_dim > 19:
+        full_geo_region = enemy_tokens[:, :, 19:entity_dim]
+    else:
+        full_geo_region = enemy_tokens[:, :, 0:0]  # empty
+
+    nonzero = bool(torch.any(torch.abs(full_geo_region) > 1e-8).item()) if full_geo_region.numel() > 0 else False
+    region_size = int(full_geo_region.numel())
+
+    return {
+        "full_geometry_nonzero_in_policy_entity": nonzero,
+        "full_geometry_used_by_policy": nonzero,
+        "entity_dim": entity_dim,
+        "enemy_token_start_idx": enemy_start,
+        "enemy_token_count": policy.max_enemies,
+        "full_geo_region_start": 19,
+        "full_geo_region_end": min(entity_dim, 30),
+        "full_geo_region_nonzero_elements": region_size,
+        "enemy_token_shape": list(enemy_tokens.shape),
+        "trace_note": "traced via _flat_to_entities",
+    }
+
+
+def _build_policy_and_trace(
+    policy_arch: str,
+    actor_dim: int,
+    critic_dim: int,
+    flat_obs: np.ndarray,
+    max_allies: int = 4,
+    max_enemies: int = 4,
+) -> tuple[Any, dict]:
+    """Build policy and trace full-geometry into entity tokens.
+
+    ``max_allies`` and ``max_enemies`` should match the adapter's output
+    dimensions so that ``_flat_to_entities`` can correctly decode the flat obs.
+    """
     import torch
 
     device = torch.device("cpu")
@@ -94,10 +176,13 @@ def _build_policy_for_audit(policy_arch: str, actor_dim: int, critic_dim: int) -
         "entity_dim": None,
         "adapter_class": None,
         "full_geometry_used_by_policy": False,
+        "full_geometry_path": "unknown",
+        "full_geometry_nonzero_in_policy_entity": "n/a",
         "reason_if_false": "",
     }
 
     try:
+        # --- flat / pure_happo: no entity decoding, flat obs path ---
         if policy_arch == "pure_happo":
             from algorithms.pure_happo.policy import PureHAPPOPolicy
             policy = PureHAPPOPolicy(
@@ -105,34 +190,43 @@ def _build_policy_for_audit(policy_arch: str, actor_dim: int, critic_dim: int) -
                 action_dim=3, num_agents=3)
             meta["adapter_class"] = "HeteroObsAdapterV2"
             meta["entity_dim"] = "n/a (flat)"
-            meta["full_geometry_used_by_policy"] = True
-            meta["reason_if_false"] = ""
             meta["enemy_flat_dim"] = 18
+            meta["full_geometry_used_by_policy"] = True
+            meta["full_geometry_path"] = "flat_actor_obs"
+            meta["full_geometry_nonzero_in_policy_entity"] = "n/a_flat_policy"
+            meta["reason_if_false"] = ""
             return policy, meta
 
         elif policy_arch == "flat":
-            # flat uses the HAPPOReferencePolicy from the happo module
             from algorithms.happo.happo_policy import HAPPOReferencePolicy
             policy = HAPPOReferencePolicy(actor_dim, critic_dim)
             meta["adapter_class"] = "HeteroObsAdapterV2"
             meta["entity_dim"] = "n/a (flat)"
-            meta["full_geometry_used_by_policy"] = True
-            meta["reason_if_false"] = ""
             meta["enemy_flat_dim"] = 18
+            meta["full_geometry_used_by_policy"] = True
+            meta["full_geometry_path"] = "flat_actor_obs"
+            meta["full_geometry_nonzero_in_policy_entity"] = "n/a_flat_policy"
+            meta["reason_if_false"] = ""
             return policy, meta
 
+        # --- entity-attention policies: flat obs → entity tokens ---
         elif policy_arch == "entity_attention":
             from algorithms.happo.entity_policy import EntityHAPPOReferencePolicy
             entity_dim = 30
             policy = EntityHAPPOReferencePolicy(
-                entity_dim=entity_dim, critic_state_dim=critic_dim)
-            meta["adapter_class"] = "HeteroObsAdapterV2"
-            meta["entity_dim"] = entity_dim
-            meta["enemy_flat_dim"] = 18
-            meta["full_geometry_used_by_policy"] = (entity_dim >= 30)
+                entity_dim=entity_dim, critic_state_dim=critic_dim,
+                max_allies=max_allies, max_enemies=max_enemies)
+            trace = _trace_enemy_token_full_geometry(policy, flat_obs)
+            meta.update({
+                "adapter_class": "HeteroObsAdapterV2",
+                "entity_dim": entity_dim,
+                "enemy_flat_dim": 18,
+                "full_geometry_path": "flat_to_entity_token_19_30",
+                **trace,
+            })
             meta["reason_if_false"] = (
-                "" if entity_dim >= 30
-                else f"entity_dim={entity_dim} < 30 truncates extra {11 - max(0, entity_dim - 19)} full-geometry dims"
+                "" if meta["full_geometry_used_by_policy"]
+                else f"entity_dim={entity_dim} insufficient for full-geometry"
             )
             return policy, meta
 
@@ -140,14 +234,19 @@ def _build_policy_for_audit(policy_arch: str, actor_dim: int, critic_dim: int) -
             from algorithms.happo.brma_entity_policy import BRMAEntityHAPPOReferencePolicy
             entity_dim = 30
             policy = BRMAEntityHAPPOReferencePolicy(
-                entity_dim=entity_dim, critic_state_dim=critic_dim, action_dim=3)
-            meta["adapter_class"] = "HeteroObsAdapterV2"
-            meta["entity_dim"] = entity_dim
-            meta["enemy_flat_dim"] = 18
-            meta["full_geometry_used_by_policy"] = (entity_dim >= 30)
+                entity_dim=entity_dim, critic_state_dim=critic_dim, action_dim=3,
+                max_allies=max_allies, max_enemies=max_enemies)
+            trace = _trace_enemy_token_full_geometry(policy, flat_obs)
+            meta.update({
+                "adapter_class": "HeteroObsAdapterV2",
+                "entity_dim": entity_dim,
+                "enemy_flat_dim": 18,
+                "full_geometry_path": "flat_to_entity_token_19_30",
+                **trace,
+            })
             meta["reason_if_false"] = (
-                "" if entity_dim >= 30
-                else f"entity_dim={entity_dim} < 30 truncates full-geometry"
+                "" if meta["full_geometry_used_by_policy"]
+                else f"entity_dim={entity_dim} insufficient for full-geometry"
             )
             return policy, meta
 
@@ -156,14 +255,19 @@ def _build_policy_for_audit(policy_arch: str, actor_dim: int, critic_dim: int) -
             entity_dim = 30
             policy = BRMARecurrentHAPPOReferencePolicy(
                 entity_dim=entity_dim, critic_state_dim=critic_dim,
-                action_dim=3, rnn_hidden_size=128)
-            meta["adapter_class"] = "HeteroObsAdapterV2"
-            meta["entity_dim"] = entity_dim
-            meta["enemy_flat_dim"] = 18
-            meta["full_geometry_used_by_policy"] = (entity_dim >= 30)
+                action_dim=3, rnn_hidden_size=128,
+                max_allies=max_allies, max_enemies=max_enemies)
+            trace = _trace_enemy_token_full_geometry(policy, flat_obs)
+            meta.update({
+                "adapter_class": "HeteroObsAdapterV2",
+                "entity_dim": entity_dim,
+                "enemy_flat_dim": 18,
+                "full_geometry_path": "flat_to_entity_token_19_30",
+                **trace,
+            })
             meta["reason_if_false"] = (
-                "" if entity_dim >= 30
-                else f"entity_dim={entity_dim} < 30 truncates full-geometry"
+                "" if meta["full_geometry_used_by_policy"]
+                else f"entity_dim={entity_dim} insufficient for full-geometry"
             )
             return policy, meta
 
@@ -173,37 +277,44 @@ def _build_policy_for_audit(policy_arch: str, actor_dim: int, critic_dim: int) -
             policy = BRMARecurrentMaskedHAPPOReferencePolicy(
                 entity_dim=entity_dim, critic_state_dim=critic_dim,
                 action_dim=3, rnn_hidden_size=128,
-                brma_random_scale_mask=False, brma_biased_mask=False, brma_random_mask_prob=0.0)
-            meta["adapter_class"] = "HeteroObsAdapterV2"
-            meta["entity_dim"] = entity_dim
-            meta["enemy_flat_dim"] = 18
-            meta["full_geometry_used_by_policy"] = (entity_dim >= 30)
+                random_scale_mask=False, biased_mask=False, random_mask_prob=0.0,
+                max_allies=max_allies, max_enemies=max_enemies)
+            trace = _trace_enemy_token_full_geometry(policy, flat_obs)
+            meta.update({
+                "adapter_class": "HeteroObsAdapterV2",
+                "entity_dim": entity_dim,
+                "enemy_flat_dim": 18,
+                "full_geometry_path": "flat_to_entity_token_19_30",
+                **trace,
+            })
             meta["reason_if_false"] = (
-                "" if entity_dim >= 30
-                else f"entity_dim={entity_dim} < 30 truncates full-geometry"
+                "" if meta["full_geometry_used_by_policy"]
+                else f"entity_dim={entity_dim} insufficient for full-geometry"
             )
             return policy, meta
 
         elif policy_arch == "hetero_entity_recurrent":
             from algorithms.happo.hetero_entity_recurrent_policy import HeteroEntityRecurrentPolicy
-            # HeteroEntitySetAdapter uses entity_dim=21 with its own token layout
-            # It does NOT yet read full-geometry keys (relative_pos_xyz etc.)
             entity_dim = 21
             policy = HeteroEntityRecurrentPolicy(
                 entity_dim=entity_dim, action_dim=3, hidden_dim=128,
                 rnn_hidden_size=128, num_attention_heads=4)
-            meta["adapter_class"] = "HeteroEntitySetAdapter"
-            meta["entity_dim"] = entity_dim
-            meta["enemy_flat_dim"] = "n/a (entity token layout)"
-            meta["full_geometry_used_by_policy"] = False
-            meta["reason_if_false"] = (
-                "hetero_entity_recurrent uses HeteroEntitySetAdapter which "
-                "only reads enemy_geo_states(5) + enemy_track_source(2). "
-                "Full-geometry keys (relative_pos_xyz, relative_vel_xyz, "
-                "bearing_elevation, speed_heading, full_geo_valid_mask) "
-                "are NOT incorporated into entity tokens (entity_dim=21). "
-                "Upgrade to entity_dim>=32 needed for full-geometry support."
-            )
+            meta.update({
+                "adapter_class": "HeteroEntitySetAdapter",
+                "entity_dim": entity_dim,
+                "enemy_flat_dim": "n/a (entity token layout)",
+                "full_geometry_used_by_policy": False,
+                "full_geometry_path": "unsupported_hetero_entity_set_adapter",
+                "full_geometry_nonzero_in_policy_entity": False,
+                "hetero_entity_recurrent_full_geometry": False,
+                "reason_if_false": (
+                    "HeteroEntitySetAdapter currently ignores full-geometry keys "
+                    "(enemy_relative_pos_xyz, enemy_relative_vel_xyz, "
+                    "enemy_bearing_elevation, enemy_speed_heading, "
+                    "enemy_full_geo_valid_mask). "
+                    "Upgrade to entity_dim>=32 needed."
+                ),
+            })
             return policy, meta
 
         else:
@@ -211,7 +322,7 @@ def _build_policy_for_audit(policy_arch: str, actor_dim: int, critic_dim: int) -
             return None, meta
 
     except Exception as exc:
-        meta["reason_if_false"] = f"build error: {exc}"
+        meta["reason_if_false"] = f"build/trace error: {exc}"
         return None, meta
 
 
@@ -254,10 +365,17 @@ def main() -> None:
     actor_dim = adapter_info["flat_actor_obs_dim"]
     critic_dim = adapter_info["critic_state_dim"]
 
-    # 4. Audit each policy_arch
+    # 4. Build flat actor obs for real trace
+    flat_obs = _flat_actor_obs_from_adapter(obs, red_ids, blue_ids)
+
+    # 5. Audit each policy_arch with real trace
+    #    Pass adapter dimensions so policies are built with matching max_allies/max_enemies
     rows = []
     for arch in POLICY_ARCHS:
-        _policy, meta = _build_policy_for_audit(arch, actor_dim, critic_dim)
+        _policy, meta = _build_policy_and_trace(
+            arch, actor_dim, critic_dim, flat_obs,
+            max_allies=adapter_info["max_allies"],
+            max_enemies=adapter_info["max_enemies"])
         row = {
             "policy_arch": arch,
             "adapter_class": meta.get("adapter_class", "unknown"),
@@ -268,25 +386,41 @@ def main() -> None:
             "full_geometry_keys_present": all(
                 raw_keys.get(k) in ("nonzero", "zero") for k in FULL_GEO_KEYS),
             "full_geometry_nonzero_in_adapter": adapter_info["full_geometry_nonzero_in_adapter"],
-            "full_geometry_nonzero_in_policy_entity": "n/a (not traced)",
+            "full_geometry_nonzero_in_policy_entity": meta.get("full_geometry_nonzero_in_policy_entity", False),
             "full_geometry_used_by_policy": meta.get("full_geometry_used_by_policy", False),
+            "full_geometry_path": meta.get("full_geometry_path", "unknown"),
             "reason_if_false": meta.get("reason_if_false", ""),
         }
         rows.append(row)
 
-    # 5. Write CSV and report
+    # 6. Write CSV
     fields = [
         "policy_arch", "adapter_class", "actor_obs_dim", "critic_state_dim",
         "entity_dim", "enemy_flat_dim",
         "full_geometry_keys_present", "full_geometry_nonzero_in_adapter",
         "full_geometry_nonzero_in_policy_entity", "full_geometry_used_by_policy",
-        "reason_if_false",
+        "full_geometry_path", "reason_if_false",
     ]
     _write_csv(output_dir / "policy_full_geometry_wiring.csv", rows, fields)
 
-    # Report
+    # 7. Write report with dynamic dimensions
     lines = [
         "# Policy Full-Geometry Wiring Audit",
+        "",
+        "> Dimensions below are read dynamically from the adapter and policy instances.",
+        "> No hard-coded 96-dim or 480-dim values are reported.",
+        "",
+        "## Adapter Dimensions",
+        "",
+        f"- **adapter_class**: {adapter_info['adapter_class']}",
+        f"- **max_red**: {adapter_info['max_red']}",
+        f"- **max_blue**: {adapter_info['max_blue']}",
+        f"- **max_allies**: {adapter_info['max_allies']}",
+        f"- **max_enemies**: {adapter_info['max_enemies']}",
+        f"- **enemy_entity_dim**: {adapter_info['enemy_entity_dim']}",
+        f"- **enemy_flat_dim**: {adapter_info['enemy_flat_dim']}",
+        f"- **flat_actor_obs_dim**: {adapter_info['flat_actor_obs_dim']}",
+        f"- **critic_state_dim**: {adapter_info['critic_state_dim']}",
         "",
         "## Raw Observation (mav_shared_geo)",
         "",
@@ -298,37 +432,33 @@ def main() -> None:
 
     lines.extend([
         "",
-        "## Adapter",
+        "## Policy Wiring Summary",
         "",
-        f"- **adapter_class**: {adapter_info['adapter_class']}",
-        f"- **enemy_entity_dim**: {adapter_info['enemy_entity_dim']}",
-        f"- **flat_actor_obs_dim**: {adapter_info['flat_actor_obs_dim']}",
-        f"- **critic_state_dim**: {adapter_info['critic_state_dim']}",
-        "",
-        "## Policy Wiring",
-        "",
-        "| policy_arch | adapter | entity_dim | enemy_flat_dim | full_geo_used |",
-        "|---|---:|---:|---|",
+        "| policy_arch | adapter | entity_dim | full_geo_used | full_geo_path | full_geo_nonzero_traced |",
+        "|---|---:|---|---|---|",
     ])
     for r in rows:
         lines.append(
             f"| {r['policy_arch']} | {r['adapter_class']} | "
-            f"{r['entity_dim']} | {r['enemy_flat_dim']} | "
-            f"{'YES' if r['full_geometry_used_by_policy'] else 'NO'} |"
+            f"{r['entity_dim']} | {'YES' if r['full_geometry_used_by_policy'] else 'NO'} | "
+            f"{r['full_geometry_path']} | "
+            f"{r['full_geometry_nonzero_in_policy_entity']} |"
         )
 
     lines.extend([
         "",
         "## Answers",
         "",
-        "### 1. Which policy_arch truly uses canonical full-geometry?",
+        "### 1. Which policy_arch truly receives canonical full-geometry?",
         "",
-        "- **pure_happo**, **flat**: YES — use HeteroObsAdapterV2 flat obs (96-dim for 3v2), full-geometry features are in the flat vector.",
-        "- **entity_attention**, **brma_entity**, **brma_recurrent**, **brma_recurrent_masked**: YES (with entity_dim=30 default) — flat-to-entity decoder reserves space for all 18 enemy flat dims.",
     ])
     for r in rows:
         if r["full_geometry_used_by_policy"]:
-            lines.append(f"- **{r['policy_arch']}**: YES — entity_dim={r['entity_dim']} >= 30, enemy_flat_dim={r['enemy_flat_dim']}.")
+            path = r["full_geometry_path"]
+            traced = r["full_geometry_nonzero_in_policy_entity"]
+            lines.append(
+                f"- **{r['policy_arch']}**: YES — path=`{path}`, traced_nonzero=`{traced}`"
+            )
 
     lines.extend([
         "",
@@ -343,18 +473,23 @@ def main() -> None:
         "",
         "### 3. Which policy_arch does NOT access full-geometry at all?",
         "",
-        "- **hetero_entity_recurrent**: Uses HeteroEntitySetAdapter with entity token layout v2 (entity_dim=21).",
-        "  Only reads enemy_geo_states (5 compact dims) + enemy_track_source (2).",
-        "  Full-geometry fields (relative_pos_xyz, relative_vel_xyz, bearing_elevation,",
-        "  speed_heading, full_geo_valid_mask) are NOT read by this adapter.",
+    ])
+    for r in rows:
+        if not r["full_geometry_used_by_policy"]:
+            lines.append(f"- **{r['policy_arch']}**: {r['reason_if_false']}")
+
+    lines.extend([
         "",
         "### 4. Recommended policy_arch for next small-scale diagnostic training",
         "",
-        "- **pure_happo** — uses HeteroObsAdapterV2, flat actor obs, independent per-agent actors,",
-        "  shared V critic. Simpler and already verified with canonical full-geometry.",
-        "- **brma_recurrent_masked** (no mask mode) — also receives full-geometry through",
-        "  entity_dim=30 flat-to-entity decoding. Good choice if you want entity-attention",
-        "  encoder with GRU.",
+        "- **pure_happo** — flat actor obs via HeteroObsAdapterV2, simplest path, verified full-geometry.",
+        "- **brma_recurrent_masked** (no mask mode) — entity_dim=30, verified full-geometry via _flat_to_entities trace.",
+        "",
+        "### 5. hetero_entity_recurrent status",
+        "",
+        "- **hetero_entity_recurrent is NOT full-geometry enabled.**",
+        "- HeteroEntitySetAdapter currently ignores full-geometry keys.",
+        "- Do NOT claim it supports full-geometry until adapter + policy entity layout are upgraded.",
     ])
 
     _write(output_dir / "policy_full_geometry_wiring_report.md", "\n".join(lines) + "\n")

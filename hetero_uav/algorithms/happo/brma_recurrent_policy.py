@@ -39,7 +39,7 @@ class BRMARecurrentHAPPOReferencePolicy(nn.Module):
 
     Architecture::
 
-        flat_obs (96-dim)
+        flat_obs (dynamic, from HeteroObsAdapterV2.flat_actor_obs_dim)
           → _flat_to_entities() → entity tensor [B, N, entity_dim]
           → BRMAEntityObservationEncoder → pooled [B, 256]
           → nn.GRUCell(256, rnn_hidden_size) → rnn_hidden [B, rnn_hidden_size]

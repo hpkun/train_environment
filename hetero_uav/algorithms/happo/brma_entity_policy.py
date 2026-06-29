@@ -83,7 +83,7 @@ class BRMAEntityHAPPOReferencePolicy(nn.Module):
     """Opt-in BRMA-style entity encoder actor with MAV/UAV heads.
 
     Scope intentionally excludes GRU and random/biased masks.  The centralized
-    critic remains the existing 480-dim MLP critic.
+    critic receives ``critic_state_dim`` from the adapter (e.g. HeteroObsAdapterV2).
     """
 
     def __init__(

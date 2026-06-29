@@ -76,7 +76,59 @@ def _entity_policy_meta(policy) -> dict:
         "policy_class": policy.__class__.__name__,
         "critic_class": policy.critic.__class__.__name__,
         "observation_adapter": "HeteroEntitySetAdapter",
+        "hetero_entity_recurrent_full_geometry": False,
+        "full_geometry_path": "unsupported_hetero_entity_set_adapter",
+        "full_geometry_features_used": False,
     }
+
+
+def _full_geometry_meta(policy_arch: str, entity_dim, args=None) -> dict:
+    """Compute full-geometry wiring meta fields."""
+    enemy_flat_dim = 18
+    entity_dim_required = 30
+    full_geo_extra = enemy_flat_dim - 7  # 11
+
+    meta = {
+        "observation_mode": "mav_shared_geo",
+        "mav_shared_full_geometry": True,
+        "enemy_flat_dim": enemy_flat_dim,
+        "enemy_entity_dim": enemy_flat_dim,
+        "entity_dim_required_for_full_geometry": entity_dim_required,
+        "full_geometry_extra_dim": full_geo_extra,
+    }
+
+    if policy_arch in ("pure_happo", "pure_happo_tanh", "flat"):
+        meta.update({
+            "full_geometry_features_used": True,
+            "full_geometry_path": "flat_actor_obs",
+            "full_geometry_checkpoint_compatible": True,
+            "hetero_entity_recurrent_full_geometry": False,
+            "entity_dim": "n/a (flat policy)",
+        })
+    elif policy_arch in ("entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked"):
+        ed = int(entity_dim) if isinstance(entity_dim, (int, float)) else 30
+        uses_fg = ed >= entity_dim_required
+        meta.update({
+            "entity_dim": ed,
+            "full_geometry_features_used": uses_fg,
+            "full_geometry_path": "flat_to_entity_token_19_30",
+            "full_geometry_checkpoint_compatible": True if uses_fg else False,
+            "hetero_entity_recurrent_full_geometry": False,
+        })
+        if not uses_fg:
+            meta["full_geometry_checkpoint_reason"] = (
+                f"old checkpoint entity_dim={ed} truncates full-geometry "
+                f"(need >= {entity_dim_required})"
+            )
+    elif policy_arch == "hetero_entity_recurrent":
+        meta.update({
+            "entity_dim": int(entity_dim) if isinstance(entity_dim, (int, float)) else 21,
+            "full_geometry_features_used": False,
+            "full_geometry_path": "unsupported_hetero_entity_set_adapter",
+            "full_geometry_checkpoint_compatible": False,
+            "hetero_entity_recurrent_full_geometry": False,
+        })
+    return meta
 
 
 def _pure_happo_meta(policy, args=None) -> dict:
@@ -564,6 +616,7 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int,
         "uav_imitation_dataset": args.uav_imitation_dataset,
         "uav_imitation_coef": args.uav_imitation_coef,
         "uav_imitation_until_steps": args.uav_imitation_until_steps,
+        **_full_geometry_meta(args.policy_arch, getattr(policy, "entity_dim", None), args),
         **_entity_policy_meta(policy),
         **_pure_happo_meta(policy, args),
     }
