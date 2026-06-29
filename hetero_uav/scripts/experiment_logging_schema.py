@@ -136,6 +136,33 @@ ATTENTION_METRICS_COLUMNS = [
     "masked_ally_count", "availability",
 ]
 
+EPISODE_REWARD_COMPONENTS_COLUMNS = [
+    "run_id", "scenario", "episode_id", "agent_id", "role", "team",
+    "episode_length", "episode_return",
+    "tam_v7_total_sum", "tam_v7_flight_sum", "tam_v7_event_sum",
+    "tam_v7_terminal_sum", "tam_v7_uav_flight_sum",
+    "tam_v7_uav_situation_sum", "tam_v7_uav_event_sum",
+    "tam_v7_uav_terminal_sum", "tam_v7_uav_total_sum",
+    "tam_v7_uav_altitude_sum", "tam_v7_uav_speed_sum",
+    "tam_v7_uav_boundary_sum", "tam_v7_uav_first_out_of_zone_sum",
+    "tam_v7_uav_kill_sum", "tam_v7_uav_death_sum",
+    "tam_v7_mav_flight_sum", "tam_v7_mav_safety_sum",
+    "tam_v7_mav_support_sum", "tam_v7_mav_event_sum",
+    "tam_v7_mav_terminal_sum", "tam_v7_mav_total_sum",
+    "tam_v7_mav_altitude_sum", "tam_v7_mav_speed_sum",
+    "tam_v7_mav_boundary_sum", "tam_v7_mav_death_sum",
+    "tam_v7_mav_team_credit_delta_sum",
+    "tam_v7_mav_team_credit_used_max",
+    "tam_v7_shared_track_usage_log_sum",
+    "tam_v7_red_fire_with_mav_track_log_sum",
+    "tam_v7_red_hit_with_mav_track_log_sum",
+    "blue_loss_frac_last", "red_loss_weighted_last",
+    "red_launch_count", "red_hit_count",
+    "blue_launch_count", "blue_hit_count",
+    "mav_alive_final", "red_alive_final", "blue_alive_final",
+    "outcome", "end_reason",
+]
+
 FILE_SCHEMAS = {
     "train_metrics.csv": TRAIN_METRICS_COLUMNS,
     "eval_episode_metrics.csv": EVAL_EPISODE_COLUMNS,
@@ -144,6 +171,7 @@ FILE_SCHEMAS = {
     "missile_events.csv": MISSILE_EVENTS_COLUMNS,
     "missile_timeseries.csv": MISSILE_TIMESERIES_COLUMNS,
     "reward_components.csv": REWARD_COMPONENT_COLUMNS,
+    "episode_reward_components.csv": EPISODE_REWARD_COMPONENTS_COLUMNS,
     "perturbation_eval_summary.csv": PERTURBATION_EVAL_COLUMNS,
     "attention_metrics.csv": ATTENTION_METRICS_COLUMNS,
 }

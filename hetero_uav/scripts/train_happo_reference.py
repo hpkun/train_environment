@@ -1189,6 +1189,13 @@ def _run_training_main() -> None:
                             step=total_steps,
                             sim_time=_sim_time(rollout_env),
                         )
+                        rich_logger.write_aircraft_timeseries(
+                            rollout_env,
+                            scenario=Path(args.config).stem,
+                            episode_id=current_ep_id[env_idx],
+                            step=total_steps,
+                            sim_time=_sim_time(rollout_env),
+                        )
                         rich_logger.write_reward_components(
                             next_info,
                             scenario=Path(args.config).stem,

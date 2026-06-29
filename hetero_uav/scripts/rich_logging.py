@@ -44,11 +44,101 @@ class RichExperimentLogger:
         self._missile_writer = csv.DictWriter(self._missile_file, fieldnames=MISSILE_EVENTS_COLUMNS)
         self._reward_file = (directory / "reward_components.csv").open("a", newline="", encoding="utf-8")
         self._reward_writer = csv.DictWriter(self._reward_file, fieldnames=FILE_SCHEMAS["reward_components.csv"])
+        self._aircraft_file = (directory / "aircraft_timeseries.csv").open("a", newline="", encoding="utf-8")
+        self._aircraft_writer = csv.DictWriter(self._aircraft_file, fieldnames=FILE_SCHEMAS["aircraft_timeseries.csv"])
+        self._ep_rc_file = (directory / "episode_reward_components.csv").open("a", newline="", encoding="utf-8")
+        self._ep_rc_writer = csv.DictWriter(self._ep_rc_file, fieldnames=FILE_SCHEMAS["episode_reward_components.csv"])
 
     def close(self) -> None:
         self._train_file.close()
         self._missile_file.close()
         self._reward_file.close()
+        self._aircraft_file.close()
+        self._ep_rc_file.close()
+
+    def write_aircraft_timeseries(self, env, *, scenario: str, episode_id: int | str,
+                                   step: int | str, sim_time: float | str = "") -> None:
+        """Write per-step aircraft telemetry for all red and blue agents."""
+        rows = []
+        for aid in list(getattr(env, "red_ids", [])) + list(getattr(env, "blue_ids", [])):
+            sim = (env.red_planes.get(aid) or env.blue_planes.get(aid)) if hasattr(env, "red_planes") else None
+            role = getattr(env, "agent_roles", {}).get(aid, "attack_uav" if aid.startswith("blue") else "")
+            team = "red" if aid.startswith("red") else "blue"
+            alive = int(sim.is_alive) if sim and hasattr(sim, "is_alive") else 0
+            row = {"run_id": self.run_id, "scenario": scenario, "episode_id": episode_id,
+                   "step": step, "sim_time": sim_time, "agent_id": aid, "role": role,
+                   "team": team, "alive": alive,
+                   "is_mav": 1 if role == "mav" else 0,
+                   "is_uav": 1 if role in ("attack_uav", "scout_uav", "interceptor_uav") else 0}
+            if sim:
+                try:
+                    lon, lat, alt = sim.get_geodetic()
+                    row["lon"] = lon; row["lat"] = lat; row["altitude"] = alt
+                except Exception:
+                    pass
+                try:
+                    r, p, y = sim.get_rpy()
+                    row["roll"] = r; row["pitch"] = p; row["yaw"] = y; row["heading"] = y
+                except Exception:
+                    pass
+                try:
+                    vel = sim.get_velocity()
+                    import numpy as np
+                    spd = float(np.linalg.norm(vel))
+                    row["velocity"] = spd; row["speed"] = spd
+                except Exception:
+                    pass
+                try:
+                    row["mach"] = float(getattr(sim, "mach", 0)) if hasattr(sim, "mach") else ""
+                except Exception:
+                    pass
+            # nearest enemy
+            try:
+                enemies = env.blue_planes if team == "red" else env.red_planes
+                min_d = 1e12; nearest_id = ""
+                for eid, esim in enemies.items():
+                    if not (esim and getattr(esim, "is_alive", False)):
+                        continue
+                    d = float(np.linalg.norm(np.array(sim.get_position()) - np.array(esim.get_position())))
+                    if d < min_d:
+                        min_d = d; nearest_id = eid
+                row["nearest_enemy_id"] = nearest_id
+                row["nearest_enemy_distance"] = min_d if min_d < 1e11 else ""
+            except Exception:
+                pass
+            rows.append(row)
+        for row in rows:
+            self._aircraft_writer.writerow(row)
+        self._aircraft_file.flush()
+
+    def write_episode_reward_components(self, episode_id: int, agent_id: str,
+                                          role: str, team: str,
+                                          episode_length: int, episode_return: float,
+                                          component_sums: dict,
+                                          launch_stats: dict | None = None,
+                                          final_state: dict | None = None,
+                                          outcome: str = "", end_reason: str = "") -> None:
+        """Write per-agent episode-level reward component aggregates."""
+        payload = {col: "" for col in FILE_SCHEMAS["episode_reward_components.csv"]}
+        payload.update({
+            "run_id": self.run_id, "scenario": "", "episode_id": episode_id,
+            "agent_id": agent_id, "role": role, "team": team,
+            "episode_length": episode_length, "episode_return": episode_return,
+        })
+        for k, v in component_sums.items():
+            payload[k] = v
+        if launch_stats:
+            for k, v in launch_stats.items():
+                if k in payload:
+                    payload[k] = v
+        if final_state:
+            for k, v in final_state.items():
+                if k in payload:
+                    payload[k] = v
+        payload["outcome"] = outcome
+        payload["end_reason"] = end_reason
+        self._ep_rc_writer.writerow(payload)
+        self._ep_rc_file.flush()
 
     def write_train_metrics(self, row: dict[str, Any]) -> None:
         elapsed = max(time.time() - self.start_time, 1e-9)
