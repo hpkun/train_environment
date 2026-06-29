@@ -140,6 +140,7 @@ def _trace_enemy_token_full_geometry(policy, flat_obs: np.ndarray) -> dict:
 
     nonzero = bool(torch.any(torch.abs(full_geo_region) > 1e-8).item()) if full_geo_region.numel() > 0 else False
     region_size = int(full_geo_region.numel())
+    nonzero_count = int(torch.count_nonzero(torch.abs(full_geo_region) > 1e-8).item()) if full_geo_region.numel() > 0 else 0
 
     return {
         "full_geometry_nonzero_in_policy_entity": nonzero,
@@ -149,9 +150,10 @@ def _trace_enemy_token_full_geometry(policy, flat_obs: np.ndarray) -> dict:
         "enemy_token_count": policy.max_enemies,
         "full_geo_region_start": 19,
         "full_geo_region_end": min(entity_dim, 30),
-        "full_geo_region_nonzero_elements": region_size,
+        "full_geo_region_size": region_size,
+        "full_geo_region_nonzero_count": nonzero_count,
         "enemy_token_shape": list(enemy_tokens.shape),
-        "trace_note": "traced via _flat_to_entities",
+        "trace_note": "traced via _flat_to_entities — enemy_token[:,:,19:30] real nonzero count",
     }
 
 
@@ -389,6 +391,8 @@ def main() -> None:
             "full_geometry_nonzero_in_policy_entity": meta.get("full_geometry_nonzero_in_policy_entity", False),
             "full_geometry_used_by_policy": meta.get("full_geometry_used_by_policy", False),
             "full_geometry_path": meta.get("full_geometry_path", "unknown"),
+            "full_geo_region_size": meta.get("full_geo_region_size", 0),
+            "full_geo_region_nonzero_count": meta.get("full_geo_region_nonzero_count", 0),
             "reason_if_false": meta.get("reason_if_false", ""),
         }
         rows.append(row)
@@ -399,7 +403,9 @@ def main() -> None:
         "entity_dim", "enemy_flat_dim",
         "full_geometry_keys_present", "full_geometry_nonzero_in_adapter",
         "full_geometry_nonzero_in_policy_entity", "full_geometry_used_by_policy",
-        "full_geometry_path", "reason_if_false",
+        "full_geometry_path",
+        "full_geo_region_size", "full_geo_region_nonzero_count",
+        "reason_if_false",
     ]
     _write_csv(output_dir / "policy_full_geometry_wiring.csv", rows, fields)
 
@@ -407,8 +413,18 @@ def main() -> None:
     lines = [
         "# Policy Full-Geometry Wiring Audit",
         "",
-        "> Dimensions below are read dynamically from the adapter and policy instances.",
+        "> **Trace method**: `full_geometry_nonzero_in_policy_entity` is determined by",
+        "> actually calling `_flat_to_entities()` on real env flat obs and checking",
+        "> `enemy_token[:, :, 19:30]` for non-zero values, NOT inferred from `entity_dim >= 30`.",
+        "> `full_geo_region_nonzero_count` is `torch.count_nonzero(abs(region) > 1e-8)`.",
+        "> All dimensions are read dynamically from adapter and policy instances.",
         "> No hard-coded 96-dim or 480-dim values are reported.",
+        "",
+        "## Full-Geometry Paths",
+        "",
+        "- **pure_happo / flat**: `full_geometry_path = flat_actor_obs`",
+        "- **entity_attention / brma_entity / brma_recurrent / brma_recurrent_masked**: `full_geometry_path = flat_to_entity_token_19_30`",
+        "- **hetero_entity_recurrent**: `unsupported_hetero_entity_set_adapter`",
         "",
         "## Adapter Dimensions",
         "",

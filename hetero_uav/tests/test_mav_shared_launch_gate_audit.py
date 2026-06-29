@@ -120,32 +120,39 @@ def test_mav_shared_audit_scripts_help():
         assert "--config" in result.stdout
 
 
-def test_mav_shared_launch_gate_audit_smoke(tmp_path):
-    out_dir = tmp_path / "launch_gate"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/audit_mav_shared_launch_gate.py",
-            "--episodes",
-            "1",
-            "--max-steps",
-            "5",
-            "--output-dir",
-            str(out_dir),
-        ],
-        cwd=Path(__file__).resolve().parents[1],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    for name in (
-        "launch_gate_by_track_source.csv",
-        "launch_block_reason_by_track_source.csv",
-        "launch_quality_by_track_source.csv",
-        "lock_continuity_by_track_source.csv",
-        "mav_shared_launch_candidates.csv",
-        "launch_events_by_track_source.csv",
-        "launch_interval_paper_alignment.md",
-    ):
-        assert (out_dir / name).exists(), name
+def test_mav_shared_launch_gate_audit_smoke():
+    import tempfile
+    import shutil
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="launch_gate_smoke_"))
+    out_dir = tmp_dir / "launch_gate"
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/audit_mav_shared_launch_gate.py",
+                "--episodes",
+                "1",
+                "--max-steps",
+                "5",
+                "--output-dir",
+                str(out_dir),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        for name in (
+            "launch_gate_by_track_source.csv",
+            "launch_block_reason_by_track_source.csv",
+            "launch_quality_by_track_source.csv",
+            "lock_continuity_by_track_source.csv",
+            "mav_shared_launch_candidates.csv",
+            "launch_events_by_track_source.csv",
+            "launch_interval_paper_alignment.md",
+        ):
+            assert (out_dir / name).exists(), name
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -93,18 +93,24 @@ def test_brma_recurrent_evaluate_actions_batch():
     assert torch.isfinite(log_prob).all()
 
 
-def test_brma_recurrent_policy_save_load_roundtrip(tmp_path):
+def test_brma_recurrent_policy_save_load_roundtrip():
+    import tempfile
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
-    policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
-    path = tmp_path / "model.pt"
-    policy.save(path)
-    loaded = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
-    loaded.load(path, map_location="cpu")
-    h0 = loaded.init_hidden(3)
-    out = loaded.act(torch.zeros((3, policy.flat_actor_obs_dim)), roles=[0, 1, 1], deterministic=True, rnn_hidden=h0)
-    assert out["action"].shape == (3, 3)
-    assert "rnn_hidden" in out
+    tmp_dir = Path(tempfile.mkdtemp(prefix="brma_save_load_"))
+    try:
+        policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+        path = tmp_dir / "model.pt"
+        policy.save(path)
+        loaded = BRMARecurrentHAPPOReferencePolicy(entity_dim=30, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
+        loaded.load(path, map_location="cpu")
+        h0 = loaded.init_hidden(3)
+        out = loaded.act(torch.zeros((3, policy.flat_actor_obs_dim)), roles=[0, 1, 1], deterministic=True, rnn_hidden=h0)
+        assert out["action"].shape == (3, 3)
+        assert "rnn_hidden" in out
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def test_rollout_buffer_preserves_recurrent_hidden_state():

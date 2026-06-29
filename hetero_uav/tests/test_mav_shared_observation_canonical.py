@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import yaml
@@ -104,12 +106,18 @@ def test_adapter_v2_consumes_canonical_full_geo_schema():
         env.close()
 
 
-def test_versioned_mav_shared_geo_mode_is_rejected(tmp_path):
+def test_versioned_mav_shared_geo_mode_is_rejected():
+    import tempfile
+
     with open(CFG, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     cfg["observation_mode"] = "mav_shared_geo_v2"
-    path = tmp_path / "legacy_v2.yaml"
-    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="unknown observation_mode"):
-        make_env(str(path), env_type="jsbsim_hetero", max_steps=2)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="canonical_v2_reject_"))
+    path = tmp_dir / "legacy_v2.yaml"
+    try:
+        path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        with pytest.raises(ValueError, match="unknown observation_mode"):
+            make_env(str(path), env_type="jsbsim_hetero", max_steps=2)
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
