@@ -1114,7 +1114,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1",
             "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4",
             "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned",
-            "tam_brma_scripted_reward_v1",
+            "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1",
         }
 
     def step(self, actions: dict):

@@ -106,6 +106,35 @@ def test_reward_mode_registered_and_configs_load():
     assert all_attack["hetero_reward_mode"] == "brma_paper_homogeneous_v1"
 
 
+def test_brma_homogeneous_reward_needs_last_step_obs_cache():
+    from uav_env import make_env
+
+    env = make_env(MAV_CFG, max_steps=5)
+    try:
+        assert env._needs_last_step_obs_cache() is True
+    finally:
+        env.close()
+
+
+def test_brma_homogeneous_reward_populates_last_step_obs_after_reset_and_step():
+    from uav_env import make_env
+
+    env = make_env(MAV_CFG, max_steps=5)
+    try:
+        obs, _info = env.reset()
+        assert env._last_step_obs
+        assert set(env.red_ids + env.blue_ids).issubset(env._last_step_obs)
+        assert set(env.red_ids + env.blue_ids).issubset(obs)
+
+        zero_actions = {aid: np.zeros(3, dtype=np.float32) for aid in env.agent_ids}
+        obs, *_ = env.step(zero_actions)
+        assert env._last_step_obs
+        assert set(env.red_ids + env.blue_ids).issubset(env._last_step_obs)
+        assert set(env.red_ids + env.blue_ids).issubset(obs)
+    finally:
+        env.close()
+
+
 def test_all_red_agents_use_same_component_structure():
     env = _bare_env()
     rewards, components = env._compute_brma_paper_homogeneous_v1({}, {})
