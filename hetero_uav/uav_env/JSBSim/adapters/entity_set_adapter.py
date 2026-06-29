@@ -1,9 +1,4 @@
-"""Entity-set view over HeteroObsAdapterV2 outputs.
-
-This adapter is intentionally additive. It does not change the environment
-observation schema or the existing flat 96-dim actor path used by current
-checkpoints.
-"""
+"""Entity-set view over canonical HeteroObsAdapterV2 outputs."""
 from __future__ import annotations
 
 import numpy as np
@@ -23,8 +18,12 @@ class EntitySetAdapter:
     """Convert mav_shared_geo observations into fixed-width entity tokens.
 
     Token layout is shared for self, allies, and enemies:
-    kind one-hot(3), role one-hot(4), geo(7), side one-hot(2),
-    missile-warning(1), track-source(2).
+    kind one-hot(3), role one-hot(4), geo/full-geometry features(18),
+    side one-hot(2), missile-warning(1).
+
+    Enemy tokens use the canonical 18-dim enemy entity from HeteroObsAdapterV2:
+    compact geo(5), track-source(2), relative position(3), relative velocity(3),
+    bearing/elevation(2), speed/heading(2), full-geometry valid mask(1).
     """
 
     def __init__(self, max_red: int = 5, max_blue: int = 4, role_dim: int = 4):
@@ -34,7 +33,8 @@ class EntitySetAdapter:
         self.max_allies = self.v2.max_allies
         self.max_enemies = self.v2.max_enemies
         self.role_dim = role_dim
-        self.entity_dim = 3 + role_dim + 7 + 2 + 1 + 2
+        self.entity_feature_dim = self.v2.enemy_entity_dim
+        self.entity_dim = 3 + role_dim + self.entity_feature_dim + 2 + 1
         self.num_entities = 1 + self.max_allies + self.max_enemies
 
     @property
@@ -90,10 +90,9 @@ class EntitySetAdapter:
         self_entity = self._token(
             kind=0,
             role=role_onehot,
-            geo7=structured["ego_feature"][:7],
+            features=structured["ego_feature"][:7],
             side=0,
             missile_warning=float(structured["ego_feature"][11]),
-            track_source=np.zeros(2, dtype=np.float32),
         )
 
         ally_entities = np.zeros((self.max_allies, self.entity_dim), dtype=np.float32)
@@ -102,10 +101,9 @@ class EntitySetAdapter:
             ally_entities[i] = self._token(
                 kind=1,
                 role=ally[5:9],
-                geo7=self._geo5_to_geo7(ally[:5]),
+                features=ally[:5],
                 side=0,
                 missile_warning=0.0,
-                track_source=np.zeros(2, dtype=np.float32),
             )
 
         enemy_entities = np.zeros((self.max_enemies, self.entity_dim), dtype=np.float32)
@@ -114,10 +112,9 @@ class EntitySetAdapter:
             enemy_entities[i] = self._token(
                 kind=2,
                 role=np.zeros(self.role_dim, dtype=np.float32),
-                geo7=self._geo5_to_geo7(enemy[:5]),
+                features=enemy,
                 side=1,
                 missile_warning=0.0,
-                track_source=enemy[5:7],
             )
 
         entities = np.vstack([
@@ -170,10 +167,9 @@ class EntitySetAdapter:
         self,
         kind: int,
         role: np.ndarray,
-        geo7: np.ndarray,
+        features: np.ndarray,
         side: int,
         missile_warning: float,
-        track_source: np.ndarray,
     ) -> np.ndarray:
         kind_oh = np.zeros(3, dtype=np.float32)
         kind_oh[kind] = 1.0
@@ -182,18 +178,10 @@ class EntitySetAdapter:
         return np.concatenate([
             kind_oh,
             self._pad_1d(role, self.role_dim),
-            self._pad_1d(geo7, 7),
+            self._pad_1d(features, self.entity_feature_dim),
             side_oh,
             np.array([missile_warning], dtype=np.float32),
-            self._pad_1d(track_source, 2),
         ]).astype(np.float32)
-
-    @staticmethod
-    def _geo5_to_geo7(geo5: np.ndarray) -> np.ndarray:
-        out = np.zeros(7, dtype=np.float32)
-        arr = np.asarray(geo5, dtype=np.float32).reshape(-1)
-        out[:min(5, arr.shape[0])] = arr[:5]
-        return out
 
     @staticmethod
     def _pad_1d(value, length: int) -> np.ndarray:

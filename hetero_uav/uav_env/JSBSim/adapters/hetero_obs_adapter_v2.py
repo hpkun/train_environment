@@ -1,4 +1,4 @@
-"""HeteroObsAdapter v2 for MAV-shared geometric observations."""
+"""Canonical fixed-size adapter for MAV-shared geometric observations."""
 from __future__ import annotations
 
 import numpy as np
@@ -12,11 +12,16 @@ REQUIRED_V2_KEYS = {
     "enemy_alive_mask",
     "enemy_observed_mask",
     "enemy_track_source",
+    "enemy_relative_pos_xyz",
+    "enemy_relative_vel_xyz",
+    "enemy_bearing_elevation",
+    "enemy_speed_heading",
+    "enemy_full_geo_valid_mask",
 }
 
 
 class HeteroObsAdapterV2:
-    """Convert mav_shared_geo raw obs to fixed-dim actor/critic inputs."""
+    """Convert canonical ``mav_shared_geo`` raw obs to actor/critic inputs."""
 
     def __init__(self, max_red: int = 5, max_blue: int = 4, role_dim: int = 4):
         self.max_red = max_red
@@ -28,9 +33,15 @@ class HeteroObsAdapterV2:
         self.ego_geo_dim = 7
         self.relative_geo_dim = 5
         self.track_source_dim = 2
+        self.enemy_full_geo_dim = 10
         self.ego_feature_dim = 12
         self.ally_entity_dim = 9
-        self.enemy_entity_dim = 7
+        self.enemy_entity_dim = (
+            self.relative_geo_dim
+            + self.track_source_dim
+            + self.enemy_full_geo_dim
+            + 1
+        )
         self.mask_dim = 20
         self.flat_actor_obs_dim = (
             self.ego_feature_dim
@@ -156,6 +167,11 @@ class HeteroObsAdapterV2:
     def _build_enemy_entities(self, obs: dict, enemy_ids: list[str]) -> tuple:
         geo = self._pad_2d(obs["enemy_geo_states"], self.max_enemies, self.relative_geo_dim)
         source = self._pad_2d(obs["enemy_track_source"], self.max_enemies, self.track_source_dim)
+        rel_pos = self._pad_2d(obs["enemy_relative_pos_xyz"], self.max_enemies, 3)
+        rel_vel = self._pad_2d(obs["enemy_relative_vel_xyz"], self.max_enemies, 3)
+        bearing_el = self._pad_2d(obs["enemy_bearing_elevation"], self.max_enemies, 2)
+        speed_heading = self._pad_2d(obs["enemy_speed_heading"], self.max_enemies, 2)
+        full_valid = self._pad_1d(obs["enemy_full_geo_valid_mask"], self.max_enemies)
         observed = self._pad_1d(obs["enemy_observed_mask"], self.max_enemies)
         raw_alive = self._pad_1d(obs["enemy_alive_mask"], self.max_enemies)
         entities = np.zeros((self.max_enemies, self.enemy_entity_dim), dtype=np.float32)
@@ -167,7 +183,15 @@ class HeteroObsAdapterV2:
             alive[i] = 1.0 if raw_alive[i] > 0.5 else 0.0
             if alive[i] > 0.5 and observed[i] > 0.5:
                 observed_mask[i] = 1.0
-                entities[i] = np.concatenate([geo[i], source[i]]).astype(np.float32)
+                entities[i] = np.concatenate([
+                    geo[i],
+                    source[i],
+                    rel_pos[i],
+                    rel_vel[i],
+                    bearing_el[i],
+                    speed_heading[i],
+                    np.asarray([full_valid[i]], dtype=np.float32),
+                ]).astype(np.float32)
         return entities, valid, alive, observed_mask
 
     @staticmethod

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import subprocess
@@ -16,7 +16,7 @@ def test_brma_recurrent_policy_forward_shapes():
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
     policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
-    actor_obs = torch.zeros((3, 96), dtype=torch.float32)
+    actor_obs = torch.zeros((3, policy.flat_actor_obs_dim), dtype=torch.float32)
     out = policy.act(actor_obs, roles=[0, 1, 1], deterministic=True)
 
     assert out["action"].shape == (3, 3)
@@ -33,7 +33,7 @@ def test_brma_recurrent_policy_hidden_state_shapes():
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
     policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
-    actor_obs = torch.zeros((2, 96), dtype=torch.float32)
+    actor_obs = torch.zeros((2, policy.flat_actor_obs_dim), dtype=torch.float32)
 
     # Zero hidden init
     h0 = policy.init_hidden(2)
@@ -53,7 +53,7 @@ def test_brma_recurrent_done_reset_hidden_state():
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
     policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
-    actor_obs = torch.randn((2, 96), dtype=torch.float32)
+    actor_obs = torch.randn((2, policy.flat_actor_obs_dim), dtype=torch.float32)
 
     h0 = policy.init_hidden(2)
     out1 = policy.act(actor_obs, roles=[0, 1], deterministic=True, rnn_hidden=h0)
@@ -64,7 +64,7 @@ def test_brma_recurrent_done_reset_hidden_state():
     h1_reset[0, :] = 0.0
 
     # Fresh input to make the difference visible
-    actor_obs2 = torch.randn((2, 96), dtype=torch.float32)
+    actor_obs2 = torch.randn((2, policy.flat_actor_obs_dim), dtype=torch.float32)
     out2_reset = policy.act(actor_obs2, roles=[0, 1], deterministic=True, rnn_hidden=h1_reset)
     out2_noreset = policy.act(actor_obs2, roles=[0, 1], deterministic=True, rnn_hidden=h1)
 
@@ -76,7 +76,7 @@ def test_brma_recurrent_evaluate_actions_batch():
     from algorithms.happo.brma_recurrent_policy import BRMARecurrentHAPPOReferencePolicy
 
     policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
-    actor_obs = torch.zeros((4, 3, 96), dtype=torch.float32)
+    actor_obs = torch.zeros((4, 3, policy.flat_actor_obs_dim), dtype=torch.float32)
     roles = torch.tensor([[0, 1, 1]] * 4)
     critic = torch.zeros((4, 480), dtype=torch.float32)
     actions = torch.zeros((4, 3, 3), dtype=torch.float32)
@@ -102,7 +102,7 @@ def test_brma_recurrent_policy_save_load_roundtrip(tmp_path):
     loaded = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
     loaded.load(path, map_location="cpu")
     h0 = loaded.init_hidden(3)
-    out = loaded.act(torch.zeros((3, 96)), roles=[0, 1, 1], deterministic=True, rnn_hidden=h0)
+    out = loaded.act(torch.zeros((3, policy.flat_actor_obs_dim)), roles=[0, 1, 1], deterministic=True, rnn_hidden=h0)
     assert out["action"].shape == (3, 3)
     assert "rnn_hidden" in out
 
@@ -113,7 +113,7 @@ def test_rollout_buffer_preserves_recurrent_hidden_state():
     buffer = HAPPORolloutBuffer(
         max_len=2,
         num_red=3,
-        actor_dim=96,
+        actor_dim=140,
         critic_dim=480,
         action_dim=3,
         role_ids=[0, 1, 1],
@@ -121,7 +121,7 @@ def test_rollout_buffer_preserves_recurrent_hidden_state():
     )
     hidden = np.ones((3, 128), dtype=np.float32)
     buffer.store(
-        actor_obs=np.zeros((3, 96), dtype=np.float32),
+        actor_obs=np.zeros((3, 140), dtype=np.float32),
         critic_state=np.zeros(480, dtype=np.float32),
         actions=np.zeros((3, 3), dtype=np.float32),
         log_probs=np.zeros(3, dtype=np.float32),
@@ -167,7 +167,7 @@ def test_brma_entity_tests_still_pass():
     """Verify brma_entity policy is unaffected."""
     from algorithms.happo.brma_entity_policy import BRMAEntityHAPPOReferencePolicy
     policy = BRMAEntityHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3)
-    actor_obs = torch.zeros((3, 96), dtype=torch.float32)
+    actor_obs = torch.zeros((3, policy.flat_actor_obs_dim), dtype=torch.float32)
     out = policy.act(actor_obs, roles=[0, 1, 1], deterministic=True)
     assert out["action"].shape == (3, 3)
     assert "rnn_hidden" not in out  # non-recurrent should not have rnn_hidden
@@ -181,12 +181,12 @@ def test_recurrent_replay_hidden_is_pre_action():
     policy = BRMARecurrentHAPPOReferencePolicy(entity_dim=19, critic_state_dim=480, action_dim=3, rnn_hidden_size=128)
     policy.eval()
 
-    actor_obs = torch.randn((2, 96), dtype=torch.float32)
+    actor_obs = torch.randn((2, policy.flat_actor_obs_dim), dtype=torch.float32)
     roles = [0, 1]
     critic = torch.randn((480,), dtype=torch.float32)
     actions = torch.randn((2, 3), dtype=torch.float32)
 
-    # Simulate rollout: act with h0 → h1
+    # Simulate rollout: act with h0 鈫?h1
     h0 = policy.init_hidden(2)
     out = policy.act(actor_obs, roles=roles, critic_state=critic, deterministic=False, rnn_hidden=h0)
     rollout_log_prob = out["log_prob"].detach().clone()

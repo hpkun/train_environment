@@ -178,7 +178,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         # TAM paper v2 per-episode state
         self._tam_v2_out_of_zone_penalized: set[str] = set()
         self._tam_v2_missile_speed_cache: dict[str, float] = {}
-        if observation_mode not in {"brma_sensor", "mav_shared_geo", "mav_shared_geo_v2"}:
+        if observation_mode not in {"brma_sensor", "mav_shared_geo"}:
             raise ValueError(f"unknown observation_mode: {observation_mode}")
         self.observation_mode = observation_mode
         self.uav_direct_observation_range_m = float(uav_direct_observation_range_m)
@@ -1169,7 +1169,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             spaces["enemy_roles"] = gymnasium.spaces.Box(
                 low=0.0, high=1.0,
                 shape=(self.max_num_red, len(ROLE_VOCAB)), dtype=np.float32)
-            if self.observation_mode in {"mav_shared_geo", "mav_shared_geo_v2"}:
+            if self.observation_mode == "mav_shared_geo":
                 self._add_mav_shared_geo_spaces(
                     spaces, self.max_num_blue - 1, self.max_num_red)
             self.observation_space.spaces[aid] = gymnasium.spaces.Dict(spaces)
@@ -1189,7 +1189,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             spaces["enemy_roles"] = gymnasium.spaces.Box(
                 low=0.0, high=1.0,
                 shape=(self.max_num_blue, len(ROLE_VOCAB)), dtype=np.float32)
-            if self.observation_mode in {"mav_shared_geo", "mav_shared_geo_v2"}:
+            if self.observation_mode == "mav_shared_geo":
                 self._add_mav_shared_geo_spaces(
                     spaces, self.max_num_red - 1, self.max_num_blue)
             self.observation_space.spaces[aid] = gymnasium.spaces.Dict(spaces)
@@ -1209,17 +1209,16 @@ class HeteroUavCombatEnv(UavCombatEnv):
             low=0.0, high=1.0, shape=(max_enemies,), dtype=np.float32)
         spaces["enemy_track_source"] = gymnasium.spaces.Box(
             low=0.0, high=1.0, shape=(max_enemies, 2), dtype=np.float32)
-        if self.observation_mode == "mav_shared_geo_v2":
-            spaces["enemy_relative_pos_xyz"] = gymnasium.spaces.Box(
-                low=-np.inf, high=np.inf, shape=(max_enemies, 3), dtype=np.float32)
-            spaces["enemy_relative_vel_xyz"] = gymnasium.spaces.Box(
-                low=-np.inf, high=np.inf, shape=(max_enemies, 3), dtype=np.float32)
-            spaces["enemy_bearing_elevation"] = gymnasium.spaces.Box(
-                low=-1.0, high=1.0, shape=(max_enemies, 2), dtype=np.float32)
-            spaces["enemy_speed_heading"] = gymnasium.spaces.Box(
-                low=-np.inf, high=np.inf, shape=(max_enemies, 2), dtype=np.float32)
-            spaces["enemy_full_geo_valid_mask"] = gymnasium.spaces.Box(
-                low=0.0, high=1.0, shape=(max_enemies,), dtype=np.float32)
+        spaces["enemy_relative_pos_xyz"] = gymnasium.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(max_enemies, 3), dtype=np.float32)
+        spaces["enemy_relative_vel_xyz"] = gymnasium.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(max_enemies, 3), dtype=np.float32)
+        spaces["enemy_bearing_elevation"] = gymnasium.spaces.Box(
+            low=-1.0, high=1.0, shape=(max_enemies, 2), dtype=np.float32)
+        spaces["enemy_speed_heading"] = gymnasium.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(max_enemies, 2), dtype=np.float32)
+        spaces["enemy_full_geo_valid_mask"] = gymnasium.spaces.Box(
+            low=0.0, high=1.0, shape=(max_enemies,), dtype=np.float32)
 
     @staticmethod
     def _fit_agent_types(values: list[str] | None, count: int, default: list[str]) -> list[str]:
@@ -1258,7 +1257,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         obs["ally_roles"] = _metadata_matrix(ally_ids, self.agent_roles, "role")
         obs["enemy_types"] = _metadata_matrix(enemy_ids, self.agent_types, "type")
         obs["enemy_roles"] = _metadata_matrix(enemy_ids, self.agent_roles, "role")
-        if self.observation_mode in {"mav_shared_geo", "mav_shared_geo_v2"}:
+        if self.observation_mode == "mav_shared_geo":
             obs.update(self._build_mav_shared_geo_obs(agent_id, ally_ids, enemy_ids))
         return obs
 
@@ -1293,14 +1292,13 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 "enemy_observed_mask": enemy_observed_mask,
                 "enemy_track_source": enemy_track_source,
             }
-            if self.observation_mode == "mav_shared_geo_v2":
-                out.update({
-                    "enemy_relative_pos_xyz": enemy_relative_pos_xyz,
-                    "enemy_relative_vel_xyz": enemy_relative_vel_xyz,
-                    "enemy_bearing_elevation": enemy_bearing_elevation,
-                    "enemy_speed_heading": enemy_speed_heading,
-                    "enemy_full_geo_valid_mask": enemy_full_geo_valid_mask,
-                })
+            out.update({
+                "enemy_relative_pos_xyz": enemy_relative_pos_xyz,
+                "enemy_relative_vel_xyz": enemy_relative_vel_xyz,
+                "enemy_bearing_elevation": enemy_bearing_elevation,
+                "enemy_speed_heading": enemy_speed_heading,
+                "enemy_full_geo_valid_mask": enemy_full_geo_valid_mask,
+            })
             return out
 
         ego_geo_state = self._ego_geo_state(ego_sim)
@@ -1341,20 +1339,18 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 enemy_geo_states[i] = self._relative_geo_state(ego_sim, enemy_sim)
                 enemy_observed_mask[i] = 1.0
                 enemy_track_source[i] = np.array([1.0, 0.0], dtype=np.float32)
-                if self.observation_mode == "mav_shared_geo_v2":
-                    self._fill_enemy_full_geo_v2(
-                        ego_sim, enemy_sim, i, enemy_relative_pos_xyz,
-                        enemy_relative_vel_xyz, enemy_bearing_elevation,
-                        enemy_speed_heading, enemy_full_geo_valid_mask)
+                self._fill_enemy_full_geo(
+                    ego_sim, enemy_sim, i, enemy_relative_pos_xyz,
+                    enemy_relative_vel_xyz, enemy_bearing_elevation,
+                    enemy_speed_heading, enemy_full_geo_valid_mask)
             elif mav_shared:
                 enemy_geo_states[i] = self._relative_geo_state(ego_sim, enemy_sim)
                 enemy_observed_mask[i] = 1.0
                 enemy_track_source[i] = np.array([0.0, 1.0], dtype=np.float32)
-                if self.observation_mode == "mav_shared_geo_v2":
-                    self._fill_enemy_full_geo_v2(
-                        ego_sim, enemy_sim, i, enemy_relative_pos_xyz,
-                        enemy_relative_vel_xyz, enemy_bearing_elevation,
-                        enemy_speed_heading, enemy_full_geo_valid_mask)
+                self._fill_enemy_full_geo(
+                    ego_sim, enemy_sim, i, enemy_relative_pos_xyz,
+                    enemy_relative_vel_xyz, enemy_bearing_elevation,
+                    enemy_speed_heading, enemy_full_geo_valid_mask)
 
         out = {
             "ego_geo_state": ego_geo_state,
@@ -1365,18 +1361,17 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "enemy_observed_mask": enemy_observed_mask,
             "enemy_track_source": enemy_track_source,
         }
-        if self.observation_mode == "mav_shared_geo_v2":
-            out.update({
-                "enemy_relative_pos_xyz": enemy_relative_pos_xyz,
-                "enemy_relative_vel_xyz": enemy_relative_vel_xyz,
-                "enemy_bearing_elevation": enemy_bearing_elevation,
-                "enemy_speed_heading": enemy_speed_heading,
-                "enemy_full_geo_valid_mask": enemy_full_geo_valid_mask,
-            })
+        out.update({
+            "enemy_relative_pos_xyz": enemy_relative_pos_xyz,
+            "enemy_relative_vel_xyz": enemy_relative_vel_xyz,
+            "enemy_bearing_elevation": enemy_bearing_elevation,
+            "enemy_speed_heading": enemy_speed_heading,
+            "enemy_full_geo_valid_mask": enemy_full_geo_valid_mask,
+        })
         return out
 
     @staticmethod
-    def _fill_enemy_full_geo_v2(
+    def _fill_enemy_full_geo(
         ego_sim,
         enemy_sim,
         index: int,

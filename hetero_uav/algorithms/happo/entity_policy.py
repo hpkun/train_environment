@@ -51,7 +51,8 @@ class EntityHAPPOReferencePolicy(nn.Module):
         self.hidden_dim = int(hidden_dim)
         self.max_allies = int(max_allies)
         self.max_enemies = int(max_enemies)
-        self.flat_actor_obs_dim = 12 + self.max_allies * 9 + self.max_enemies * 7 + 20
+        self.enemy_flat_dim = 18
+        self.flat_actor_obs_dim = 12 + self.max_allies * 9 + self.max_enemies * self.enemy_flat_dim + 20
 
         self.entity_encoder = nn.Sequential(
             nn.Linear(self.entity_dim, self.hidden_dim),
@@ -102,9 +103,9 @@ class EntityHAPPOReferencePolicy(nn.Module):
         ego = flat[:, :12]
         allies_start = 12
         enemies_start = allies_start + self.max_allies * 9
-        masks_start = enemies_start + self.max_enemies * 7
+        masks_start = enemies_start + self.max_enemies * self.enemy_flat_dim
         allies = flat[:, allies_start:enemies_start].reshape(batch, self.max_allies, 9)
-        enemies = flat[:, enemies_start:masks_start].reshape(batch, self.max_enemies, 7)
+        enemies = flat[:, enemies_start:masks_start].reshape(batch, self.max_enemies, self.enemy_flat_dim)
         masks = flat[:, masks_start:masks_start + 20]
         ally_valid = masks[:, :self.max_allies]
         ally_alive = masks[:, self.max_allies:self.max_allies * 2]
@@ -135,6 +136,9 @@ class EntityHAPPOReferencePolicy(nn.Module):
             entities[:, idx, 7:12] = enemies[:, i, :5]
             entities[:, idx, 15] = 1.0
             entities[:, idx, 17:19] = enemies[:, i, 5:7]
+            if self.entity_dim > 19:
+                n = min(self.entity_dim - 19, self.enemy_flat_dim - 7)
+                entities[:, idx, 19:19 + n] = enemies[:, i, 7:7 + n]
             keep[:, idx] = (
                 (enemy_valid[:, i] > 0.5)
                 & (enemy_alive[:, i] > 0.5)
