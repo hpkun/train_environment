@@ -1,0 +1,13 @@
+policy,first_launch_red,first_launch_blue,first_hit_red,first_hit_blue,episodes
+zero_action_red_vs_blue_rule,0,12,0,12,18
+level_flight_red_vs_blue_rule,0,14,0,8,18
+straight_chase_red_vs_blue_rule,8,4,8,4,18
+oracle_geometry_red_vs_blue_rule,8,4,8,4,18
+oracle_launch_window_red_vs_blue_rule,12,2,12,2,18
+oracle_launch_window_red_vs_blue_zero,12,2,12,2,18
+obs_limited_chase_red_vs_blue_rule,0,0,0,0,18
+obs_limited_chase_red_vs_blue_zero,12,4,12,4,18
+obs_limited_chase_red_vs_blue_rule_with_mav_shared,0,0,0,0,18
+red_rule_vs_blue_zero,12,0,12,0,18
+blue_rule_only_strength_probe,0,14,0,8,18
+red_rule_vs_blue_rule_symmetric_all_attack,0,6,0,6,6

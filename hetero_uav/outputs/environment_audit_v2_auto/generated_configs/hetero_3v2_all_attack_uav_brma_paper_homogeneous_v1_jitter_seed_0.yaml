@@ -1,0 +1,55 @@
+agent_interaction_steps: 12
+aircraft_type_params:
+  attack_uav:
+    aircraft_model: f16
+    role: attack_uav
+    num_missiles: 2
+blue_agent_types:
+- attack_uav
+- attack_uav
+enable_gcas_for_blue: true
+env_type: jsbsim_hetero
+hetero_reward_mode: brma_paper_homogeneous_v1
+initial_states:
+  blue_0:
+    altitude_m: 5724.584114361717
+    lat: 60.201230342142665
+    lon: 119.99583875245234
+    speed_mps: 230.66110542114117
+    yaw_deg: 186.26540478400545
+  blue_1:
+    altitude_m: 6137.697936590399
+    lat: 60.20370782947609
+    lon: 120.04192750760679
+    speed_mps: 251.7449996586169
+    yaw_deg: 188.70144847575537
+  red_0:
+    altitude_m: 6214.442565952541
+    lat: 60.00283734777328
+    lon: 119.9710660887562
+    speed_mps: 231.34342301221858
+    yaw_deg: 4.59310892859888
+  red_1:
+    altitude_m: 6024.876732149455
+    lat: 59.99708637819442
+    lon: 120.00652495368936
+    speed_mps: 241.98847562149538
+    yaw_deg: -1.546255576046832
+  red_2:
+    altitude_m: 6102.374648816178
+    lat: 59.995762842895665
+    lon: 120.03324978937297
+    speed_mps: 255.88758046297
+    yaw_deg: 2.307702229625077
+max_num_blue: 2
+max_num_red: 3
+max_steps: 1000
+observation_mode: brma_sensor
+red_agent_types:
+- attack_uav
+- attack_uav
+- attack_uav
+sim_freq: 60
+suppress_jsbsim_output: true
+pid_profile_by_role:
+  attack_uav: f16_default

@@ -1,0 +1,15 @@
+side,blocked_reason,sum,observed_steps,missing_steps
+red,track_unobserved_blocked,4832608.0,172356,0
+red,role_blocked_mav,1228296.0,172356,0
+red,ammo_empty_blocked,80580.0,172356,0
+red,cooldown_blocked,60.0,172356,0
+red,kill_cooldown_blocked,0.0,172356,0
+red,lock_delay_blocked,,0,172356
+red,engaged_blocked,238976.0,172356,0
+blue,track_unobserved_blocked,249990.0,172356,0
+blue,role_blocked_mav,0.0,172356,0
+blue,ammo_empty_blocked,24130.0,172356,0
+blue,cooldown_blocked,0.0,172356,0
+blue,kill_cooldown_blocked,0.0,172356,0
+blue,lock_delay_blocked,,0,172356
+blue,engaged_blocked,5597212.0,172356,0

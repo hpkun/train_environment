@@ -1,0 +1,121 @@
+action_trim_by_role:
+  mav:
+    heading: 0.0
+    pitch: 0.0
+    speed: 0.0
+agent_interaction_steps: 12
+aircraft_type_params:
+  attack_uav:
+    aircraft_model: f16
+    role: attack_uav
+    num_missiles: 2
+  interceptor_uav:
+    aircraft_model: f16
+    role: interceptor_uav
+    num_missiles: 2
+  mav:
+    aircraft_model: f16
+    role: mav
+    num_missiles: 0
+  scout_uav:
+    aircraft_model: f16
+    role: scout_uav
+    num_missiles: 0
+blue_agent_types:
+- attack_uav
+- attack_uav
+enable_gcas_for_blue: true
+env_type: jsbsim_hetero
+hetero_reward_mode: tam_paper_reward_v7_role_aligned
+tam_paper_reward_v7_role_aligned:
+  global_scale: 1.0
+  flight:
+    pitch_weight: 0.01
+    roll_weight: 0.002
+    altitude_weight: 0.04
+    speed_weight: 0.02
+    boundary_weight: 0.04
+    boundary_raw_penalty: -10.0
+  situation:
+    weight: 0.15
+    enemy_threat_weight: 0.8
+    use_effective_launch_range: true
+  uav_event:
+    kill_enemy: 200.0
+    death: -200.0
+    first_out_of_zone: -100.0
+  mav_safety:
+    dist_weight: 0.5
+    threat_weight: 0.3
+    aspect_weight: 0.2
+    negative_scale: 0.2
+    positive_scale: 0.05
+    d_danger_m: 5000.0
+    d_safe_m: 14000.0
+  mav_support:
+    pos_weight: 0.6
+    aware_weight: 0.4
+    scale: 0.1
+    aware_reduce: mean
+    d_opt_m: 8000.0
+    d_max_m: 25000.0
+  mav_event:
+    death: -300.0
+    team_credit_per_uav_kill: 40.0
+    team_credit_cap: 100.0
+    require_alive_after_for_team_credit: true
+  terminal:
+    coef_per_agent: 30.0
+    red_loss_mode: role_weighted
+    mav_weight_mode: match_uav_count
+red_target_selection_mode: mav_threat_rank
+initial_states:
+  blue_0:
+    altitude_m: 5724.584114361717
+    lat: 60.201230342142665
+    lon: 119.99583875245234
+    speed_mps: 230.66110542114117
+    yaw_deg: 186.26540478400545
+  blue_1:
+    altitude_m: 6137.697936590399
+    lat: 60.20370782947609
+    lon: 120.04192750760679
+    speed_mps: 251.7449996586169
+    yaw_deg: 188.70144847575537
+  red_0:
+    altitude_m: 6714.442565952541
+    lat: 59.98283734777328
+    lon: 120.01107148638957
+    speed_mps: 211.34342301221858
+    yaw_deg: 4.59310892859888
+  red_1:
+    altitude_m: 6024.876732149455
+    lat: 59.99708637819442
+    lon: 120.00652495368936
+    speed_mps: 241.98847562149538
+    yaw_deg: -1.546255576046832
+  red_2:
+    altitude_m: 6102.374648816178
+    lat: 59.995762842895665
+    lon: 120.03324978937297
+    speed_mps: 255.88758046297
+    yaw_deg: 2.307702229625077
+mav_observation_range_m: 80000
+max_num_blue: 2
+max_num_red: 3
+max_steps: 1000
+observation_mode: mav_shared_geo
+red_agent_types:
+- mav
+- attack_uav
+- attack_uav
+sim_freq: 60
+suppress_jsbsim_output: true
+uav_direct_observation_range_m: 10000.0
+pid_profile_by_role:
+  mav: f16_default
+  attack_uav: f16_default
+  interceptor_uav: f16_default
+acmi_visual_by_role:
+  mav: f22
+  attack_uav: f16

@@ -1,0 +1,13 @@
+policy,episodes,red_fire_total,red_hit_total,blue_fire_total,blue_hit_total,outcomes
+zero_action_red_vs_blue_rule,18,0,0,12,12,"{""draw_or_timeout"": 18}"
+level_flight_red_vs_blue_rule,18,0,0,14,8,"{""draw_or_timeout"": 18}"
+straight_chase_red_vs_blue_rule,18,28,24,4,4,"{""draw_or_timeout"": 6, ""red_win"": 12}"
+oracle_geometry_red_vs_blue_rule,18,28,24,4,4,"{""draw_or_timeout"": 6, ""red_win"": 12}"
+oracle_launch_window_red_vs_blue_rule,18,24,24,2,2,"{""draw_or_timeout"": 6, ""red_win"": 12}"
+oracle_launch_window_red_vs_blue_zero,18,24,24,4,4,"{""draw_or_timeout"": 6, ""red_win"": 12}"
+obs_limited_chase_red_vs_blue_rule,18,0,0,0,0,"{""draw_or_timeout"": 18}"
+obs_limited_chase_red_vs_blue_zero,18,20,20,6,6,"{""draw_or_timeout"": 10, ""red_win"": 8}"
+obs_limited_chase_red_vs_blue_rule_with_mav_shared,18,0,0,0,0,"{""draw_or_timeout"": 18}"
+red_rule_vs_blue_zero,18,24,24,0,0,"{""draw_or_timeout"": 6, ""red_win"": 12}"
+blue_rule_only_strength_probe,18,0,0,14,8,"{""draw_or_timeout"": 18}"
+red_rule_vs_blue_rule_symmetric_all_attack,6,0,0,14,12,"{""blue_win"": 6}"
