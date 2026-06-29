@@ -10,7 +10,11 @@ import numpy as np
 from ..env import UavCombatEnv
 from ..utils import get2d_AO_TA_R
 from ..alignment.los_geometry import compute_3d_range, compute_body_x_q_los
-from ..alignment.reward_utils import ta_angle_advantage_fixed, td_distance_advantage
+from ..alignment.reward_utils import (
+    altitude_reward_pairwise_mean_eq17,
+    ta_angle_advantage_fixed,
+    td_distance_advantage,
+)
 
 FT_PER_M = 1.0 / 0.3048
 FPS_PER_MPS = 1.0 / 0.3048
@@ -130,7 +134,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
-        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1"}:
+        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1"}:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
         self._tam_reward_scale = float(kwargs.pop("tam_reward_scale", 0.05))
@@ -211,6 +215,113 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._tam_v6v3_uav_death_penalized: set[str] = set()
         self._tam_v6v3_mav_death_penalized = False
         self._tam_v6v3_mav_team_credit_used = 0.0
+
+    # -- BRMA-MAPPO paper homogeneous diagnostic reward ----------------------
+
+    def _brma_homo_reset_episode_state(self) -> None:
+        self._brma_homo_terminal_applied = False
+
+    @staticmethod
+    def _brma_homo_td15(distance_m: float) -> float:
+        distance = float(distance_m)
+        if not np.isfinite(distance):
+            return 0.0
+        if distance <= 15000.0:
+            return 1.0
+        return float(np.exp(1.0 - distance / 15000.0))
+
+    def _brma_homo_boundary(self, sim) -> float:
+        pos = np.asarray(sim.get_position(), dtype=np.float64)
+        half = float(getattr(self, "BATTLEFIELD_HALF_SIZE", 40000.0))
+        if abs(float(pos[0])) > half or abs(float(pos[1])) > half:
+            return -10.0
+        return 0.0
+
+    def _brma_homo_altitude(self, sim, alive_blue: list) -> float:
+        if not alive_blue:
+            return 0.0
+        alt = float(sim.get_geodetic()[2])
+        enemy_alts = [float(blue.get_geodetic()[2]) for blue in alive_blue]
+        return altitude_reward_pairwise_mean_eq17(alt, enemy_alts)
+
+    def _brma_homo_situation_reward(self, sim, alive_blue: list) -> tuple[float, float, float]:
+        own_adv = 0.0
+        enemy_threat = 0.0
+        ego_pos = sim.get_position()
+        ego_rpy = sim.get_rpy()
+        for blue in alive_blue:
+            blue_pos = blue.get_position()
+            blue_rpy = blue.get_rpy()
+            d_3d = compute_3d_range(ego_pos, blue_pos)
+            q_red_to_blue = compute_body_x_q_los(ego_pos, ego_rpy, blue_pos)
+            q_blue_to_red = compute_body_x_q_los(blue_pos, blue_rpy, ego_pos)
+            own_adv += ta_angle_advantage_fixed(np.rad2deg(q_red_to_blue)) * self._brma_homo_td15(d_3d)
+            enemy_threat += ta_angle_advantage_fixed(np.rad2deg(q_blue_to_red)) * self._brma_homo_td15(d_3d)
+        r_adv = own_adv - 0.8 * enemy_threat
+        return float(r_adv), float(own_adv), float(enemy_threat)
+
+    def _brma_homo_terminal_outcome(self) -> float:
+        n_blue_alive = sum(1 for sim in self.blue_planes.values() if sim.is_alive)
+        n_red_alive = sum(1 for sim in self.red_planes.values() if sim.is_alive)
+        if n_blue_alive == n_red_alive:
+            return 0.0
+        return float(30.0 * (n_red_alive - n_blue_alive))
+
+    def _compute_brma_paper_homogeneous_v1(self, base_rewards: dict, components: dict):
+        alive_blue = [sim for sim in self.blue_planes.values() if sim.is_alive]
+        n_blue_alive = len(alive_blue)
+        n_red_alive = sum(1 for sim in self.red_planes.values() if sim.is_alive)
+        round_over = n_blue_alive == 0 or n_red_alive == 0 or self.current_step >= self.max_steps
+        terminal_applied = 0.0
+        r_end = 0.0
+        if round_over and not getattr(self, "_brma_homo_terminal_applied", False):
+            r_end = self._brma_homo_terminal_outcome()
+            self._brma_homo_terminal_applied = True
+            terminal_applied = 1.0
+
+        for rid in self.red_ids:
+            sim = self.red_planes.get(rid)
+            if sim is None:
+                continue
+            comp = components.setdefault(rid, {})
+            if sim.is_alive:
+                r_pitch = float(self._pitch_penalty(sim))
+                r_roll = float(self._roll_penalty(sim))
+                r_altitude = float(self._brma_homo_altitude(sim, alive_blue))
+                r_boundary = float(self._brma_homo_boundary(sim))
+                r_speed = float(self._speed_penalty(sim))
+                r_adv, own_adv, enemy_threat = self._brma_homo_situation_reward(sim, alive_blue)
+            else:
+                r_pitch = r_roll = r_altitude = r_boundary = r_speed = r_adv = 0.0
+                own_adv = enemy_threat = 0.0
+
+            total = (
+                0.01 * r_pitch
+                + 0.002 * r_roll
+                + 0.04 * r_altitude
+                + 0.04 * r_boundary
+                + 0.02 * r_speed
+                + 0.15 * r_adv
+                + r_end
+            )
+            comp.update({
+                "brma_homo_r_pitch": r_pitch,
+                "brma_homo_r_roll": r_roll,
+                "brma_homo_r_altitude": r_altitude,
+                "brma_homo_r_boundary": r_boundary,
+                "brma_homo_r_speed": r_speed,
+                "brma_homo_r_adv": r_adv,
+                "brma_homo_r_end": r_end,
+                "brma_homo_total": float(total),
+                "brma_homo_own_adv_sum": own_adv,
+                "brma_homo_enemy_threat_sum": enemy_threat,
+                "brma_homo_td15_used": 1.0,
+                "brma_homo_role_agnostic": 1.0,
+                "brma_homo_terminal_applied": terminal_applied,
+            })
+            base_rewards[rid] = float(total)
+            components[rid] = comp
+        return base_rewards, components
 
     def _tam_v6v3_td_env(self, distance_m: float, cfg: dict) -> float:
         scfg = cfg.get("situation", {})
@@ -1023,6 +1134,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._tam_v2_missile_speed_cache = {}
         self._tam_v3_out_of_zone_active: set[str] = set()
         self._tam_v4_terminal_applied: bool = False
+        self._brma_homo_reset_episode_state()
         self._tam_v6v3_reset_episode_state()
         self._tam_v7_reset_episode_state()
         self._tam_brma_scripted_terminal_applied: bool = False
@@ -2784,6 +2896,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 return self._compute_tam_paper_reward_v7_role_aligned(base_rewards, components)
             if self.hetero_reward_mode == "tam_brma_scripted_reward_v1":
                 return self._compute_tam_brma_scripted_reward_v1(base_rewards, components)
+            if self.hetero_reward_mode == "brma_paper_homogeneous_v1":
+                return self._compute_brma_paper_homogeneous_v1(base_rewards, components)
             return base_rewards, components
 
         mav_id = self.red_ids[0] if self.red_ids else None
