@@ -6,6 +6,7 @@ import csv
 import faulthandler
 import json
 import math
+import multiprocessing as _mp
 import os
 import subprocess
 import sys
@@ -20,6 +21,155 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+# ---------------------------------------------------------------------------
+#  Multiprocess env helpers — each env in its own process, pipe-based proxy
+# ---------------------------------------------------------------------------
+def _mp_env_worker(remote, parent_remote, config: str,
+                   reward_mode: str, max_steps: int) -> None:
+    """Child-process entry point: construct env, loop on pipe commands."""
+    parent_remote.close()
+    for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(_var, "1")
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    env = None
+    try:
+        from uav_env import make_env
+        env = make_env(config, env_type="jsbsim_hetero",
+                       hetero_reward_mode=reward_mode, max_steps=max_steps)
+        meta = {
+            "red_ids": list(env.red_ids),
+            "blue_ids": list(env.blue_ids),
+            "agent_ids": list(env.agent_ids),
+            "max_steps": int(env.max_steps),
+            "agent_roles": dict(env.agent_roles),
+            "agent_types": dict(env.agent_types),
+            "agent_models": dict(env.agent_models),
+        }
+        remote.send(("ready", meta))
+        while True:
+            cmd, data = remote.recv()
+            if cmd == "step":
+                obs, rewards, terminated, truncated, info = env.step(data)
+                remote.send(("ok", obs, rewards, terminated, truncated, info))
+            elif cmd == "reset":
+                obs, info = env.reset(seed=data)
+                remote.send(("ok", obs, info))
+            elif cmd == "call":
+                method, args, kwargs = data
+                result = getattr(env, method)(*args, **kwargs)
+                remote.send(("ok", result))
+            elif cmd == "close":
+                remote.send(("ok",))
+                break
+    except Exception as exc:
+        try:
+            remote.send(("error", repr(exc)))
+        except Exception:
+            pass
+    finally:
+        if env is not None:
+            try: env.close()
+            except Exception: pass
+        try: remote.close()
+        except Exception: pass
+
+
+class _MpEnvProxy:
+    """Thin proxy that looks like a real env to the rollout loop.
+
+    Internal JSBSim attributes accessed by heartbeat / debug paths return
+    safe fallback values so diagnostics don't block on pipe round-trips.
+    """
+
+    def __init__(self, meta: dict, remote):
+        self.red_ids = list(meta["red_ids"])
+        self.blue_ids = list(meta["blue_ids"])
+        self.agent_ids = list(meta["agent_ids"])
+        self.max_steps = int(meta["max_steps"])
+        self.agent_roles = dict(meta.get("agent_roles", {}))
+        self.agent_types = dict(meta.get("agent_types", {}))
+        self.agent_models = dict(meta.get("agent_models", {}))
+        self._remote = remote
+        # Safe fallbacks for heartbeat diagnostics
+        self.red_planes = {}
+        self.blue_planes = {}
+        self.current_step = 0
+        self.env_dt = 0.0
+
+    def step(self, actions: dict):
+        self._remote.send(("step", actions))
+        msg = self._remote.recv()
+        if msg[0] != "ok":
+            raise RuntimeError(f"mp env step error: {msg}")
+        return msg[1], msg[2], msg[3], msg[4], msg[5]
+
+    def reset(self, *, seed: int):
+        self._remote.send(("reset", seed))
+        msg = self._remote.recv()
+        if msg[0] != "ok":
+            raise RuntimeError(f"mp env reset error: {msg}")
+        return msg[1], msg[2]
+
+    def refresh_engaged_targets(self):
+        self._remote.send(("call", ("refresh_engaged_targets", (), {})))
+        msg = self._remote.recv()
+        return msg[1] if msg[0] == "ok" else set()
+
+    def get_blue_own_positions(self):
+        self._remote.send(("call", ("get_blue_own_positions", (), {})))
+        msg = self._remote.recv()
+        return msg[1] if msg[0] == "ok" else {}
+
+    def get_blue_own_kinematics(self):
+        self._remote.send(("call", ("get_blue_own_kinematics", (), {})))
+        msg = self._remote.recv()
+        return msg[1] if msg[0] == "ok" else ({}, {})
+
+    def close(self):
+        try:
+            self._remote.send(("close", None))
+            if self._remote.poll(2):
+                self._remote.recv()
+        except Exception:
+            pass
+        try:
+            self._remote.close()
+        except Exception:
+            pass
+        proc = getattr(self, "_proc", None)
+        if proc is not None:
+            proc.join(timeout=5)
+            if proc.is_alive():
+                proc.terminate()
+
+
+def _create_mp_envs(num_envs: int, config: str, reward_mode: str,
+                    max_steps: int):
+    """Spawn ``num_envs`` worker processes, return list of ``_MpEnvProxy``."""
+    ctx = _mp.get_context("spawn")
+    proxies = []
+    for i in range(num_envs):
+        parent, child = ctx.Pipe()
+        proc = ctx.Process(target=_mp_env_worker,
+                           args=(child, parent, config, reward_mode, max_steps),
+                           daemon=True)
+        proc.start()
+        child.close()
+        if not parent.poll(300):
+            proc.terminate()
+            raise TimeoutError(f"mp env worker {i} startup timed out")
+        msg = parent.recv()
+        if msg[0] != "ready":
+            proc.terminate()
+            raise RuntimeError(f"mp env worker {i} init error: {msg}")
+        proxy = _MpEnvProxy(msg[1], parent)
+        proxy._proc = proc
+        proxies.append(proxy)
+        if i < num_envs - 1:
+            time.sleep(0.5)
+    return proxies
 
 from algorithms.happo import (
     BRMAEntityHAPPOReferencePolicy,
@@ -801,13 +951,6 @@ def _run_training_main() -> None:
     _reject_unsafe_random_scale_mask(args)
     if args.num_envs < 1:
         raise ValueError("--num-envs must be >= 1")
-    if args.num_envs > 1:
-        raise ValueError(
-            "train_happo_reference.py does not support true parallel envs. "
-            "The previous serial --num-envs rollout batching path is disabled "
-            "because it was misleading. Use scripts/train_happo_reference_parallel.py "
-            "for multiprocessing rollout workers."
-        )
     if args.device == "cuda" and not torch.cuda.is_available():
         args.device = "cpu"
 
@@ -824,9 +967,16 @@ def _run_training_main() -> None:
     (out_dir / "best").mkdir(parents=True, exist_ok=True)
     (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
 
-    env = make_env(args.config, env_type="jsbsim_hetero",
-                   hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
-    envs = [env]
+    if args.num_envs > 1:
+        envs = _create_mp_envs(args.num_envs, args.config, args.reward_mode,
+                               args.max_steps)
+    else:
+        envs = [
+            make_env(args.config, env_type="jsbsim_hetero",
+                     hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
+            for _ in range(args.num_envs)
+        ]
+    env = envs[0]
     _SINGLE_RUNNER_STATE["envs"] = envs
     entity_mode = args.policy_arch == "hetero_entity_recurrent"
     adapter = HeteroEntitySetAdapter() if entity_mode else HeteroObsAdapterV2()
