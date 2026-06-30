@@ -303,6 +303,9 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
             _blue_rule_module._simple_debug_state.clear()
             prev_yaw: dict[str, float] = {}
             prev_track: dict[str, float] = {}
+            prev_action_heading: dict[str, float] = {}
+            prev_target_cmd: dict[str, float] = {}
+            seen_deaths: set[tuple[int, str, str]] = set()
             dt = _decision_dt(env)
             for step in range(max_steps):
                 engaged_targets = env.refresh_engaged_targets()
@@ -373,6 +376,14 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                         ),
                         "blue_track_heading_rate_rad_s": (
                             _wrap_pi(track - prev_track[bid]) / dt if bid in prev_track else ""
+                        ),
+                        "action_heading_delta_from_prev_rad": (
+                            abs(_wrap_pi(target_heading_cmd - prev_action_heading[bid]))
+                            if bid in prev_action_heading else ""
+                        ),
+                        "target_heading_cmd_delta_from_prev_rad": (
+                            abs(_wrap_pi(target_heading_cmd - prev_target_cmd[bid]))
+                            if bid in prev_target_cmd else ""
                         ),
                         "blue_roll_rad": roll,
                         "blue_pitch_rad": pitch,
@@ -463,6 +474,8 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                             })
                     prev_yaw[bid] = yaw
                     prev_track[bid] = track
+                    prev_action_heading[bid] = target_heading_cmd
+                    prev_target_cmd[bid] = target_heading_cmd
 
                 full_actions = {**_red_actions(env, red_mode), **actions_blue}
                 obs, _rewards, terminated, truncated, info = env.step(full_actions)
@@ -490,9 +503,6 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                     row["aileron_cmd"] = ""
                     row["elevator_cmd"] = ""
                     row["throttle_cmd"] = ""
-                    # Heading deltas from previous step
-                    row["action_heading_delta_from_prev_rad"] = ""
-                    row["target_heading_cmd_delta_from_prev_rad"] = ""
                     row["range_delta_next_m"] = (
                         float(next_geom["nearest_red_range_m"]) - float(row["nearest_red_range_m"])
                         if row["nearest_red_range_m"] != "" and next_geom["nearest_red_range_m"] != "" else ""
@@ -505,13 +515,18 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                     row["death_or_outcome_if_terminal"] = terminal
                     row["death_reason_if_any"] = _death_reason(env, bid)
                     row["episode_outcome"] = terminal
+                    # Unique death tracking: (episode, blue_id, reason)
+                    dr = row["death_reason_if_any"]
+                    if dr:
+                        seen_deaths.add((ep, bid, str(dr)))
                     rows.append(row)
                 if terminal:
                     break
         finally:
             env.close()
     _annotate_future_response(rows)
-    _write_outputs(output_dir, rows, config, episodes, max_steps, red_mode, opponent_policy)
+    _write_outputs(output_dir, rows, config, episodes, max_steps, red_mode, opponent_policy,
+                   seen_deaths=seen_deaths)
 
 
 def _finite_values(rows: list[dict[str, Any]], key: str) -> list[float]:
@@ -529,7 +544,7 @@ def _finite_values(rows: list[dict[str, Any]], key: str) -> list[float]:
     return vals
 
 
-def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _summary_rows(rows: list[dict[str, Any]], seen_deaths: set | None = None) -> list[dict[str, Any]]:
     total = max(len(rows), 1)
     branch_counts = Counter(str(r.get("branch_state", "")) for r in rows)
     high = [
@@ -607,8 +622,13 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {"metric": "blue_alt_mean", "value": float(np.mean(alts)) if alts else ""},
         {"metric": "boundary_pressure_max", "value": float(np.max(pressures)) if pressures else ""},
         {"metric": "blue_death_count_by_reason", "value": dict(death_reasons)},
+        {"metric": "blue_death_count_by_reason_note", "value": "row-based — each step row with a death reason is counted. See blue_unique_death_count_by_reason for deduplicated per-episode-per-blue counts."},
         {"metric": "blue_boundary_death_count", "value": sum(v for k, v in death_reasons.items() if "boundary" in k.lower() or "out" in k.lower())},
         {"metric": "blue_low_altitude_death_count", "value": sum(v for k, v in death_reasons.items() if "alt" in k.lower() or "crash" in k.lower())},
+        {"metric": "blue_unique_death_count_by_reason", "value": dict(Counter(r[2] for r in seen_deaths)) if seen_deaths else {}},
+        {"metric": "blue_unique_death_count", "value": len(seen_deaths) if seen_deaths else 0},
+        {"metric": "action_heading_delta_abs_p95", "value": float(np.percentile([abs(v) for v in _finite_values(rows, "action_heading_delta_from_prev_rad")], 95)) if _finite_values(rows, "action_heading_delta_from_prev_rad") else ""},
+        {"metric": "target_heading_cmd_delta_abs_p95", "value": float(np.percentile([abs(v) for v in _finite_values(rows, "target_heading_cmd_delta_from_prev_rad")], 95)) if _finite_values(rows, "target_heading_cmd_delta_from_prev_rad") else ""},
         {"metric": "blue_missiles_fired_mean", "value": float(np.mean(missiles)) if missiles else ""},
         {"metric": "blue_missile_hits_mean", "value": "unavailable"},
         {"metric": "blue_missile_hits_mean_unavailable_reason", "value": "audit records launch flags but does not reconstruct missile hit ownership"},
@@ -631,11 +651,12 @@ def _output_prefix(opponent_policy: str) -> str:
 
 def _write_outputs(output_dir: Path, rows: list[dict[str, Any]], config: str,
                    episodes: int, max_steps: int, red_mode: str,
-                   opponent_policy: str = "brma_rule") -> None:
+                   opponent_policy: str = "brma_rule",
+                   seen_deaths: set | None = None) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = _output_prefix(opponent_policy)
     _write_csv(output_dir / f"{prefix}_steps.csv", rows, FIELDS)
-    summary = _summary_rows(rows)
+    summary = _summary_rows(rows, seen_deaths=seen_deaths)
     _write_csv(output_dir / f"{prefix}_summary.csv", summary, ["metric", "value"])
     _write_report(output_dir, rows, summary, config, episodes, max_steps, red_mode, opponent_policy)
 

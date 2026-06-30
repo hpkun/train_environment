@@ -478,13 +478,79 @@ def test_roll_guard_not_active_in_legacy_brma_rule():
     """Legacy brma_rule (delta10) should not trigger roll_recovery."""
     _reset_rule_memory()
     obs = _obs_with_roll(np.deg2rad(80.0), 0.10)
-    action = _blue_pursuit_action_impl(
+    _blue_pursuit_action_impl(
         obs, 2, 3, 0, forced_target_idx=None,
         own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
         own_heading=0.0,
         pursuit_mode="delta10",
     )
-    # Legacy path should not have _simple_debug_state entry for roll_recovery
     if 0 in rule_based_agent._simple_debug_state:
         dbg = rule_based_agent._simple_debug_state[0]
         assert dbg.get("roll_recovery_active", 0) == 0
+
+
+def test_roll_recovery_uses_current_heading_not_offset():
+    """Roll recovery desired_heading = our_heading, not ±30° offset."""
+    _reset_rule_memory()
+    for roll_deg in [80.0, 110.0]:
+        obs = _obs_with_roll(np.deg2rad(roll_deg), 0.10)
+        action = _blue_pursuit_action_impl(
+            obs, 2, 3, 0, forced_target_idx=None,
+            own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+            own_heading=1.0,  # non-zero test heading
+            pursuit_mode="safe_pursuit",
+        )
+        # action[1] = clip(our_heading / pi, -1, 1]) = 1/pi ≈ 0.318
+        expected = np.clip(1.0 / np.pi, -1, 1)
+        assert abs(float(action[1]) - expected) < 1e-6, (
+            f"roll={roll_deg}: expected action[1]={expected}, got {action[1]}"
+        )
+
+
+def test_no_custom_heading_limiter_constants():
+    """Safe_pursuit must not hard-code 15°, 20°, or 30° heading limits."""
+    import inspect
+    source = inspect.getsource(rule_based_agent._blue_simple_pursuit_action_impl)
+    assert "_SIMPLE_ROLL_RECOVERY_OFFSET" not in source
+    assert "30.0" not in source or "roll_recovery" not in source
+    # No 15, 20, or 30 deg heading limits with env-contract-basis claims
+    for deg in ["15.0", "20.0", "30.0"]:
+        # If these appear, they must not be near "heading" / "limiter" / "max"
+        if deg in source:
+            idx = source.index(deg)
+            ctx = source[max(0, idx-30):idx+30].lower()
+            assert "heading" not in ctx and "limiter" not in ctx, (
+                f"Found {deg} near heading/limiter in safe_pursuit source"
+            )
+
+
+def test_action_heading_delta_computed_in_audit():
+    """Audit output should compute action_heading_delta_from_prev_rad (not all empty)."""
+    import tempfile
+    import shutil
+    tmp_dir = Path(tempfile.mkdtemp(prefix="hdelta_audit_"))
+    out_dir = tmp_dir / "hdelta"
+    try:
+        result = subprocess.run(
+            [sys.executable, "scripts/audit_blue_rule_control_response.py",
+             "--opponent-policy", "brma_rule_safe_pursuit",
+             "--episodes", "1", "--max-steps", "10",
+             "--output-dir", str(out_dir)],
+            cwd=ROOT, text=True, capture_output=True,
+            encoding="utf-8", errors="replace", timeout=180,
+        )
+        assert result.returncode == 0, result.stderr[-1000:]
+        with open(out_dir / "blue_rule_safe_pursuit_steps.csv") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        assert len(rows) > 5
+        non_empty_deltas = [r for r in rows
+                           if r.get("action_heading_delta_from_prev_rad", "") != ""]
+        # At least one row should have a non-empty delta (step 2+)
+        assert len(non_empty_deltas) > 0, "action_heading_delta_from_prev_rad is all empty"
+        # Check unique death fields exist in summary
+        with open(out_dir / "blue_rule_safe_pursuit_report.md", encoding="utf-8") as f:
+            report = f.read()
+        assert "blue_unique_death_count" in report
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
