@@ -393,7 +393,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--brma-random-mask-prob", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
-                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"])
+                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule_safe_pursuit"])
     parser.add_argument("--reward-mode", default=None,
                         help="Override YAML hetero_reward_mode. If omitted, uses YAML value.")
     parser.add_argument("--ppo-epochs", type=int, default=2)

@@ -38,7 +38,6 @@ from rule_based_agent import (  # noqa: E402
     SAFE_COMBAT_ALT,
     _boundary_outward_heading_component,
     _boundary_patrol_pressure,
-    _safe_pursuit_heading_command,
     _should_override_for_boundary_safety,
 )
 from uav_env import make_env  # noqa: E402
@@ -250,24 +249,22 @@ def _safe_pursuit_diag(
     else:
         desired = ""
     if opponent_policy != "brma_rule_safe_pursuit" or branch != "combat" or desired == "":
+        reason = "not_safe_pursuit" if opponent_policy != "brma_rule_safe_pursuit" else "non_combat_safety_or_no_target"
         return {
             "desired_heading_rad": desired,
             "heading_error_to_desired_rad": abs(_wrap_pi(float(desired) - yaw)) if desired != "" else "",
             "heading_limit_deg": 10.0,
             "safe_pursuit_mode_active": 0,
             "safe_pursuit_direct_heading_used": 0,
-            "fallback_to_delta10_reason": "not_safe_pursuit",
+            "fallback_to_delta10_reason": reason,
         }
-    target_heading, limit_deg, reason, direct = _safe_pursuit_heading_command(
-        float(desired), yaw, alt_m, speed_mps, roll_abs, own_position)
-    del target_heading
     return {
         "desired_heading_rad": desired,
         "heading_error_to_desired_rad": abs(_wrap_pi(float(desired) - yaw)),
-        "heading_limit_deg": limit_deg,
-        "safe_pursuit_mode_active": int(reason == ""),
-        "safe_pursuit_direct_heading_used": int(direct and reason == ""),
-        "fallback_to_delta10_reason": reason,
+        "heading_limit_deg": 180.0,
+        "safe_pursuit_mode_active": 1,
+        "safe_pursuit_direct_heading_used": 1,
+        "fallback_to_delta10_reason": "",
     }
 
 
@@ -484,7 +481,7 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     safe_active = [int(r.get("safe_pursuit_mode_active", 0)) for r in rows]
     fallback = [
         r for r in rows
-        if str(r.get("fallback_to_delta10_reason", "")) not in {"", "not_safe_pursuit"}
+        if str(r.get("fallback_to_delta10_reason", "")) not in {"", "not_safe_pursuit", "non_combat_safety_or_no_target"}
     ]
     roll_abs = [abs(v) for v in _finite_values(rows, "blue_roll_rad")]
     speeds = _finite_values(rows, "blue_speed_mps")
@@ -522,7 +519,7 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {"metric": "blue_boundary_death_count", "value": sum(v for k, v in death_reasons.items() if "boundary" in k.lower() or "out" in k.lower())},
         {"metric": "blue_low_altitude_death_count", "value": sum(v for k, v in death_reasons.items() if "alt" in k.lower() or "crash" in k.lower())},
         {"metric": "blue_missiles_fired_mean", "value": float(np.mean(missiles)) if missiles else ""},
-        {"metric": "blue_missile_hits_mean", "value": ""},
+        {"metric": "blue_missile_hits_mean", "value": "unavailable"},
         {"metric": "episode_outcome_counts", "value": dict(outcomes)},
     ]
     for horizon in (5, 10, 20):
@@ -590,17 +587,22 @@ def _write_report(output_dir: Path, rows: list[dict[str, Any]], summary: list[di
         "## Safe-Pursuit Assessment",
         f"- safe_pursuit_active_rate: {s.get('safe_pursuit_active_rate')}",
         f"- fallback_to_delta10_rate: {s.get('fallback_to_delta10_rate')}",
+        "- safe-pursuit combat heading output uses the same normalized `action[1]` bounds as red policy actions: [-1, 1].",
+        "- safe-pursuit maps `target_heading_abs / pi` directly; no 20/35/60/180 deg staged limiter remains.",
+        "- safety layers still execute before combat: hard deck, descent safety, stall protection, anti-stall, and boundary safety.",
         f"- blue_death_count_by_reason: {s.get('blue_death_count_by_reason')}",
         f"- blue_boundary_death_count: {s.get('blue_boundary_death_count')}",
         f"- blue_low_altitude_death_count: {s.get('blue_low_altitude_death_count')}",
         f"- blue_roll_abs_max: {s.get('blue_roll_abs_max')}",
         f"- blue_speed_min: {s.get('blue_speed_min')}",
-        "- Recommendation: use this mode as an opt-in training/evaluation opponent probe, not as the default brma_rule replacement, until longer controlled runs confirm it does not increase blue self-loss or energy collapse.",
+        "- Recommendation: use this mode as an opt-in opponent probe. The default `brma_rule` remains the legacy delta10 script.",
         "",
         "## BRMA-MAPPO Action Contract Note",
-        "- The environment action contract uses `action[1] * pi` as an absolute target heading.",
-        "- The current blue script first computes an internal heading delta and limits it to +/-10 deg per decision step, then converts it back to the absolute target heading expected by the environment.",
-        "- This +/-10 deg limiter is a project legacy autopilot limiter. This audit does not treat it as a paper-required BRMA-MAPPO action-space constraint.",
+        "- The environment action contract uses `action[1] * pi` as an absolute target heading, so `action[1] = -1/0/+1` maps to `-pi/0/+pi` rad.",
+        "- Red policy actions enter this absolute heading contract without an additional delta-heading limiter in `env.py`.",
+        "- The default `brma_rule` first computes an internal heading delta and limits it to +/-10 deg per decision step, then converts it back to an absolute target heading.",
+        "- The +/-10 deg limiter is a project legacy autopilot limiter, not a paper-required BRMA-MAPPO action-space constraint.",
+        "- `brma_rule_safe_pursuit` keeps target selection and safety branches unchanged, but in combat maps radar lead bearing or AWACS coarse bearing directly to the same absolute heading action bound used by red actions.",
         "- `direct_lead_heading_probe` is diagnostic only; it is not used by training or evaluation.",
         "",
         "## Representative High-Error Sample",

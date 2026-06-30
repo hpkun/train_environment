@@ -236,67 +236,6 @@ def _wrap_pi(angle: float) -> float:
     return float((angle + np.pi) % (2 * np.pi) - np.pi)
 
 
-def _safe_pursuit_heading_limit_deg(
-    heading_error: float,
-    alt_m: float,
-    ego_vel: float,
-    ego_roll_abs: float,
-    own_position: np.ndarray | None,
-) -> tuple[float, str, bool]:
-    """Return opt-in safe-pursuit heading authority.
-
-    The default brma_rule path keeps the legacy +/-10 degree delta-heading
-    limiter.  This helper is only used by brma_rule_safe_pursuit.
-    """
-
-    boundary_pressure = (
-        _boundary_patrol_pressure(own_position)
-        if own_position is not None else 0.0
-    )
-    if alt_m < SAFE_COMBAT_ALT:
-        return 10.0, "low_altitude", False
-    if alt_m < HARD_DECK + 1000.0:
-        return 10.0, "hard_deck_margin", False
-    if ego_vel < 250.0:
-        return 10.0, "stall_risk", False
-    if ego_vel < 260.0:
-        return 10.0, "low_speed", False
-    if ego_roll_abs > np.deg2rad(70.0):
-        return 10.0, "extreme_bank", False
-    if ego_roll_abs > np.deg2rad(60.0):
-        return 10.0, "high_bank", False
-    if boundary_pressure >= 0.5:
-        return 10.0, "boundary_pressure", False
-
-    abs_err = abs(float(heading_error))
-    if abs_err < np.deg2rad(45.0):
-        return 20.0, "", False
-    if abs_err <= np.deg2rad(120.0):
-        return 35.0, "", False
-    return 180.0, "", True
-
-
-def _safe_pursuit_heading_command(
-    desired_heading: float,
-    our_heading: float,
-    alt_m: float,
-    ego_vel: float,
-    ego_roll_abs: float,
-    own_position: np.ndarray | None,
-) -> tuple[float, float, str, bool]:
-    """Return absolute heading target and diagnostic gate info."""
-
-    heading_error = _wrap_pi(float(desired_heading) - float(our_heading))
-    limit_deg, reason, direct = _safe_pursuit_heading_limit_deg(
-        heading_error, alt_m, ego_vel, ego_roll_abs, own_position)
-    limited_error = np.clip(
-        heading_error,
-        -np.deg2rad(limit_deg),
-        np.deg2rad(limit_deg),
-    )
-    return _wrap_pi(our_heading + limited_error), limit_deg, reason, direct
-
-
 def _target_track_quality(tgt_vec: np.ndarray) -> str:
     """Return 'radar', 'awacs', or 'invalid' for an enemy entity vector.
 
@@ -658,10 +597,7 @@ def _blue_pursuit_action_impl(
         _lost_target_steps[blue_id] = 0
         if pursuit_mode == "safe_pursuit":
             desired_heading = _wrap_pi(our_heading + AO)
-            target_heading_abs, _limit_deg, fallback_reason, _direct = _safe_pursuit_heading_command(
-                desired_heading, our_heading, alt_m, ego_vel, ego_roll_abs, own_position)
-            if not fallback_reason:
-                return _rescale_absolute_heading(pitch_cmd, target_heading_abs, float(vel_cmd))
+            return _rescale_absolute_heading(pitch_cmd, desired_heading, float(vel_cmd))
         return _rescale(pitch_cmd, heading_cmd, float(vel_cmd))
 
     # =========================================================================
@@ -815,9 +751,6 @@ def _blue_pursuit_action_impl(
         vel_cmd = max(vel_cmd, 1.0)
 
     if pursuit_mode == "safe_pursuit":
-        target_heading_abs, _limit_deg, fallback_reason, _direct = _safe_pursuit_heading_command(
-            float(lead_bearing), our_heading, alt_m, ego_vel, ego_roll_abs, own_position)
-        if not fallback_reason:
-            return _rescale_absolute_heading(pitch_cmd, target_heading_abs, vel_cmd)
+        return _rescale_absolute_heading(pitch_cmd, float(lead_bearing), vel_cmd)
 
     return _rescale(pitch_cmd, heading_cmd, vel_cmd)
