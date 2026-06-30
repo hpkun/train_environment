@@ -232,6 +232,71 @@ def _should_override_for_boundary_safety(
     )
 
 
+def _wrap_pi(angle: float) -> float:
+    return float((angle + np.pi) % (2 * np.pi) - np.pi)
+
+
+def _safe_pursuit_heading_limit_deg(
+    heading_error: float,
+    alt_m: float,
+    ego_vel: float,
+    ego_roll_abs: float,
+    own_position: np.ndarray | None,
+) -> tuple[float, str, bool]:
+    """Return opt-in safe-pursuit heading authority.
+
+    The default brma_rule path keeps the legacy +/-10 degree delta-heading
+    limiter.  This helper is only used by brma_rule_safe_pursuit.
+    """
+
+    boundary_pressure = (
+        _boundary_patrol_pressure(own_position)
+        if own_position is not None else 0.0
+    )
+    if alt_m < SAFE_COMBAT_ALT:
+        return 10.0, "low_altitude", False
+    if alt_m < HARD_DECK + 1000.0:
+        return 10.0, "hard_deck_margin", False
+    if ego_vel < 250.0:
+        return 10.0, "stall_risk", False
+    if ego_vel < 260.0:
+        return 10.0, "low_speed", False
+    if ego_roll_abs > np.deg2rad(70.0):
+        return 10.0, "extreme_bank", False
+    if ego_roll_abs > np.deg2rad(60.0):
+        return 10.0, "high_bank", False
+    if boundary_pressure >= 0.5:
+        return 10.0, "boundary_pressure", False
+
+    abs_err = abs(float(heading_error))
+    if abs_err < np.deg2rad(45.0):
+        return 20.0, "", False
+    if abs_err <= np.deg2rad(120.0):
+        return 35.0, "", False
+    return 180.0, "", True
+
+
+def _safe_pursuit_heading_command(
+    desired_heading: float,
+    our_heading: float,
+    alt_m: float,
+    ego_vel: float,
+    ego_roll_abs: float,
+    own_position: np.ndarray | None,
+) -> tuple[float, float, str, bool]:
+    """Return absolute heading target and diagnostic gate info."""
+
+    heading_error = _wrap_pi(float(desired_heading) - float(our_heading))
+    limit_deg, reason, direct = _safe_pursuit_heading_limit_deg(
+        heading_error, alt_m, ego_vel, ego_roll_abs, own_position)
+    limited_error = np.clip(
+        heading_error,
+        -np.deg2rad(limit_deg),
+        np.deg2rad(limit_deg),
+    )
+    return _wrap_pi(our_heading + limited_error), limit_deg, reason, direct
+
+
 def _target_track_quality(tgt_vec: np.ndarray) -> str:
     """Return 'radar', 'awacs', or 'invalid' for an enemy entity vector.
 
@@ -281,6 +346,7 @@ def blue_coordinated_actions(
     engaged_targets: set[str] | None = None,
     own_positions: dict[str, np.ndarray] | None = None,
     own_headings: dict[str, float] | None = None,
+    pursuit_mode: str = "delta10",
 ) -> dict[str, np.ndarray]:
     """Greedy target deconfliction: distribute blues across different reds.
 
@@ -326,7 +392,8 @@ def blue_coordinated_actions(
                 blue_obs[bid], num_blue, num_red, int(bid.split("_")[1]),
                 forced_target_idx=None,
                 own_position=own_positions.get(bid) if own_positions else None,
-                own_heading=own_headings.get(bid) if own_headings else None)
+                own_heading=own_headings.get(bid) if own_headings else None,
+                pursuit_mode=pursuit_mode)
         return actions
 
     # Score every blue × red pair
@@ -379,7 +446,8 @@ def blue_coordinated_actions(
             blue_obs[bid], num_blue, num_red, b_idx,
             forced_target_idx=assignments[b_idx],
             own_position=own_positions.get(bid) if own_positions else None,
-            own_heading=own_headings.get(bid) if own_headings else None)
+            own_heading=own_headings.get(bid) if own_headings else None,
+            pursuit_mode=pursuit_mode)
     return actions
 
 
@@ -390,12 +458,14 @@ def blue_coordinated_actions(
 def blue_pursuit_action(obs: dict, num_blue: int, num_red: int, blue_id: int,
                         missile_warning: bool = False,
                         own_position: np.ndarray | None = None,
-                        own_heading: float | None = None) -> np.ndarray:
+                        own_heading: float | None = None,
+                        pursuit_mode: str = "delta10") -> np.ndarray:
     """Per-aircraft entry point (legacy — prefer ``blue_coordinated_actions``)."""
     return _blue_pursuit_action_impl(obs, num_blue, num_red, blue_id,
                                      forced_target_idx=None,
                                      own_position=own_position,
-                                     own_heading=own_heading)
+                                     own_heading=own_heading,
+                                     pursuit_mode=pursuit_mode)
 
 
 # ==============================================================================
@@ -410,6 +480,7 @@ def _blue_pursuit_action_impl(
     forced_target_idx: int | None,
     own_position: np.ndarray | None = None,
     own_heading: float | None = None,
+    pursuit_mode: str = "delta10",
 ) -> np.ndarray:
     """四层状态机自动驾驶仪（优先级从高到低）。
 
@@ -449,6 +520,13 @@ def _blue_pursuit_action_impl(
         target_heading = (target_heading + np.pi) % (2 * np.pi) - np.pi
         heading_new = target_heading / np.pi            # → [−1, 1]
         vel_new = (90.0 + 100.0 * vel_int) / 306.0     # [250,350]→[102,408]
+        vel_new = np.clip(vel_new, -1.0, 1.0)
+        return np.array([pitch_new, heading_new, vel_new], dtype=np.float32)
+
+    def _rescale_absolute_heading(pitch_int, target_heading_abs, vel_int):
+        pitch_new = pitch_int
+        heading_new = _wrap_pi(float(target_heading_abs)) / np.pi
+        vel_new = (90.0 + 100.0 * vel_int) / 306.0
         vel_new = np.clip(vel_new, -1.0, 1.0)
         return np.array([pitch_new, heading_new, vel_new], dtype=np.float32)
 
@@ -578,6 +656,12 @@ def _blue_pursuit_action_impl(
         _prev_heading_cmd.pop(blue_id, None)
         _last_target_bearing[blue_id] = float((our_heading + AO + np.pi) % (2 * np.pi) - np.pi)
         _lost_target_steps[blue_id] = 0
+        if pursuit_mode == "safe_pursuit":
+            desired_heading = _wrap_pi(our_heading + AO)
+            target_heading_abs, _limit_deg, fallback_reason, _direct = _safe_pursuit_heading_command(
+                desired_heading, our_heading, alt_m, ego_vel, ego_roll_abs, own_position)
+            if not fallback_reason:
+                return _rescale_absolute_heading(pitch_cmd, target_heading_abs, float(vel_cmd))
         return _rescale(pitch_cmd, heading_cmd, float(vel_cmd))
 
     # =========================================================================
@@ -729,5 +813,11 @@ def _blue_pursuit_action_impl(
 
     if TA > np.deg2rad(90):
         vel_cmd = max(vel_cmd, 1.0)
+
+    if pursuit_mode == "safe_pursuit":
+        target_heading_abs, _limit_deg, fallback_reason, _direct = _safe_pursuit_heading_command(
+            float(lead_bearing), our_heading, alt_m, ego_vel, ego_roll_abs, own_position)
+        if not fallback_reason:
+            return _rescale_absolute_heading(pitch_cmd, target_heading_abs, vel_cmd)
 
     return _rescale(pitch_cmd, heading_cmd, vel_cmd)

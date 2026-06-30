@@ -33,9 +33,11 @@ class OpponentPolicy:
     - ``greedy_fsm``: low-intrusion finite-state scripted blue intent policy.
     - ``brma_rule``: delegates to the parent project's ``rule_based_agent.py``
       (BRMA-MAPPO paper-aligned blue opponent).
+    - ``brma_rule_safe_pursuit``: same target assignment as ``brma_rule`` with
+      an opt-in JSBSim safe-pursuit heading adaptation.
     """
 
-    MODES = {"zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"}
+    MODES = {"zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule_safe_pursuit"}
 
     def __init__(self, mode: str = "zero", seed: int | None = None):
         if mode not in self.MODES:
@@ -104,14 +106,16 @@ class OpponentPolicy:
                     assigned_targets.add(target_slot)
                     self.last_assigned_targets[bid] = target_slot
             return actions
-        if self.mode == "brma_rule":
-            return self._brma_rule_actions(obs_dict, blue_ids, env)
+        if self.mode in {"brma_rule", "brma_rule_safe_pursuit"}:
+            pursuit_mode = "safe_pursuit" if self.mode == "brma_rule_safe_pursuit" else "delta10"
+            return self._brma_rule_actions(obs_dict, blue_ids, env, pursuit_mode=pursuit_mode)
         return {
             bid: self._rule_nearest_action(obs_dict.get(bid, {}))
             for bid in blue_ids
         }
 
-    def _brma_rule_actions(self, obs_dict, blue_ids, env) -> dict[str, np.ndarray]:
+    def _brma_rule_actions(self, obs_dict, blue_ids, env,
+                           pursuit_mode: str = "delta10") -> dict[str, np.ndarray]:
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
             from rule_based_agent import blue_coordinated_actions
@@ -163,6 +167,7 @@ class OpponentPolicy:
             engaged_targets=engaged_targets,
             own_positions=own_positions,
             own_headings=own_headings,
+            pursuit_mode=pursuit_mode,
         )
 
     @staticmethod

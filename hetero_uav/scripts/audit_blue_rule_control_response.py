@@ -28,13 +28,18 @@ from scripts.audit_blue_rule_pursuit_logic import (  # noqa: E402
     DEFAULT_CONFIG,
     _coordinated_assignment_debug,
     _infer_branch,
+    _launch_flags,
     _red_actions,
     _select_target_debug,
 )
 import rule_based_agent as _blue_rule_module  # noqa: E402
 from rule_based_agent import (  # noqa: E402
+    HARD_DECK,
+    SAFE_COMBAT_ALT,
     _boundary_outward_heading_component,
     _boundary_patrol_pressure,
+    _safe_pursuit_heading_command,
+    _should_override_for_boundary_safety,
 )
 from uav_env import make_env  # noqa: E402
 
@@ -42,15 +47,20 @@ from uav_env import make_env  # noqa: E402
 FIELDS = [
     "episode", "step", "blue_id",
     "branch_state", "selected_red_id",
+    "target_quality",
     "target_range_m", "nearest_red_range_m",
     "AO_rad", "TA_rad",
+    "lead_bearing_rad", "target_bearing_rad", "desired_heading_rad",
+    "heading_error_to_desired_rad", "heading_limit_deg",
+    "safe_pursuit_mode_active", "safe_pursuit_direct_heading_used",
+    "fallback_to_delta10_reason",
     "heading_error_to_target_rad",
     "heading_cmd_internal", "heading_cmd_saturated",
     "target_heading_cmd_rad",
     "blue_yaw_rad", "blue_track_heading_rad", "blue_heading_source",
     "blue_heading_rate_rad_s", "blue_track_heading_rate_rad_s",
     "blue_roll_rad", "blue_pitch_rad", "blue_speed_mps", "blue_alt_m",
-    "target_bearing_rad", "lead_bearing_rad", "lead_bearing_error_rad",
+    "lead_bearing_error_rad",
     "pid_target_heading_rad",
     "actual_heading_next_rad", "actual_track_heading_next_rad",
     "actual_heading_delta_next_rad", "actual_track_heading_delta_next_rad",
@@ -62,7 +72,11 @@ FIELDS = [
     "red_pos_n", "red_pos_e", "red_alt_m",
     "blue_pos_n", "blue_pos_e", "range_delta_next_m",
     "distance_to_center_m", "boundary_pressure", "outward_component",
+    "hard_deck_active", "stall_risk_active", "anti_stall_active",
+    "boundary_safety_active", "missile_fired_this_step", "launch_track_ok",
+    "launch_geometry_ok", "range_ok", "ao_ok", "ta_ok",
     "death_or_outcome_if_terminal", "death_reason_if_any",
+    "episode_outcome",
 ]
 
 
@@ -217,10 +231,50 @@ def _annotate_future_response(rows: list[dict[str, Any]]) -> None:
                 )
 
 
+def _safe_pursuit_diag(
+    opponent_policy: str,
+    branch: str,
+    target_quality: str,
+    lead_bearing: float | str,
+    yaw: float,
+    ao_rad: float | str,
+    alt_m: float,
+    speed_mps: float,
+    roll_abs: float,
+    own_position: np.ndarray,
+) -> dict[str, Any]:
+    if target_quality == "awacs" and ao_rad != "":
+        desired = _wrap_pi(yaw + float(ao_rad))
+    elif lead_bearing != "":
+        desired = float(lead_bearing)
+    else:
+        desired = ""
+    if opponent_policy != "brma_rule_safe_pursuit" or branch != "combat" or desired == "":
+        return {
+            "desired_heading_rad": desired,
+            "heading_error_to_desired_rad": abs(_wrap_pi(float(desired) - yaw)) if desired != "" else "",
+            "heading_limit_deg": 10.0,
+            "safe_pursuit_mode_active": 0,
+            "safe_pursuit_direct_heading_used": 0,
+            "fallback_to_delta10_reason": "not_safe_pursuit",
+        }
+    target_heading, limit_deg, reason, direct = _safe_pursuit_heading_command(
+        float(desired), yaw, alt_m, speed_mps, roll_abs, own_position)
+    del target_heading
+    return {
+        "desired_heading_rad": desired,
+        "heading_error_to_desired_rad": abs(_wrap_pi(float(desired) - yaw)),
+        "heading_limit_deg": limit_deg,
+        "safe_pursuit_mode_active": int(reason == ""),
+        "safe_pursuit_direct_heading_used": int(direct and reason == ""),
+        "fallback_to_delta10_reason": reason,
+    }
+
+
 def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
-              red_mode: str) -> None:
+              red_mode: str, opponent_policy: str = "brma_rule") -> None:
     rows: list[dict[str, Any]] = []
-    opponent = OpponentPolicy("brma_rule", seed=23)
+    opponent = OpponentPolicy(opponent_policy, seed=23)
     for ep in range(episodes):
         env = make_env(config, env_type="jsbsim_hetero", max_steps=max_steps)
         try:
@@ -273,6 +327,7 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                         "blue_id": bid,
                         "branch_state": branch,
                         "selected_red_id": geom["selected_red_id"],
+                        "target_quality": target["target_quality"],
                         "target_range_m": geom["target_range_m"],
                         "nearest_red_range_m": geom["nearest_red_range_m"],
                         "AO_rad": float(target["target_state"][3]) * math.pi if target["target_state"] is not None and target["target_state"].size > 3 else "",
@@ -322,9 +377,32 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                         "distance_to_center_m": float(np.linalg.norm(bpos[:2])),
                         "boundary_pressure": pressure,
                         "outward_component": outward,
+                        "hard_deck_active": int(float(bpos[2]) < HARD_DECK),
+                        "stall_risk_active": int(float(np.linalg.norm(bvel)) < 250.0),
+                        "anti_stall_active": int(branch == "anti_stall"),
+                        "boundary_safety_active": int(_should_override_for_boundary_safety(bpos, yaw)),
+                        "missile_fired_this_step": 0,
+                        "launch_track_ok": 0,
+                        "launch_geometry_ok": 0,
+                        "range_ok": 0,
+                        "ao_ok": 0,
+                        "ta_ok": int(target["target_state"] is not None and target["target_state"].size > 4 and abs(float(target["target_state"][4])) > 1e-4),
                         "death_or_outcome_if_terminal": "",
                         "death_reason_if_any": _death_reason(env, bid),
+                        "episode_outcome": "",
                     }
+                    current[bid].update(_safe_pursuit_diag(
+                        opponent_policy=opponent_policy,
+                        branch=branch,
+                        target_quality=target["target_quality"],
+                        lead_bearing=lead_bearing,
+                        yaw=yaw,
+                        ao_rad=current[bid]["AO_rad"],
+                        alt_m=float(bpos[2]),
+                        speed_mps=float(np.linalg.norm(bvel)),
+                        roll_abs=abs(roll),
+                        own_position=bpos,
+                    ))
                     prev_yaw[bid] = yaw
                     prev_track[bid] = track
 
@@ -332,6 +410,7 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                 obs, _rewards, terminated, truncated, info = env.step(full_actions)
                 terminal = _terminal_label(terminated, truncated, info)
                 for bid, row in current.items():
+                    launch = _launch_flags(info, bid)
                     blue = env.blue_planes[bid]
                     bvel_next = np.asarray(blue.get_velocity(), dtype=np.float64)
                     yaw_next = float(blue.get_rpy()[2])
@@ -347,15 +426,21 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                         float(next_geom["nearest_red_range_m"]) - float(row["nearest_red_range_m"])
                         if row["nearest_red_range_m"] != "" and next_geom["nearest_red_range_m"] != "" else ""
                     )
+                    row["missile_fired_this_step"] = launch[0]
+                    row["launch_track_ok"] = launch[1]
+                    row["launch_geometry_ok"] = launch[2]
+                    row["range_ok"] = launch[3]
+                    row["ao_ok"] = launch[4]
                     row["death_or_outcome_if_terminal"] = terminal
                     row["death_reason_if_any"] = _death_reason(env, bid)
+                    row["episode_outcome"] = terminal
                     rows.append(row)
                 if terminal:
                     break
         finally:
             env.close()
     _annotate_future_response(rows)
-    _write_outputs(output_dir, rows, config, episodes, max_steps, red_mode)
+    _write_outputs(output_dir, rows, config, episodes, max_steps, red_mode, opponent_policy)
 
 
 def _finite_values(rows: list[dict[str, Any]], key: str) -> list[float]:
@@ -396,9 +481,23 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if r.get("death_or_outcome_if_terminal")
         or r.get("death_reason_if_any")
     ]
+    safe_active = [int(r.get("safe_pursuit_mode_active", 0)) for r in rows]
+    fallback = [
+        r for r in rows
+        if str(r.get("fallback_to_delta10_reason", "")) not in {"", "not_safe_pursuit"}
+    ]
+    roll_abs = [abs(v) for v in _finite_values(rows, "blue_roll_rad")]
+    speeds = _finite_values(rows, "blue_speed_mps")
+    alts = _finite_values(rows, "blue_alt_m")
+    pressures = _finite_values(rows, "boundary_pressure")
+    death_reasons = Counter(str(r.get("death_reason_if_any", "")) for r in rows if str(r.get("death_reason_if_any", "")))
+    outcomes = Counter(str(r.get("episode_outcome", "")) for r in rows if str(r.get("episode_outcome", "")))
+    missiles = _finite_values(rows, "missile_fired_this_step")
     out = [
         {"metric": "samples", "value": total},
         {"metric": "combat_rate", "value": branch_counts.get("combat", 0) / total},
+        {"metric": "safe_pursuit_active_rate", "value": sum(safe_active) / total},
+        {"metric": "fallback_to_delta10_rate", "value": len(fallback) / total},
         {"metric": "branch_counts", "value": dict(branch_counts)},
         {"metric": "high_heading_error_count_gt_90deg", "value": len(high)},
         {"metric": "high_error_cmd_saturation_rate", "value": len(sat_high) / len(high) if high else 0.0},
@@ -412,6 +511,19 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {"metric": "range_increase_rate_next", "value": sum(v > 0.0 for v in range_next) / len(range_next) if range_next else ""},
         {"metric": "direct_probe_improvement_mean_rad", "value": float(np.mean(direct_gain)) if direct_gain else ""},
         {"metric": "terminal_or_death_rows", "value": len(boundary_terminal)},
+        {"metric": "blue_roll_abs_mean", "value": float(np.mean(roll_abs)) if roll_abs else ""},
+        {"metric": "blue_roll_abs_max", "value": float(np.max(roll_abs)) if roll_abs else ""},
+        {"metric": "blue_speed_min", "value": float(np.min(speeds)) if speeds else ""},
+        {"metric": "blue_speed_mean", "value": float(np.mean(speeds)) if speeds else ""},
+        {"metric": "blue_alt_min", "value": float(np.min(alts)) if alts else ""},
+        {"metric": "blue_alt_mean", "value": float(np.mean(alts)) if alts else ""},
+        {"metric": "boundary_pressure_max", "value": float(np.max(pressures)) if pressures else ""},
+        {"metric": "blue_death_count_by_reason", "value": dict(death_reasons)},
+        {"metric": "blue_boundary_death_count", "value": sum(v for k, v in death_reasons.items() if "boundary" in k.lower() or "out" in k.lower())},
+        {"metric": "blue_low_altitude_death_count", "value": sum(v for k, v in death_reasons.items() if "alt" in k.lower() or "crash" in k.lower())},
+        {"metric": "blue_missiles_fired_mean", "value": float(np.mean(missiles)) if missiles else ""},
+        {"metric": "blue_missile_hits_mean", "value": ""},
+        {"metric": "episode_outcome_counts", "value": dict(outcomes)},
     ]
     for horizon in (5, 10, 20):
         hd = [abs(v) for v in _finite_values(high, f"heading_delta_{horizon}_steps_rad")]
@@ -424,17 +536,24 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _output_prefix(opponent_policy: str) -> str:
+    return "blue_rule_safe_pursuit" if opponent_policy == "brma_rule_safe_pursuit" else "blue_rule_control_response"
+
+
 def _write_outputs(output_dir: Path, rows: list[dict[str, Any]], config: str,
-                   episodes: int, max_steps: int, red_mode: str) -> None:
+                   episodes: int, max_steps: int, red_mode: str,
+                   opponent_policy: str = "brma_rule") -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_csv(output_dir / "blue_rule_control_response_steps.csv", rows, FIELDS)
+    prefix = _output_prefix(opponent_policy)
+    _write_csv(output_dir / f"{prefix}_steps.csv", rows, FIELDS)
     summary = _summary_rows(rows)
-    _write_csv(output_dir / "blue_rule_control_response_summary.csv", summary, ["metric", "value"])
-    _write_report(output_dir, rows, summary, config, episodes, max_steps, red_mode)
+    _write_csv(output_dir / f"{prefix}_summary.csv", summary, ["metric", "value"])
+    _write_report(output_dir, rows, summary, config, episodes, max_steps, red_mode, opponent_policy)
 
 
 def _write_report(output_dir: Path, rows: list[dict[str, Any]], summary: list[dict[str, Any]],
-                  config: str, episodes: int, max_steps: int, red_mode: str) -> None:
+                  config: str, episodes: int, max_steps: int, red_mode: str,
+                  opponent_policy: str = "brma_rule") -> None:
     s = {row["metric"]: row["value"] for row in summary}
     high = [
         r for r in rows
@@ -449,9 +568,10 @@ def _write_report(output_dir: Path, rows: list[dict[str, Any]], summary: list[di
     if float(s.get("command_tracking_error_mean_rad") or 0.0) > math.radians(45.0):
         classification.append("C execution layer: aircraft yaw/track lags the commanded heading target.")
     lines = [
-        "# Blue Rule Control Response Audit",
+        "# Blue Rule Safe Pursuit Audit" if opponent_policy == "brma_rule_safe_pursuit" else "# Blue Rule Control Response Audit",
         "",
         f"- config: `{config}`",
+        f"- opponent_policy: `{opponent_policy}`",
         f"- episodes: {episodes}",
         f"- max_steps: {max_steps}",
         f"- red_mode: `{red_mode}`",
@@ -466,6 +586,16 @@ def _write_report(output_dir: Path, rows: list[dict[str, Any]], summary: list[di
         "",
         "## Classification",
         *[f"- {item}" for item in classification],
+        "",
+        "## Safe-Pursuit Assessment",
+        f"- safe_pursuit_active_rate: {s.get('safe_pursuit_active_rate')}",
+        f"- fallback_to_delta10_rate: {s.get('fallback_to_delta10_rate')}",
+        f"- blue_death_count_by_reason: {s.get('blue_death_count_by_reason')}",
+        f"- blue_boundary_death_count: {s.get('blue_boundary_death_count')}",
+        f"- blue_low_altitude_death_count: {s.get('blue_low_altitude_death_count')}",
+        f"- blue_roll_abs_max: {s.get('blue_roll_abs_max')}",
+        f"- blue_speed_min: {s.get('blue_speed_min')}",
+        "- Recommendation: use this mode as an opt-in training/evaluation opponent probe, not as the default brma_rule replacement, until longer controlled runs confirm it does not increase blue self-loss or energy collapse.",
         "",
         "## BRMA-MAPPO Action Contract Note",
         "- The environment action contract uses `action[1] * pi` as an absolute target heading.",
@@ -491,10 +621,10 @@ def _write_report(output_dir: Path, rows: list[dict[str, Any]], summary: list[di
     lines.extend([
         "",
         "## Outputs",
-        "- step CSV: `blue_rule_control_response_steps.csv`",
-        "- summary CSV: `blue_rule_control_response_summary.csv`",
+        f"- step CSV: `{_output_prefix(opponent_policy)}_steps.csv`",
+        f"- summary CSV: `{_output_prefix(opponent_policy)}_summary.csv`",
     ])
-    _write(output_dir / "blue_rule_control_response_report.md", "\n".join(lines) + "\n")
+    _write(output_dir / f"{_output_prefix(opponent_policy)}_report.md", "\n".join(lines) + "\n")
 
 
 def main() -> None:
@@ -503,10 +633,16 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=300)
     parser.add_argument("--output-dir", default="outputs/blue_rule_control_response_audit")
+    parser.add_argument("--opponent-policy", default="brma_rule",
+                        choices=["brma_rule", "brma_rule_safe_pursuit"])
+    parser.add_argument("--blue-rule-mode", default=None, choices=["safe_pursuit"])
     parser.add_argument("--red-mode", default="zero", choices=["zero", "straight_outward"])
     args = parser.parse_args()
+    opponent_policy = args.opponent_policy
+    if args.blue_rule_mode == "safe_pursuit":
+        opponent_policy = "brma_rule_safe_pursuit"
     out = ROOT / args.output_dir if not Path(args.output_dir).is_absolute() else Path(args.output_dir)
-    run_audit(args.config, args.episodes, args.max_steps, out, args.red_mode)
+    run_audit(args.config, args.episodes, args.max_steps, out, args.red_mode, opponent_policy)
     print(out)
 
 
