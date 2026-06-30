@@ -622,7 +622,7 @@ def _summary_rows(rows: list[dict[str, Any]], seen_deaths: set | None = None) ->
         {"metric": "blue_alt_mean", "value": float(np.mean(alts)) if alts else ""},
         {"metric": "boundary_pressure_max", "value": float(np.max(pressures)) if pressures else ""},
         {"metric": "blue_death_count_by_reason", "value": dict(death_reasons)},
-        {"metric": "blue_death_count_by_reason_note", "value": "row-based — each step row with a death reason is counted. See blue_unique_death_count_by_reason for deduplicated per-episode-per-blue counts."},
+        {"metric": "blue_death_count_by_reason_note", "value": "row-based - each step row with a death reason is counted. See blue_unique_death_count_by_reason for deduplicated per-episode-per-blue counts."},
         {"metric": "blue_boundary_death_count", "value": sum(v for k, v in death_reasons.items() if "boundary" in k.lower() or "out" in k.lower())},
         {"metric": "blue_low_altitude_death_count", "value": sum(v for k, v in death_reasons.items() if "alt" in k.lower() or "crash" in k.lower())},
         {"metric": "blue_unique_death_count_by_reason", "value": dict(Counter(r[2] for r in seen_deaths)) if seen_deaths else {}},

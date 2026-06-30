@@ -6,6 +6,7 @@ models, or modify environment mechanics.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import sys
@@ -222,6 +223,127 @@ def _all_done(terminated: dict, truncated: dict) -> bool:
     )
 
 
+def _safe_position(sim) -> np.ndarray:
+    try:
+        return np.asarray(sim.get_position(), dtype=np.float64)
+    except Exception:
+        return np.zeros(3, dtype=np.float64)
+
+
+def _nearest_range_to_team(env, sim, team_ids: list[str], team_planes: dict) -> float:
+    pos = _safe_position(sim)
+    best = float("nan")
+    for aid in team_ids:
+        other = team_planes.get(aid)
+        if other is None or not bool(getattr(other, "is_alive", False)):
+            continue
+        distance = float(np.linalg.norm(pos - _safe_position(other)))
+        if not math.isfinite(best) or distance < best:
+            best = distance
+    return best
+
+
+def _safe_debug_float(debug: dict, key: str) -> float:
+    try:
+        return float(debug.get(key, np.nan))
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _agent_diag_row(
+    env,
+    step: int,
+    sim_time: float,
+    aid: str,
+    sim,
+    action: np.ndarray,
+    nearest_enemy_range_m: float,
+    debug: dict | None = None,
+) -> dict:
+    debug = debug or {}
+    pos = _safe_position(sim)
+    vel = np.asarray(sim.get_velocity(), dtype=np.float64)
+    roll, pitch, yaw = np.asarray(sim.get_rpy(), dtype=np.float64)
+    speed = float(np.linalg.norm(vel))
+    return {
+        "step": int(step),
+        "sim_time_sec": float(sim_time),
+        "agent_id": aid,
+        "alive": int(bool(getattr(sim, "is_alive", False))),
+        "north_m": float(pos[0]) if pos.size > 0 else 0.0,
+        "east_m": float(pos[1]) if pos.size > 1 else 0.0,
+        "up_m": float(pos[2]) if pos.size > 2 else 0.0,
+        "alt_m": float(sim.get_altitude()) if hasattr(sim, "get_altitude") else float(pos[2] if pos.size > 2 else 0.0),
+        "speed_mps": speed,
+        "roll_deg": float(np.rad2deg(roll)),
+        "pitch_deg": float(np.rad2deg(pitch)),
+        "yaw_deg": float(np.rad2deg(yaw)),
+        "action_pitch": float(action[0]) if len(action) > 0 else 0.0,
+        "action_heading": float(action[1]) if len(action) > 1 else 0.0,
+        "action_speed": float(action[2]) if len(action) > 2 else 0.0,
+        "nearest_enemy_range_m": float(nearest_enemy_range_m),
+        "death_reason": str(getattr(env, "_death_reasons", {}).get(aid, "")),
+        "desired_heading_source": str(debug.get("desired_heading_source", "")),
+        "roll_recovery_active": int(debug.get("roll_recovery_active", 0) or 0),
+        "extreme_roll_recovery_active": int(debug.get("extreme_roll_recovery_active", 0) or 0),
+        "simple_lost_steps": int(debug.get("simple_lost_steps", 0) or 0),
+        "selected_range_m": _safe_debug_float(debug, "selected_range_m"),
+        "selected_AO_rad": _safe_debug_float(debug, "selected_AO_rad"),
+        "selected_TA_rad": _safe_debug_float(debug, "selected_TA_rad"),
+        "selected_target_quality": _safe_debug_float(debug, "selected_target_quality"),
+    }
+
+
+def _append_diag_rows(
+    env,
+    step: int,
+    sim_time: float,
+    red_actions: dict[str, np.ndarray],
+    blue_actions: dict[str, np.ndarray],
+    red_rows: list[dict],
+    blue_rows: list[dict],
+) -> None:
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from rule_based_agent import _simple_debug_state
+    except Exception:
+        _simple_debug_state = {}
+
+    for rid in env.red_ids:
+        sim = env.red_planes.get(rid)
+        if sim is None:
+            continue
+        nearest = _nearest_range_to_team(env, sim, env.blue_ids, env.blue_planes)
+        red_rows.append(_agent_diag_row(
+            env, step, sim_time, rid, sim,
+            np.asarray(red_actions.get(rid, np.zeros(3)), dtype=np.float32),
+            nearest,
+        ))
+    for index, bid in enumerate(env.blue_ids):
+        sim = env.blue_planes.get(bid)
+        if sim is None:
+            continue
+        nearest = _nearest_range_to_team(env, sim, env.red_ids, env.red_planes)
+        blue_rows.append(_agent_diag_row(
+            env, step, sim_time, bid, sim,
+            np.asarray(blue_actions.get(bid, np.zeros(3)), dtype=np.float32),
+            nearest,
+            dict(_simple_debug_state.get(index, {})),
+        ))
+
+
+def _write_csv(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fieldnames = list(rows[0].keys())
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -233,7 +355,7 @@ def main() -> None:
     parser.add_argument("--red-policy", choices=["zero", "random"], default="zero")
     parser.add_argument(
         "--blue-policy",
-        choices=["zero", "rule_nearest", "greedy_fsm", "random"],
+        choices=["zero", "rule_nearest", "greedy_fsm", "random", "brma_rule", "brma_rule_safe_pursuit"],
         default="greedy_fsm",
     )
     parser.add_argument(
@@ -266,25 +388,40 @@ def main() -> None:
     missile_id_map: dict[str, int] = {}
     logged_explosions: set[str] = set()
     launch_records: list[dict] = []
+    red_diag_rows: list[dict] = []
+    blue_diag_rows: list[dict] = []
     steps_executed = 0
     final_terminated = False
     final_truncated = False
 
     try:
         obs, _info = env.reset(seed=args.seed)
+        _append_diag_rows(
+            env, 0, 0.0,
+            {rid: np.zeros(3, dtype=np.float32) for rid in env.red_ids},
+            {bid: np.zeros(3, dtype=np.float32) for bid in env.blue_ids},
+            red_diag_rows, blue_diag_rows,
+        )
         _record_frame(
             logger, env, 0.0, args.record_missiles,
             missile_id_map, logged_explosions)
 
         for step in range(1, args.steps + 1):
-            actions = _red_actions(env, args.red_policy, rng)
-            actions.update(blue_policy.act(obs, env.blue_ids))
+            red_actions = _red_actions(env, args.red_policy, rng)
+            blue_actions = blue_policy.act(obs, env.blue_ids, env=env)
+            actions = dict(red_actions)
+            actions.update(blue_actions)
             obs, _rewards, terminated, truncated, _info = env.step(actions)
+            sim_time = step * float(env.env_dt)
+            _append_diag_rows(
+                env, step, sim_time, red_actions, blue_actions,
+                red_diag_rows, blue_diag_rows,
+            )
             _merge_launch_records(launch_records, _info.get("__launch_quality_step__", []))
             _merge_launch_records(launch_records, _info.get("__launch_quality_done__", []))
             steps_executed = step
             _record_frame(
-                logger, env, step * float(env.env_dt), args.record_missiles,
+                logger, env, sim_time, args.record_missiles,
                 missile_id_map, logged_explosions)
             final_terminated = all(bool(v) for v in terminated.values())
             final_truncated = all(bool(v) for v in truncated.values())
@@ -292,12 +429,19 @@ def main() -> None:
                 break
 
         logger.write(str(output_acmi))
+        diagnostics_dir = output_acmi.parent / "diagnostics"
+        blue_diag_path = diagnostics_dir / "blue_behavior_timeseries.csv"
+        red_diag_path = diagnostics_dir / "red_behavior_timeseries.csv"
+        _write_csv(blue_diag_path, blue_diag_rows)
+        _write_csv(red_diag_path, red_diag_rows)
         red_alive, blue_alive, mav_alive = _alive_counts(env)
         metadata = {
             "acmi_entity_type_fix": True,
             "config": args.config,
             "output_acmi": str(output_acmi),
             "output_json": str(output_json),
+            "blue_behavior_timeseries": str(blue_diag_path),
+            "red_behavior_timeseries": str(red_diag_path),
             "steps_requested": int(args.steps),
             "steps_executed": int(steps_executed),
             "frames_recorded": int(logger.frame_count),

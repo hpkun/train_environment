@@ -370,8 +370,8 @@ def _obs_with_roll(roll_rad: float, enemy_offset_rad: float = 0.10) -> dict:
     }
 
 
-def test_roll_recovery_triggers_at_high_roll():
-    """When abs(roll) > 75 deg, safe_pursuit outputs roll_recovery not current_target."""
+def test_high_roll_still_tracks_current_target():
+    """High roll alone must not block safe_pursuit current-target tracking."""
     _reset_rule_memory()
     obs = _obs_with_roll(np.deg2rad(80.0), 0.10)
     action = _blue_pursuit_action_impl(
@@ -381,14 +381,15 @@ def test_roll_recovery_triggers_at_high_roll():
         pursuit_mode="safe_pursuit",
     )
     dbg = rule_based_agent._simple_debug_state[0]
-    assert dbg["desired_heading_source"] == "roll_recovery", f"got {dbg['desired_heading_source']}"
-    assert dbg["roll_recovery_active"] == 1
+    assert dbg["desired_heading_source"] == "current_target", f"got {dbg['desired_heading_source']}"
+    assert dbg["roll_recovery_active"] == 0
+    assert dbg["extreme_roll_recovery_active"] == 0
     assert abs(float(action[1])) <= 1.0
-    assert float(action[2]) >= 0.62  # throttle at max (vel_int=1.0 → 190/306)
+    assert abs(_wrap_pi(float(action[1]) * math.pi - 0.10)) < math.radians(1.0)
 
 
-def test_extreme_roll_recovery_triggers_above_105_deg():
-    """When abs(roll) > 105 deg, safe_pursuit outputs extreme_roll_recovery."""
+def test_extreme_roll_still_tracks_current_target():
+    """Extreme roll alone must not trigger a high-roll-only recovery branch."""
     _reset_rule_memory()
     obs = _obs_with_roll(np.deg2rad(110.0), 0.10)
     action = _blue_pursuit_action_impl(
@@ -398,24 +399,15 @@ def test_extreme_roll_recovery_triggers_above_105_deg():
         pursuit_mode="safe_pursuit",
     )
     dbg = rule_based_agent._simple_debug_state[0]
-    assert dbg["desired_heading_source"] == "extreme_roll_recovery"
-    assert dbg["extreme_roll_recovery_active"] == 1
+    assert dbg["desired_heading_source"] == "current_target"
+    assert dbg["roll_recovery_active"] == 0
+    assert dbg["extreme_roll_recovery_active"] == 0
     assert abs(float(action[1])) <= 1.0
 
 
-def test_roll_recovery_does_not_update_last_seen():
-    """Roll recovery must not preserve target bearing in last_seen."""
+def test_high_roll_current_target_updates_last_seen():
+    """High-roll pursuit should preserve normal last_seen reacquisition behavior."""
     _reset_rule_memory()
-    # First step: normal pursuit to set last_seen
-    obs_normal = _obs_with_roll(0.0, 0.10)
-    _blue_pursuit_action_impl(
-        obs_normal, 2, 3, 0, forced_target_idx=0,
-        own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
-        own_heading=0.0,
-        pursuit_mode="safe_pursuit",
-    )
-    assert 0 in rule_based_agent._simple_last_seen_bearing
-    # Second step: high roll should clear last_seen
     obs_roll = _obs_with_roll(np.deg2rad(80.0), 0.10)
     _blue_pursuit_action_impl(
         obs_roll, 2, 3, 0, forced_target_idx=None,
@@ -423,11 +415,12 @@ def test_roll_recovery_does_not_update_last_seen():
         own_heading=0.0,
         pursuit_mode="safe_pursuit",
     )
-    assert 0 not in rule_based_agent._simple_last_seen_bearing
+    assert 0 in rule_based_agent._simple_last_seen_bearing
+    assert abs(rule_based_agent._simple_last_seen_bearing[0] - 0.10) < math.radians(1.0)
 
 
-def test_roll_recovery_action_in_bounds():
-    """action[1] must remain in [-1, 1] during roll recovery."""
+def test_high_roll_pursuit_action_in_bounds():
+    """action[1] must remain in [-1, 1] during high-roll pursuit."""
     _reset_rule_memory()
     for roll_deg in [80.0, 95.0, 110.0, 130.0, 160.0]:
         obs = _obs_with_roll(np.deg2rad(roll_deg), 0.10)
@@ -438,7 +431,7 @@ def test_roll_recovery_action_in_bounds():
             pursuit_mode="safe_pursuit",
         )
         assert -1.0 <= float(action[1]) <= 1.0, f"roll={roll_deg} action[1]={action[1]}"
-        assert float(action[2]) >= 0.62, f"roll={roll_deg} throttle={action[2]}"
+        assert rule_based_agent._simple_debug_state[0]["desired_heading_source"] == "current_target"
 
 
 def test_low_speed_safety_still_triggers():
@@ -489,8 +482,8 @@ def test_roll_guard_not_active_in_legacy_brma_rule():
         assert dbg.get("roll_recovery_active", 0) == 0
 
 
-def test_roll_recovery_uses_current_heading_not_offset():
-    """Roll recovery desired_heading = our_heading, not ±30° offset."""
+def test_high_roll_uses_target_heading_not_current_heading_offset():
+    """High-roll pursuit uses target heading, not current heading or an offset."""
     _reset_rule_memory()
     for roll_deg in [80.0, 110.0]:
         obs = _obs_with_roll(np.deg2rad(roll_deg), 0.10)
@@ -500,18 +493,21 @@ def test_roll_recovery_uses_current_heading_not_offset():
             own_heading=1.0,  # non-zero test heading
             pursuit_mode="safe_pursuit",
         )
-        # action[1] = clip(our_heading / pi, -1, 1]) = 1/pi ≈ 0.318
-        expected = np.clip(1.0 / np.pi, -1, 1)
+        # env contract: action[1] * pi = absolute target heading.
+        expected = np.clip((1.0 + 0.10) / np.pi, -1, 1)
         assert abs(float(action[1]) - expected) < 1e-6, (
             f"roll={roll_deg}: expected action[1]={expected}, got {action[1]}"
         )
 
 
-def test_no_custom_heading_limiter_constants():
+def test_no_custom_heading_limiter_or_high_roll_recovery_constants():
     """Safe_pursuit must not hard-code 15°, 20°, or 30° heading limits."""
     import inspect
     source = inspect.getsource(rule_based_agent._blue_simple_pursuit_action_impl)
     assert "_SIMPLE_ROLL_RECOVERY_OFFSET" not in source
+    assert "_SIMPLE_HIGH_ROLL_RECOVERY" not in inspect.getsource(rule_based_agent)
+    assert '"roll_recovery"' not in source
+    assert '"extreme_roll_recovery"' not in source
     assert "30.0" not in source or "roll_recovery" not in source
     # No 15, 20, or 30 deg heading limits with env-contract-basis claims
     for deg in ["15.0", "20.0", "30.0"]:
@@ -554,3 +550,4 @@ def test_action_heading_delta_computed_in_audit():
         assert "blue_unique_death_count" in report
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
