@@ -1,0 +1,514 @@
+"""Audit blue brma_rule command-to-aircraft pursuit response.
+
+This script is read-only with respect to environment mechanics. It traces the
+same brma_rule policy path used by train/eval and records whether saturated
+heading commands are followed by aircraft yaw/track response and range closure.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import math
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+PARENT = ROOT.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(PARENT) not in sys.path:
+    sys.path.insert(0, str(PARENT))
+
+from algorithms.mappo.opponent_policy import OpponentPolicy  # noqa: E402
+from scripts.audit_blue_rule_pursuit_logic import (  # noqa: E402
+    DEFAULT_CONFIG,
+    _coordinated_assignment_debug,
+    _infer_branch,
+    _red_actions,
+    _select_target_debug,
+)
+import rule_based_agent as _blue_rule_module  # noqa: E402
+from rule_based_agent import (  # noqa: E402
+    _boundary_outward_heading_component,
+    _boundary_patrol_pressure,
+)
+from uav_env import make_env  # noqa: E402
+
+
+FIELDS = [
+    "episode", "step", "blue_id",
+    "branch_state", "selected_red_id",
+    "target_range_m", "nearest_red_range_m",
+    "AO_rad", "TA_rad",
+    "heading_error_to_target_rad",
+    "heading_cmd_internal", "heading_cmd_saturated",
+    "target_heading_cmd_rad",
+    "blue_yaw_rad", "blue_track_heading_rad", "blue_heading_source",
+    "blue_heading_rate_rad_s", "blue_track_heading_rate_rad_s",
+    "blue_roll_rad", "blue_pitch_rad", "blue_speed_mps", "blue_alt_m",
+    "target_bearing_rad", "lead_bearing_rad", "lead_bearing_error_rad",
+    "pid_target_heading_rad",
+    "actual_heading_next_rad", "actual_track_heading_next_rad",
+    "actual_heading_delta_next_rad", "actual_track_heading_delta_next_rad",
+    "command_tracking_error_rad", "command_track_tracking_error_rad",
+    "delta10_heading_error_after_cmd_rad", "direct_probe_heading_cmd_rad",
+    "direct_probe_heading_error_after_cmd_rad", "direct_probe_improvement_rad",
+    "heading_delta_5_steps_rad", "heading_delta_10_steps_rad", "heading_delta_20_steps_rad",
+    "range_delta_5_steps_m", "range_delta_10_steps_m", "range_delta_20_steps_m",
+    "red_pos_n", "red_pos_e", "red_alt_m",
+    "blue_pos_n", "blue_pos_e", "range_delta_next_m",
+    "distance_to_center_m", "boundary_pressure", "outward_component",
+    "death_or_outcome_if_terminal", "death_reason_if_any",
+]
+
+
+def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _wrap_pi(angle: float) -> float:
+    return (float(angle) + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _delta10_target_heading(current_heading_rad: float, heading_cmd_internal: float) -> float:
+    return _wrap_pi(float(current_heading_rad) + float(heading_cmd_internal) * math.radians(10.0))
+
+
+def _direct_heading_probe(_current_heading_rad: float, target_bearing_rad: float) -> float:
+    """Diagnostic-only absolute heading probe without the blue rule ±10 deg limit."""
+
+    return _wrap_pi(target_bearing_rad)
+
+
+def _track_heading(velocity: np.ndarray) -> float:
+    vel = np.asarray(velocity, dtype=np.float64).reshape(-1)
+    if vel.size < 2 or np.linalg.norm(vel[:2]) < 1e-6:
+        return 0.0
+    return float(math.atan2(float(vel[1]), float(vel[0])))
+
+
+def _decision_dt(env) -> float:
+    sim_freq = float(getattr(env, "sim_freq", 60.0) or 60.0)
+    interaction = float(getattr(env, "agent_interaction_steps", 12.0) or 12.0)
+    return interaction / sim_freq
+
+
+def _red_blue_geometry(env, blue_id: str, target_idx: int | None) -> dict[str, Any]:
+    blue = env.blue_planes[blue_id]
+    bpos = np.asarray(blue.get_position(), dtype=np.float64)
+    nearest = []
+    for red in env.red_planes.values():
+        if red is not None and red.is_alive:
+            nearest.append(float(np.linalg.norm(np.asarray(red.get_position(), dtype=np.float64) - bpos)))
+    if target_idx is None or target_idx >= len(env.red_ids):
+        return {
+            "selected_red_id": "",
+            "target_range_m": "",
+            "nearest_red_range_m": min(nearest) if nearest else float("nan"),
+            "target_bearing_rad": "",
+            "heading_error_to_target_rad": "",
+            "red_pos_n": "",
+            "red_pos_e": "",
+            "red_alt_m": "",
+        }
+    rid = env.red_ids[target_idx]
+    red = env.red_planes[rid]
+    rpos = np.asarray(red.get_position(), dtype=np.float64)
+    delta = rpos - bpos
+    bearing = math.atan2(float(delta[1]), float(delta[0]))
+    yaw = float(blue.get_rpy()[2])
+    return {
+        "selected_red_id": rid,
+        "target_range_m": float(np.linalg.norm(delta)),
+        "nearest_red_range_m": min(nearest) if nearest else float("nan"),
+        "target_bearing_rad": bearing,
+        "heading_error_to_target_rad": abs(_wrap_pi(bearing - yaw)),
+        "red_pos_n": float(rpos[0]),
+        "red_pos_e": float(rpos[1]),
+        "red_alt_m": float(rpos[2]),
+    }
+
+
+def _lead_bearing_from_obs(obs: dict, target_state: np.ndarray | None, own_heading: float) -> float | str:
+    if target_state is None or target_state.size < 7:
+        return ""
+    ao = float(target_state[3]) * math.pi
+    ta = float(target_state[4]) * math.pi
+    quality_is_awacs = abs(ta) <= 1e-4
+    if quality_is_awacs:
+        return _wrap_pi(own_heading + ao)
+
+    ego_state = np.asarray(obs.get("ego_state", []), dtype=np.float64).reshape(-1)
+    vel = np.asarray(obs.get("velocity", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+    if ego_state.size < 11 or vel.size < 2:
+        return _wrap_pi(own_heading + ao)
+    roll = math.atan2(float(ego_state[7]), float(ego_state[8]))
+    pitch = math.atan2(float(ego_state[9]), float(ego_state[10]))
+    speed = max(float(np.hypot(vel[0], vel[1])), 1.0)
+
+    r = float(target_state[5]) * 80000.0
+    v_tgt = float(target_state[6]) * 600.0
+    dx_body = float(target_state[0]) * 40000.0
+    dy_body = float(target_state[1]) * 40000.0
+    dz_body = -float(target_state[2]) * 10000.0
+
+    c_psi, s_psi = math.cos(own_heading), math.sin(own_heading)
+    c_theta, s_theta = math.cos(pitch), math.sin(pitch)
+    c_phi, s_phi = math.cos(roll), math.sin(roll)
+    dn = (c_psi * c_theta) * dx_body \
+        + (c_psi * s_theta * s_phi - s_psi * c_phi) * dy_body \
+        + (c_psi * s_theta * c_phi + s_psi * s_phi) * dz_body
+    de = (s_psi * c_theta) * dx_body \
+        + (s_psi * s_theta * s_phi + c_psi * c_phi) * dy_body \
+        + (s_psi * s_theta * c_phi - c_psi * s_phi) * dz_body
+
+    target_heading = own_heading + ao + ta
+    t_lead = min(r / max(speed, v_tgt, 1.0), 30.0)
+    lead_n = dn + v_tgt * math.cos(target_heading) * t_lead
+    lead_e = de + v_tgt * math.sin(target_heading) * t_lead
+    return _wrap_pi(math.atan2(lead_e, lead_n))
+
+
+def _death_reason(env, aid: str) -> str:
+    reasons = getattr(env, "_death_reasons", {}) or {}
+    return str(reasons.get(aid, ""))
+
+
+def _terminal_label(terminated: dict, truncated: dict, info: dict) -> str:
+    if not (all(terminated.values()) or all(truncated.values())):
+        return ""
+    winners = info.get("__winner__", "") or info.get("winner", "")
+    reasons = info.get("__episode_end_reason__", "") or info.get("episode_end_reason", "")
+    return str(reasons or winners or "episode_done")
+
+
+def _annotate_future_response(rows: list[dict[str, Any]]) -> None:
+    grouped: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[(int(row["episode"]), str(row["blue_id"]))].append(row)
+    for group in grouped.values():
+        group.sort(key=lambda r: int(r["step"]))
+        for idx, row in enumerate(group):
+            yaw0 = row.get("blue_yaw_rad")
+            range0 = row.get("nearest_red_range_m")
+            for horizon in (5, 10, 20):
+                if idx + horizon >= len(group) or yaw0 == "" or range0 == "":
+                    row[f"heading_delta_{horizon}_steps_rad"] = ""
+                    row[f"range_delta_{horizon}_steps_m"] = ""
+                    continue
+                later = group[idx + horizon]
+                row[f"heading_delta_{horizon}_steps_rad"] = _wrap_pi(
+                    float(later["blue_yaw_rad"]) - float(yaw0))
+                row[f"range_delta_{horizon}_steps_m"] = (
+                    float(later["nearest_red_range_m"]) - float(range0)
+                )
+
+
+def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
+              red_mode: str) -> None:
+    rows: list[dict[str, Any]] = []
+    opponent = OpponentPolicy("brma_rule", seed=23)
+    for ep in range(episodes):
+        env = make_env(config, env_type="jsbsim_hetero", max_steps=max_steps)
+        try:
+            obs, info = env.reset(seed=ep)
+            opponent.reset_memory()
+            _blue_rule_module._last_target_bearing.clear()
+            _blue_rule_module._lost_target_steps.clear()
+            _blue_rule_module._prev_heading_cmd.clear()
+            _blue_rule_module._prev_lead_bearing.clear()
+            prev_yaw: dict[str, float] = {}
+            prev_track: dict[str, float] = {}
+            dt = _decision_dt(env)
+            for step in range(max_steps):
+                engaged_targets = env.refresh_engaged_targets()
+                assignments = _coordinated_assignment_debug(
+                    obs, env.blue_ids, len(env.blue_ids), len(env.red_ids), engaged_targets)
+                actions_blue = opponent.act(obs, env.blue_ids, env=env)
+                current: dict[str, dict[str, Any]] = {}
+                for bid in env.blue_ids:
+                    bobs = obs.get(bid, {})
+                    blue = env.blue_planes[bid]
+                    bpos = np.asarray(blue.get_position(), dtype=np.float64)
+                    bvel = np.asarray(blue.get_velocity(), dtype=np.float64)
+                    roll, pitch, yaw = [float(v) for v in blue.get_rpy()]
+                    track = _track_heading(bvel)
+                    target = _select_target_debug(
+                        bobs, len(env.blue_ids), len(env.red_ids),
+                        forced_target_idx=assignments.get(bid))
+                    geom = _red_blue_geometry(env, bid, target["target_idx"])
+                    action = np.asarray(actions_blue.get(bid, np.zeros(3, dtype=np.float32)), dtype=np.float32)
+                    target_heading_cmd = _wrap_pi(float(action[1]) * math.pi)
+                    heading_cmd_internal = _wrap_pi(target_heading_cmd - yaw) / math.radians(10.0)
+                    lead_bearing = _lead_bearing_from_obs(bobs, target["target_state"], yaw)
+                    target_bearing = geom["target_bearing_rad"]
+                    direct_cmd = (
+                        _direct_heading_probe(yaw, float(target_bearing))
+                        if target_bearing != "" else ""
+                    )
+                    branch = _infer_branch(
+                        bobs,
+                        target["target_idx"],
+                        bpos,
+                        yaw,
+                    )
+                    pressure = _boundary_patrol_pressure(bpos)
+                    outward = _boundary_outward_heading_component(bpos, yaw)
+                    current[bid] = {
+                        "episode": ep,
+                        "step": step,
+                        "blue_id": bid,
+                        "branch_state": branch,
+                        "selected_red_id": geom["selected_red_id"],
+                        "target_range_m": geom["target_range_m"],
+                        "nearest_red_range_m": geom["nearest_red_range_m"],
+                        "AO_rad": float(target["target_state"][3]) * math.pi if target["target_state"] is not None and target["target_state"].size > 3 else "",
+                        "TA_rad": float(target["target_state"][4]) * math.pi if target["target_state"] is not None and target["target_state"].size > 4 else "",
+                        "heading_error_to_target_rad": geom["heading_error_to_target_rad"],
+                        "heading_cmd_internal": float(np.clip(heading_cmd_internal, -1.0, 1.0)),
+                        "heading_cmd_saturated": int(abs(heading_cmd_internal) >= 0.99),
+                        "target_heading_cmd_rad": target_heading_cmd,
+                        "blue_yaw_rad": yaw,
+                        "blue_track_heading_rad": track,
+                        "blue_heading_source": "sim_rpy_yaw",
+                        "blue_heading_rate_rad_s": (
+                            _wrap_pi(yaw - prev_yaw[bid]) / dt if bid in prev_yaw else ""
+                        ),
+                        "blue_track_heading_rate_rad_s": (
+                            _wrap_pi(track - prev_track[bid]) / dt if bid in prev_track else ""
+                        ),
+                        "blue_roll_rad": roll,
+                        "blue_pitch_rad": pitch,
+                        "blue_speed_mps": float(np.linalg.norm(bvel)),
+                        "blue_alt_m": float(bpos[2]),
+                        "target_bearing_rad": target_bearing,
+                        "lead_bearing_rad": lead_bearing,
+                        "lead_bearing_error_rad": (
+                            abs(_wrap_pi(float(lead_bearing) - yaw)) if lead_bearing != "" else ""
+                        ),
+                        "pid_target_heading_rad": target_heading_cmd,
+                        "delta10_heading_error_after_cmd_rad": (
+                            abs(_wrap_pi(float(target_bearing) - target_heading_cmd))
+                            if target_bearing != "" else ""
+                        ),
+                        "direct_probe_heading_cmd_rad": direct_cmd,
+                        "direct_probe_heading_error_after_cmd_rad": (
+                            abs(_wrap_pi(float(target_bearing) - float(direct_cmd)))
+                            if direct_cmd != "" and target_bearing != "" else ""
+                        ),
+                        "direct_probe_improvement_rad": (
+                            abs(_wrap_pi(float(target_bearing) - target_heading_cmd))
+                            - abs(_wrap_pi(float(target_bearing) - float(direct_cmd)))
+                            if direct_cmd != "" and target_bearing != "" else ""
+                        ),
+                        "red_pos_n": geom["red_pos_n"],
+                        "red_pos_e": geom["red_pos_e"],
+                        "red_alt_m": geom["red_alt_m"],
+                        "blue_pos_n": float(bpos[0]),
+                        "blue_pos_e": float(bpos[1]),
+                        "distance_to_center_m": float(np.linalg.norm(bpos[:2])),
+                        "boundary_pressure": pressure,
+                        "outward_component": outward,
+                        "death_or_outcome_if_terminal": "",
+                        "death_reason_if_any": _death_reason(env, bid),
+                    }
+                    prev_yaw[bid] = yaw
+                    prev_track[bid] = track
+
+                full_actions = {**_red_actions(env, red_mode), **actions_blue}
+                obs, _rewards, terminated, truncated, info = env.step(full_actions)
+                terminal = _terminal_label(terminated, truncated, info)
+                for bid, row in current.items():
+                    blue = env.blue_planes[bid]
+                    bvel_next = np.asarray(blue.get_velocity(), dtype=np.float64)
+                    yaw_next = float(blue.get_rpy()[2])
+                    track_next = _track_heading(bvel_next)
+                    next_geom = _red_blue_geometry(env, bid, assignments.get(bid))
+                    row["actual_heading_next_rad"] = yaw_next
+                    row["actual_track_heading_next_rad"] = track_next
+                    row["actual_heading_delta_next_rad"] = _wrap_pi(yaw_next - float(row["blue_yaw_rad"]))
+                    row["actual_track_heading_delta_next_rad"] = _wrap_pi(track_next - float(row["blue_track_heading_rad"]))
+                    row["command_tracking_error_rad"] = abs(_wrap_pi(float(row["target_heading_cmd_rad"]) - yaw_next))
+                    row["command_track_tracking_error_rad"] = abs(_wrap_pi(float(row["target_heading_cmd_rad"]) - track_next))
+                    row["range_delta_next_m"] = (
+                        float(next_geom["nearest_red_range_m"]) - float(row["nearest_red_range_m"])
+                        if row["nearest_red_range_m"] != "" and next_geom["nearest_red_range_m"] != "" else ""
+                    )
+                    row["death_or_outcome_if_terminal"] = terminal
+                    row["death_reason_if_any"] = _death_reason(env, bid)
+                    rows.append(row)
+                if terminal:
+                    break
+        finally:
+            env.close()
+    _annotate_future_response(rows)
+    _write_outputs(output_dir, rows, config, episodes, max_steps, red_mode)
+
+
+def _finite_values(rows: list[dict[str, Any]], key: str) -> list[float]:
+    vals = []
+    for row in rows:
+        val = row.get(key, "")
+        if val == "":
+            continue
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(f):
+            vals.append(f)
+    return vals
+
+
+def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    total = max(len(rows), 1)
+    branch_counts = Counter(str(r.get("branch_state", "")) for r in rows)
+    high = [
+        r for r in rows
+        if r.get("heading_error_to_target_rad") != ""
+        and float(r["heading_error_to_target_rad"]) > math.radians(90.0)
+    ]
+    sat_high = [r for r in high if int(r.get("heading_cmd_saturated", 0)) == 1]
+    high_range_next = [
+        float(r["range_delta_next_m"]) for r in high
+        if r.get("range_delta_next_m") != "" and np.isfinite(float(r["range_delta_next_m"]))
+    ]
+    high_heading_delta = _finite_values(high, "actual_heading_delta_next_rad")
+    high_roll_abs = [abs(v) for v in _finite_values(high, "blue_roll_rad")]
+    tracking = _finite_values(rows, "command_tracking_error_rad")
+    direct_gain = _finite_values(rows, "direct_probe_improvement_rad")
+    range_next = _finite_values(rows, "range_delta_next_m")
+    boundary_terminal = [
+        r for r in rows
+        if r.get("death_or_outcome_if_terminal")
+        or r.get("death_reason_if_any")
+    ]
+    out = [
+        {"metric": "samples", "value": total},
+        {"metric": "combat_rate", "value": branch_counts.get("combat", 0) / total},
+        {"metric": "branch_counts", "value": dict(branch_counts)},
+        {"metric": "high_heading_error_count_gt_90deg", "value": len(high)},
+        {"metric": "high_error_cmd_saturation_rate", "value": len(sat_high) / len(high) if high else 0.0},
+        {"metric": "high_error_range_increase_rate_next", "value": sum(v > 0.0 for v in high_range_next) / len(high_range_next) if high_range_next else ""},
+        {"metric": "high_error_range_delta_next_mean_m", "value": float(np.mean(high_range_next)) if high_range_next else ""},
+        {"metric": "high_error_actual_heading_delta_abs_mean_rad", "value": float(np.mean([abs(v) for v in high_heading_delta])) if high_heading_delta else ""},
+        {"metric": "high_error_roll_abs_mean_rad", "value": float(np.mean(high_roll_abs)) if high_roll_abs else ""},
+        {"metric": "command_tracking_error_mean_rad", "value": float(np.mean(tracking)) if tracking else ""},
+        {"metric": "command_tracking_error_p90_rad", "value": float(np.percentile(tracking, 90)) if tracking else ""},
+        {"metric": "range_delta_next_mean_m", "value": float(np.mean(range_next)) if range_next else ""},
+        {"metric": "range_increase_rate_next", "value": sum(v > 0.0 for v in range_next) / len(range_next) if range_next else ""},
+        {"metric": "direct_probe_improvement_mean_rad", "value": float(np.mean(direct_gain)) if direct_gain else ""},
+        {"metric": "terminal_or_death_rows", "value": len(boundary_terminal)},
+    ]
+    for horizon in (5, 10, 20):
+        hd = [abs(v) for v in _finite_values(high, f"heading_delta_{horizon}_steps_rad")]
+        rd = _finite_values(high, f"range_delta_{horizon}_steps_m")
+        out.extend([
+            {"metric": f"high_error_heading_delta_{horizon}_steps_abs_mean_rad", "value": float(np.mean(hd)) if hd else ""},
+            {"metric": f"high_error_range_delta_{horizon}_steps_mean_m", "value": float(np.mean(rd)) if rd else ""},
+            {"metric": f"high_error_range_increase_rate_{horizon}_steps", "value": sum(v > 0.0 for v in rd) / len(rd) if rd else ""},
+        ])
+    return out
+
+
+def _write_outputs(output_dir: Path, rows: list[dict[str, Any]], config: str,
+                   episodes: int, max_steps: int, red_mode: str) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_csv(output_dir / "blue_rule_control_response_steps.csv", rows, FIELDS)
+    summary = _summary_rows(rows)
+    _write_csv(output_dir / "blue_rule_control_response_summary.csv", summary, ["metric", "value"])
+    _write_report(output_dir, rows, summary, config, episodes, max_steps, red_mode)
+
+
+def _write_report(output_dir: Path, rows: list[dict[str, Any]], summary: list[dict[str, Any]],
+                  config: str, episodes: int, max_steps: int, red_mode: str) -> None:
+    s = {row["metric"]: row["value"] for row in summary}
+    high = [
+        r for r in rows
+        if r.get("heading_error_to_target_rad") != ""
+        and float(r["heading_error_to_target_rad"]) > math.radians(90.0)
+    ]
+    sample = high[0] if high else None
+    classification = []
+    classification.append("A decision layer: not confirmed by this audit unless target_idx/cruise issues appear.")
+    if float(s.get("direct_probe_improvement_mean_rad") or 0.0) > math.radians(20.0):
+        classification.append("B command layer: delta10 limit materially slows large-angle heading target convergence.")
+    if float(s.get("command_tracking_error_mean_rad") or 0.0) > math.radians(45.0):
+        classification.append("C execution layer: aircraft yaw/track lags the commanded heading target.")
+    lines = [
+        "# Blue Rule Control Response Audit",
+        "",
+        f"- config: `{config}`",
+        f"- episodes: {episodes}",
+        f"- max_steps: {max_steps}",
+        f"- red_mode: `{red_mode}`",
+        "- no training was run.",
+        "- no reward, missile, PID, aircraft XML, red policy, action space, or observation dimension was modified.",
+        "",
+        "## Summary",
+    ]
+    for row in summary:
+        lines.append(f"- {row['metric']}: {row['value']}")
+    lines.extend([
+        "",
+        "## Classification",
+        *[f"- {item}" for item in classification],
+        "",
+        "## BRMA-MAPPO Action Contract Note",
+        "- The environment action contract uses `action[1] * pi` as an absolute target heading.",
+        "- The current blue script first computes an internal heading delta and limits it to +/-10 deg per decision step, then converts it back to the absolute target heading expected by the environment.",
+        "- This +/-10 deg limiter is a project legacy autopilot limiter. This audit does not treat it as a paper-required BRMA-MAPPO action-space constraint.",
+        "- `direct_lead_heading_probe` is diagnostic only; it is not used by training or evaluation.",
+        "",
+        "## Representative High-Error Sample",
+    ])
+    if sample:
+        keys = [
+            "episode", "step", "blue_id", "selected_red_id",
+            "heading_error_to_target_rad", "heading_cmd_internal",
+            "target_heading_cmd_rad", "blue_yaw_rad",
+            "actual_heading_next_rad", "actual_heading_delta_next_rad",
+            "range_delta_next_m", "command_tracking_error_rad",
+            "blue_roll_rad", "blue_speed_mps",
+        ]
+        for key in keys:
+            lines.append(f"- {key}: {sample.get(key, '')}")
+    else:
+        lines.append("- no heading_error > 90 deg sample was observed.")
+    lines.extend([
+        "",
+        "## Outputs",
+        "- step CSV: `blue_rule_control_response_steps.csv`",
+        "- summary CSV: `blue_rule_control_response_summary.csv`",
+    ])
+    _write(output_dir / "blue_rule_control_response_report.md", "\n".join(lines) + "\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=DEFAULT_CONFIG)
+    parser.add_argument("--episodes", type=int, default=2)
+    parser.add_argument("--max-steps", type=int, default=300)
+    parser.add_argument("--output-dir", default="outputs/blue_rule_control_response_audit")
+    parser.add_argument("--red-mode", default="zero", choices=["zero", "straight_outward"])
+    args = parser.parse_args()
+    out = ROOT / args.output_dir if not Path(args.output_dir).is_absolute() else Path(args.output_dir)
+    run_audit(args.config, args.episodes, args.max_steps, out, args.red_mode)
+    print(out)
+
+
+if __name__ == "__main__":
+    main()
