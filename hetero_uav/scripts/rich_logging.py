@@ -246,7 +246,10 @@ class RichExperimentLogger:
                 "sim_time": sim_time,
                 "agent_id": agent_id,
                 "role": role,
-                "total_reward": comp.get("tam_v7_total", comp.get("total_reward", "")),
+                "total_reward": comp.get(
+                    "tam_v7_total",
+                    comp.get("brma_role_no_missile_total", comp.get("total", comp.get("total_reward", ""))),
+                ),
                 "mav_survival_reward": comp.get("mav_survival", ""),
                 "mav_support_reward": comp.get("mav_support", comp.get("tam_v7_mav_support", "")),
                 "uav_attack_reward": comp.get("uav_attack_window", ""),

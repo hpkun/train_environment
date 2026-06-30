@@ -135,7 +135,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
-        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1"}:
+        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8"}:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
         self._tam_reward_scale = float(kwargs.pop("tam_reward_scale", 0.05))
@@ -321,6 +321,40 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 "brma_homo_terminal_applied": terminal_applied,
             })
             base_rewards[rid] = float(total)
+            components[rid] = comp
+        return base_rewards, components
+
+    def _compute_brma_role_no_missile_reward_v8(self, base_rewards: dict, components: dict):
+        """BRMA trunk reward with MAV attack-situation disabled.
+
+        ``super()._compute_rewards`` already stores the BRMA flight, situation,
+        and terminal components after their BRMA weights have been applied.
+        This overlay only removes the already-weighted situation term from MAVs.
+        Attack UAV rewards remain the parent BRMA flight + situation + terminal
+        reward.  No TAM event/safety/support or missile-process reward helper is
+        called here, so no v7 state can be mutated.
+        """
+        for rid in self.red_ids:
+            comp = components.setdefault(rid, {})
+            role = self.agent_roles.get(rid, "")
+            comp["brma_role_no_missile_active"] = 1.0
+            comp["brma_role_active_brma_flight"] = 1.0
+            comp["brma_role_active_brma_terminal"] = 1.0
+            comp["brma_role_removed_situation_is_weighted"] = 1.0
+            comp["brma_role_is_mav"] = 1.0 if role == "mav" else 0.0
+            if role == "mav":
+                removed = float(comp.get("r_adv", 0.0))
+                base_rewards[rid] = float(base_rewards.get(rid, 0.0)) - removed
+                comp["r_adv"] = 0.0
+                comp["brma_role_removed_situation"] = removed
+                comp["brma_role_situation_active"] = 0.0
+                comp["brma_role_active_brma_situation"] = 0.0
+            else:
+                comp["brma_role_removed_situation"] = 0.0
+                comp["brma_role_situation_active"] = 1.0
+                comp["brma_role_active_brma_situation"] = 1.0
+            comp["brma_role_no_missile_total"] = float(base_rewards.get(rid, 0.0))
+            comp["total"] = float(base_rewards.get(rid, 0.0))
             components[rid] = comp
         return base_rewards, components
 
@@ -1116,6 +1150,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4",
             "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned",
             "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1",
+            "brma_role_no_missile_reward_v8",
         }
 
     def step(self, actions: dict):
@@ -2964,6 +2999,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 return self._compute_tam_brma_scripted_reward_v1(base_rewards, components)
             if self.hetero_reward_mode == "brma_paper_homogeneous_v1":
                 return self._compute_brma_paper_homogeneous_v1(base_rewards, components)
+            if self.hetero_reward_mode == "brma_role_no_missile_reward_v8":
+                return self._compute_brma_role_no_missile_reward_v8(base_rewards, components)
             return base_rewards, components
 
         mav_id = self.red_ids[0] if self.red_ids else None

@@ -120,6 +120,11 @@ REWARD_COMPONENT_COLUMNS = [
     "tam_v7_blue_loss_frac", "tam_v7_red_loss_weighted",
     "tam_v7_shared_track_usage_log", "tam_v7_red_fire_with_mav_track_log",
     "tam_v7_red_hit_with_mav_track_log",
+    "brma_role_no_missile_total", "brma_role_no_missile_active",
+    "brma_role_active_brma_flight", "brma_role_active_brma_situation",
+    "brma_role_active_brma_terminal", "brma_role_removed_situation",
+    "brma_role_situation_active", "brma_role_removed_situation_is_weighted",
+    "brma_role_is_mav",
 ]
 
 PERTURBATION_EVAL_COLUMNS = [
@@ -166,6 +171,8 @@ EPISODE_REWARD_COMPONENTS_COLUMNS = [
     "tam_v7_uav_own_adv_mean_sum", "tam_v7_uav_enemy_threat_mean_sum",
     "tam_v7_uav_distance_ref_m_sum", "tam_v7_uav_situation_raw_sum",
     "tam_v7_blue_loss_frac_last", "tam_v7_red_loss_weighted_last",
+    "brma_role_no_missile_total_sum", "brma_role_removed_situation_sum",
+    "brma_role_situation_active_sum", "brma_role_is_mav_last",
     "red_launch_count", "red_hit_count",
     "blue_launch_count", "blue_hit_count",
     "mav_alive_final", "red_alive_final", "blue_alive_final",

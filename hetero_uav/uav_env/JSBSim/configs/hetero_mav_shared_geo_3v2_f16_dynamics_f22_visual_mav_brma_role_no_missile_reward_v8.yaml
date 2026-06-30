@@ -1,0 +1,41 @@
+# MAIN EXPERIMENT CONFIG - 3v2
+# MAV uses F16 dynamics, F22 ACMI visual label. All PID = f16_default.
+# Reward: brma_role_no_missile_reward_v8
+action_trim_by_role:
+  mav: {heading: 0.0, pitch: 0.0, speed: 0.0}
+agent_interaction_steps: 12
+aircraft_type_params:
+  attack_uav:  {aircraft_model: f16, role: attack_uav,  num_missiles: 2}
+  interceptor_uav: {aircraft_model: f16, role: interceptor_uav, num_missiles: 2}
+  mav:          {aircraft_model: f16, role: mav, num_missiles: 0}
+  scout_uav:    {aircraft_model: f16, role: scout_uav, num_missiles: 0}
+blue_agent_types: [attack_uav, attack_uav]
+enable_gcas_for_blue: true
+env_type: jsbsim_hetero
+hetero_reward_mode: brma_role_no_missile_reward_v8
+red_target_selection_mode: mav_threat_rank
+initial_states:
+  blue_0: {altitude_m: 6000, lat: 60.2, lon: 120.0,  speed_mps: 250, yaw_deg: 180.0}
+  blue_1: {altitude_m: 6000, lat: 60.2, lon: 120.04, speed_mps: 250, yaw_deg: 180.0}
+  red_0:  {altitude_m: 6500, lat: 59.98, lon: 120.02, speed_mps: 230, yaw_deg: 0.0}
+  red_1:  {altitude_m: 6000, lat: 60.0,  lon: 120.0,  speed_mps: 250, yaw_deg: 0.0}
+  red_2:  {altitude_m: 6000, lat: 60.0,  lon: 120.04, speed_mps: 250, yaw_deg: 0.0}
+mav_observation_range_m: 80000
+max_num_blue: 2
+max_num_red: 3
+max_steps: 1000
+observation_mode: mav_shared_geo
+red_agent_types: [mav, attack_uav, attack_uav]
+sim_freq: 60
+suppress_jsbsim_output: true
+uav_direct_observation_range_m: 10000.0
+
+pid_profile_by_role:
+  mav: f16_default
+  attack_uav: f16_default
+  interceptor_uav: f16_default
+
+# Visual only - ACMI rendering, no effect on simulation dynamics.
+acmi_visual_by_role:
+  mav: f22
+  attack_uav: f16
