@@ -305,31 +305,186 @@ def test_primary_entrypoint_help_includes_safe_pursuit():
         assert "brma_rule_safe_pursuit" in result.stdout
 
 
-def test_safe_pursuit_audit_smoke_writes_report(tmp_path):
-    out_dir = tmp_path / "safe_audit"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/audit_blue_rule_control_response.py",
-            "--opponent-policy",
-            "brma_rule_safe_pursuit",
-            "--episodes",
-            "1",
-            "--max-steps",
-            "3",
-            "--output-dir",
-            str(out_dir),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=180,
-    )
+def test_safe_pursuit_audit_smoke_writes_report():
+    import tempfile
+    import shutil
+    tmp_dir = Path(tempfile.mkdtemp(prefix="safe_audit_"))
+    out_dir = tmp_dir / "safe_audit"
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/audit_blue_rule_control_response.py",
+                "--opponent-policy",
+                "brma_rule_safe_pursuit",
+                "--episodes",
+                "1",
+                "--max-steps",
+                "3",
+                "--output-dir",
+                str(out_dir),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+        )
+        assert result.returncode == 0, result.stderr[-1000:]
+        assert (out_dir / "blue_rule_safe_pursuit_report.md").exists()
+        rows = list(csv.DictReader((out_dir / "blue_rule_safe_pursuit_steps.csv").open()))
+        assert rows
+        assert "safe_pursuit_mode_active" in rows[0]
+        # Roll audit fields present
+        assert "high_roll_active" in rows[0]
+        assert "roll_recovery_active" in rows[0]
+        assert "blue_roll_abs_deg" in rows[0]
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    assert result.returncode == 0, result.stderr[-1000:]
-    assert (out_dir / "blue_rule_safe_pursuit_report.md").exists()
-    rows = list(csv.DictReader((out_dir / "blue_rule_safe_pursuit_steps.csv").open()))
-    assert rows
-    assert "safe_pursuit_mode_active" in rows[0]
+
+# ---------------------------------------------------------------------------
+# Roll safety guard tests
+# ---------------------------------------------------------------------------
+
+def _obs_with_roll(roll_rad: float, enemy_offset_rad: float = 0.10) -> dict:
+    """Build an observation with a specific ego roll."""
+    ego_state = np.zeros(11, dtype=np.float32)
+    ego_state[6] = 0.55
+    ego_state[7] = float(np.sin(roll_rad))
+    ego_state[8] = float(np.cos(roll_rad))
+    ego_state[9] = 0.0
+    ego_state[10] = 1.0
+    enemy_states = np.zeros((3, 11), dtype=np.float32)
+    enemy_states[0] = np.asarray(
+        [0.125, 0.0, 0.0, enemy_offset_rad / np.pi, 0.20, 0.125, 0.50, 0.0, 1.0, 0.0, 1.0],
+        dtype=np.float32,
+    )
+    return {
+        "ego_state": ego_state,
+        "enemy_states": enemy_states,
+        "death_mask": np.ones(5, dtype=np.float32),
+        "altitude": np.asarray([7000.0], dtype=np.float32),
+        "velocity": np.asarray([330.0, 0.0, 0.0], dtype=np.float32),
+    }
+
+
+def test_roll_recovery_triggers_at_high_roll():
+    """When abs(roll) > 75 deg, safe_pursuit outputs roll_recovery not current_target."""
+    _reset_rule_memory()
+    obs = _obs_with_roll(np.deg2rad(80.0), 0.10)
+    action = _blue_pursuit_action_impl(
+        obs, 2, 3, 0, forced_target_idx=None,
+        own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    dbg = rule_based_agent._simple_debug_state[0]
+    assert dbg["desired_heading_source"] == "roll_recovery", f"got {dbg['desired_heading_source']}"
+    assert dbg["roll_recovery_active"] == 1
+    assert abs(float(action[1])) <= 1.0
+    assert float(action[2]) >= 0.62  # throttle at max (vel_int=1.0 → 190/306)
+
+
+def test_extreme_roll_recovery_triggers_above_105_deg():
+    """When abs(roll) > 105 deg, safe_pursuit outputs extreme_roll_recovery."""
+    _reset_rule_memory()
+    obs = _obs_with_roll(np.deg2rad(110.0), 0.10)
+    action = _blue_pursuit_action_impl(
+        obs, 2, 3, 0, forced_target_idx=None,
+        own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    dbg = rule_based_agent._simple_debug_state[0]
+    assert dbg["desired_heading_source"] == "extreme_roll_recovery"
+    assert dbg["extreme_roll_recovery_active"] == 1
+    assert abs(float(action[1])) <= 1.0
+
+
+def test_roll_recovery_does_not_update_last_seen():
+    """Roll recovery must not preserve target bearing in last_seen."""
+    _reset_rule_memory()
+    # First step: normal pursuit to set last_seen
+    obs_normal = _obs_with_roll(0.0, 0.10)
+    _blue_pursuit_action_impl(
+        obs_normal, 2, 3, 0, forced_target_idx=0,
+        own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    assert 0 in rule_based_agent._simple_last_seen_bearing
+    # Second step: high roll should clear last_seen
+    obs_roll = _obs_with_roll(np.deg2rad(80.0), 0.10)
+    _blue_pursuit_action_impl(
+        obs_roll, 2, 3, 0, forced_target_idx=None,
+        own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    assert 0 not in rule_based_agent._simple_last_seen_bearing
+
+
+def test_roll_recovery_action_in_bounds():
+    """action[1] must remain in [-1, 1] during roll recovery."""
+    _reset_rule_memory()
+    for roll_deg in [80.0, 95.0, 110.0, 130.0, 160.0]:
+        obs = _obs_with_roll(np.deg2rad(roll_deg), 0.10)
+        action = _blue_pursuit_action_impl(
+            obs, 2, 3, 0, forced_target_idx=None,
+            own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+            own_heading=0.0,
+            pursuit_mode="safe_pursuit",
+        )
+        assert -1.0 <= float(action[1]) <= 1.0, f"roll={roll_deg} action[1]={action[1]}"
+        assert float(action[2]) >= 0.62, f"roll={roll_deg} throttle={action[2]}"
+
+
+def test_low_speed_safety_still_triggers():
+    """Low speed safety (< 220 m/s) still triggers even with roll recovery code present."""
+    _reset_rule_memory()
+    obs = _base_obs()
+    # Set speed to 200 m/s via ego_state[6] (normalized speed)
+    obs["ego_state"][6] = 200.0 / 600.0  # ~0.333
+    obs["velocity"] = np.asarray([200.0, 0.0, 0.0], dtype=np.float32)
+    action = _blue_pursuit_action_impl(
+        obs, 2, 3, 0, forced_target_idx=0,
+        own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    dbg = rule_based_agent._simple_debug_state[0]
+    assert dbg["desired_heading_source"] == "low_speed_recovery"
+
+
+def test_normal_pursuit_not_affected_by_roll_guard():
+    """Normal safe_pursuit still uses current_target nearest when roll is low."""
+    _reset_rule_memory()
+    obs = _obs_with_roll(0.0, 0.10)
+    action = _blue_pursuit_action_impl(
+        obs, 2, 3, 0, forced_target_idx=None,
+        own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    dbg = rule_based_agent._simple_debug_state[0]
+    assert dbg["desired_heading_source"] == "current_target"
+    assert dbg["roll_recovery_active"] == 0
+    assert dbg["extreme_roll_recovery_active"] == 0
+
+
+def test_roll_guard_not_active_in_legacy_brma_rule():
+    """Legacy brma_rule (delta10) should not trigger roll_recovery."""
+    _reset_rule_memory()
+    obs = _obs_with_roll(np.deg2rad(80.0), 0.10)
+    action = _blue_pursuit_action_impl(
+        obs, 2, 3, 0, forced_target_idx=None,
+        own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="delta10",
+    )
+    # Legacy path should not have _simple_debug_state entry for roll_recovery
+    if 0 in rule_based_agent._simple_debug_state:
+        dbg = rule_based_agent._simple_debug_state[0]
+        assert dbg.get("roll_recovery_active", 0) == 0

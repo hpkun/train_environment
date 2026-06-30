@@ -24,6 +24,10 @@ if str(PARENT) not in sys.path:
     sys.path.insert(0, str(PARENT))
 
 from algorithms.mappo.opponent_policy import OpponentPolicy  # noqa: E402
+
+_HIGH_ROLL_THRESH_RAD = np.deg2rad(75.0)
+_EXTREME_ROLL_THRESH_RAD = np.deg2rad(105.0)
+
 from scripts.audit_blue_rule_pursuit_logic import (  # noqa: E402
     DEFAULT_CONFIG,
     _coordinated_assignment_debug,
@@ -80,6 +84,15 @@ FIELDS = [
     "launch_geometry_ok", "range_ok", "ao_ok", "ta_ok",
     "death_or_outcome_if_terminal", "death_reason_if_any",
     "episode_outcome",
+    # Roll safety diagnostics
+    "roll_recovery_active", "extreme_roll_recovery_active",
+    "high_roll_active", "extreme_roll_active",
+    "action_heading_delta_from_prev_rad", "target_heading_cmd_delta_from_prev_rad",
+    "action_heading_norm",
+    "desired_heading_source",
+    "blue_roll_abs_rad", "blue_roll_abs_deg",
+    "blue_speed_mps",
+    "aileron_cmd", "elevator_cmd", "throttle_cmd",
 ]
 
 
@@ -445,6 +458,8 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                                 ),
                                 "action_heading_abs_rad": dbg.get("action_heading_abs_rad", ""),
                                 "action_heading_norm": dbg.get("action_heading_norm", ""),
+                                "roll_recovery_active": dbg.get("roll_recovery_active", 0),
+                                "extreme_roll_recovery_active": dbg.get("extreme_roll_recovery_active", 0),
                             })
                     prev_yaw[bid] = yaw
                     prev_track[bid] = track
@@ -465,6 +480,19 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                     row["actual_track_heading_delta_next_rad"] = _wrap_pi(track_next - float(row["blue_track_heading_rad"]))
                     row["command_tracking_error_rad"] = abs(_wrap_pi(float(row["target_heading_cmd_rad"]) - yaw_next))
                     row["command_track_tracking_error_rad"] = abs(_wrap_pi(float(row["target_heading_cmd_rad"]) - track_next))
+                    # Roll safety diagnostics
+                    row["high_roll_active"] = int(abs(roll) > _HIGH_ROLL_THRESH_RAD)
+                    row["extreme_roll_active"] = int(abs(roll) > _EXTREME_ROLL_THRESH_RAD)
+                    row["blue_roll_abs_rad"] = abs(roll)
+                    row["blue_roll_abs_deg"] = float(np.rad2deg(abs(roll)))
+                    row["blue_speed_mps"] = float(np.linalg.norm(bvel))
+                    # Control surface probes (unavailable unless simulator exposes them)
+                    row["aileron_cmd"] = ""
+                    row["elevator_cmd"] = ""
+                    row["throttle_cmd"] = ""
+                    # Heading deltas from previous step
+                    row["action_heading_delta_from_prev_rad"] = ""
+                    row["target_heading_cmd_delta_from_prev_rad"] = ""
                     row["range_delta_next_m"] = (
                         float(next_geom["nearest_red_range_m"]) - float(row["nearest_red_range_m"])
                         if row["nearest_red_range_m"] != "" and next_geom["nearest_red_range_m"] != "" else ""
@@ -566,8 +594,15 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {"metric": "terminal_or_death_rows", "value": len(boundary_terminal)},
         {"metric": "blue_roll_abs_mean", "value": float(np.mean(roll_abs)) if roll_abs else ""},
         {"metric": "blue_roll_abs_max", "value": float(np.max(roll_abs)) if roll_abs else ""},
+        {"metric": "blue_roll_abs_p95", "value": float(np.percentile(roll_abs, 95)) if roll_abs else ""},
+        {"metric": "high_roll_rate_gt_75deg", "value": sum(1 for r in rows if int(r.get("high_roll_active", 0)) == 1) / total},
+        {"metric": "extreme_roll_rate_gt_105deg", "value": sum(1 for r in rows if int(r.get("extreme_roll_active", 0)) == 1) / total},
+        {"metric": "roll_recovery_rate", "value": sum(1 for r in rows if int(r.get("roll_recovery_active", 0)) == 1) / total},
+        {"metric": "extreme_roll_recovery_rate", "value": sum(1 for r in rows if int(r.get("extreme_roll_recovery_active", 0)) == 1) / total},
         {"metric": "blue_speed_min", "value": float(np.min(speeds)) if speeds else ""},
         {"metric": "blue_speed_mean", "value": float(np.mean(speeds)) if speeds else ""},
+        {"metric": "blue_speed_min_during_high_roll", "value": float(np.min([float(r.get("blue_speed_mps", np.inf)) for r in rows if int(r.get("high_roll_active", 0)) == 1])) if any(int(r.get("high_roll_active", 0)) == 1 for r in rows) else ""},
+        {"metric": "high_roll_sources_counts", "value": dict(Counter(str(r.get("desired_heading_source", "")) for r in rows if int(r.get("high_roll_active", 0)) == 1))},
         {"metric": "blue_alt_min", "value": float(np.min(alts)) if alts else ""},
         {"metric": "blue_alt_mean", "value": float(np.mean(alts)) if alts else ""},
         {"metric": "boundary_pressure_max", "value": float(np.max(pressures)) if pressures else ""},
@@ -659,7 +694,14 @@ def _write_report(output_dir: Path, rows: list[dict[str, Any]], summary: list[di
         f"- blue_boundary_death_count: {s.get('blue_boundary_death_count')}",
         f"- blue_low_altitude_death_count: {s.get('blue_low_altitude_death_count')}",
         f"- blue_roll_abs_max: {s.get('blue_roll_abs_max')}",
+        f"- blue_roll_abs_p95: {s.get('blue_roll_abs_p95')}",
+        f"- high_roll_rate_gt_75deg: {s.get('high_roll_rate_gt_75deg')}",
+        f"- extreme_roll_rate_gt_105deg: {s.get('extreme_roll_rate_gt_105deg')}",
+        f"- roll_recovery_rate: {s.get('roll_recovery_rate')}",
+        f"- extreme_roll_recovery_rate: {s.get('extreme_roll_recovery_rate')}",
         f"- blue_speed_min: {s.get('blue_speed_min')}",
+        f"- blue_speed_min_during_high_roll: {s.get('blue_speed_min_during_high_roll')}",
+        f"- high_roll_sources: {s.get('high_roll_sources_counts')}",
         "- Recommendation: use this mode as an opt-in opponent probe. The default `brma_rule` remains the legacy delta10 script.",
         "",
         "## BRMA-MAPPO Action Contract Note",

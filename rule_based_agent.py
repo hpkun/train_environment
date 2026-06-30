@@ -71,6 +71,14 @@ _DIVE_FREEZE_ALT = 5000.0  # below this, pitch must be >= 0 (no dive at all)
 _STALL_SPEED        = 200.0    # m/s — below this, stall risk at manoeuvring AoA
 _STALL_PROTECT_ALT  = 5000.0   # m — below this altitude, low speed triggers recovery
 
+# ---- Simple pursuit roll safety (safe_pursuit only) ----
+_SIMPLE_HIGH_ROLL_RECOVERY_DEG       = 75.0
+_SIMPLE_EXTREME_ROLL_RECOVERY_DEG    = 105.0
+_SIMPLE_ROLL_RECOVERY_HEADING_OFFSET_DEG = 30.0
+_SIMPLE_HIGH_ROLL_RECOVERY_RAD       = np.deg2rad(_SIMPLE_HIGH_ROLL_RECOVERY_DEG)
+_SIMPLE_EXTREME_ROLL_RECOVERY_RAD    = np.deg2rad(_SIMPLE_EXTREME_ROLL_RECOVERY_DEG)
+_SIMPLE_ROLL_RECOVERY_OFFSET_RAD     = np.deg2rad(_SIMPLE_ROLL_RECOVERY_HEADING_OFFSET_DEG)
+
 # ---- Heading hysteresis (anti-oscillation) ----
 _HEADING_HYST_DEG   = 5.0      # degrees — don't update target_heading for Δ < this
 _HEADING_HYST_RAD   = np.deg2rad(_HEADING_HYST_DEG)
@@ -364,6 +372,8 @@ def _blue_simple_pursuit_action_impl(
             "selected_target_quality": _target_track_quality(state) if state is not None else "invalid",
             "action_heading_abs_rad": _wrap_pi(desired_heading),
             "action_heading_norm": float(action[1]),
+            "roll_recovery_active": int(source in ("roll_recovery", "extreme_roll_recovery")),
+            "extreme_roll_recovery_active": int(source == "extreme_roll_recovery"),
         }
         return action
 
@@ -374,9 +384,29 @@ def _blue_simple_pursuit_action_impl(
     if alt_m < DESCENT_WARN_ALT and v_up < -MAX_DESCENT_RATE:
         action = _simple_rescale_absolute_heading(0.45, center_heading, 1.0)
         return _record("safety", None, None, None, center_heading, action)
+    # ---- High-roll / energy recovery — override pursuit when aircraft is near inverted ----
+    # Placed before low-speed and boundary safety so roll recovery takes priority
+    # when roll is extreme, even if speed is also low.
+    if abs(ego_roll) > _SIMPLE_EXTREME_ROLL_RECOVERY_RAD:
+        sign = 1.0 if ego_roll > 0 else -1.0
+        recovery_heading = _wrap_pi(our_heading - sign * _SIMPLE_ROLL_RECOVERY_OFFSET_RAD)
+        pitch_cmd = max(0.25, _TRIM_BASELINE)
+        action = _simple_rescale_absolute_heading(pitch_cmd, recovery_heading, 1.0)
+        _simple_last_seen_bearing.pop(blue_id, None)
+        _simple_lost_steps.pop(blue_id, None)
+        return _record("extreme_roll_recovery", None, None, None, recovery_heading, action)
+    if abs(ego_roll) > _SIMPLE_HIGH_ROLL_RECOVERY_RAD:
+        sign = 1.0 if ego_roll > 0 else -1.0
+        recovery_heading = _wrap_pi(our_heading - sign * _SIMPLE_ROLL_RECOVERY_OFFSET_RAD)
+        pitch_cmd = max(0.15, _TRIM_BASELINE)
+        action = _simple_rescale_absolute_heading(pitch_cmd, recovery_heading, 1.0)
+        _simple_last_seen_bearing.pop(blue_id, None)
+        _simple_lost_steps.pop(blue_id, None)
+        return _record("roll_recovery", None, None, None, recovery_heading, action)
+    # ---- End roll recovery ----
     if ego_vel < 220.0:
         action = _simple_rescale_absolute_heading(max(0.15, _TRIM_BASELINE), our_heading, 1.0)
-        return _record("safety", None, None, None, our_heading, action)
+        return _record("low_speed_recovery", None, None, None, our_heading, action)
     if _should_override_for_boundary_safety(own_position, our_heading):
         pitch = np.clip((SAFE_COMBAT_ALT - alt_m) / 2000.0, -0.10, 0.15) + _TRIM_BASELINE
         action = _simple_rescale_absolute_heading(float(pitch), center_heading, 0.8)
