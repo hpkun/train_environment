@@ -290,7 +290,11 @@ def _agent_diag_row(
         "selected_range_m": _safe_debug_float(debug, "selected_range_m"),
         "selected_AO_rad": _safe_debug_float(debug, "selected_AO_rad"),
         "selected_TA_rad": _safe_debug_float(debug, "selected_TA_rad"),
-        "selected_target_quality": _safe_debug_float(debug, "selected_target_quality"),
+        "selected_target_quality": str(debug.get("selected_target_quality", "")),
+        "selected_rel_body_x_norm": _safe_debug_float(debug, "selected_rel_body_x_norm"),
+        "selected_rel_body_y_norm": _safe_debug_float(debug, "selected_rel_body_y_norm"),
+        "selected_rel_body_up_norm": _safe_debug_float(debug, "selected_rel_body_up_norm"),
+        "action_heading_abs_rad": _safe_debug_float(debug, "action_heading_abs_rad"),
     }
 
 

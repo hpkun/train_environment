@@ -240,6 +240,50 @@ def _wrap_pi(angle: float) -> float:
     return float((angle + np.pi) % (2 * np.pi) - np.pi)
 
 
+def _simple_body_vector_to_world_bearing(
+    state: np.ndarray,
+    ego_state: np.ndarray,
+    own_heading: float,
+    battlefield_half_size: float = 40000.0,
+    battlefield_altitude_max: float = 10000.0,
+) -> float | None:
+    """Convert current body-frame relative position to world horizontal bearing.
+
+    The observation's ``state[0:3]`` is the current target relative position in
+    body frame: x=forward, y=right, z=up after normalization.  The environment
+    action contract expects an absolute world target heading.  This is only a
+    coordinate conversion of the current relative position; it is not lead
+    pursuit, does not use target velocity, and does not predict future target
+    position.
+    """
+
+    if state is None or np.asarray(state).size < 3:
+        return None
+    ego = np.asarray(ego_state, dtype=np.float32)
+    if ego.size < 11:
+        return None
+    x = float(state[0]) * battlefield_half_size
+    y = float(state[1]) * battlefield_half_size
+    up = float(state[2]) * battlefield_altitude_max
+    if not np.all(np.isfinite([x, y, up])):
+        return None
+
+    roll = float(np.arctan2(float(ego[7]), float(ego[8])))
+    pitch = float(np.arctan2(float(ego[9]), float(ego[10])))
+    yaw = float(own_heading)
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    r_bi = np.array([
+        [cp * cy, cp * sy, -sp],
+        [sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, sr * cp],
+        [cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp],
+    ], dtype=np.float64)
+    body = np.array([x, y, -up], dtype=np.float64)
+    ned = r_bi.T @ body
+    return _wrap_pi(float(np.arctan2(ned[1], ned[0])))
+
+
 def reset_rule_memory() -> None:
     """Clear module-level blue rule memory for a new evaluation/training run."""
 
@@ -362,6 +406,9 @@ def _blue_simple_pursuit_action_impl(
             "selected_AO_rad": float(state[3]) * np.pi if state is not None and state.size > 3 else "",
             "selected_TA_rad": float(state[4]) * np.pi if state is not None and state.size > 4 else "",
             "selected_target_quality": _target_track_quality(state) if state is not None else "invalid",
+            "selected_rel_body_x_norm": float(state[0]) if state is not None and state.size > 0 else "",
+            "selected_rel_body_y_norm": float(state[1]) if state is not None and state.size > 1 else "",
+            "selected_rel_body_up_norm": float(state[2]) if state is not None and state.size > 2 else "",
             "action_heading_abs_rad": _wrap_pi(desired_heading),
             "action_heading_norm": float(action[1]),
             "roll_recovery_active": 0,
@@ -398,7 +445,9 @@ def _blue_simple_pursuit_action_impl(
 
     if target_state is not None:
         ao = float(target_state[3]) * np.pi if target_state.size > 3 else 0.0
-        desired_heading = _wrap_pi(our_heading + ao)
+        geo_heading = _simple_body_vector_to_world_bearing(
+            target_state, np.asarray(obs.get("ego_state", []), dtype=np.float32), our_heading)
+        desired_heading = geo_heading if geo_heading is not None else _wrap_pi(our_heading + ao)
         _simple_last_seen_bearing[blue_id] = desired_heading
         _simple_lost_steps[blue_id] = 0
         delta_alt = float(target_state[2]) * 10000.0 if target_state.size > 2 else 0.0

@@ -229,6 +229,32 @@ def _team_done(terminated: dict, truncated: dict) -> bool:
     return all(terminated.values()) or all(truncated.values())
 
 
+def _nearest_range_to_team(env, sim, team_ids: list[str], team_planes: dict) -> float:
+    try:
+        pos = np.asarray(sim.get_position(), dtype=np.float64)
+    except Exception:
+        return float("nan")
+    best = float("nan")
+    for aid in team_ids:
+        other = team_planes.get(aid)
+        if other is None or not bool(getattr(other, "is_alive", False)):
+            continue
+        try:
+            distance = float(np.linalg.norm(pos - np.asarray(other.get_position(), dtype=np.float64)))
+        except Exception:
+            continue
+        if not math.isfinite(best) or distance < best:
+            best = distance
+    return best
+
+
+def _safe_debug_float(debug: dict, key: str) -> float:
+    try:
+        return float(debug.get(key, np.nan))
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def _append_schema_row(directory: Path, filename: str, row: dict) -> None:
     ensure_schema_files(directory)
     columns = FILE_SCHEMAS[filename]
@@ -422,7 +448,8 @@ def main() -> int:
             if len(env.red_ids) > 1:
                 uav_sat.append(float(np.mean(np.abs(acts_np[1:]) >= 0.999)))
             actions = {rid: acts_np[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
-            actions.update(opponent.act(obs, env.blue_ids, env=env))
+            blue_actions = opponent.act(obs, env.blue_ids, env=env)
+            actions.update(blue_actions)
             obs, rewards, terminated, truncated, info = env.step(actions)
             step += 1
             for aid in env.agent_ids:
@@ -531,6 +558,12 @@ def main() -> int:
                     row["uav_out_zone"] = round(float(rc.get("uav_out_zone", 0)), 4)
                 red_rows.append(row)
 
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+                from rule_based_agent import _simple_debug_state
+            except Exception:
+                _simple_debug_state = {}
+
             # Per-step diagnostics: blue agents
             for i, bid in enumerate(env.blue_ids):
                 sim = env.blue_planes.get(bid)
@@ -547,10 +580,30 @@ def main() -> int:
                                 "speed_mps": round(float(np.linalg.norm(vel)), 1),
                                 "vn_mps": round(float(vel[0]), 1), "ve_mps": round(float(vel[1]), 1),
                                 "vu_mps": round(float(vel[2]), 1),
-                                "roll_deg": round(float(np.rad2deg(rpy[0])), 1),
-                                "pitch_deg": round(float(np.rad2deg(rpy[1])), 1),
-                                "yaw_deg": round(float(np.rad2deg(rpy[2])), 1),
-                                "heading_deg": round(float(np.rad2deg(rpy[2])), 1)})
+                                 "roll_deg": round(float(np.rad2deg(rpy[0])), 1),
+                                 "pitch_deg": round(float(np.rad2deg(rpy[1])), 1),
+                                 "yaw_deg": round(float(np.rad2deg(rpy[2])), 1),
+                                 "heading_deg": round(float(np.rad2deg(rpy[2])), 1)})
+                    action = np.asarray(blue_actions.get(bid, np.zeros(3)), dtype=np.float32)
+                    dbg = dict(_simple_debug_state.get(i, {}))
+                    row.update({
+                        "action_pitch": round(float(action[0]), 6),
+                        "action_heading": round(float(action[1]), 6),
+                        "action_speed": round(float(action[2]), 6),
+                        "nearest_enemy_range_m": round(float(_nearest_range_to_team(env, sim, env.red_ids, env.red_planes)), 3),
+                        "desired_heading_source": str(dbg.get("desired_heading_source", "")),
+                        "roll_recovery_active": int(dbg.get("roll_recovery_active", 0) or 0),
+                        "extreme_roll_recovery_active": int(dbg.get("extreme_roll_recovery_active", 0) or 0),
+                        "simple_lost_steps": int(dbg.get("simple_lost_steps", 0) or 0),
+                        "selected_range_m": round(_safe_debug_float(dbg, "selected_range_m"), 3),
+                        "selected_AO_rad": round(_safe_debug_float(dbg, "selected_AO_rad"), 6),
+                        "selected_TA_rad": round(_safe_debug_float(dbg, "selected_TA_rad"), 6),
+                        "selected_target_quality": str(dbg.get("selected_target_quality", "")),
+                        "selected_rel_body_x_norm": round(_safe_debug_float(dbg, "selected_rel_body_x_norm"), 6),
+                        "selected_rel_body_y_norm": round(_safe_debug_float(dbg, "selected_rel_body_y_norm"), 6),
+                        "selected_rel_body_up_norm": round(_safe_debug_float(dbg, "selected_rel_body_up_norm"), 6),
+                        "action_heading_abs_rad": round(_safe_debug_float(dbg, "action_heading_abs_rad"), 6),
+                    })
                     blue_cum_fired[bid] += int((info.get(bid, {}) or {}).get("missiles_fired_this_step", 0))
                     row["missiles_fired_this_step"] = int((info.get(bid, {}) or {}).get("missiles_fired_this_step", 0))
                     row["cumulative_missiles_fired"] = blue_cum_fired[bid]

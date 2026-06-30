@@ -28,12 +28,34 @@ def _wrap_pi(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
-def _base_obs() -> dict:
-    enemy_states = np.zeros((3, 11), dtype=np.float32)
-    enemy_states[0] = np.asarray(
-        [0.125, 0.0, 0.0, 0.95, 0.20, 0.125, 0.50, 0.0, 1.0, 0.0, 1.0],
+def _target_state_for_bearing(
+    bearing_rad: float,
+    range_norm: float = 0.125,
+    ta_norm: float = 0.20,
+    speed_norm: float = 0.50,
+) -> np.ndarray:
+    """Return a simple target entity whose body-frame position has bearing_rad."""
+    return np.asarray(
+        [
+            range_norm * math.cos(bearing_rad),
+            range_norm * math.sin(bearing_rad),
+            0.0,
+            bearing_rad / math.pi,
+            ta_norm,
+            range_norm,
+            speed_norm,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+        ],
         dtype=np.float32,
     )
+
+
+def _base_obs() -> dict:
+    enemy_states = np.zeros((3, 11), dtype=np.float32)
+    enemy_states[0] = _target_state_for_bearing(0.10, 0.125)
     return {
         "ego_state": np.asarray(
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.55, 0.0, 1.0, 0.0, 1.0],
@@ -102,14 +124,14 @@ def test_safe_pursuit_uses_current_ao_not_lead_for_radar_track():
         own_heading=0.0,
         pursuit_mode="safe_pursuit",
     )
-    desired = float(obs["enemy_states"][0, 3]) * math.pi
+    desired = math.atan2(float(obs["enemy_states"][0, 1]), float(obs["enemy_states"][0, 0]))
 
     assert _heading_delta(delta10) <= math.radians(10.1)
     assert -1.0 <= float(safe[1]) <= 1.0
     assert abs(_wrap_pi(float(safe[1]) * math.pi - desired)) < math.radians(1.0)
 
 
-def test_safe_pursuit_heading_ignores_target_velocity_and_ta():
+def test_safe_pursuit_heading_uses_body_position_not_target_velocity_or_ta():
     _reset_rule_memory()
     obs_a = _base_obs()
     obs_b = _base_obs()
@@ -130,7 +152,7 @@ def test_safe_pursuit_heading_ignores_target_velocity_and_ta():
     )
     np.testing.assert_allclose(safe_a[1], safe_b[1], atol=1e-7)
 
-    obs_b["enemy_states"][0, 3] = -0.5
+    obs_b["enemy_states"][0] = _target_state_for_bearing(-1.00, 0.125)
     safe_c = _blue_pursuit_action_impl(
         obs_b, 2, 3, 0, forced_target_idx=0,
         own_position=np.asarray([0.0, 0.0, 7000.0], dtype=np.float32),
@@ -144,14 +166,8 @@ def test_safe_pursuit_selects_nearest_valid_target_not_weighted_score():
     _reset_rule_memory()
     obs = _base_obs()
     # Target 0 has better AO/TA but is farther; target 1 is nearest.
-    obs["enemy_states"][0] = np.asarray(
-        [0.10, 0.0, 0.0, 0.05, 0.80, 0.40, 0.5, 0.0, 1.0, 0.0, 1.0],
-        dtype=np.float32,
-    )
-    obs["enemy_states"][1] = np.asarray(
-        [0.05, 0.0, 0.0, -0.45, 0.01, 0.08, 0.5, 0.0, 1.0, 0.0, 1.0],
-        dtype=np.float32,
-    )
+    obs["enemy_states"][0] = _target_state_for_bearing(0.05 * math.pi, 0.40, 0.80)
+    obs["enemy_states"][1] = _target_state_for_bearing(-0.45 * math.pi, 0.08, 0.01)
     action = _blue_pursuit_action_impl(
         obs, 2, 3, 0, forced_target_idx=None,
         own_position=np.asarray([0.0, 0.0, 7000.0], dtype=np.float32),
@@ -167,14 +183,8 @@ def test_safe_pursuit_coordinated_assignment_uses_simple_step_deconfliction():
     obs0 = _base_obs()
     obs1 = _base_obs()
     for obs in (obs0, obs1):
-        obs["enemy_states"][0] = np.asarray(
-            [0.05, 0.0, 0.0, 0.10, 0.01, 0.08, 0.5, 0.0, 1.0, 0.0, 1.0],
-            dtype=np.float32,
-        )
-        obs["enemy_states"][1] = np.asarray(
-            [0.07, 0.0, 0.0, -0.35, 0.01, 0.12, 0.5, 0.0, 1.0, 0.0, 1.0],
-            dtype=np.float32,
-        )
+        obs["enemy_states"][0] = _target_state_for_bearing(0.10 * math.pi, 0.08, 0.01)
+        obs["enemy_states"][1] = _target_state_for_bearing(-0.35 * math.pi, 0.12, 0.01)
     actions = blue_coordinated_actions(
         {"blue_0": obs0, "blue_1": obs1},
         num_blue=2,
@@ -234,7 +244,7 @@ def test_safe_pursuit_does_not_override_boundary_safety():
     assert abs(_wrap_pi(float(safe[1]) * math.pi - math.pi)) < math.radians(1.0)
 
 
-def test_awacs_safe_pursuit_uses_ao_bearing_not_velocity_lead():
+def test_awacs_safe_pursuit_uses_body_position_not_velocity_lead():
     _reset_rule_memory()
     obs = _base_obs()
     obs["enemy_states"][0, 4] = 0.0
@@ -246,7 +256,8 @@ def test_awacs_safe_pursuit_uses_ao_bearing_not_velocity_lead():
         pursuit_mode="safe_pursuit",
     )
 
-    assert abs(_wrap_pi(float(safe[1]) * math.pi - float(obs["enemy_states"][0, 3]) * math.pi)) < math.radians(1.0)
+    desired = math.atan2(float(obs["enemy_states"][0, 1]), float(obs["enemy_states"][0, 0]))
+    assert abs(_wrap_pi(float(safe[1]) * math.pi - desired)) < math.radians(1.0)
 
 
 def test_safe_pursuit_updates_and_uses_last_seen_for_15_steps_then_center_cruise():
@@ -357,10 +368,7 @@ def _obs_with_roll(roll_rad: float, enemy_offset_rad: float = 0.10) -> dict:
     ego_state[9] = 0.0
     ego_state[10] = 1.0
     enemy_states = np.zeros((3, 11), dtype=np.float32)
-    enemy_states[0] = np.asarray(
-        [0.125, 0.0, 0.0, enemy_offset_rad / np.pi, 0.20, 0.125, 0.50, 0.0, 1.0, 0.0, 1.0],
-        dtype=np.float32,
-    )
+    enemy_states[0] = _target_state_for_bearing(enemy_offset_rad, 0.125)
     return {
         "ego_state": ego_state,
         "enemy_states": enemy_states,
@@ -385,7 +393,9 @@ def test_high_roll_still_tracks_current_target():
     assert dbg["roll_recovery_active"] == 0
     assert dbg["extreme_roll_recovery_active"] == 0
     assert abs(float(action[1])) <= 1.0
-    assert abs(_wrap_pi(float(action[1]) * math.pi - 0.10)) < math.radians(1.0)
+    expected = rule_based_agent._simple_body_vector_to_world_bearing(
+        obs["enemy_states"][0], obs["ego_state"], 0.0)
+    assert abs(_wrap_pi(float(action[1]) * math.pi - expected)) < math.radians(1.0)
 
 
 def test_extreme_roll_still_tracks_current_target():
@@ -416,7 +426,9 @@ def test_high_roll_current_target_updates_last_seen():
         pursuit_mode="safe_pursuit",
     )
     assert 0 in rule_based_agent._simple_last_seen_bearing
-    assert abs(rule_based_agent._simple_last_seen_bearing[0] - 0.10) < math.radians(1.0)
+    expected = rule_based_agent._simple_body_vector_to_world_bearing(
+        obs_roll["enemy_states"][0], obs_roll["ego_state"], 0.0)
+    assert abs(rule_based_agent._simple_last_seen_bearing[0] - expected) < math.radians(1.0)
 
 
 def test_high_roll_pursuit_action_in_bounds():
@@ -494,7 +506,9 @@ def test_high_roll_uses_target_heading_not_current_heading_offset():
             pursuit_mode="safe_pursuit",
         )
         # env contract: action[1] * pi = absolute target heading.
-        expected = np.clip((1.0 + 0.10) / np.pi, -1, 1)
+        expected_heading = rule_based_agent._simple_body_vector_to_world_bearing(
+            obs["enemy_states"][0], obs["ego_state"], 1.0)
+        expected = np.clip(expected_heading / np.pi, -1, 1)
         assert abs(float(action[1]) - expected) < 1e-6, (
             f"roll={roll_deg}: expected action[1]={expected}, got {action[1]}"
         )
