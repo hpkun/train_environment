@@ -20,7 +20,7 @@ if str(PARENT) not in sys.path:
 
 
 import rule_based_agent  # noqa: E402
-from rule_based_agent import _blue_pursuit_action_impl  # noqa: E402
+from rule_based_agent import blue_coordinated_actions, _blue_pursuit_action_impl  # noqa: E402
 from scripts.audit_blue_rule_control_response import _lead_bearing_from_obs  # noqa: E402
 
 
@@ -46,6 +46,19 @@ def _base_obs() -> dict:
     }
 
 
+def _reset_rule_memory() -> None:
+    for name in (
+        "_last_target_bearing",
+        "_lost_target_steps",
+        "_prev_heading_cmd",
+        "_prev_lead_bearing",
+        "_simple_last_seen_bearing",
+        "_simple_lost_steps",
+        "_simple_debug_state",
+    ):
+        getattr(rule_based_agent, name, {}).clear()
+
+
 def _heading_delta(action: np.ndarray, own_heading: float = 0.0) -> float:
     return abs(_wrap_pi(float(action[1]) * math.pi - own_heading))
 
@@ -57,6 +70,7 @@ def test_opponent_policy_exposes_safe_pursuit_mode():
 
 
 def test_default_brma_rule_path_matches_explicit_delta10():
+    _reset_rule_memory()
     obs = _base_obs()
     default = _blue_pursuit_action_impl(
         obs, 2, 3, 0, forced_target_idx=0,
@@ -73,7 +87,8 @@ def test_default_brma_rule_path_matches_explicit_delta10():
     np.testing.assert_allclose(default, explicit, atol=1e-7)
 
 
-def test_safe_pursuit_uses_absolute_red_action_heading_bounds_for_radar_track():
+def test_safe_pursuit_uses_current_ao_not_lead_for_radar_track():
+    _reset_rule_memory()
     obs = _base_obs()
     delta10 = _blue_pursuit_action_impl(
         obs, 2, 3, 0, forced_target_idx=0,
@@ -87,14 +102,95 @@ def test_safe_pursuit_uses_absolute_red_action_heading_bounds_for_radar_track():
         own_heading=0.0,
         pursuit_mode="safe_pursuit",
     )
-    desired = _lead_bearing_from_obs(obs, obs["enemy_states"][0], 0.0)
+    desired = float(obs["enemy_states"][0, 3]) * math.pi
 
     assert _heading_delta(delta10) <= math.radians(10.1)
     assert -1.0 <= float(safe[1]) <= 1.0
     assert abs(_wrap_pi(float(safe[1]) * math.pi - desired)) < math.radians(1.0)
 
 
+def test_safe_pursuit_heading_ignores_target_velocity_and_ta():
+    _reset_rule_memory()
+    obs_a = _base_obs()
+    obs_b = _base_obs()
+    obs_b["enemy_states"][0, 4] = -0.95
+    obs_b["enemy_states"][0, 6] = 0.05
+
+    safe_a = _blue_pursuit_action_impl(
+        obs_a, 2, 3, 0, forced_target_idx=0,
+        own_position=np.asarray([0.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    safe_b = _blue_pursuit_action_impl(
+        obs_b, 2, 3, 0, forced_target_idx=0,
+        own_position=np.asarray([0.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    np.testing.assert_allclose(safe_a[1], safe_b[1], atol=1e-7)
+
+    obs_b["enemy_states"][0, 3] = -0.5
+    safe_c = _blue_pursuit_action_impl(
+        obs_b, 2, 3, 0, forced_target_idx=0,
+        own_position=np.asarray([0.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    assert abs(float(safe_c[1]) - float(safe_a[1])) > 0.2
+
+
+def test_safe_pursuit_selects_nearest_valid_target_not_weighted_score():
+    _reset_rule_memory()
+    obs = _base_obs()
+    # Target 0 has better AO/TA but is farther; target 1 is nearest.
+    obs["enemy_states"][0] = np.asarray(
+        [0.10, 0.0, 0.0, 0.05, 0.80, 0.40, 0.5, 0.0, 1.0, 0.0, 1.0],
+        dtype=np.float32,
+    )
+    obs["enemy_states"][1] = np.asarray(
+        [0.05, 0.0, 0.0, -0.45, 0.01, 0.08, 0.5, 0.0, 1.0, 0.0, 1.0],
+        dtype=np.float32,
+    )
+    action = _blue_pursuit_action_impl(
+        obs, 2, 3, 0, forced_target_idx=None,
+        own_position=np.asarray([0.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    assert abs(_wrap_pi(float(action[1]) * math.pi - (-0.45 * math.pi))) < math.radians(1.0)
+    assert rule_based_agent._simple_debug_state[0]["selected_target_idx"] == 1
+
+
+def test_safe_pursuit_coordinated_assignment_uses_simple_step_deconfliction():
+    _reset_rule_memory()
+    obs0 = _base_obs()
+    obs1 = _base_obs()
+    for obs in (obs0, obs1):
+        obs["enemy_states"][0] = np.asarray(
+            [0.05, 0.0, 0.0, 0.10, 0.01, 0.08, 0.5, 0.0, 1.0, 0.0, 1.0],
+            dtype=np.float32,
+        )
+        obs["enemy_states"][1] = np.asarray(
+            [0.07, 0.0, 0.0, -0.35, 0.01, 0.12, 0.5, 0.0, 1.0, 0.0, 1.0],
+            dtype=np.float32,
+        )
+    actions = blue_coordinated_actions(
+        {"blue_0": obs0, "blue_1": obs1},
+        num_blue=2,
+        num_red=3,
+        engaged_targets={"red_0"},
+        own_positions={"blue_0": np.asarray([0.0, 0.0, 7000.0], dtype=np.float32),
+                       "blue_1": np.asarray([0.0, 0.0, 7000.0], dtype=np.float32)},
+        own_headings={"blue_0": 0.0, "blue_1": 0.0},
+        pursuit_mode="safe_pursuit",
+    )
+    assert abs(_wrap_pi(float(actions["blue_0"][1]) * math.pi - 0.10 * math.pi)) < math.radians(1.0)
+    assert abs(_wrap_pi(float(actions["blue_1"][1]) * math.pi - -0.35 * math.pi)) < math.radians(1.0)
+
+
 def test_safe_pursuit_keeps_precombat_safety_branches_before_direct_heading():
+    _reset_rule_memory()
     low_alt = _base_obs()
     low_alt["altitude"] = np.asarray([300.0], dtype=np.float32)
 
@@ -119,17 +215,14 @@ def test_safe_pursuit_does_not_keep_complex_multistage_heading_limiter():
     source = inspect.getsource(rule_based_agent._blue_pursuit_action_impl)
     assert "_safe_pursuit_heading_limit_deg" not in source
     assert "_safe_pursuit_heading_command" not in source
+    assert "_prev_heading_cmd" not in inspect.getsource(rule_based_agent._blue_simple_pursuit_action_impl)
+    assert "_prev_lead_bearing" not in inspect.getsource(rule_based_agent._blue_simple_pursuit_action_impl)
 
 
 def test_safe_pursuit_does_not_override_boundary_safety():
+    _reset_rule_memory()
     obs = _base_obs()
     own_pos = np.asarray([39500.0, 0.0, 7000.0], dtype=np.float32)
-    delta10 = _blue_pursuit_action_impl(
-        obs, 2, 3, 0, forced_target_idx=0,
-        own_position=own_pos,
-        own_heading=0.0,
-        pursuit_mode="delta10",
-    )
     safe = _blue_pursuit_action_impl(
         obs, 2, 3, 0, forced_target_idx=0,
         own_position=own_pos,
@@ -137,10 +230,12 @@ def test_safe_pursuit_does_not_override_boundary_safety():
         pursuit_mode="safe_pursuit",
     )
 
-    np.testing.assert_allclose(safe, delta10, atol=1e-6)
+    assert rule_based_agent._simple_debug_state[0]["desired_heading_source"] == "safety"
+    assert abs(_wrap_pi(float(safe[1]) * math.pi - math.pi)) < math.radians(1.0)
 
 
 def test_awacs_safe_pursuit_uses_ao_bearing_not_velocity_lead():
+    _reset_rule_memory()
     obs = _base_obs()
     obs["enemy_states"][0, 4] = 0.0
     obs["enemy_states"][0, 6] = 1.0
@@ -152,6 +247,40 @@ def test_awacs_safe_pursuit_uses_ao_bearing_not_velocity_lead():
     )
 
     assert abs(_wrap_pi(float(safe[1]) * math.pi - float(obs["enemy_states"][0, 3]) * math.pi)) < math.radians(1.0)
+
+
+def test_safe_pursuit_updates_and_uses_last_seen_for_15_steps_then_center_cruise():
+    _reset_rule_memory()
+    obs = _base_obs()
+    visible = _blue_pursuit_action_impl(
+        obs, 2, 3, 0, forced_target_idx=0,
+        own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    last_heading = float(visible[1]) * math.pi
+    no_target = _base_obs()
+    no_target["enemy_states"][:] = 0.0
+
+    for step in range(15):
+        reacquire = _blue_pursuit_action_impl(
+            no_target, 2, 3, 0, forced_target_idx=None,
+            own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+            own_heading=0.0,
+            pursuit_mode="safe_pursuit",
+        )
+        assert abs(_wrap_pi(float(reacquire[1]) * math.pi - last_heading)) < math.radians(1.0)
+        assert rule_based_agent._simple_debug_state[0]["desired_heading_source"] == "reacquire_last_seen"
+        assert rule_based_agent._simple_debug_state[0]["simple_lost_steps"] == step + 1
+
+    cruise = _blue_pursuit_action_impl(
+        no_target, 2, 3, 0, forced_target_idx=None,
+        own_position=np.asarray([1000.0, 0.0, 7000.0], dtype=np.float32),
+        own_heading=0.0,
+        pursuit_mode="safe_pursuit",
+    )
+    assert rule_based_agent._simple_debug_state[0]["desired_heading_source"] == "center_cruise"
+    assert abs(_wrap_pi(float(cruise[1]) * math.pi - math.pi)) < math.radians(1.0)
 
 
 def test_primary_entrypoint_help_includes_safe_pursuit():

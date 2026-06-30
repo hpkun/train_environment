@@ -45,6 +45,10 @@ from uav_env import make_env  # noqa: E402
 
 FIELDS = [
     "episode", "step", "blue_id",
+    "pursuit_variant", "simple_target_selection", "desired_heading_source",
+    "uses_red_action_bounds", "simple_reacquire_active", "simple_lost_steps",
+    "selected_range_m", "selected_AO_rad", "selected_TA_rad", "selected_target_quality",
+    "action_heading_abs_rad", "action_heading_norm",
     "branch_state", "selected_red_id",
     "target_quality",
     "target_range_m", "nearest_red_range_m",
@@ -281,6 +285,9 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
             _blue_rule_module._lost_target_steps.clear()
             _blue_rule_module._prev_heading_cmd.clear()
             _blue_rule_module._prev_lead_bearing.clear()
+            _blue_rule_module._simple_last_seen_bearing.clear()
+            _blue_rule_module._simple_lost_steps.clear()
+            _blue_rule_module._simple_debug_state.clear()
             prev_yaw: dict[str, float] = {}
             prev_track: dict[str, float] = {}
             dt = _decision_dt(env)
@@ -322,6 +329,18 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                         "episode": ep,
                         "step": step,
                         "blue_id": bid,
+                        "pursuit_variant": "legacy_delta10",
+                        "simple_target_selection": "",
+                        "desired_heading_source": "",
+                        "uses_red_action_bounds": 0,
+                        "simple_reacquire_active": 0,
+                        "simple_lost_steps": "",
+                        "selected_range_m": "",
+                        "selected_AO_rad": "",
+                        "selected_TA_rad": "",
+                        "selected_target_quality": "",
+                        "action_heading_abs_rad": "",
+                        "action_heading_norm": "",
                         "branch_state": branch,
                         "selected_red_id": geom["selected_red_id"],
                         "target_quality": target["target_quality"],
@@ -400,6 +419,33 @@ def run_audit(config: str, episodes: int, max_steps: int, output_dir: Path,
                         roll_abs=abs(roll),
                         own_position=bpos,
                     ))
+                    if opponent_policy == "brma_rule_safe_pursuit":
+                        b_idx = int(bid.split("_")[1])
+                        dbg = dict(getattr(_blue_rule_module, "_simple_debug_state", {}).get(b_idx, {}))
+                        if dbg:
+                            current[bid].update({
+                                "pursuit_variant": dbg.get("pursuit_variant", "simple_safe_pursuit"),
+                                "simple_target_selection": dbg.get("simple_target_selection", "nearest_valid"),
+                                "desired_heading_source": dbg.get("desired_heading_source", ""),
+                                "uses_red_action_bounds": dbg.get("uses_red_action_bounds", 1),
+                                "simple_reacquire_active": dbg.get("simple_reacquire_active", 0),
+                                "simple_lost_steps": dbg.get("simple_lost_steps", ""),
+                                "selected_red_id": (
+                                    f"red_{dbg['selected_target_idx']}"
+                                    if dbg.get("selected_target_idx") is not None else ""
+                                ),
+                                "selected_range_m": dbg.get("selected_range_m", ""),
+                                "selected_AO_rad": dbg.get("selected_AO_rad", ""),
+                                "selected_TA_rad": dbg.get("selected_TA_rad", ""),
+                                "selected_target_quality": dbg.get("selected_target_quality", ""),
+                                "desired_heading_rad": dbg.get("action_heading_abs_rad", ""),
+                                "heading_error_to_desired_rad": (
+                                    abs(_wrap_pi(float(dbg["action_heading_abs_rad"]) - yaw))
+                                    if dbg.get("action_heading_abs_rad", "") != "" else ""
+                                ),
+                                "action_heading_abs_rad": dbg.get("action_heading_abs_rad", ""),
+                                "action_heading_norm": dbg.get("action_heading_norm", ""),
+                            })
                     prev_yaw[bid] = yaw
                     prev_track[bid] = track
 
@@ -479,6 +525,11 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         or r.get("death_reason_if_any")
     ]
     safe_active = [int(r.get("safe_pursuit_mode_active", 0)) for r in rows]
+    sources = Counter(str(r.get("desired_heading_source", "")) for r in rows)
+    uses_bounds = [
+        int(float(r.get("uses_red_action_bounds", 0) or 0))
+        for r in rows
+    ]
     fallback = [
         r for r in rows
         if str(r.get("fallback_to_delta10_reason", "")) not in {"", "not_safe_pursuit", "non_combat_safety_or_no_target"}
@@ -493,6 +544,11 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = [
         {"metric": "samples", "value": total},
         {"metric": "combat_rate", "value": branch_counts.get("combat", 0) / total},
+        {"metric": "combat_or_target_visible_rate", "value": sources.get("current_target", 0) / total},
+        {"metric": "simple_reacquire_rate", "value": sources.get("reacquire_last_seen", 0) / total},
+        {"metric": "center_cruise_rate", "value": sources.get("center_cruise", 0) / total},
+        {"metric": "hold_heading_rate", "value": sources.get("hold_heading", 0) / total},
+        {"metric": "uses_red_action_bounds_rate", "value": sum(uses_bounds) / total},
         {"metric": "safe_pursuit_active_rate", "value": sum(safe_active) / total},
         {"metric": "fallback_to_delta10_rate", "value": len(fallback) / total},
         {"metric": "branch_counts", "value": dict(branch_counts)},
@@ -520,6 +576,7 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {"metric": "blue_low_altitude_death_count", "value": sum(v for k, v in death_reasons.items() if "alt" in k.lower() or "crash" in k.lower())},
         {"metric": "blue_missiles_fired_mean", "value": float(np.mean(missiles)) if missiles else ""},
         {"metric": "blue_missile_hits_mean", "value": "unavailable"},
+        {"metric": "blue_missile_hits_mean_unavailable_reason", "value": "audit records launch flags but does not reconstruct missile hit ownership"},
         {"metric": "episode_outcome_counts", "value": dict(outcomes)},
     ]
     for horizon in (5, 10, 20):
@@ -587,8 +644,16 @@ def _write_report(output_dir: Path, rows: list[dict[str, Any]], summary: list[di
         "## Safe-Pursuit Assessment",
         f"- safe_pursuit_active_rate: {s.get('safe_pursuit_active_rate')}",
         f"- fallback_to_delta10_rate: {s.get('fallback_to_delta10_rate')}",
+        f"- combat_or_target_visible_rate: {s.get('combat_or_target_visible_rate')}",
+        f"- simple_reacquire_rate: {s.get('simple_reacquire_rate')}",
+        f"- center_cruise_rate: {s.get('center_cruise_rate')}",
+        f"- hold_heading_rate: {s.get('hold_heading_rate')}",
+        f"- uses_red_action_bounds_rate: {s.get('uses_red_action_bounds_rate')}",
         "- safe-pursuit combat heading output uses the same normalized `action[1]` bounds as red policy actions: [-1, 1].",
         "- safe-pursuit maps `target_heading_abs / pi` directly; no 20/35/60/180 deg staged limiter remains.",
+        "- safe-pursuit no longer uses lead pursuit, target velocity, TA-derived target heading, complex target scoring, heading hysteresis, bank damping, G compensation, or multi-condition throttle.",
+        "- target selection is nearest valid red slot, with only one-step simple deconfliction across blue aircraft.",
+        f"- short lost-target reacquire window: 15 steps.",
         "- safety layers still execute before combat: hard deck, descent safety, stall protection, anti-stall, and boundary safety.",
         f"- blue_death_count_by_reason: {s.get('blue_death_count_by_reason')}",
         f"- blue_boundary_death_count: {s.get('blue_boundary_death_count')}",
@@ -602,7 +667,7 @@ def _write_report(output_dir: Path, rows: list[dict[str, Any]], summary: list[di
         "- Red policy actions enter this absolute heading contract without an additional delta-heading limiter in `env.py`.",
         "- The default `brma_rule` first computes an internal heading delta and limits it to +/-10 deg per decision step, then converts it back to an absolute target heading.",
         "- The +/-10 deg limiter is a project legacy autopilot limiter, not a paper-required BRMA-MAPPO action-space constraint.",
-        "- `brma_rule_safe_pursuit` keeps target selection and safety branches unchanged, but in combat maps radar lead bearing or AWACS coarse bearing directly to the same absolute heading action bound used by red actions.",
+        "- `brma_rule_safe_pursuit` is a separate simple-pursuit path: nearest valid target, current AO bearing, 15-step last-seen reacquire, then center cruise or hold heading.",
         "- `direct_lead_heading_probe` is diagnostic only; it is not used by training or evaluation.",
         "",
         "## Representative High-Error Sample",

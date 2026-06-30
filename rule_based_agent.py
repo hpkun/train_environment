@@ -34,6 +34,9 @@ _prev_heading_cmd: dict[int, float] = {}     # blue_id → last heading_cmd (int
 _prev_lead_bearing: dict[int, float] = {}    # blue_id → last lead_bearing (rad)
 _last_target_bearing: dict[int, float] = {}  # blue_id -> last radar/AWACS target bearing (rad)
 _lost_target_steps: dict[int, int] = {}       # blue_id -> short-horizon reacquisition age
+_simple_last_seen_bearing: dict[int, float] = {}
+_simple_lost_steps: dict[int, int] = {}
+_simple_debug_state: dict[int, dict] = {}
 BLUE_POLICY_DEBUG = False
 
 # ==============================================================================
@@ -71,6 +74,7 @@ _STALL_PROTECT_ALT  = 5000.0   # m — below this altitude, low speed triggers r
 # ---- Heading hysteresis (anti-oscillation) ----
 _HEADING_HYST_DEG   = 5.0      # degrees — don't update target_heading for Δ < this
 _HEADING_HYST_RAD   = np.deg2rad(_HEADING_HYST_DEG)
+_SIMPLE_REACQUIRE_STEPS = 15
 
 
 def _boundary_patrol_heading_command(
@@ -236,6 +240,188 @@ def _wrap_pi(angle: float) -> float:
     return float((angle + np.pi) % (2 * np.pi) - np.pi)
 
 
+def reset_rule_memory() -> None:
+    """Clear module-level blue rule memory for a new evaluation/training run."""
+
+    _prev_heading_cmd.clear()
+    _prev_lead_bearing.clear()
+    _last_target_bearing.clear()
+    _lost_target_steps.clear()
+    _simple_last_seen_bearing.clear()
+    _simple_lost_steps.clear()
+    _simple_debug_state.clear()
+
+
+def _simple_center_bearing(own_position: np.ndarray | None, current_heading: float) -> float:
+    if own_position is None:
+        return float(current_heading)
+    pos = np.asarray(own_position, dtype=np.float64).reshape(-1)
+    if pos.size < 2:
+        return float(current_heading)
+    if np.linalg.norm(pos[:2]) < 1e-6:
+        return float(current_heading)
+    return _wrap_pi(np.arctan2(-float(pos[1]), -float(pos[0])))
+
+
+def _simple_valid_targets(
+    obs: dict,
+    num_blue: int,
+    num_red: int,
+    excluded: set[int] | None = None,
+) -> list[tuple[float, int, np.ndarray]]:
+    enemy_states = np.asarray(obs.get("enemy_states", []), dtype=np.float32)
+    death_mask = np.asarray(obs.get("death_mask", []), dtype=np.float32).reshape(-1)
+    if enemy_states.ndim != 2 or enemy_states.shape[0] == 0:
+        return []
+    excluded = excluded or set()
+    candidates: list[tuple[float, int, np.ndarray]] = []
+    for red_idx in range(min(num_red, enemy_states.shape[0])):
+        if red_idx in excluded:
+            continue
+        if death_mask.size > num_blue + red_idx and death_mask[num_blue + red_idx] <= 0.5:
+            continue
+        state = np.asarray(enemy_states[red_idx], dtype=np.float32)
+        if state.size < 6 or np.allclose(state, 0.0):
+            continue
+        range_m = float(state[5]) * 80000.0
+        if not np.isfinite(range_m) or range_m <= 1.0:
+            continue
+        candidates.append((range_m, red_idx, state))
+    return sorted(candidates, key=lambda item: item[0])
+
+
+def _simple_nearest_target(
+    obs: dict,
+    num_blue: int,
+    num_red: int,
+    excluded: set[int] | None = None,
+) -> tuple[int | None, np.ndarray | None, float | None]:
+    candidates = _simple_valid_targets(obs, num_blue, num_red, excluded)
+    if not candidates and excluded:
+        candidates = _simple_valid_targets(obs, num_blue, num_red, set())
+    if not candidates:
+        return None, None, None
+    range_m, idx, state = candidates[0]
+    return idx, state, range_m
+
+
+def _simple_rescale_absolute_heading(pitch_int: float, target_heading_abs: float, vel_int: float) -> np.ndarray:
+    vel_new = (90.0 + 100.0 * float(vel_int)) / 306.0
+    return np.array([
+        float(np.clip(pitch_int, -1.0, 1.0)),
+        float(np.clip(_wrap_pi(target_heading_abs) / np.pi, -1.0, 1.0)),
+        float(np.clip(vel_new, -1.0, 1.0)),
+    ], dtype=np.float32)
+
+
+def _blue_simple_pursuit_action_impl(
+    obs: dict,
+    num_blue: int,
+    num_red: int,
+    blue_id: int,
+    forced_target_idx: int | None,
+    own_position: np.ndarray | None = None,
+    own_heading: float | None = None,
+) -> np.ndarray:
+    """Simple safe-pursuit opponent path.
+
+    This opt-in path is deliberately separate from the legacy BRMA rule:
+    nearest valid target, current AO bearing, short last-seen reacquire, and
+    fixed throttle choices. It does not use lead pursuit, target scoring,
+    heading hysteresis, bank damping, or G compensation.
+    """
+
+    ego_state = np.asarray(obs.get("ego_state", np.zeros(11)), dtype=np.float32)
+    velocity = np.asarray(obs.get("velocity", np.zeros(3)), dtype=np.float32)
+    altitude = np.asarray(obs.get("altitude", [SAFE_COMBAT_ALT]), dtype=np.float32).reshape(-1)
+    ego_roll = np.arctan2(float(ego_state[7]) if ego_state.size > 7 else 0.0,
+                          float(ego_state[8]) if ego_state.size > 8 else 1.0)
+    ego_vel = float(ego_state[6]) * 600.0 if ego_state.size > 6 else float(np.linalg.norm(velocity))
+    alt_m = float(altitude[0]) if altitude.size else SAFE_COMBAT_ALT
+    v_up = float(velocity[2]) if velocity.size > 2 else 0.0
+    if own_heading is None:
+        if velocity.size >= 2 and np.linalg.norm(velocity[:2]) > 1e-6:
+            our_heading = float(np.arctan2(float(velocity[1]), float(velocity[0])))
+        else:
+            our_heading = 0.0
+    else:
+        our_heading = float(own_heading)
+
+    def _record(source: str, target_idx: int | None, state: np.ndarray | None,
+                range_m: float | None, desired_heading: float, action: np.ndarray,
+                reacquire: bool = False) -> np.ndarray:
+        _simple_debug_state[blue_id] = {
+            "pursuit_variant": "simple_safe_pursuit",
+            "simple_target_selection": "nearest_valid",
+            "desired_heading_source": source,
+            "uses_red_action_bounds": 1,
+            "simple_reacquire_active": int(reacquire),
+            "simple_lost_steps": int(_simple_lost_steps.get(blue_id, 0)),
+            "selected_target_idx": target_idx,
+            "selected_range_m": range_m if range_m is not None else "",
+            "selected_AO_rad": float(state[3]) * np.pi if state is not None and state.size > 3 else "",
+            "selected_TA_rad": float(state[4]) * np.pi if state is not None and state.size > 4 else "",
+            "selected_target_quality": _target_track_quality(state) if state is not None else "invalid",
+            "action_heading_abs_rad": _wrap_pi(desired_heading),
+            "action_heading_norm": float(action[1]),
+        }
+        return action
+
+    center_heading = _simple_center_bearing(own_position, our_heading)
+    if alt_m < HARD_DECK:
+        action = _simple_rescale_absolute_heading(0.45, center_heading, 1.0)
+        return _record("safety", None, None, None, center_heading, action)
+    if alt_m < DESCENT_WARN_ALT and v_up < -MAX_DESCENT_RATE:
+        action = _simple_rescale_absolute_heading(0.45, center_heading, 1.0)
+        return _record("safety", None, None, None, center_heading, action)
+    if ego_vel < 220.0:
+        action = _simple_rescale_absolute_heading(max(0.15, _TRIM_BASELINE), our_heading, 1.0)
+        return _record("safety", None, None, None, our_heading, action)
+    if _should_override_for_boundary_safety(own_position, our_heading):
+        pitch = np.clip((SAFE_COMBAT_ALT - alt_m) / 2000.0, -0.10, 0.15) + _TRIM_BASELINE
+        action = _simple_rescale_absolute_heading(float(pitch), center_heading, 0.8)
+        return _record("safety", None, None, None, center_heading, action)
+
+    target_idx = None
+    target_state = None
+    range_m = None
+    if forced_target_idx is not None:
+        candidates = _simple_valid_targets(obs, num_blue, num_red, set())
+        for cand_range, cand_idx, cand_state in candidates:
+            if cand_idx == forced_target_idx:
+                target_idx, target_state, range_m = cand_idx, cand_state, cand_range
+                break
+    if target_state is None:
+        target_idx, target_state, range_m = _simple_nearest_target(obs, num_blue, num_red)
+
+    if target_state is not None:
+        ao = float(target_state[3]) * np.pi if target_state.size > 3 else 0.0
+        desired_heading = _wrap_pi(our_heading + ao)
+        _simple_last_seen_bearing[blue_id] = desired_heading
+        _simple_lost_steps[blue_id] = 0
+        delta_alt = float(target_state[2]) * 10000.0 if target_state.size > 2 else 0.0
+        pitch = np.clip(delta_alt / max(float(range_m or 300.0), 300.0) * 2.0 + _TRIM_BASELINE, -0.20, 0.25)
+        if alt_m < SAFE_COMBAT_ALT:
+            pitch = max(float(pitch), 0.0)
+        action = _simple_rescale_absolute_heading(float(pitch), desired_heading, 0.8)
+        return _record("current_target", target_idx, target_state, range_m, desired_heading, action)
+
+    if blue_id in _simple_last_seen_bearing and _simple_lost_steps.get(blue_id, 0) < _SIMPLE_REACQUIRE_STEPS:
+        _simple_lost_steps[blue_id] = _simple_lost_steps.get(blue_id, 0) + 1
+        desired_heading = _simple_last_seen_bearing[blue_id]
+        pitch = np.clip((SAFE_COMBAT_ALT - alt_m) / 2000.0, -0.10, 0.15) + _TRIM_BASELINE
+        action = _simple_rescale_absolute_heading(float(pitch), desired_heading, 0.8)
+        return _record("reacquire_last_seen", None, None, None, desired_heading, action, reacquire=True)
+
+    _simple_last_seen_bearing.pop(blue_id, None)
+    _simple_lost_steps.pop(blue_id, None)
+    source = "center_cruise" if own_position is not None else "hold_heading"
+    desired_heading = center_heading if own_position is not None else our_heading
+    pitch = np.clip((SAFE_COMBAT_ALT - alt_m) / 2000.0, -0.10, 0.15) + _TRIM_BASELINE
+    action = _simple_rescale_absolute_heading(float(pitch), desired_heading, 0.6)
+    return _record(source, None, None, None, desired_heading, action)
+
+
 def _target_track_quality(tgt_vec: np.ndarray) -> str:
     """Return 'radar', 'awacs', or 'invalid' for an enemy entity vector.
 
@@ -305,6 +491,25 @@ def blue_coordinated_actions(
     compatible for training loops that don't have env-level access).
     """
     blue_ids = [f"blue_{i}" for i in range(num_blue)]
+
+    if pursuit_mode == "safe_pursuit":
+        taken: set[int] = set()
+        assignments: dict[int, int | None] = {}
+        for b_idx, bid in enumerate(blue_ids):
+            obs = blue_obs.get(bid, {})
+            target_idx, _state, _range = _simple_nearest_target(
+                obs, num_blue, num_red, excluded=taken)
+            assignments[b_idx] = target_idx
+            if target_idx is not None:
+                taken.add(target_idx)
+        return {
+            bid: _blue_simple_pursuit_action_impl(
+                blue_obs.get(bid, {}), num_blue, num_red, b_idx,
+                forced_target_idx=assignments.get(b_idx),
+                own_position=own_positions.get(bid) if own_positions else None,
+                own_heading=own_headings.get(bid) if own_headings else None)
+            for b_idx, bid in enumerate(blue_ids)
+        }
 
     # ---- Convert engaged UIDs to red indices ----
     engaged_red_indices: set[int] = set()
@@ -431,6 +636,14 @@ def _blue_pursuit_action_impl(
     """
 
     # ---- 读取物理姿态 ----
+    if pursuit_mode == "safe_pursuit":
+        return _blue_simple_pursuit_action_impl(
+            obs, num_blue, num_red, blue_id,
+            forced_target_idx=forced_target_idx,
+            own_position=own_position,
+            own_heading=own_heading,
+        )
+
     ego_state     = obs["ego_state"]
     ego_sin_roll  = float(ego_state[7])
     ego_cos_roll  = float(ego_state[8])

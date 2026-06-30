@@ -65,6 +65,12 @@ class OpponentPolicy:
         self.used_env_refresh_engaged_targets = False
         self.used_env_own_kinematics = False
         self.used_env_own_positions = False
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+            from rule_based_agent import reset_rule_memory
+            reset_rule_memory()
+        except Exception:
+            pass
 
     def act(self, obs_dict: dict, blue_ids: list[str],
             deterministic: bool = True, env=None) -> dict[str, np.ndarray]:
