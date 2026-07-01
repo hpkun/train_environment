@@ -315,6 +315,8 @@ def main() -> int:
     parser.add_argument("--opponent-policy", default="brma_rule",
                         choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule_safe_pursuit"])
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--stochastic", action="store_true",
+                        help="Use deterministic=False for policy (closer to training rollout)")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--enable-rich-logging", action="store_true")
     parser.add_argument("--rich-log-dir", default=None)
@@ -419,7 +421,7 @@ def main() -> int:
                         torch.as_tensor(adapted["role_ids"], device=device),
                         torch.as_tensor(adapted["critic_entity_tokens"], device=device),
                         torch.as_tensor(adapted["critic_keep_mask"], device=device),
-                        deterministic=True,
+                        deterministic=not args.stochastic,
                         critic_counts=torch.as_tensor(
                             adapted.get("critic_counts", np.zeros(4, dtype=np.float32)),
                             device=device),
@@ -434,7 +436,7 @@ def main() -> int:
                         torch.as_tensor(actor_obs, device=device),
                         roles=_role_ids(env),
                         critic_state=torch.as_tensor(adapted["critic_state"], device=device),
-                        deterministic=True,
+                        deterministic=not args.stochastic,
                     )
             acts_np = out["action"].cpu().numpy()
             if eval_rnn_hidden is not None and "rnn_hidden" in out:

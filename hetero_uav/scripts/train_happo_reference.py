@@ -92,25 +92,50 @@ class _MpEnvProxy:
         self.agent_types = dict(meta.get("agent_types", {}))
         self.agent_models = dict(meta.get("agent_models", {}))
         self._remote = remote
-        # Safe fallbacks for heartbeat diagnostics
-        self.red_planes = {}
-        self.blue_planes = {}
         self.current_step = 0
         self.env_dt = 0.0
+        # Alive caches — updated from step result info
+        self._cached_red_alive = 0
+        self._cached_blue_alive = 0
+
+    # red_planes / blue_planes are accessed by _alive_counts().
+    # Return simple objects with .is_alive so _alive_counts works.
+    class _AliveSim:
+        def __init__(self, alive: bool): self.is_alive = alive
+
+    @property
+    def red_planes(self):
+        return {rid: self._AliveSim(i < self._cached_red_alive)
+                for i, rid in enumerate(self.red_ids)}
+
+    @property
+    def blue_planes(self):
+        return {bid: self._AliveSim(i < self._cached_blue_alive)
+                for i, bid in enumerate(self.blue_ids)}
 
     def step(self, actions: dict):
         self._remote.send(("step", actions))
         msg = self._remote.recv()
         if msg[0] != "ok":
             raise RuntimeError(f"mp env step error: {msg}")
-        return msg[1], msg[2], msg[3], msg[4], msg[5]
+        _obs, _rewards, _terminated, _truncated, info = msg[1], msg[2], msg[3], msg[4], msg[5]
+        self._cached_red_alive = sum(
+            1 for rid in self.red_ids
+            if info.get(rid, {}).get("alive", False))
+        self._cached_blue_alive = sum(
+            1 for bid in self.blue_ids
+            if info.get(bid, {}).get("alive", False))
+        return _obs, _rewards, _terminated, _truncated, info
 
     def reset(self, *, seed: int):
         self._remote.send(("reset", seed))
         msg = self._remote.recv()
         if msg[0] != "ok":
             raise RuntimeError(f"mp env reset error: {msg}")
-        return msg[1], msg[2]
+        obs, info = msg[1], msg[2]
+        self._cached_red_alive = len(self.red_ids)
+        self._cached_blue_alive = len(self.blue_ids)
+        return obs, info
 
     def refresh_engaged_targets(self):
         self._remote.send(("call", ("refresh_engaged_targets", (), {})))
@@ -1510,6 +1535,21 @@ def _run_training_main() -> None:
                             "reward_comp": dict(current_ep_reward_comp[env_idx]),
                         })
                         episodes += 1
+                        # ---- Terminal episode audit CSV (BEFORE reset) ----
+                        _death_events = next_info.get("death_events", []) if isinstance(next_info, dict) else []
+                        _red_deaths = [e for e in _death_events if str(e.get("agent_id","")).startswith("red_")]
+                        _blue_deaths = [e for e in _death_events if str(e.get("agent_id","")).startswith("blue_")]
+                        _ra_env, _ba_env = ra, ba
+                        _ra_info = sum(1 for rid in rollout_env.red_ids if next_info.get(rid, {}).get("alive", False))
+                        _ba_info = sum(1 for bid in rollout_env.blue_ids if next_info.get(bid, {}).get("alive", False))
+                        _mav_info = bool(next_info.get("red_0", {}).get("alive", False))
+                        if _ra_env != _ra_info or _ba_env != _ba_info:
+                            print(f"  [WARN] alive mismatch env vs info: red env={_ra_env} info={_ra_info} blue env={_ba_env} info={_ba_info}")
+                        with open(out_dir / "terminal_episode_audit.csv", "a", newline="") as _ta_f:
+                            _ta_w = csv.writer(_ta_f)
+                            if _ta_f.tell() == 0:
+                                _ta_w.writerow(["iteration","total_steps","env_idx","episode_id","episode_length","winner","end_reason","all_terminated","all_truncated","red_alive_env","blue_alive_env","mav_alive_env","red_alive_info","blue_alive_info","mav_alive_info","alive_mismatch","red_death_reasons","blue_death_reasons","red_launch_count","blue_launch_count","red_hit_count","blue_hit_count"])
+                            _ta_w.writerow([iteration, total_steps, env_idx, episodes, current_ep_len[env_idx], outcome["winner"], outcome["end_reason"], int(all(terminated.values())), int(all(truncated.values())), _ra_env, _ba_env, int(_mav_alive(rollout_env)), _ra_info, _ba_info, int(_mav_info), int(_ra_env != _ra_info or _ba_env != _ba_info), str([e.get("death_reason","?") for e in _red_deaths]), str([e.get("death_reason","?") for e in _blue_deaths]), red_fired, blue_fired, red_hits, blue_hits])
                         # Write per-agent episode reward components
                         if rich_logger is not None:
                             for rid in rollout_env.red_ids:
@@ -1719,10 +1759,12 @@ def _run_training_main() -> None:
                 episode_length="",
                 alive_agents=dict(zip(("red", "blue"), _alive_counts(env))),
             )
+            n_rec = max(len(rec), 1)
             print(
                 f"[happo] iter={iteration:04d} steps={total_steps}/{args.total_env_steps} "
-                f"ret={avg_return:+.2f} red_win={red_win:.2f} blue_win={blue_win:.2f} "
-                f"mav_surv={mav_surv:.2f} blue_alive={blue_alive:.1f} "
+                f"ret={avg_return:+.2f} "
+                f"Rwin={red_win:.2f} Bwin={blue_win:.2f} draw={draw:.2f} tout={timeout:.2f} "
+                f"mav={mav_surv:.2f} Ralive={red_alive:.1f} Balive={blue_alive:.1f} "
                 f"loss_mav={stats['actor_loss_mav']:.4f} loss_uav={stats['actor_loss_uav']:.4f}",
                 flush=True,
             )
