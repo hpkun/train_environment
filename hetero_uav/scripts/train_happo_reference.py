@@ -934,6 +934,10 @@ def _run_training_main() -> None:
     parser.add_argument("--keep-eval-checkpoints", type=int, default=20,
                         help="Maximum number of per-eval checkpoint directories to keep when enabled.")
     parser.add_argument("--init-checkpoint", default=None)
+    parser.add_argument("--checkpoint-interval-steps", type=int, default=0,
+                        help="Save a periodic checkpoint every N env steps (0=disabled)")
+    parser.add_argument("--keep-checkpoints", type=int, default=5,
+                        help="Max periodic checkpoints to keep (oldest removed first)")
     parser.add_argument("--uav-imitation-dataset", default=None)
     parser.add_argument("--uav-imitation-coef", type=float, default=0.0)
     parser.add_argument("--uav-imitation-until-steps", type=int, default=0)
@@ -1722,6 +1726,29 @@ def _run_training_main() -> None:
                 f"loss_mav={stats['actor_loss_mav']:.4f} loss_uav={stats['actor_loss_uav']:.4f}",
                 flush=True,
             )
+            # ---- Periodic checkpoint ----
+            if args.checkpoint_interval_steps > 0:
+                milestone = (total_steps // args.checkpoint_interval_steps) * args.checkpoint_interval_steps
+                prev_milestone = ((total_steps - transitions_per_rollout) // args.checkpoint_interval_steps) * args.checkpoint_interval_steps
+                if milestone > prev_milestone or total_steps >= args.total_env_steps:
+                    ckpt_dir = out_dir / "checkpoints" / f"step_{total_steps:09d}"
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    policy.save(ckpt_dir / "model.pt")
+                    (ckpt_dir / "meta.json").write_text(json.dumps({
+                        "algorithm": "happo_reference_v0",
+                        "policy_arch": args.policy_arch,
+                        "reward_mode": args.reward_mode,
+                        "total_env_steps": total_steps,
+                        "iteration": iteration,
+                    }, indent=2), encoding="utf-8")
+                    # Rotate old checkpoints
+                    existing = sorted(
+                        (out_dir / "checkpoints").glob("step_*"),
+                        key=lambda p: p.name,
+                    )
+                    while len(existing) > args.keep_checkpoints:
+                        import shutil
+                        shutil.rmtree(existing.pop(0), ignore_errors=True)
             if total_steps - last_eval >= args.eval_interval_steps and args.eval_during_training:
                 last_eval = total_steps
                 tmp_model = out_dir / "_tmp_eval.pt"
