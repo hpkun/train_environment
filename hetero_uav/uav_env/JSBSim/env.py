@@ -667,7 +667,10 @@ class UavCombatEnv(gymnasium.Env):
         """Convert normalised actor outputs ∈ [-1, 1] to physical setpoints.
 
         Control-flow priority (team-aware):
-          Layer 1 — Missile evasion:     RED team only  (scripted)
+          Layer 1 — Missile evasion:     configurable BRMA-style scripted
+                                         missile-warning evasion.  Active
+                                         teams controlled by missile_evasion.teams
+                                         (both/red_only/blue_only/none).
           Layer 2 — GCAS safety net:     BLUE only   (hard-coded baseline)
           Layer 3 — Agent action:        BOTH teams  (identical §2.4 mapping)
 
@@ -692,9 +695,12 @@ class UavCombatEnv(gymnasium.Env):
             # =================================================================
             #  Layer 1 — Missile Evasion Script (paper §2.1.3)
             #
-            #  RED team only.  Missile warning / scripted evasion is modeled as
-            #  a red MAV/UAV formation information advantage.  The blue
-            #  rule-based opponent does not use scripted missile evasion.
+            #  Configurable BRMA-style scripted missile-warning evasion.
+            #  BRMA-MAPPO specifies preset missile escape commands but does
+            #  not disclose exact maneuver angles.  Active teams are
+            #  controlled by missile_evasion.teams (both / red_only /
+            #  blue_only / none).  red_only is the legacy default;
+            #  the current PN missile config uses teams: both.
             # =================================================================
             incoming = None
             incoming_diag = {}
@@ -2167,6 +2173,10 @@ class UavCombatEnv(gymnasium.Env):
             self, "_missile_attack_interval_sec_effective", 0.5)
         info["use_boresight_launch_gate"] = bool(getattr(
             self, "use_boresight_launch_gate", False))
+        # Drain per-step event buffers so rich logger sees each event exactly once
+        self._launch_quality_step_records = []
+        self._launch_quality_done_step_records = []
+        self._evasion_step_records = []
         return info
 
     # ------------------------------------------------------------------

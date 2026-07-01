@@ -1,7 +1,6 @@
-"""
-Aircraft and Missile simulators wrapping JSBSim flight dynamics.
-Based on the CloseAirCombat project, with all neural-network dependencies removed.
-"""
+"""Aircraft and Missile simulators wrapping JSBSim flight dynamics."""
+from __future__ import annotations
+
 import contextlib
 import os
 import sys
@@ -568,7 +567,7 @@ class MissileSimulator(BaseSimulator):
 
     @property
     def K(self):
-        return self._K  # constant 3.0 — paper §2.1.3 proportional guidance law
+        return self._K  # navigation gain for PN guidance; default 3.0 is a project/TAM-supported parameter, not a BRMA numeric table value
 
     @property
     def target_distance(self) -> float:
@@ -747,6 +746,13 @@ class MissileSimulator(BaseSimulator):
         vm_norm = float(np.linalg.norm(vm))
         if not np.isfinite(vm_norm) or vm_norm < 1e-8:
             return np.zeros(3, dtype=np.float64), {"range_m": R, "closing_speed_mps": closing_speed}
+        if closing_speed <= 0.0:
+            return np.zeros(3, dtype=np.float64), {
+                "range_m": R,
+                "closing_speed_mps": closing_speed,
+                "omega_los_norm": 0.0,
+                "acc_cmd_norm": 0.0,
+            }
         missile_dir = vm / vm_norm
         omega_los = np.cross(r, v_rel) / max(R * R, 1e-8)
         a_cmd = float(navigation_gain) * closing_speed * np.cross(omega_los, missile_dir)

@@ -68,3 +68,19 @@ def test_pn_guidance_responds_to_los_rate_not_pure_los_direction():
 
     assert np.linalg.norm(a_cmd) > 1e-6
     assert abs(float(np.dot(a_dir, los_dir))) < 0.95
+
+
+def test_pn_acceleration_zero_when_not_closing():
+    """PN should return zero acceleration when closing_speed <= 0."""
+    missile_pos = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    missile_vel = np.array([600.0, 0.0, 0.0], dtype=np.float64)
+    target_pos = np.array([-500.0, 0.0, 0.0], dtype=np.float64)
+    target_vel = np.array([250.0, 0.0, 0.0], dtype=np.float64)
+
+    a_cmd, diag = MissileSimulator.compute_pn_lateral_acceleration(
+        missile_pos, missile_vel, target_pos, target_vel,
+        navigation_gain=3.0, max_overload_g=30.0,
+    )
+    assert diag["closing_speed_mps"] <= 0, f"expected closing<=0, got {diag['closing_speed_mps']}"
+    assert diag["acc_cmd_norm"] == 0.0
+    assert np.linalg.norm(a_cmd) < 1e-9
