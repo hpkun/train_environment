@@ -23,13 +23,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def _format_stdout_step_count(value: int | float) -> str:
-    count = int(value)
-    if count < 1000:
-        return str(count)
-    if count % 1000 == 0:
-        return f"{count // 1000}k"
-    return f"{count / 1000.0:.1f}k"
+def _format_step_count(n: int) -> str:
+    n = int(n)
+    if n >= 1_000_000:
+        v = n / 1_000_000
+        return f"{v:.1f}m" if n % 1_000_000 else f"{int(v)}m"
+    if n >= 1000:
+        v = n / 1000
+        return f"{v:.1f}k" if n % 1000 else f"{int(v)}k"
+    return str(n)
 
 
 def _format_happo_stdout_line(
@@ -52,8 +54,8 @@ def _format_happo_stdout_line(
     blue_hits: int,
 ) -> str:
     step_text = (
-        f"{_format_stdout_step_count(total_steps)}/"
-        f"{_format_stdout_step_count(target_steps)}"
+        f"{_format_step_count(total_steps)}/"
+        f"{_format_step_count(target_steps)}"
     )
     missile_text = f"msl:R{int(red_fired)}/{int(red_hits)} B{int(blue_fired)}/{int(blue_hits)}"
     if rec_count <= 0:
@@ -62,7 +64,7 @@ def _format_happo_stdout_line(
             f"win:R/B/D/T=-- alive:R/B/M=-- {missile_text}"
         )
     return (
-        f"[happo] it={iteration:04d} step={step_text} ret={avg_return:.2f} "
+        f"[happo] it={iteration:04d} step={step_text} ret={avg_return:+.2f} "
         f"win:R/B/D/T={red_win:.2f}/{blue_win:.2f}/{draw:.2f}/{timeout:.2f} "
         f"alive:R/B/M={red_alive:.2f}/{blue_alive:.2f}/{mav_survival:.2f} "
         f"{missile_text}"
