@@ -23,6 +23,52 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def _format_stdout_step_count(value: int | float) -> str:
+    count = int(value)
+    if count < 1000:
+        return str(count)
+    if count % 1000 == 0:
+        return f"{count // 1000}k"
+    return f"{count / 1000.0:.1f}k"
+
+
+def _format_happo_stdout_line(
+    *,
+    iteration: int,
+    total_steps: int,
+    target_steps: int,
+    rec_count: int,
+    avg_return: float,
+    red_win: float,
+    blue_win: float,
+    draw: float,
+    timeout: float,
+    red_alive: float,
+    blue_alive: float,
+    mav_survival: float,
+    red_fired: int,
+    red_hits: int,
+    blue_fired: int,
+    blue_hits: int,
+) -> str:
+    step_text = (
+        f"{_format_stdout_step_count(total_steps)}/"
+        f"{_format_stdout_step_count(target_steps)}"
+    )
+    missile_text = f"msl:R{int(red_fired)}/{int(red_hits)} B{int(blue_fired)}/{int(blue_hits)}"
+    if rec_count <= 0:
+        return (
+            f"[happo] it={iteration:04d} step={step_text} ret=-- "
+            f"win:R/B/D/T=-- alive:R/B/M=-- {missile_text}"
+        )
+    return (
+        f"[happo] it={iteration:04d} step={step_text} ret={avg_return:.2f} "
+        f"win:R/B/D/T={red_win:.2f}/{blue_win:.2f}/{draw:.2f}/{timeout:.2f} "
+        f"alive:R/B/M={red_alive:.2f}/{blue_alive:.2f}/{mav_survival:.2f} "
+        f"{missile_text}"
+    )
+
+
 # ---------------------------------------------------------------------------
 #  Multiprocess env helpers — each env in its own process, pipe-based proxy
 # ---------------------------------------------------------------------------
@@ -1759,13 +1805,25 @@ def _run_training_main() -> None:
                 episode_length="",
                 alive_agents=dict(zip(("red", "blue"), _alive_counts(env))),
             )
-            n_rec = max(len(rec), 1)
             print(
-                f"[happo] iter={iteration:04d} steps={total_steps}/{args.total_env_steps} "
-                f"ret={avg_return:+.2f} "
-                f"Rwin={red_win:.2f} Bwin={blue_win:.2f} draw={draw:.2f} tout={timeout:.2f} "
-                f"mav={mav_surv:.2f} Ralive={red_alive:.1f} Balive={blue_alive:.1f} "
-                f"loss_mav={stats['actor_loss_mav']:.4f} loss_uav={stats['actor_loss_uav']:.4f}",
+                _format_happo_stdout_line(
+                    iteration=iteration,
+                    total_steps=total_steps,
+                    target_steps=args.total_env_steps,
+                    rec_count=len(rec),
+                    avg_return=avg_return,
+                    red_win=red_win,
+                    blue_win=blue_win,
+                    draw=draw,
+                    timeout=timeout,
+                    red_alive=red_alive,
+                    blue_alive=blue_alive,
+                    mav_survival=mav_surv,
+                    red_fired=red_fired,
+                    red_hits=red_hits,
+                    blue_fired=blue_fired,
+                    blue_hits=blue_hits,
+                ),
                 flush=True,
             )
             # ---- Periodic checkpoint ----
