@@ -48,26 +48,20 @@ def _format_happo_stdout_line(
     red_alive: float,
     blue_alive: float,
     mav_survival: float,
-    red_fired: int,
-    red_hits: int,
-    blue_fired: int,
-    blue_hits: int,
 ) -> str:
     step_text = (
         f"{_format_step_count(total_steps)}/"
         f"{_format_step_count(target_steps)}"
     )
-    missile_text = f"msl:R{int(red_fired)}/{int(red_hits)} B{int(blue_fired)}/{int(blue_hits)}"
     if rec_count <= 0:
         return (
             f"[happo] it={iteration:04d} step={step_text} ret=-- "
-            f"win:R/B/D/T=-- alive:R/B/M=-- {missile_text}"
+            f"win:R/B/D/T=-- alive:R/B/M=--"
         )
     return (
         f"[happo] it={iteration:04d} step={step_text} ret={avg_return:+.2f} "
         f"win:R/B/D/T={red_win:.2f}/{blue_win:.2f}/{draw:.2f}/{timeout:.2f} "
-        f"alive:R/B/M={red_alive:.2f}/{blue_alive:.2f}/{mav_survival:.2f} "
-        f"{missile_text}"
+        f"alive:R/B/M={red_alive:.2f}/{blue_alive:.2f}/{mav_survival:.2f}"
     )
 
 
@@ -1821,10 +1815,6 @@ def _run_training_main() -> None:
                     red_alive=red_alive,
                     blue_alive=blue_alive,
                     mav_survival=mav_surv,
-                    red_fired=red_fired,
-                    red_hits=red_hits,
-                    blue_fired=blue_fired,
-                    blue_hits=blue_hits,
                 ),
                 flush=True,
             )
