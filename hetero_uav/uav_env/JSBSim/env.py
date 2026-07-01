@@ -229,6 +229,8 @@ class UavCombatEnv(gymnasium.Env):
                  red_target_selection_mode: str = "closest",
                  missile_launch_range_m: float | None = None,
                  missile_attack_interval_sec: float | None = None,
+                 missile_guidance: dict | None = None,
+                 missile_evasion: dict | None = None,
                  use_boresight_launch_gate: bool = False,
                  render_mode=None):
         super().__init__()
@@ -254,6 +256,8 @@ class UavCombatEnv(gymnasium.Env):
         self.direct_fcs_trim_by_role = dict(direct_fcs_trim_by_role or {})
         self.pid_profile_by_role = dict(pid_profile_by_role or {})
         self.pid_profile_config = dict(pid_profile_config or {})
+        self.missile_guidance_config = dict(missile_guidance or {"mode": "legacy"})
+        self.missile_evasion_config = dict(missile_evasion or {"mode": "brma_scripted", "teams": "red_only"})
         self.physics_dt = 1.0 / sim_freq
         self.env_dt = agent_interaction_steps * self.physics_dt
         # missile_attack_interval_sec: configurable cooldown (TAM-HAPPO paper: 25s)
@@ -345,6 +349,7 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_quality_records: dict[str, dict] = {}
         self._launch_quality_step_records: list[dict] = []
         self._launch_quality_done_step_records: list[dict] = []
+        self._evasion_step_records: list[dict] = []
         self._physics_frame = 0
         # Missile termination reason counters: {"red": Counter(), "blue": Counter()}
         self._missile_term_reasons: dict[str, dict[str, int]] = {
@@ -395,6 +400,7 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_quality_records.clear()
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
+        self._evasion_step_records = []
         self._missile_acmi_id.clear()
         self._missile_term_reasons = {"red": {}, "blue": {}}
         self._next_missile_acmi_id = 1001
@@ -470,6 +476,7 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_diag_step = make_empty_launch_diag()
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
+        self._evasion_step_records = []
 
         # Reset death reasons
         self._death_reasons = {}
@@ -606,6 +613,56 @@ class UavCombatEnv(gymnasium.Env):
     #  Action parsing
     # ------------------------------------------------------------------
 
+    def _missile_evasion_enabled_for(self, aid: str) -> bool:
+        cfg = getattr(self, "missile_evasion_config", {}) or {}
+        if str(cfg.get("mode", "brma_scripted")).lower() != "brma_scripted":
+            return False
+        teams = str(cfg.get("teams", "red_only")).lower()
+        if teams == "none":
+            return False
+        is_red = str(aid).startswith("red")
+        is_blue = str(aid).startswith("blue")
+        if teams == "both":
+            return is_red or is_blue
+        if teams == "red_only":
+            return is_red
+        if teams == "blue_only":
+            return is_blue
+        return False
+
+    def _select_incoming_missile_threat(self, aid: str, sim: AircraftSimulator):
+        best = None
+        best_diag: dict = {}
+        best_tgo = float("inf")
+        aircraft_pos = np.asarray(sim.get_position(), dtype=np.float64)
+        aircraft_vel = np.asarray(sim.get_velocity(), dtype=np.float64)
+        for missile in getattr(sim, "under_missiles", []) or []:
+            if not getattr(missile, "is_alive", False):
+                continue
+            if getattr(missile, "target_aircraft", None) is not sim and getattr(missile, "_target_id", "") != aid:
+                continue
+            missile_pos = np.asarray(missile.get_position(), dtype=np.float64)
+            missile_vel = np.asarray(missile.get_velocity(), dtype=np.float64)
+            rel = aircraft_pos - missile_pos
+            range_m = float(np.linalg.norm(rel))
+            if not np.isfinite(range_m) or range_m < 1e-8:
+                continue
+            range_hat = rel / range_m
+            closing_speed = float(np.dot(missile_vel - aircraft_vel, range_hat))
+            if not np.isfinite(closing_speed) or closing_speed <= 0.0:
+                continue
+            t_go = range_m / max(closing_speed, 1e-6)
+            if t_go < best_tgo:
+                best = missile
+                best_tgo = t_go
+                best_diag = {
+                    "incoming_missile_id": getattr(missile, "uid", getattr(missile, "_uid", "")),
+                    "incoming_range_m": range_m,
+                    "incoming_closing_speed_mps": closing_speed,
+                    "incoming_t_go_sec": t_go,
+                }
+        return best, best_diag
+
     def _parse_actions(self, actions: dict) -> dict:
         """Convert normalised actor outputs ∈ [-1, 1] to physical setpoints.
 
@@ -640,9 +697,11 @@ class UavCombatEnv(gymnasium.Env):
             #  rule-based opponent does not use scripted missile evasion.
             # =================================================================
             incoming = None
-            if not is_blue:
-                incoming = sim.check_missile_warning()
+            incoming_diag = {}
+            if self._missile_evasion_enabled_for(aid):
+                incoming, incoming_diag = self._select_incoming_missile_threat(aid, sim)
             if incoming is not None:
+                evasion_cfg = getattr(self, "missile_evasion_config", {}) or {}
                 alt_m = sim.get_geodetic()[2]
 
                 # Determine turn direction from missile bearing (+right, −left)
@@ -658,6 +717,18 @@ class UavCombatEnv(gymnasium.Env):
                                 (vn * dn + ve * de) / (vh * rh))
                 turn_dir = 1.0 if ao > 0 else -1.0
 
+                self._evasion_step_records.append({
+                    "evasion_triggered": 1,
+                    "evasion_team": "blue" if is_blue else "red",
+                    "evasion_agent_id": aid,
+                    "incoming_missile_id": incoming_diag.get("incoming_missile_id", ""),
+                    "incoming_range_m": incoming_diag.get("incoming_range_m", ""),
+                    "incoming_closing_speed_mps": incoming_diag.get("incoming_closing_speed_mps", ""),
+                    "incoming_t_go_sec": incoming_diag.get("incoming_t_go_sec", ""),
+                    "evasion_mode": str(evasion_cfg.get("mode", "brma_scripted")),
+                    "current_step": self.current_step,
+                })
+
                 if self._control_mode_for(aid) == "direct_fcs_3d":
                     # Direct-FCS evade: pull up + break turn + full throttle
                     elevator_sign_chosen = 1.0
@@ -667,22 +738,29 @@ class UavCombatEnv(gymnasium.Env):
                     targets[aid] = (elevator_cmd, aileron_cmd, throttle_cmd)
                     continue
 
-                if alt_m > 5000.0:
+                if alt_m > float(evasion_cfg.get("high_altitude_threshold_m", 5000.0)):
                     # High altitude: break turn with ~60° bank.
                     # Pull 25° pitch while executing a ~60° heading break.
-                    target_pitch = np.deg2rad(25.0)
-                    target_heading = current_heading + turn_dir * np.deg2rad(60.0)
+                    target_pitch = np.deg2rad(float(evasion_cfg.get("high_altitude_pitch_deg", 25.0)))
+                    target_heading = current_heading + turn_dir * np.deg2rad(
+                        float(evasion_cfg.get("high_altitude_heading_break_deg", 60.0))
+                    )
                 else:
                     # Low altitude (< 5000 m): wings-level zoom climb.
                     # Pull 30° pitch, maintain current heading (roll out first).
-                    target_pitch = np.deg2rad(30.0)
+                    target_pitch = np.deg2rad(float(evasion_cfg.get("low_altitude_pitch_deg", 30.0)))
                     ego_roll = float(rpy[0])
                     if abs(ego_roll) > np.deg2rad(5):
-                        target_heading = current_heading - np.sign(ego_roll) * np.deg2rad(15.0)
+                        target_heading = current_heading - np.sign(ego_roll) * np.deg2rad(
+                            float(evasion_cfg.get("low_altitude_roll_level_heading_deg", 15.0))
+                        )
                     else:
                         target_heading = current_heading
 
-                targets[aid] = (target_pitch, target_heading, self.VELOCITY_MAX)
+                target_velocity = self.VELOCITY_MAX
+                if str(evasion_cfg.get("target_velocity", "max")).lower() != "max":
+                    target_velocity = float(evasion_cfg.get("target_velocity", self.VELOCITY_MAX))
+                targets[aid] = (target_pitch, target_heading, target_velocity)
                 continue
 
             # =================================================================
@@ -1382,7 +1460,12 @@ class UavCombatEnv(gymnasium.Env):
         target: AircraftSimulator,
         launch_quality: dict | None = None,
     ):
-        missile = MissileSimulator.create(parent, target, f"m{self._missile_id_counter}")
+        missile = MissileSimulator.create(
+            parent,
+            target,
+            f"m{self._missile_id_counter}",
+            guidance_config=getattr(self, "missile_guidance_config", {}),
+        )
         self._missile_id_counter += 1
         self._missiles_in_flight[missile.uid] = missile
         self._missile_acmi_id[missile.uid] = self._next_missile_acmi_id
@@ -1419,6 +1502,11 @@ class UavCombatEnv(gymnasium.Env):
             "termination_step": int(self.current_step),
             "step_delta": step_delta,
             "target_alive_at_termination": target_alive,
+            "min_range_m": float(getattr(missile, "_min_range_m", _nan_float())),
+            "directional_match_at_hit_check": float(getattr(missile, "_directional_match_at_hit_check", _nan_float())),
+            "P_hit_at_hit_check": float(getattr(missile, "_p_hit_at_hit_check", _nan_float())),
+            "speed_at_termination_mps": float(getattr(missile, "_speed_at_termination_mps", _nan_float())),
+            "closing_speed_at_termination_mps": float(getattr(missile, "_last_closing_speed_mps", _nan_float())),
         })
         self._launch_quality_done_step_records.append(dict(record))
 
@@ -2068,6 +2156,9 @@ class UavCombatEnv(gymnasium.Env):
         ]
         info["__launch_quality_done__"] = [
             dict(record) for record in self._launch_quality_done_step_records
+        ]
+        info["__evasion_events__"] = [
+            dict(record) for record in getattr(self, "_evasion_step_records", [])
         ]
         info["death_events"] = [dict(event) for event in self._death_events_step]
         info["effective_missile_launch_range_m"] = getattr(

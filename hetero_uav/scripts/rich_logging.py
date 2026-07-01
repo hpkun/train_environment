@@ -211,6 +211,15 @@ class RichExperimentLogger:
                 sim_time=sim_time,
                 event_type=reason,
             ))
+        for record in info.get("__evasion_events__", []) or []:
+            rows.append(self._missile_row(
+                record,
+                scenario=scenario,
+                episode_id=episode_id,
+                step=step,
+                sim_time=sim_time,
+                event_type="evasion",
+            ))
         if not rows:
             return
         for row in rows:
@@ -305,6 +314,7 @@ class RichExperimentLogger:
             "hit_success": int(hit) if not is_launch else "",
             "death_caused": death_caused,
             "raw_termination_reason": raw_reason if not is_launch else "",
+            "termination_reason": record.get("termination_reason", "") if not is_launch else "",
             "AO_rad": record.get("AO_rad", ""),
             "AO_deg": record.get("AO_deg", ""),
             "TA_rad": record.get("TA_rad", ""),
@@ -349,6 +359,19 @@ class RichExperimentLogger:
             "legacy_AO_2d_rad": record.get("legacy_AO_2d_rad", ""),
             "legacy_TA_2d_rad": record.get("legacy_TA_2d_rad", ""),
             "legacy_range_2d_m": record.get("legacy_range_2d_m", ""),
+            "min_range_m": record.get("min_range_m", ""),
+            "directional_match_at_hit_check": record.get("directional_match_at_hit_check", ""),
+            "P_hit_at_hit_check": record.get("P_hit_at_hit_check", ""),
+            "speed_at_termination_mps": record.get("speed_at_termination_mps", ""),
+            "closing_speed_at_termination_mps": record.get("closing_speed_at_termination_mps", ""),
+            "evasion_triggered": record.get("evasion_triggered", ""),
+            "evasion_team": record.get("evasion_team", ""),
+            "evasion_agent_id": record.get("evasion_agent_id", ""),
+            "incoming_missile_id": record.get("incoming_missile_id", ""),
+            "incoming_range_m": record.get("incoming_range_m", ""),
+            "incoming_closing_speed_mps": record.get("incoming_closing_speed_mps", ""),
+            "incoming_t_go_sec": record.get("incoming_t_go_sec", ""),
+            "evasion_mode": record.get("evasion_mode", ""),
         }
 
     def write_training_efficiency(self, total_steps: int, nan_detected: bool = False) -> None:

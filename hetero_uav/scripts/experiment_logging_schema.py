@@ -68,7 +68,7 @@ MISSILE_EVENTS_COLUMNS = [
     "team", "shooter_id", "shooter_role", "target_role", "hit",
     "lon", "lat", "altitude", "distance_to_target", "hit_success",
     "death_caused",
-    "raw_termination_reason",
+    "raw_termination_reason", "termination_reason",
     "AO_rad", "AO_deg",
     "TA_rad", "TA_deg",
     "flight_time_sec",
@@ -89,6 +89,11 @@ MISSILE_EVENTS_COLUMNS = [
     "selected_target_shot_quality_score", "selected_target_range_m",
     "selected_target_AO_rad", "selected_target_TA_rad",
     "selected_target_is_mav_observed", "candidate_count",
+    "min_range_m", "directional_match_at_hit_check", "P_hit_at_hit_check",
+    "speed_at_termination_mps", "closing_speed_at_termination_mps",
+    "evasion_triggered", "evasion_team", "evasion_agent_id",
+    "incoming_missile_id", "incoming_range_m",
+    "incoming_closing_speed_mps", "incoming_t_go_sec", "evasion_mode",
 ]
 
 MISSILE_TIMESERIES_COLUMNS = [

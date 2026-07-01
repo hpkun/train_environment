@@ -508,9 +508,11 @@ class MissileSimulator(BaseSimulator):
 
     @classmethod
     def create(cls, parent: AircraftSimulator, target: AircraftSimulator,
-               uid: str, missile_model: str = "AIM-9L"):
+               uid: str, missile_model: str = "AIM-9L",
+               guidance_config: dict | None = None):
         assert parent.dt == target.dt
         missile = MissileSimulator(uid, parent.color, missile_model, parent.dt)
+        missile.configure_guidance(guidance_config or {})
         missile.launch(parent)
         missile.target(target)
         return missile
@@ -535,7 +537,22 @@ class MissileSimulator(BaseSimulator):
         self._nyz_max = 30
         self._Rc = 300
         self._missile_speed_mps = 600.0
+        self._guidance_mode = "legacy"
+        self._min_range_m = np.nan
+        self._last_closing_speed_mps = np.nan
+        self._directional_match_at_hit_check = np.nan
+        self._p_hit_at_hit_check = np.nan
+        self._speed_at_termination_mps = np.nan
         self._t_arm = 0.15  # warhead safety-arming delay (s) — prevents same-frame detonation at launch
+
+    def configure_guidance(self, cfg: dict) -> None:
+        cfg = cfg or {}
+        mode = str(cfg.get("mode", self._guidance_mode)).lower()
+        self._guidance_mode = mode if mode in {"legacy", "pn"} else "legacy"
+        self._K = float(cfg.get("navigation_gain", self._K))
+        self._nyz_max = float(cfg.get("max_overload_g", self._nyz_max))
+        self._missile_speed_mps = float(cfg.get("speed_mps", self._missile_speed_mps))
+
 
     @property
     def is_alive(self):
@@ -570,6 +587,12 @@ class MissileSimulator(BaseSimulator):
         self.lon0, self.lat0, self.alt0 = parent.lon0, parent.lat0, parent.alt0
         self._t = 0
         self._status = MissileSimulator.LAUNCHED
+        self._termination_reason = ""
+        self._min_range_m = np.nan
+        self._last_closing_speed_mps = np.nan
+        self._directional_match_at_hit_check = np.nan
+        self._p_hit_at_hit_check = np.nan
+        self._speed_at_termination_mps = np.nan
         self.render_explosion = False
 
     def target(self, target: AircraftSimulator):
@@ -580,6 +603,10 @@ class MissileSimulator(BaseSimulator):
     def run(self):
         self._t += self.dt
         action, distance = self._guidance()
+        self._min_range_m = (
+            distance if not np.isfinite(self._min_range_m)
+            else min(float(self._min_range_m), float(distance))
+        )
 
         if (distance < self._Rc and self.target_aircraft.is_alive
                 and self._t > self._t_arm):  # warhead must be armed before detonation
@@ -600,6 +627,8 @@ class MissileSimulator(BaseSimulator):
             self._termination_reason = "target_dead"
         else:
             self._state_trans(action)
+            return
+        self._speed_at_termination_mps = float(np.linalg.norm(self.get_velocity()))
 
     def _roll_hit_probability(self) -> bool:
         """Paper 2.1.3 hit probability using missile velocity and LOS.
@@ -619,6 +648,8 @@ class MissileSimulator(BaseSimulator):
             directional_match = max(0.0, directional_match)
 
         P_hit = 0.05 + 0.95 * directional_match
+        self._directional_match_at_hit_check = float(directional_match)
+        self._p_hit_at_hit_check = float(P_hit)
         return np.random.random() < P_hit
 
     def log(self):
@@ -680,10 +711,71 @@ class MissileSimulator(BaseSimulator):
     def _guidance(self):
         los = self.target_aircraft.get_position() - self.get_position()
         distance = float(np.linalg.norm(los))
+        if self._guidance_mode == "pn":
+            a_cmd, diag = self.compute_pn_lateral_acceleration(
+                self.get_position(),
+                self.get_velocity(),
+                self.target_aircraft.get_position(),
+                self.target_aircraft.get_velocity(),
+                navigation_gain=self._K,
+                max_overload_g=self._nyz_max,
+            )
+            self._last_closing_speed_mps = float(diag.get("closing_speed_mps", np.nan))
+            return a_cmd, max(distance, 1e-8)
         desired_dir = self._unit(los, fallback=self.get_velocity())
         return desired_dir, max(distance, 1e-8)
 
-    def _state_trans(self, desired_dir):
+    @staticmethod
+    def compute_pn_lateral_acceleration(
+        missile_pos,
+        missile_vel,
+        target_pos,
+        target_vel,
+        *,
+        navigation_gain: float = 3.0,
+        max_overload_g: float = 30.0,
+    ):
+        r = np.asarray(target_pos, dtype=np.float64) - np.asarray(missile_pos, dtype=np.float64)
+        vm = np.asarray(missile_vel, dtype=np.float64)
+        vt = np.asarray(target_vel, dtype=np.float64)
+        v_rel = vt - vm
+        R = float(np.linalg.norm(r))
+        if not np.isfinite(R) or R < 1e-8:
+            return np.zeros(3, dtype=np.float64), {"range_m": np.nan, "closing_speed_mps": 0.0}
+        r_hat = r / R
+        closing_speed = -float(np.dot(v_rel, r_hat))
+        vm_norm = float(np.linalg.norm(vm))
+        if not np.isfinite(vm_norm) or vm_norm < 1e-8:
+            return np.zeros(3, dtype=np.float64), {"range_m": R, "closing_speed_mps": closing_speed}
+        missile_dir = vm / vm_norm
+        omega_los = np.cross(r, v_rel) / max(R * R, 1e-8)
+        a_cmd = float(navigation_gain) * closing_speed * np.cross(omega_los, missile_dir)
+        a_cmd = a_cmd - float(np.dot(a_cmd, missile_dir)) * missile_dir
+        acc_norm = float(np.linalg.norm(a_cmd))
+        max_acc = float(max_overload_g) * 9.81
+        if np.isfinite(acc_norm) and acc_norm > max_acc > 0.0:
+            a_cmd = a_cmd / acc_norm * max_acc
+        if not np.all(np.isfinite(a_cmd)):
+            a_cmd = np.zeros(3, dtype=np.float64)
+        return a_cmd.astype(np.float64), {
+            "range_m": R,
+            "closing_speed_mps": closing_speed,
+            "omega_los_norm": float(np.linalg.norm(omega_los)),
+            "acc_cmd_norm": float(np.linalg.norm(a_cmd)),
+        }
+
+    def _state_trans(self, action):
+        if self._guidance_mode == "pn":
+            current_vel = np.asarray(self.get_velocity(), dtype=np.float64)
+            new_velocity = current_vel + np.asarray(action, dtype=np.float64) * self.dt
+            new_dir = self._unit(new_velocity, fallback=current_vel)
+            self._velocity[:] = new_dir * self._missile_speed_mps
+            self._position[:] += self.dt * self.get_velocity()
+            self._geodetic[:] = NEU2LLA(*self.get_position(), self.lon0, self.lat0, self.alt0)
+            self._update_posture_from_velocity()
+            return
+
+        desired_dir = action
         current_dir = self._unit(self.get_velocity(), fallback=desired_dir)
         desired_dir = self._unit(desired_dir, fallback=current_dir)
         dot = float(np.clip(np.sum(current_dir * desired_dir), -1.0, 1.0))
