@@ -1738,6 +1738,10 @@ def _run_training_main() -> None:
                         "algorithm": "happo_reference_v0",
                         "policy_arch": args.policy_arch,
                         "reward_mode": args.reward_mode,
+                        "actor_obs_dim": actor_dim,
+                        "critic_state_dim": critic_dim,
+                        "entity_dim": getattr(policy, "entity_dim", None),
+                        "num_agents": len(env.red_ids),
                         "total_env_steps": total_steps,
                         "iteration": iteration,
                     }, indent=2), encoding="utf-8")
