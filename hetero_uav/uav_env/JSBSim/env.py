@@ -1481,6 +1481,7 @@ class UavCombatEnv(gymnasium.Env):
         self._missile_launch_counts[parent.uid] += 1
         if launch_quality is not None:
             launch_quality["missile_id"] = missile.uid
+            launch_quality["launch_step"] = launch_quality.get("current_step", self.current_step)
             launch_quality["shooter_num_left_after_launch"] = int(parent.num_left_missiles)
             self._launch_quality_records[missile.uid] = launch_quality
             self._launch_quality_step_records.append(dict(launch_quality))

@@ -50,6 +50,7 @@ class RichExperimentLogger:
         self._aircraft_writer = csv.DictWriter(self._aircraft_file, fieldnames=FILE_SCHEMAS["aircraft_timeseries.csv"])
         self._ep_rc_file = (directory / "episode_reward_components.csv").open("a", newline="", encoding="utf-8")
         self._ep_rc_writer = csv.DictWriter(self._ep_rc_file, fieldnames=FILE_SCHEMAS["episode_reward_components.csv"])
+        self._seen_missile_event_keys: set[tuple] = set()
 
     def close(self) -> None:
         self._train_file.close()
@@ -191,39 +192,21 @@ class RichExperimentLogger:
         method only persists those diagnostics to the rich logging schema.
         """
 
-        rows = []
-        for record in info.get("__launch_quality_step__", []) or []:
-            rows.append(self._missile_row(
-                record,
-                scenario=scenario,
-                episode_id=episode_id,
-                step=step,
-                sim_time=sim_time,
-                event_type="launch",
-            ))
-        for record in info.get("__launch_quality_done__", []) or []:
-            reason = str(record.get("termination_reason") or "termination")
-            rows.append(self._missile_row(
-                record,
-                scenario=scenario,
-                episode_id=episode_id,
-                step=step,
-                sim_time=sim_time,
-                event_type=reason,
-            ))
-        for record in info.get("__evasion_events__", []) or []:
-            rows.append(self._missile_row(
-                record,
-                scenario=scenario,
-                episode_id=episode_id,
-                step=step,
-                sim_time=sim_time,
-                event_type="evasion",
-            ))
-        if not rows:
-            return
-        for row in rows:
+        def _emit(record, event_type):
+            row = self._missile_row(record, scenario=scenario, episode_id=episode_id,
+                                    step=step, sim_time=sim_time, event_type=event_type)
+            key = self._missile_event_key(record, event_type, scenario, episode_id, step)
+            if key in self._seen_missile_event_keys:
+                return
+            self._seen_missile_event_keys.add(key)
             self._missile_writer.writerow(row)
+
+        for record in info.get("__launch_quality_step__", []) or []:
+            _emit(record, "launch")
+        for record in info.get("__launch_quality_done__", []) or []:
+            _emit(record, str(record.get("termination_reason") or "termination"))
+        for record in info.get("__evasion_events__", []) or []:
+            _emit(record, "evasion")
         self._missile_file.flush()
 
     def write_reward_components(
@@ -373,6 +356,32 @@ class RichExperimentLogger:
             "incoming_t_go_sec": record.get("incoming_t_go_sec", ""),
             "evasion_mode": record.get("evasion_mode", ""),
         }
+
+    @staticmethod
+    def _missile_event_key(
+        record: dict[str, Any], event_type: str, scenario: str,
+        episode_id: int | str, step: int | str,
+    ) -> tuple:
+        """Produce a de-duplication key from a raw env record (before CSV formatting).
+
+        Uses env-level fields (missile_id, current_step/launch_step, physics_frame,
+        termination_step) so duplicate physics-frame records within the same gym
+        step are collapsed into one CSV row.
+        """
+        missile_id = str(record.get("missile_id", ""))
+        if event_type == "launch":
+            launch_step = str(record.get("launch_step", record.get("current_step", step)))
+            phys_frame = str(record.get("physics_frame", ""))
+            return (str(scenario), str(episode_id), event_type, missile_id, launch_step, phys_frame)
+        if event_type in ("hit", "miss", "timeout", "target_dead",
+                          "p_hit_fail", "kill_cooldown_blocked", "multi_kill_blocked"):
+            return (str(scenario), str(episode_id), event_type, missile_id,
+                    str(record.get("termination_step", step)))
+        if event_type == "evasion":
+            return (str(scenario), str(episode_id), event_type, str(step),
+                    str(record.get("evasion_agent_id", "")),
+                    str(record.get("incoming_missile_id", "")))
+        return (str(scenario), str(episode_id), event_type, missile_id, str(step))
 
     def write_training_efficiency(self, total_steps: int, nan_detected: bool = False) -> None:
         elapsed = max(time.time() - self.start_time, 1e-9)
