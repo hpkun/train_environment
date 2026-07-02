@@ -423,7 +423,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--opponent-policy", default="brma_rule",
-                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule_safe_pursuit", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"])
+                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule"])
     parser.add_argument("--configs", nargs="*", default=None)
     parser.add_argument("--summary-json", default=None)
     parser.add_argument("--max-steps-override", type=int, default=None)

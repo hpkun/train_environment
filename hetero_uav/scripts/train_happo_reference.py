@@ -645,13 +645,8 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
             num_attention_heads=int(meta.get("num_attention_heads", 4)),
         ).to(device)
-    if policy_arch == "pure_happo":
+    if policy_arch in ("pure_happo", "pure_happo_tanh"):
         return PureHAPPOPolicy(
-            actor_obs_dim=actor_dim, critic_state_dim=critic_dim,
-            action_dim=3, num_agents=num_agents,
-        ).to(device)
-    if policy_arch == "pure_happo_tanh":
-        return PureHAPPOTanhPolicy(
             actor_obs_dim=actor_dim, critic_state_dim=critic_dim,
             action_dim=3, num_agents=num_agents,
         ).to(device)
@@ -968,8 +963,7 @@ def _run_training_main() -> None:
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--policy-arch", default="flat",
-                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent", "pure_happo", "pure_happo_tanh"],
-                        help="Policy architecture. pure_happo_tanh is the corrected tanh-squashed bounded-action baseline.")
+                        choices=["flat", "entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent", "pure_happo"])
     parser.add_argument("--brma-random-scale-mask", action="store_true",
                         help="Accepted for compatibility but rejected: unsafe without rollout mask replay.")
     parser.add_argument("--brma-biased-mask", action="store_true",
@@ -978,7 +972,7 @@ def _run_training_main() -> None:
                         help="Non-self entity drop probability for BRMA random scale mask.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
-                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule_safe_pursuit", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"])
+                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"])
     parser.add_argument("--reward-mode", default="happo_ref_v0")
     parser.add_argument("--ppo-epochs", type=int, default=2)
     parser.add_argument("--entropy-coef", type=float, default=0.02)
@@ -1086,7 +1080,7 @@ def _run_training_main() -> None:
             init_path = ROOT / init_path
         policy.load(init_path, map_location=device)
         print(f"Loaded init_checkpoint: {init_path}", flush=True)
-    if args.policy_arch in {"pure_happo", "pure_happo_tanh"}:
+    if args.policy_arch in {"pure_happo"}:
         trainer = PureHAPPOTrainer(
             policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
             clip_param=args.clip_param, entropy_coef=args.entropy_coef,
@@ -1676,7 +1670,7 @@ def _run_training_main() -> None:
             if imitation_active:
                 imitation_batch = _sample_uav_imitation_batch(
                     uav_imitation_data, args.uav_imitation_batch_size, device)
-            if args.policy_arch in {"pure_happo", "pure_happo_tanh"}:
+            if args.policy_arch in {"pure_happo"}:
                 stats = trainer.update(buffer)
             else:
                 stats = trainer.update(
@@ -1889,7 +1883,7 @@ def _run_training_main() -> None:
                     alive_agents=dict(zip(("red", "blue"), _alive_counts(env))),
                 )
                 eval_configs_for_this_run = args.eval_configs or DEFAULT_EVAL_CONFIGS
-                if args.policy_arch in {"pure_happo", "pure_happo_tanh"}:
+                if args.policy_arch in {"pure_happo"}:
                     import yaml
                     filtered = []
                     for cfg in eval_configs_for_this_run:

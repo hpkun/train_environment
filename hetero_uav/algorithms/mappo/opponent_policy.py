@@ -47,9 +47,6 @@ class OpponentPolicy:
         "rule_nearest",
         "greedy_fsm",
         "brma_rule",
-        "brma_rule_safe_pursuit",
-        "tam_greedy_easy",
-        "brma_rule_safe_pursuit_easy",
     }
 
     EASY_SAFE_PURSUIT_DELAY_STEPS = 200

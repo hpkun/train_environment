@@ -22,15 +22,11 @@ def _mlp(in_dim: int, out_dim: int) -> nn.Sequential:
     )
 
 
-class PureHAPPOPolicy(nn.Module):
-    """Paper-aligned HAPPO baseline policy.
+class LegacyClampPureHAPPOPolicy(nn.Module):
+    """Legacy clamp-Gaussian HAPPO policy (pre-tanh).
 
-    Args:
-        actor_obs_dim:    per-agent observation dimension (default 96)
-        critic_state_dim: centralized critic state dimension (default 480)
-        action_dim:       action space dimension (default 3)
-        num_agents:       number of agents (e.g. 3 for 3v2)
-        init_log_std:     initial log std for all agents
+    Kept only for backward-compatible checkpoint loading.  New training must use
+    ``PureHAPPOPolicy`` (tanh-squashed Gaussian, below).
     """
 
     def __init__(self, actor_obs_dim: int = 96, critic_state_dim: int = 480,
@@ -180,13 +176,12 @@ class PureHAPPOPolicy(nn.Module):
         self.load_state_dict(torch.load(path, map_location=map_location, weights_only=True))
 
 
-class PureHAPPOTanhPolicy(PureHAPPOPolicy):
-    """Pure-HAPPO with tanh-squashed Gaussian action accounting.
+class PureHAPPOPolicy(LegacyClampPureHAPPOPolicy):
+    """Paper-aligned HAPPO baseline with tanh-squashed Gaussian bounded actions.
 
-    This keeps the independent actor / centralized critic structure from
-    ``PureHAPPOPolicy`` but uses the same transformed distribution for rollout
-    and PPO replay. The historical ``PureHAPPOPolicy`` clamp behavior is left
-    unchanged for baseline compatibility.
+    Independent per-agent actors + shared V critic.  Uses tanh-squashed
+    Gaussian with Jacobian log-prob correction for PPO replay consistency.
+    This is the canonical ``pure_happo`` policy for all formal experiments.
     """
 
     tanh_eps = 1e-6
