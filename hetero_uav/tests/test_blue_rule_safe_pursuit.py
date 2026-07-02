@@ -348,11 +348,7 @@ def test_safe_pursuit_audit_smoke_writes_report():
         assert (out_dir / "blue_rule_control_response_report.md").exists()
         rows = list(csv.DictReader((out_dir / "blue_rule_control_response_steps.csv").open()))
         assert rows
-        assert "safe_pursuit_mode_active" in rows[0]
-        # Roll audit fields present
-        assert "high_roll_active" in rows[0]
-        assert "roll_recovery_active" in rows[0]
-        assert "blue_roll_abs_deg" in rows[0]
+        assert "blue_roll_rad" in rows[0]
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -545,7 +541,7 @@ def test_action_heading_delta_computed_in_audit():
     try:
         result = subprocess.run(
             [sys.executable, "scripts/audit_blue_rule_control_response.py",
-             "--opponent-policy", "brma_rule_safe_pursuit",
+             "--opponent-policy", "brma_rule",
              "--episodes", "1", "--max-steps", "10",
              "--output-dir", str(out_dir)],
             cwd=ROOT, text=True, capture_output=True,

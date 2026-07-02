@@ -351,7 +351,8 @@ def _full_geometry_meta(policy_arch: str, entity_dim, args=None) -> dict:
 def _pure_happo_meta(policy, args=None) -> dict:
     """Extra meta fields for paper-aligned pure HAPPO baseline."""
     cls_name = getattr(getattr(policy, "__class__", None), "__name__", "")
-    if cls_name not in {"PureHAPPOPolicy", "PureHAPPOTanhPolicy"}:
+    if cls_name not in {"PureHAPPOPolicy", "PureHAPPOTanhPolicy",
+                        "LegacyClampPureHAPPOPolicy"}:
         return {}
     meta = {
         "num_agents": int(policy.num_agents),
@@ -361,13 +362,10 @@ def _pure_happo_meta(policy, args=None) -> dict:
         "global_v_critic": True,
         "sequential_correction_factor": True,
         "happo_update_unit": "agent",
+        "policy_arch": "pure_happo",
+        "bounded_action_distribution": "tanh_squashed_gaussian",
+        "logprob_correction": "tanh_jacobian",
     }
-    if cls_name == "PureHAPPOTanhPolicy":
-        meta.update({
-            "policy_arch": "pure_happo_tanh",
-            "bounded_action_distribution": "tanh_squashed_gaussian",
-            "logprob_correction": "tanh_jacobian",
-        })
     return meta
 
 
