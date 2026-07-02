@@ -82,12 +82,17 @@ def test_tanh_policy_trainer_update_no_nan():
     assert np.isfinite(metrics["critic_loss"])
 
 
-def test_old_pure_happo_policy_still_builds_separately():
-    old = PureHAPPOPolicy(num_agents=3)
-    new = _build_policy("pure_happo_tanh", 96, 480, torch.device("cpu"), num_agents=3)
-    assert old.__class__.__name__ == "PureHAPPOPolicy"
-    assert new.__class__.__name__ == "PureHAPPOTanhPolicy"
-    meta = _pure_happo_meta(new)
-    assert meta["policy_arch"] == "pure_happo_tanh"
-    assert meta["bounded_action_distribution"] == "tanh_squashed_gaussian"
-    assert meta["logprob_correction"] == "tanh_jacobian"
+def test_pure_happo_is_tanh_squashed():
+    """PureHAPPOPolicy now IS the tanh-squashed version. Legacy clamp is LegacyClampPureHAPPOPolicy."""
+    policy = _build_policy("pure_happo", 96, 480, torch.device("cpu"), num_agents=3)
+    assert policy.__class__.__name__ == "PureHAPPOPolicy"
+    meta = _pure_happo_meta(policy)
+    assert meta["policy_arch"] == "pure_happo"
+    assert meta.get("bounded_action_distribution", "") == "tanh_squashed_gaussian"
+    assert meta.get("logprob_correction", "") == "tanh_jacobian"
+
+
+def test_legacy_clamp_policy_still_available():
+    from algorithms.pure_happo.policy import LegacyClampPureHAPPOPolicy
+    old = LegacyClampPureHAPPOPolicy(num_agents=3, actor_obs_dim=96, critic_state_dim=480)
+    assert old.__class__.__name__ == "LegacyClampPureHAPPOPolicy"

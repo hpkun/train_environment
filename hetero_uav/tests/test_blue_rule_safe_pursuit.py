@@ -85,10 +85,10 @@ def _heading_delta(action: np.ndarray, own_heading: float = 0.0) -> float:
     return abs(_wrap_pi(float(action[1]) * math.pi - own_heading))
 
 
-def test_opponent_policy_exposes_safe_pursuit_mode():
+def test_opponent_policy_exposes_brma_rule_mode():
     from algorithms.mappo.opponent_policy import OpponentPolicy
-
-    assert "brma_rule_safe_pursuit" in OpponentPolicy.MODES
+    assert "brma_rule" in OpponentPolicy.MODES
+    # safe_pursuit removed from formal modes; accessed via pursuit_mode kwarg internally
 
 
 def test_default_brma_rule_path_matches_explicit_delta10():
@@ -294,7 +294,7 @@ def test_safe_pursuit_updates_and_uses_last_seen_for_15_steps_then_center_cruise
     assert abs(_wrap_pi(float(cruise[1]) * math.pi - math.pi)) < math.radians(1.0)
 
 
-def test_primary_entrypoint_help_includes_safe_pursuit():
+def test_primary_entrypoint_help_includes_brma_rule():
     env = os.environ.copy()
     env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     for script in (
@@ -313,7 +313,9 @@ def test_primary_entrypoint_help_includes_safe_pursuit():
             timeout=60,
         )
         assert result.returncode == 0, result.stderr[-1000:]
-        assert "brma_rule_safe_pursuit" in result.stdout
+        assert "brma_rule" in result.stdout
+        # safe_pursuit removed from formal training entry points
+        assert "safe_pursuit" not in result.stdout
 
 
 def test_safe_pursuit_audit_smoke_writes_report():
@@ -327,7 +329,7 @@ def test_safe_pursuit_audit_smoke_writes_report():
                 sys.executable,
                 "scripts/audit_blue_rule_control_response.py",
                 "--opponent-policy",
-                "brma_rule_safe_pursuit",
+                "brma_rule",
                 "--episodes",
                 "1",
                 "--max-steps",
@@ -343,8 +345,8 @@ def test_safe_pursuit_audit_smoke_writes_report():
             timeout=180,
         )
         assert result.returncode == 0, result.stderr[-1000:]
-        assert (out_dir / "blue_rule_safe_pursuit_report.md").exists()
-        rows = list(csv.DictReader((out_dir / "blue_rule_safe_pursuit_steps.csv").open()))
+        assert (out_dir / "blue_rule_control_response_report.md").exists()
+        rows = list(csv.DictReader((out_dir / "blue_rule_control_response_steps.csv").open()))
         assert rows
         assert "safe_pursuit_mode_active" in rows[0]
         # Roll audit fields present
@@ -550,7 +552,7 @@ def test_action_heading_delta_computed_in_audit():
             encoding="utf-8", errors="replace", timeout=180,
         )
         assert result.returncode == 0, result.stderr[-1000:]
-        with open(out_dir / "blue_rule_safe_pursuit_steps.csv") as f:
+        with open(out_dir / "blue_rule_control_response_steps.csv") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
         assert len(rows) > 5
@@ -559,7 +561,7 @@ def test_action_heading_delta_computed_in_audit():
         # At least one row should have a non-empty delta (step 2+)
         assert len(non_empty_deltas) > 0, "action_heading_delta_from_prev_rad is all empty"
         # Check unique death fields exist in summary
-        with open(out_dir / "blue_rule_safe_pursuit_report.md", encoding="utf-8") as f:
+        with open(out_dir / "blue_rule_control_response_report.md", encoding="utf-8") as f:
             report = f.read()
         assert "blue_unique_death_count" in report
     finally:
