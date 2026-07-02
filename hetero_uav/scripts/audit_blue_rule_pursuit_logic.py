@@ -503,7 +503,7 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=300)
     parser.add_argument("--output-dir", default="outputs/blue_rule_pursuit_audit")
-    parser.add_argument("--opponent-policy", default="brma_rule", choices=["brma_rule"])
+    parser.add_argument("--opponent-policy", default="brma_rule", choices=["brma_rule", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"])
     parser.add_argument("--red-mode", default="zero", choices=["zero", "straight_outward"])
     parser.add_argument("--export-acmi", action="store_true")
     args = parser.parse_args()

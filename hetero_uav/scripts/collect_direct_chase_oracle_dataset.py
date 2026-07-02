@@ -190,7 +190,7 @@ def main() -> int:
     parser.add_argument("--summary-json", default=DEFAULT_SUMMARY)
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=1000)
-    parser.add_argument("--opponent-policy", choices=["brma_rule", "zero"], default="brma_rule")
+    parser.add_argument("--opponent-policy", choices=["brma_rule", "zero", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"], default="brma_rule")
     parser.add_argument("--max-samples", type=int, default=100000)
     parser.add_argument("--stop-when-samples-reached", action="store_true", default=True)
     parser.add_argument("--seed", type=int, default=0)

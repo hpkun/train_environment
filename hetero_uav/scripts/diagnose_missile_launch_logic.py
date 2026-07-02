@@ -209,7 +209,7 @@ def main() -> None:
     parser.add_argument("--red-policy", choices=["zero", "random"], default="zero")
     parser.add_argument(
         "--blue-policy",
-        choices=["zero", "rule_nearest", "greedy_fsm", "random"],
+        choices=["zero", "rule_nearest", "greedy_fsm", "random", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"],
         default="rule_nearest",
     )
     parser.add_argument(

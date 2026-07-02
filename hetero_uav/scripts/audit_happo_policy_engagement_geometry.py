@@ -203,7 +203,7 @@ def main() -> int:
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=1000)
-    parser.add_argument("--opponent-policy", choices=["zero", "brma_rule"], default="brma_rule")
+    parser.add_argument("--opponent-policy", choices=["zero", "brma_rule", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"], default="brma_rule")
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
         "--output-json",

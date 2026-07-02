@@ -282,7 +282,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--blue-policy",
-        choices=["zero", "rule_nearest", "greedy_fsm"],
+        choices=["zero", "rule_nearest", "greedy_fsm", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"],
         default="zero",
     )
     parser.add_argument("--output-json", default="outputs/environment_audit/mav_flight_stability.json")

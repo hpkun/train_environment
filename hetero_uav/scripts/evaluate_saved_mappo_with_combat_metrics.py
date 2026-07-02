@@ -108,7 +108,8 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--opponent-policy",
-                        choices=["zero", "random", "rule_nearest", "greedy_fsm"],
+                        choices=["zero", "random", "rule_nearest", "greedy_fsm",
+                                 "tam_greedy_easy", "brma_rule_safe_pursuit_easy"],
                         default="rule_nearest")
     parser.add_argument("--configs", nargs="+", default=DEFAULT_CONFIGS)
     parser.add_argument(

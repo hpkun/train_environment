@@ -313,7 +313,7 @@ def main() -> int:
     parser.add_argument("--output", default=None)
     parser.add_argument("--summary-json", default=None)
     parser.add_argument("--opponent-policy", default="brma_rule",
-                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule_safe_pursuit"])
+                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule_safe_pursuit", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--stochastic", action="store_true",
                         help="Use deterministic=False for policy (closer to training rollout)")

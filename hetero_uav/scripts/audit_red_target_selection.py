@@ -256,7 +256,7 @@ def main() -> int:
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--checkpoint", default=None, help="Optional HAPPO checkpoint to use for red actions.")
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--blue-policy", default="zero", choices=["zero", "brma_rule"])
+    parser.add_argument("--blue-policy", default="zero", choices=["zero", "brma_rule", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"])
     parser.add_argument("--output-dir", default="outputs/environment_audit/red_target_selection")
     args = parser.parse_args()
 

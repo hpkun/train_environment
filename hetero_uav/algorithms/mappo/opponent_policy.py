@@ -35,9 +35,34 @@ class OpponentPolicy:
       (BRMA-MAPPO paper-aligned blue opponent).
     - ``brma_rule_safe_pursuit``: same target assignment as ``brma_rule`` with
       an opt-in JSBSim safe-pursuit heading adaptation.
+    - ``tam_greedy_easy``: weak TAM-style greedy FSM for blue pressure
+      diagnostics.
+    - ``brma_rule_safe_pursuit_easy``: capped/probabilistic safe pursuit for
+      intermediate blue pressure diagnostics.
     """
 
-    MODES = {"zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule_safe_pursuit"}
+    MODES = {
+        "zero",
+        "random",
+        "rule_nearest",
+        "greedy_fsm",
+        "brma_rule",
+        "brma_rule_safe_pursuit",
+        "tam_greedy_easy",
+        "brma_rule_safe_pursuit_easy",
+    }
+
+    EASY_SAFE_PURSUIT_DELAY_STEPS = 200
+    EASY_PURSUIT_PROB = 0.6
+    EASY_SPEED_CAP = 0.7
+    EASY_HEADING_DELTA_CAP = 0.15
+    EASY_PITCH_CAP = 0.35
+    EASY_EXTEND_STEPS = 25
+    EASY_LOST_TARGET_TURN_BACK_LIMIT = 15
+    TAM_EASY_SPEED_CAP = 0.65
+    TAM_EASY_SEARCH_SPEED = 0.55
+    TAM_EASY_HEADING_DELTA_CAP = 0.12
+    TAM_EASY_PITCH_CAP = 0.25
 
     def __init__(self, mode: str = "zero", seed: int | None = None):
         if mode not in self.MODES:
@@ -54,6 +79,10 @@ class OpponentPolicy:
         self.used_env_refresh_engaged_targets = False
         self.used_env_own_kinematics = False
         self.used_env_own_positions = False
+        self.easy_step_count = 0
+        self.easy_mode_states: dict[str, str] = {}
+        self.easy_extend_steps: dict[str, int] = {}
+        self.easy_lost_steps: dict[str, int] = {}
 
     def reset_memory(self) -> None:
         """Clear per-agent target persistence and state history."""
@@ -65,6 +94,10 @@ class OpponentPolicy:
         self.used_env_refresh_engaged_targets = False
         self.used_env_own_kinematics = False
         self.used_env_own_positions = False
+        self.easy_step_count = 0
+        self.easy_mode_states.clear()
+        self.easy_extend_steps.clear()
+        self.easy_lost_steps.clear()
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
             from rule_based_agent import reset_rule_memory
@@ -82,6 +115,7 @@ class OpponentPolicy:
         self.used_env_own_positions = False
         own_kinematics = self._env_blue_own_kinematics(env)
         own_positions = self._env_blue_own_positions(env)
+        self.easy_step_count += 1
         if self.mode == "zero":
             return {
                 bid: np.zeros(3, dtype=np.float32)
@@ -112,6 +146,22 @@ class OpponentPolicy:
                     assigned_targets.add(target_slot)
                     self.last_assigned_targets[bid] = target_slot
             return actions
+        if self.mode == "tam_greedy_easy":
+            actions = {}
+            for index, bid in enumerate(blue_ids):
+                ownship = self._ownship_context(bid, own_kinematics, own_positions)
+                action, state = self._tam_greedy_easy_action(
+                    obs_dict.get(bid, {}),
+                    blue_id=bid,
+                    agent_index=index,
+                    ownship=ownship,
+                )
+                actions[bid] = action
+                self.easy_mode_states[bid] = state
+                self.last_states[bid] = state
+            return actions
+        if self.mode == "brma_rule_safe_pursuit_easy":
+            return self._brma_rule_safe_pursuit_easy_actions(obs_dict, blue_ids, env)
         if self.mode in {"brma_rule", "brma_rule_safe_pursuit"}:
             pursuit_mode = "safe_pursuit" if self.mode == "brma_rule_safe_pursuit" else "delta10"
             return self._brma_rule_actions(obs_dict, blue_ids, env, pursuit_mode=pursuit_mode)
@@ -176,6 +226,45 @@ class OpponentPolicy:
             pursuit_mode=pursuit_mode,
         )
 
+    def _brma_rule_safe_pursuit_easy_actions(self, obs_dict, blue_ids, env) -> dict[str, np.ndarray]:
+        pursuit_mode = "delta10"
+        if self.easy_step_count > self.EASY_SAFE_PURSUIT_DELAY_STEPS:
+            if float(self.rng.random()) < self.EASY_PURSUIT_PROB:
+                pursuit_mode = "safe_pursuit"
+        raw_actions = self._brma_rule_actions(obs_dict, blue_ids, env, pursuit_mode=pursuit_mode)
+        own_kinematics = self._env_blue_own_kinematics(env)
+        own_positions = self._env_blue_own_positions(env)
+        actions: dict[str, np.ndarray] = {}
+        for index, bid in enumerate(blue_ids):
+            obs = obs_dict.get(bid, {})
+            ownship = self._ownship_context(bid, own_kinematics, own_positions)
+            target, _target_idx = self._select_nearest_target(obs)
+            if self.easy_extend_steps.get(bid, 0) > 0:
+                self.easy_extend_steps[bid] -= 1
+                actions[bid] = self._easy_extend_action(obs, index, ownship, speed=0.55)
+                self.last_states[bid] = "extend"
+                continue
+            if target is None:
+                self.easy_lost_steps[bid] = self.easy_lost_steps.get(bid, 0) + 1
+                if self.easy_lost_steps[bid] > self.EASY_LOST_TARGET_TURN_BACK_LIMIT:
+                    actions[bid] = self._easy_extend_action(obs, index, ownship, speed=0.50)
+                    self.last_states[bid] = "search"
+                    continue
+            else:
+                self.easy_lost_steps[bid] = 0
+                if self._distance(target) < 0.08:
+                    self.easy_extend_steps[bid] = self.EASY_EXTEND_STEPS
+                    actions[bid] = self._easy_extend_action(obs, index, ownship, speed=0.55)
+                    self.last_states[bid] = "extend"
+                    continue
+            current_heading = self._own_heading_norm(obs, ownship)
+            actions[bid] = self._postprocess_easy_safe_pursuit_action(
+                raw_actions.get(bid, np.zeros(3, dtype=np.float32)),
+                current_heading_norm=current_heading,
+            )
+            self.last_states[bid] = f"easy_{pursuit_mode}"
+        return actions
+
     @staticmethod
     def _rule_nearest_action(obs: dict) -> np.ndarray:
         enemy_states = np.asarray(obs.get("enemy_states", []), dtype=np.float32)
@@ -206,6 +295,100 @@ class OpponentPolicy:
         return np.clip(action, -1.0, 1.0).astype(np.float32)
 
     LOST_TARGET_TURN_BACK_LIMIT = 50  # env steps before giving up
+
+    def _tam_greedy_easy_action(
+        self,
+        obs: dict,
+        blue_id: str,
+        agent_index: int = 0,
+        ownship: dict | None = None,
+    ) -> tuple[np.ndarray, str]:
+        if not obs:
+            return np.array([0.0, 0.0, 0.35], dtype=np.float32), "search"
+
+        if self._scalar(obs.get("missile_warning", 0.0)) > 0.0:
+            self.easy_extend_steps.pop(blue_id, None)
+            heading = self._capped_heading(
+                self._own_heading_norm(obs, ownship),
+                self._fallback_heading(obs, agent_index, scale=0.5),
+                self.TAM_EASY_HEADING_DELTA_CAP,
+            )
+            return self._clip_action([0.20, heading, 0.65]), "evade"
+
+        if self.easy_extend_steps.get(blue_id, 0) > 0:
+            self.easy_extend_steps[blue_id] -= 1
+            return self._easy_extend_action(obs, agent_index, ownship, speed=0.50), "extend"
+
+        target, _target_idx = self._select_nearest_target(obs)
+        if target is None:
+            self.easy_lost_steps[blue_id] = self.easy_lost_steps.get(blue_id, 0) + 1
+            if self.easy_lost_steps[blue_id] > self.EASY_LOST_TARGET_TURN_BACK_LIMIT:
+                return self._easy_extend_action(obs, agent_index, ownship, speed=0.50), "extend"
+            return self._easy_search_action(obs, agent_index, ownship), "search"
+
+        self.easy_lost_steps[blue_id] = 0
+        dist = self._distance(target)
+        if dist < 0.08:
+            self.easy_extend_steps[blue_id] = self.EASY_EXTEND_STEPS
+            return self._easy_extend_action(obs, agent_index, ownship, speed=0.50), "extend"
+
+        current_heading = self._own_heading_norm(obs, ownship)
+        target_heading = _wrap_heading_norm(current_heading + float(target[1]) * 0.35)
+        heading = self._capped_heading(current_heading, target_heading, self.TAM_EASY_HEADING_DELTA_CAP)
+        pitch = float(target[2]) * 1.5 if target.size >= 3 else 0.0
+        pitch = float(np.clip(pitch, -self.TAM_EASY_PITCH_CAP, self.TAM_EASY_PITCH_CAP))
+        state = "attack" if dist < 0.30 and abs(float(target[1])) < 0.25 else "approach"
+        speed = 0.65 if state == "attack" else 0.60
+        return self._clip_action([pitch, heading, speed]), state
+
+    def _easy_search_action(self, obs: dict, agent_index: int, ownship: dict | None) -> np.ndarray:
+        current_heading = self._own_heading_norm(obs, ownship)
+        offset = 0.03 if agent_index % 2 == 0 else -0.03
+        heading = self._capped_heading(
+            current_heading,
+            _wrap_heading_norm(current_heading + offset),
+            self.TAM_EASY_HEADING_DELTA_CAP,
+        )
+        return self._clip_action([0.0, heading, self.TAM_EASY_SEARCH_SPEED])
+
+    def _easy_extend_action(
+        self,
+        obs: dict,
+        agent_index: int,
+        ownship: dict | None,
+        speed: float = 0.55,
+    ) -> np.ndarray:
+        current_heading = self._own_heading_norm(obs, ownship)
+        offset = 0.02 if agent_index % 2 == 0 else -0.02
+        heading = self._capped_heading(
+            current_heading,
+            _wrap_heading_norm(current_heading + offset),
+            self.TAM_EASY_HEADING_DELTA_CAP,
+        )
+        return self._clip_action([0.0, heading, min(float(speed), 0.65)])
+
+    @classmethod
+    def _capped_heading(cls, current_heading_norm: float, desired_heading_norm: float,
+                        cap_norm: float) -> float:
+        delta = _wrap_heading_norm(float(desired_heading_norm) - float(current_heading_norm))
+        delta = float(np.clip(delta, -float(cap_norm), float(cap_norm)))
+        return _wrap_heading_norm(float(current_heading_norm) + delta)
+
+    @classmethod
+    def _postprocess_easy_safe_pursuit_action(
+        cls, action: np.ndarray, current_heading_norm: float
+    ) -> np.ndarray:
+        arr = np.asarray(action, dtype=np.float32).reshape(-1)
+        if arr.size < 3:
+            arr = np.pad(arr, (0, 3 - arr.size), mode="constant")
+        pitch = float(np.clip(arr[0], -cls.EASY_PITCH_CAP, cls.EASY_PITCH_CAP))
+        heading = cls._capped_heading(
+            current_heading_norm,
+            float(arr[1]),
+            cls.EASY_HEADING_DELTA_CAP,
+        )
+        speed = float(np.clip(arr[2], -1.0, cls.EASY_SPEED_CAP))
+        return cls._clip_action([pitch, heading, speed])
 
     def _greedy_fsm_action(
         self, obs: dict, agent_index: int = 0,

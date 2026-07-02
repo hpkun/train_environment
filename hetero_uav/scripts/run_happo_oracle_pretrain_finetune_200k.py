@@ -141,7 +141,7 @@ def main() -> int:
     parser.add_argument("--critic-lr", type=float, default=5e-4)
     parser.add_argument("--eval-interval-steps", type=int, default=25000)
     parser.add_argument("--train-eval-episodes", type=int, default=2)
-    parser.add_argument("--opponent-policy", choices=["brma_rule", "zero"], default="brma_rule")
+    parser.add_argument("--opponent-policy", choices=["brma_rule", "zero", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"], default="brma_rule")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
     if args.device == "cuda":

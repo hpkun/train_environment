@@ -257,7 +257,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", default="outputs/main_mappo_experiment")
-    parser.add_argument("--opponent-policy", choices=["rule_nearest", "greedy_fsm", "brma_rule"], default="greedy_fsm")
+    parser.add_argument("--opponent-policy", choices=["rule_nearest", "greedy_fsm", "brma_rule", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"], default="greedy_fsm")
     parser.add_argument('--eval-during-training', action='store_true')
     parser.add_argument('--eval-interval-steps', type=int, default=50000)
     parser.add_argument('--train-eval-episodes', type=int, default=5)

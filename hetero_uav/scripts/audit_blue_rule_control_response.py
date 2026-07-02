@@ -764,7 +764,7 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=300)
     parser.add_argument("--output-dir", default="outputs/blue_rule_control_response_audit")
     parser.add_argument("--opponent-policy", default="brma_rule",
-                        choices=["brma_rule", "brma_rule_safe_pursuit"])
+                        choices=["brma_rule", "brma_rule_safe_pursuit", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"])
     parser.add_argument("--blue-rule-mode", default=None, choices=["safe_pursuit"])
     parser.add_argument("--red-mode", default="zero", choices=["zero", "straight_outward"])
     args = parser.parse_args()

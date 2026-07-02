@@ -46,7 +46,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--opponent-policy",
-                        choices=["zero", "random", "rule_nearest", "greedy_fsm"],
+                        choices=["zero", "random", "rule_nearest", "greedy_fsm",
+                                 "tam_greedy_easy", "brma_rule_safe_pursuit_easy"],
                         default="rule_nearest")
     parser.add_argument("--obs-adapter-version", choices=["v1", "v2"],
                         default=None)

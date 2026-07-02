@@ -133,7 +133,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Probe red UAV missile launch envelope")
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--steps", type=int, default=80)
-    parser.add_argument("--blue-policy", choices=["zero", "brma_rule"], default="zero")
+    parser.add_argument("--blue-policy", choices=["zero", "brma_rule", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"], default="zero")
     parser.add_argument(
         "--output-json",
         default="outputs/environment_audit/red_launch_envelope/red_missile_launch_envelope_probe.json",

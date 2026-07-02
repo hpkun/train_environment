@@ -367,7 +367,7 @@ def main() -> int:
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--opponent-policy", default="brma_rule",
-                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule_safe_pursuit"])
+                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "brma_rule_safe_pursuit", "tam_greedy_easy", "brma_rule_safe_pursuit_easy"])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--label", default=None)
     args = parser.parse_args()
