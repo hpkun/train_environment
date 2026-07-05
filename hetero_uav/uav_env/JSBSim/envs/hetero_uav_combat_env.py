@@ -135,10 +135,14 @@ class HeteroUavCombatEnv(UavCombatEnv):
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
-        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8"}:
+        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8"}:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
         self._tam_reward_scale = float(kwargs.pop("tam_reward_scale", 0.05))
+        _happo_v1_cfg = kwargs.pop("happo_ref_v1_mav_support", None) or {}
+        self.happo_ref_v1_mav_support_config = deepcopy(_happo_v1_cfg)
+        if hetero_reward_mode == "happo_ref_v1_mav_support" and not self.happo_ref_v1_mav_support_config:
+            raise ValueError("happo_ref_v1_mav_support mode requires happo_ref_v1_mav_support config block")
         # TAM paper reward v2 config
         _tam_cfg = kwargs.pop("tam_paper_reward_v2", None) or {}
         self.tam_paper_reward_v2_config = deepcopy(_tam_cfg)
@@ -221,6 +225,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
     def _brma_homo_reset_episode_state(self) -> None:
         self._brma_homo_terminal_applied = False
+
+    def _happo_ref_v1_reset_episode_state(self) -> None:
+        self._happo_v1_mav_death_penalized = False
+        self._happo_v1_mav_team_credit_used = 0.0
 
     @staticmethod
     def _brma_homo_td15(distance_m: float) -> float:
@@ -357,6 +365,295 @@ class HeteroUavCombatEnv(UavCombatEnv):
             comp["total"] = float(base_rewards.get(rid, 0.0))
             components[rid] = comp
         return base_rewards, components
+
+    def _compute_happo_ref_v1_mav_support(self, base_rewards: dict, components: dict):
+        """HAPPO reference v1: keep v0 UAV rewards, replace MAV reward.
+
+        MAV total is rebuilt from BRMA flight base plus TAM-style safety,
+        support, and event terms.  This method intentionally does not call the
+        v7/TAM helpers, so their death/team-credit state is not mutated.
+        """
+        self._ensure_happo_ref_v0_reward_component_keys(components)
+        cfg = self.happo_ref_v1_mav_support_config
+        scale = float(cfg.get("scale", 1.0))
+        mav_id = next((rid for rid in self.red_ids if self.agent_roles.get(rid) == "mav"),
+                      self.red_ids[0] if self.red_ids else None)
+
+        # UAV side: copied from happo_ref_v0 UAV logic. MAV is excluded.
+        for rid in self.red_ids:
+            if self.agent_roles.get(rid, "") == "mav":
+                continue
+            sim = self.red_planes.get(rid)
+            comp = components.setdefault(rid, {})
+            if sim is None:
+                continue
+            safety = 0.0
+            if sim.is_alive:
+                obs = self._last_step_obs.get(rid, {})
+                altitude = float(np.asarray(obs.get("altitude", [0.0])).reshape(-1)[0]) if obs else 0.0
+                velocity = np.asarray(obs.get("velocity", [0.0, 0.0, 0.0]), dtype=np.float32).reshape(-1)
+                speed = float(np.linalg.norm(velocity)) if velocity.size else 0.0
+                safety += 0.002 if 2500.0 <= altitude <= 12000.0 else -0.003
+                safety += 0.002 if 120.0 <= speed <= 420.0 else -0.003
+            comp["safety"] = float(np.clip(safety, -0.01, 0.01))
+            base_rewards[rid] = base_rewards.get(rid, 0.0) + comp["safety"]
+
+            if not sim.is_alive:
+                if rid not in self._uav_death_penalized:
+                    comp["death_penalty"] = -2.0
+                    self._uav_death_penalized.add(rid)
+                    base_rewards[rid] = base_rewards.get(rid, 0.0) - 2.0
+                continue
+
+            obs = self._last_step_obs.get(rid, {})
+            enemy_geo = np.asarray(obs.get("enemy_geo_states", []), dtype=np.float32)
+            enemy_alive = np.asarray(obs.get("enemy_alive_mask", []), dtype=np.float32)
+            window = 0.0
+            if enemy_geo.ndim == 2 and enemy_alive.ndim == 1:
+                for i in range(min(enemy_geo.shape[0], enemy_alive.shape[0])):
+                    if enemy_alive[i] < 0.5:
+                        continue
+                    distance_norm = abs(float(enemy_geo[i, 2]))
+                    ata_norm = abs(float(enemy_geo[i, 3]))
+                    aa_norm = abs(float(enemy_geo[i, 4]))
+                    if distance_norm < 0.35:
+                        window += 0.005
+                    if ata_norm < 0.25:
+                        window += 0.005
+                    if aa_norm < 0.35:
+                        window += 0.003
+            comp["uav_attack_window"] = float(np.clip(window, 0.0, 0.04))
+            base_rewards[rid] = base_rewards.get(rid, 0.0) + comp["uav_attack_window"]
+
+            fired = int(self._missile_launch_counts.get(rid, 0))
+            if fired > 0:
+                comp["uav_fire"] = min(0.02 * fired, 0.04)
+                base_rewards[rid] = base_rewards.get(rid, 0.0) + comp["uav_fire"]
+            kills = int(self._step_kill_count.get(rid, 0))
+            if kills > 0:
+                comp["uav_hit"] = min(2.0 * kills, 4.0)
+                comp["event"] = min(1.0 * kills, 2.0)
+                base_rewards[rid] = base_rewards.get(rid, 0.0) + comp["uav_hit"] + comp["event"]
+            mw = np.asarray(obs.get("missile_warning", [0.0]), dtype=np.float32).reshape(-1)
+            if mw.size and mw[0] > 0.5:
+                comp["uav_dodge"] = 0.005
+                base_rewards[rid] = base_rewards.get(rid, 0.0) + comp["uav_dodge"]
+
+        if not mav_id or mav_id not in components:
+            return base_rewards, components
+
+        mav = self.red_planes.get(mav_id)
+        comp = components.setdefault(mav_id, {})
+        removed_adv = float(comp.get("r_adv", 0.0))
+        removed_end = float(comp.get("r_end", 0.0))
+        flight_base = sum(float(comp.get(k, 0.0)) for k in ("r_pitch", "r_roll", "r_alt", "r_bound", "r_vel"))
+        comp["r_adv"] = 0.0
+        comp["r_end"] = 0.0
+
+        safety, safety_logs = self._happo_v1_mav_safety(mav, cfg)
+        support, support_logs = self._happo_v1_mav_support(mav_id, mav, cfg)
+        event, event_logs = self._happo_v1_mav_event(mav_id, mav, cfg)
+        total_pre_clip = flight_base + scale * (safety + support + event)
+        total = float(total_pre_clip)
+
+        comp.update(safety_logs)
+        comp.update(support_logs)
+        comp.update(event_logs)
+        comp.update(self._happo_v1_episode_support_logs(mav_id, mav))
+        comp.update({
+            "v1_mav_removed_r_adv": removed_adv,
+            "v1_mav_removed_r_end": removed_end,
+            "v1_mav_removed_v0_overlay": 1.0,
+            "v1_mav_flight_base": float(flight_base),
+            "v1_mav_total_pre_clip": float(total_pre_clip),
+            "v1_mav_total": total,
+            "mav_reward_safety_sum": safety,
+            "mav_reward_support_sum": support,
+            "mav_reward_event_sum": event,
+            "mav_reward_total_sum": total,
+            "mav_removed_r_adv_sum": removed_adv,
+            "mav_removed_r_end_sum": removed_end,
+            "total": total,
+        })
+        for old_key in ("mav_survival", "mav_support", "mav_attack", "mav_dodge", "death_penalty"):
+            comp.pop(old_key, None)
+        base_rewards[mav_id] = total
+        components[mav_id] = comp
+        return base_rewards, components
+
+    def _happo_v1_mav_safety(self, mav, cfg: dict) -> tuple[float, dict]:
+        scfg = cfg.get("mav_safety", {})
+        d_danger = float(scfg.get("d_danger_m", 8000.0))
+        d_safe = float(scfg.get("d_safe_m", 15000.0))
+        alive_blue = [s for s in self.blue_planes.values() if getattr(s, "is_alive", False)]
+        if mav is None or not getattr(mav, "is_alive", False):
+            logs = {
+                "v1_mav_safety_dist": 0.0,
+                "v1_mav_safety_threat": 0.0,
+                "v1_mav_safety_aspect": 0.0,
+                "v1_mav_safety_danger_m": d_danger,
+                "v1_mav_safety_safe_m": d_safe,
+            }
+            logs["v1_mav_safety"] = 0.0
+            return 0.0, logs
+        mav_pos = np.asarray(mav.get_position(), dtype=np.float64)
+        if alive_blue:
+            d_min = min(float(np.linalg.norm(mav_pos - np.asarray(b.get_position(), dtype=np.float64)))
+                        for b in alive_blue)
+        else:
+            d_min = d_safe
+        if d_min <= d_danger:
+            r_dist = -1.0
+        elif d_min < d_safe:
+            r_dist = -1.0 + (d_min - d_danger) / max(d_safe - d_danger, 1e-6)
+        else:
+            r_dist = 0.0
+        r_threat = -1.0 if mav.check_missile_warning() is not None else 0.0
+        blue_launch_window_on_mav = 0.0
+        r_aspect = 0.0
+        for blue in alive_blue:
+            try:
+                m = self._missile_candidate_metrics(blue, mav)
+            except Exception:
+                continue
+            ao = float(m.get("AO_rad", np.pi))
+            r_aspect -= max(0.0, 1.0 - ao / np.pi)
+            if m.get("range_ok") and m.get("ao_ok") and m.get("ta_ok"):
+                blue_launch_window_on_mav += 1.0
+        r_safety = (
+            float(scfg.get("dist_weight", 0.5)) * r_dist
+            + float(scfg.get("threat_weight", 0.3)) * r_threat
+            + float(scfg.get("aspect_weight", 0.2)) * r_aspect
+        )
+        logs = {
+            "v1_mav_safety": float(r_safety),
+            "v1_mav_safety_dist": float(r_dist),
+            "v1_mav_safety_threat": float(r_threat),
+            "v1_mav_safety_aspect": float(r_aspect),
+            "v1_mav_safety_danger_m": d_danger,
+            "v1_mav_safety_safe_m": d_safe,
+            "v1_mav_blue_launch_window_on_mav_log": float(blue_launch_window_on_mav),
+        }
+        return float(r_safety), logs
+
+    def _happo_v1_mav_support(self, mav_id: str, mav, cfg: dict) -> tuple[float, dict]:
+        sp = cfg.get("mav_support", {})
+        obs = self._last_step_obs.get(mav_id, {})
+        observed = np.asarray(obs.get("enemy_observed_mask", []), dtype=np.float32).reshape(-1)
+        observed_count = 0
+        aware_raw = 0.0
+        if mav is not None and getattr(mav, "is_alive", False):
+            for idx, bid in enumerate(self.blue_ids):
+                if idx >= observed.size or observed[idx] <= 0.5:
+                    continue
+                blue = self.blue_planes.get(bid)
+                if blue is None or not blue.is_alive:
+                    continue
+                observed_count += 1
+                try:
+                    m = self._missile_candidate_metrics(mav, blue)
+                    ao = float(m.get("AO_rad", np.pi))
+                except Exception:
+                    ao = np.pi
+                if ao < np.pi / 2.0:
+                    aware_raw += 0.3 * (1.0 - ao / (np.pi / 2.0))
+        pos = 0.0
+        pos_active = bool(sp.get("pos_active", False))
+        if pos_active:
+            # Only active when the config explicitly opts in. Current main
+            # configs keep it log-only because d_b is not paper-grounded here.
+            pos = 0.0
+        support = (
+            float(sp.get("pos_weight", 0.6)) * pos * float(pos_active)
+            + float(sp.get("aware_weight", 0.4)) * aware_raw
+        )
+        logs = {
+            "v1_mav_support": float(support),
+            "v1_mav_support_pos": float(pos),
+            "v1_mav_support_pos_active": 1.0 if pos_active else 0.0,
+            "v1_mav_support_aware": float(aware_raw),
+            "v1_mav_support_observed_count": float(observed_count),
+            "v1_mav_support_aware_raw": float(aware_raw),
+        }
+        return float(support), logs
+
+    def _happo_v1_mav_event(self, mav_id: str, mav, cfg: dict) -> tuple[float, dict]:
+        ecfg = cfg.get("mav_event", {})
+        death = 0.0
+        if mav is not None and (not mav.is_alive) and not self._happo_v1_mav_death_penalized:
+            death = float(ecfg.get("death_penalty", -4.0))
+            self._happo_v1_mav_death_penalized = True
+        mav_alive = bool(mav is not None and mav.is_alive)
+        kills = 0
+        for rid in self.red_ids:
+            if rid == mav_id or self.agent_roles.get(rid) != "attack_uav":
+                continue
+            kills += int(self._step_kill_count.get(rid, 0))
+        cap = float(ecfg.get("team_credit_cap", 1.0))
+        if mav_alive and kills > 0:
+            available = max(0.0, cap - self._happo_v1_mav_team_credit_used)
+            credit = min(float(ecfg.get("team_credit_per_kill", 0.5)) * kills, available)
+            self._happo_v1_mav_team_credit_used += credit
+        else:
+            credit = 0.0
+        event = death + credit
+        logs = {
+            "v1_mav_event": float(event),
+            "v1_mav_event_death": float(death),
+            "v1_mav_event_team_credit_delta": float(credit),
+            "v1_mav_event_team_credit_used": float(self._happo_v1_mav_team_credit_used),
+            "v1_mav_event_team_credit_cap": cap,
+        }
+        return float(event), logs
+
+    def _happo_v1_episode_support_logs(self, mav_id: str, mav) -> dict:
+        alive_blue = [bid for bid in self.blue_ids if self.blue_planes.get(bid) and self.blue_planes[bid].is_alive]
+        mav_obs = self._last_step_obs.get(mav_id, {})
+        observed = np.asarray(mav_obs.get("enemy_observed_mask", []), dtype=np.float32).reshape(-1)
+        observed_alive = sum(1 for idx, _bid in enumerate(alive_blue)
+                             if idx < observed.size and observed[idx] > 0.5)
+        mav_observed_ratio = observed_alive / max(len(alive_blue), 1)
+
+        shared = 0.0
+        slots = 0.0
+        for rid in self.red_ids:
+            if rid == mav_id or self.agent_roles.get(rid) != "attack_uav":
+                continue
+            src = np.asarray(self._last_step_obs.get(rid, {}).get("enemy_track_source", []), dtype=np.float32)
+            if src.ndim == 2 and src.shape[1] >= 2:
+                slots += float(src.shape[0])
+                shared += float(np.sum(src[:, 1] > 0.5))
+        mav_shared_track_ratio = shared / max(slots, 1.0)
+
+        launches = [
+            r for r in (getattr(self, "_launch_quality_step_records", None) or [])
+            if str(r.get("shooter_id", "")).startswith("red_")
+            and self.agent_roles.get(str(r.get("shooter_id", ""))) == "attack_uav"
+        ]
+        hits = [
+            r for r in (getattr(self, "_launch_quality_done_step_records", None) or [])
+            if str(r.get("shooter_id", "")).startswith("red_")
+            and self.agent_roles.get(str(r.get("shooter_id", ""))) == "attack_uav"
+            and str(r.get("raw_termination_reason", "")) == "hit"
+        ]
+        shared_launches = sum(1 for r in launches if str(r.get("launch_track_source", "")) == "mav_shared")
+        shared_hits = sum(1 for r in hits if str(r.get("launch_track_source", "")) == "mav_shared")
+        mav_alive = bool(mav is not None and mav.is_alive)
+        team_kills = sum(int(self._step_kill_count.get(rid, 0)) for rid in self.red_ids
+                         if rid != mav_id and self.agent_roles.get(rid) == "attack_uav")
+        uav_alive_steps = sum(1 for rid in self.red_ids
+                              if rid != mav_id and self.agent_roles.get(rid) == "attack_uav"
+                              and self.red_planes.get(rid) and self.red_planes[rid].is_alive)
+        return {
+            "mav_observed_ratio": float(mav_observed_ratio),
+            "mav_shared_track_ratio": float(mav_shared_track_ratio),
+            "red_launch_with_mav_shared_track": float(shared_launches),
+            "red_hit_with_mav_shared_track": float(shared_hits),
+            "team_kill_while_mav_alive": float(team_kills if mav_alive else 0),
+            "team_kill_after_mav_death": float(0 if mav_alive else team_kills),
+            "red_launch_rate_before_mav_death": float(len(launches) / max(uav_alive_steps, 1)) if mav_alive else 0.0,
+            "red_launch_rate_after_mav_death": 0.0 if mav_alive else float(len(launches) / max(uav_alive_steps, 1)),
+        }
 
     def _tam_v6v3_td_env(self, distance_m: float, cfg: dict) -> float:
         scfg = cfg.get("situation", {})
@@ -1150,7 +1447,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4",
             "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned",
             "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1",
-            "brma_role_no_missile_reward_v8",
+            "brma_role_no_missile_reward_v8", "happo_ref_v1_mav_support",
         }
 
     def step(self, actions: dict):
@@ -1171,6 +1468,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._tam_v3_out_of_zone_active: set[str] = set()
         self._tam_v4_terminal_applied: bool = False
         self._brma_homo_reset_episode_state()
+        self._happo_ref_v1_reset_episode_state()
         self._tam_v6v3_reset_episode_state()
         self._tam_v7_reset_episode_state()
         self._tam_brma_scripted_terminal_applied: bool = False
@@ -2984,7 +3282,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         """Override to add minimal hetero role-aware overlay."""
         base_rewards, components = super()._compute_rewards()
 
-        if self.hetero_reward_mode not in {"minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1"}:
+        if self.hetero_reward_mode not in {"minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1"}:
             if self.hetero_reward_mode == "tam_paper_reward_v2":
                 return self._compute_tam_paper_reward_v2(base_rewards, components)
             if self.hetero_reward_mode == "tam_paper_reward_v3":
@@ -3160,6 +3458,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
                     base_rewards[rid] = base_rewards.get(rid, 0.0) + comp["uav_dodge"]
 
             return base_rewards, components
+
+        if self.hetero_reward_mode == "happo_ref_v1_mav_support":
+            return self._compute_happo_ref_v1_mav_support(base_rewards, components)
 
         # ---- paper_role_reward_v1: brma_uav_tam_mav_event_v1 ----
         if self.hetero_reward_mode == "paper_role_reward_v1":

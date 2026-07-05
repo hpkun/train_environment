@@ -1213,6 +1213,13 @@ def _run_training_main() -> None:
             "tam_v7_uav_altitude_sum", "tam_v7_uav_speed_sum",
             "tam_v7_uav_boundary_sum", "tam_v7_mav_altitude_sum",
             "tam_v7_mav_speed_sum", "tam_v7_mav_boundary_sum",
+            "v1_mav_safety_sum", "v1_mav_support_sum",
+            "v1_mav_event_sum", "v1_mav_total_sum",
+            "mav_observed_ratio", "mav_shared_track_ratio",
+            "red_launch_with_mav_shared_track", "red_hit_with_mav_shared_track",
+            "team_kill_while_mav_alive", "team_kill_after_mav_death",
+            "red_launch_rate_before_mav_death", "red_launch_rate_after_mav_death",
+            "mav_removed_r_adv_sum", "mav_removed_r_end_sum",
             "nan_detected",
         ])
         eval_writer = None
@@ -1489,7 +1496,26 @@ def _run_training_main() -> None:
                             continue
                         agent_acc = current_ep_reward_comp_by_agent[env_idx].setdefault(rid, {})
                         for key, value in comp.items():
-                            if not key.startswith("tam_v7_"):
+                            if not (
+                                key.startswith("tam_v7_")
+                                or key.startswith("v1_mav_")
+                                or key in {
+                                    "mav_observed_ratio",
+                                    "mav_shared_track_ratio",
+                                    "red_launch_with_mav_shared_track",
+                                    "red_hit_with_mav_shared_track",
+                                    "team_kill_while_mav_alive",
+                                    "team_kill_after_mav_death",
+                                    "red_launch_rate_before_mav_death",
+                                    "red_launch_rate_after_mav_death",
+                                    "mav_reward_safety_sum",
+                                    "mav_reward_support_sum",
+                                    "mav_reward_event_sum",
+                                    "mav_reward_total_sum",
+                                    "mav_removed_r_adv_sum",
+                                    "mav_removed_r_end_sum",
+                                }
+                            ):
                                 continue
                             try:
                                 delta = float(value)
@@ -1500,6 +1526,15 @@ def _run_training_main() -> None:
                                     agent_acc.get("tam_v7_mav_team_credit_used_max", delta), delta)
                             elif key in ("tam_v7_blue_loss_frac", "tam_v7_red_loss_weighted"):
                                 agent_acc[key + "_last"] = delta
+                            elif key in {
+                                "mav_reward_safety_sum",
+                                "mav_reward_support_sum",
+                                "mav_reward_event_sum",
+                                "mav_reward_total_sum",
+                                "mav_removed_r_adv_sum",
+                                "mav_removed_r_end_sum",
+                            }:
+                                agent_acc[key] = agent_acc.get(key, 0.0) + delta
                             else:
                                 sum_key = key + "_sum"
                                 agent_acc[sum_key] = agent_acc.get(sum_key, 0.0) + delta
@@ -1733,6 +1768,20 @@ def _run_training_main() -> None:
                 f"{rc_sum.get('tam_v7_mav_altitude', 0):.4f}",
                 f"{rc_sum.get('tam_v7_mav_speed', 0):.4f}",
                 f"{rc_sum.get('tam_v7_mav_boundary', 0):.4f}",
+                f"{rc_sum.get('v1_mav_safety', 0):.4f}",
+                f"{rc_sum.get('v1_mav_support', 0):.4f}",
+                f"{rc_sum.get('v1_mav_event', 0):.4f}",
+                f"{rc_sum.get('v1_mav_total', 0):.4f}",
+                f"{rc_sum.get('mav_observed_ratio', 0):.4f}",
+                f"{rc_sum.get('mav_shared_track_ratio', 0):.4f}",
+                f"{rc_sum.get('red_launch_with_mav_shared_track', 0):.4f}",
+                f"{rc_sum.get('red_hit_with_mav_shared_track', 0):.4f}",
+                f"{rc_sum.get('team_kill_while_mav_alive', 0):.4f}",
+                f"{rc_sum.get('team_kill_after_mav_death', 0):.4f}",
+                f"{rc_sum.get('red_launch_rate_before_mav_death', 0):.4f}",
+                f"{rc_sum.get('red_launch_rate_after_mav_death', 0):.4f}",
+                f"{rc_sum.get('v1_mav_removed_r_adv', 0):.4f}",
+                f"{rc_sum.get('v1_mav_removed_r_end', 0):.4f}",
                 int(nan_detected),
             ])
             if rich_logger is not None:

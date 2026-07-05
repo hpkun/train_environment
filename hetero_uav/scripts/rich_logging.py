@@ -240,10 +240,13 @@ class RichExperimentLogger:
                 "role": role,
                 "total_reward": comp.get(
                     "tam_v7_total",
-                    comp.get("brma_role_no_missile_total", comp.get("total", comp.get("total_reward", ""))),
+                    comp.get(
+                        "v1_mav_total",
+                        comp.get("brma_role_no_missile_total", comp.get("total", comp.get("total_reward", ""))),
+                    ),
                 ),
                 "mav_survival_reward": comp.get("mav_survival", ""),
-                "mav_support_reward": comp.get("mav_support", comp.get("tam_v7_mav_support", "")),
+                "mav_support_reward": comp.get("v1_mav_support", comp.get("mav_support", comp.get("tam_v7_mav_support", ""))),
                 "uav_attack_reward": comp.get("uav_attack_window", ""),
                 "uav_fire_reward": comp.get("uav_fire", ""),
                 "uav_hit_reward": comp.get("uav_hit", ""),
