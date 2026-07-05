@@ -76,7 +76,9 @@ from scripts.train_happo_reference import (
     _build_policy,
     _entity_policy_meta,
     _eval_checkpoint_extra,
+    _finalize_happo_v1_episode_reward_components,
     _load_uav_imitation_dataset,
+    _recent_component_mean,
     _reject_unsafe_random_scale_mask,
     _reject_unsafe_random_scale_mask_checkpoint,
     _rel,
@@ -1102,6 +1104,10 @@ def _run_training(args: argparse.Namespace) -> None:
                             diag, truncated, current_ep_len[env_idx], proxy.max_steps)
                         mav_return = float(current_ep_return[env_idx][0])
                         uav_return = float(current_ep_return[env_idx][1:].mean()) if len(env.red_ids) > 1 else 0.0
+                        episode_reward_comp = _finalize_happo_v1_episode_reward_components(
+                            current_ep_reward_comp[env_idx],
+                            current_ep_len[env_idx],
+                        )
                         recent.append({
                             "return": float(current_ep_return[env_idx].mean()),
                             "winner": outcome["winner"],
@@ -1112,7 +1118,7 @@ def _run_training(args: argparse.Namespace) -> None:
                             "ep_len": current_ep_len[env_idx],
                             "return_mav": mav_return,
                             "return_uav": uav_return,
-                            "reward_comp": dict(current_ep_reward_comp[env_idx]),
+                            "reward_comp": episode_reward_comp,
                             "red_death": dict(current_ep_red_death[env_idx]),
                             "blue_death": dict(current_ep_blue_death[env_idx]),
                             "missile": dict(current_ep_missile[env_idx]),
@@ -1206,6 +1212,15 @@ def _run_training(args: argparse.Namespace) -> None:
             for r in rec:
                 for k, v in r.get("reward_comp", {}).items():
                     rc_sum[k] += v
+            rc_mean = {
+                key: _recent_component_mean(rec, key)
+                for key in (
+                    "mav_observed_ratio",
+                    "mav_shared_track_ratio",
+                    "red_launch_rate_before_mav_death",
+                    "red_launch_rate_after_mav_death",
+                )
+            }
             # Missile stats
             red_mf = float(np.mean([r.get("missile", {}).get("red_fired", 0) for r in rec])) if rec else 0.0
             red_mh = float(np.mean([r.get("missile", {}).get("red_hits", 0) for r in rec])) if rec else 0.0
@@ -1275,14 +1290,14 @@ def _run_training(args: argparse.Namespace) -> None:
                 f"{rc_sum.get('v1_mav_support', 0):.4f}",
                 f"{rc_sum.get('v1_mav_event', 0):.4f}",
                 f"{rc_sum.get('v1_mav_total', 0):.4f}",
-                f"{rc_sum.get('mav_observed_ratio', 0):.4f}",
-                f"{rc_sum.get('mav_shared_track_ratio', 0):.4f}",
+                f"{rc_mean.get('mav_observed_ratio', 0):.4f}",
+                f"{rc_mean.get('mav_shared_track_ratio', 0):.4f}",
                 f"{rc_sum.get('red_launch_with_mav_shared_track', 0):.4f}",
                 f"{rc_sum.get('red_hit_with_mav_shared_track', 0):.4f}",
                 f"{rc_sum.get('team_kill_while_mav_alive', 0):.4f}",
                 f"{rc_sum.get('team_kill_after_mav_death', 0):.4f}",
-                f"{rc_sum.get('red_launch_rate_before_mav_death', 0):.4f}",
-                f"{rc_sum.get('red_launch_rate_after_mav_death', 0):.4f}",
+                f"{rc_mean.get('red_launch_rate_before_mav_death', 0):.4f}",
+                f"{rc_mean.get('red_launch_rate_after_mav_death', 0):.4f}",
                 f"{rc_sum.get('v1_mav_removed_r_adv', 0):.4f}",
                 f"{rc_sum.get('v1_mav_removed_r_end', 0):.4f}",
                 f"{red_mf:.2f}", f"{red_mh:.2f}",

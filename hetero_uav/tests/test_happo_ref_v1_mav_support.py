@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
+import uav_env.JSBSim.envs.hetero_uav_combat_env as hetero_env_mod
 
 
 CFG_3V2 = (
@@ -204,6 +205,59 @@ def test_v1_mav_support_pos_is_log_only_when_disabled():
     assert comp["v1_mav_support_aware_raw"] > 0.0
 
 
+def test_v1_mav_support_pos_active_true_raises_until_paper_grounded():
+    env = _bare_env()
+    env.happo_ref_v1_mav_support_config["mav_support"]["pos_active"] = True
+    with pytest.raises(ValueError, match="R_pos is not implemented"):
+        env._happo_v1_mav_support("red_0", env.red_planes["red_0"], env.happo_ref_v1_mav_support_config)
+
+
+def test_v1_mav_safety_dist_matches_tam_v2_formula():
+    env = _bare_env()
+    cfg = env.happo_ref_v1_mav_support_config
+    cfg["mav_safety"]["threat_weight"] = 0.0
+    cfg["mav_safety"]["aspect_weight"] = 0.0
+    cfg["mav_safety"]["dist_weight"] = 1.0
+    d_danger = cfg["mav_safety"]["d_danger_m"]
+    d_safe = cfg["mav_safety"]["d_safe_m"]
+
+    for distance, expected in [
+        (0.0, -1.0),
+        (d_danger, 0.0),
+        ((d_danger + d_safe) / 2.0, -0.25),
+        (d_safe, 0.2),
+        (d_safe + 1000.0, 0.2),
+    ]:
+        env.blue_planes = {"blue_0": _Sim(True, (distance, 0.0, 6500.0))}
+        _total, logs = env._happo_v1_mav_safety(env.red_planes["red_0"], cfg)
+        assert logs["v1_mav_safety_dist"] == pytest.approx(expected)
+
+
+def test_v1_mav_safety_aspect_uses_ta_not_ao(monkeypatch):
+    env = _bare_env()
+    env.blue_planes = {"blue_0": env.blue_planes["blue_0"]}
+    cfg = env.happo_ref_v1_mav_support_config
+    cfg["mav_safety"]["dist_weight"] = 0.0
+    cfg["mav_safety"]["threat_weight"] = 0.0
+    cfg["mav_safety"]["aspect_weight"] = 1.0
+
+    monkeypatch.setattr(
+        hetero_env_mod,
+        "get2d_AO_TA_R",
+        lambda _mav_feat, _blue_feat: (0.0, np.pi / 8.0, 10000.0),
+    )
+    _total, logs = env._happo_v1_mav_safety(env.red_planes["red_0"], cfg)
+    assert logs["v1_mav_safety_aspect"] == pytest.approx(-0.5)
+
+    monkeypatch.setattr(
+        hetero_env_mod,
+        "get2d_AO_TA_R",
+        lambda _mav_feat, _blue_feat: (0.0, np.pi / 3.0, 10000.0),
+    )
+    _total, logs = env._happo_v1_mav_safety(env.red_planes["red_0"], cfg)
+    assert logs["v1_mav_safety_aspect"] == pytest.approx(0.0)
+
+
 def test_v1_mav_event_team_credit_only_when_mav_alive_and_capped():
     env = _bare_env()
     rewards, components = _base_rewards_components()
@@ -253,6 +307,33 @@ def test_v1_summary_fields_exist_on_mav_components():
     ]
     for key in required:
         assert key in comp
+
+
+def test_v1_mav_observed_ratio_uses_full_blue_index_alignment():
+    env = _bare_env()
+    env.blue_planes["blue_0"].is_alive = False
+    env.blue_planes["blue_1"].is_alive = True
+    env._last_step_obs["red_0"]["enemy_observed_mask"] = np.asarray([0.0, 1.0], dtype=np.float32)
+    logs = env._happo_v1_episode_support_logs("red_0", env.red_planes["red_0"])
+    assert logs["mav_observed_ratio"] == pytest.approx(1.0)
+
+
+def test_v1_episode_ratio_aggregation_uses_mean_not_linear_sum():
+    from scripts.train_happo_reference import _finalize_happo_v1_episode_reward_components
+
+    comp = {
+        "mav_observed_ratio": 10.0,
+        "mav_shared_track_ratio": 5.0,
+        "red_launch_before_mav_death": 2.0,
+        "red_uav_alive_steps_before_mav_death": 4.0,
+        "red_launch_after_mav_death": 1.0,
+        "red_uav_alive_steps_after_mav_death": 2.0,
+    }
+    out = _finalize_happo_v1_episode_reward_components(comp, episode_length=10)
+    assert out["mav_observed_ratio"] == pytest.approx(1.0)
+    assert out["mav_shared_track_ratio"] == pytest.approx(0.5)
+    assert out["red_launch_rate_before_mav_death"] == pytest.approx(0.5)
+    assert out["red_launch_rate_after_mav_death"] == pytest.approx(0.5)
 
 
 def test_v1_needs_last_step_obs_cache_and_mav_never_launches():

@@ -65,6 +65,68 @@ def _format_happo_stdout_line(
     )
 
 
+def _finalize_happo_v1_episode_reward_components(
+    component_sums: dict,
+    episode_length: int,
+) -> dict:
+    """Convert v1 per-step sums into episode-level means/rates."""
+    out = {}
+    for key, value in (component_sums or {}).items():
+        try:
+            out[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+    length = max(int(episode_length), 1)
+    for key in ("mav_observed_ratio", "mav_shared_track_ratio"):
+        raw = out.get(key, out.get(key + "_sum", 0.0))
+        value = float(raw) / float(length)
+        out[key] = value
+        if key + "_sum" in out:
+            out[key + "_sum"] = value
+
+    before_launches = out.get(
+        "red_launch_before_mav_death",
+        out.get("red_launch_before_mav_death_sum", 0.0),
+    )
+    before_alive_steps = out.get(
+        "red_uav_alive_steps_before_mav_death",
+        out.get("red_uav_alive_steps_before_mav_death_sum", 0.0),
+    )
+    after_launches = out.get(
+        "red_launch_after_mav_death",
+        out.get("red_launch_after_mav_death_sum", 0.0),
+    )
+    after_alive_steps = out.get(
+        "red_uav_alive_steps_after_mav_death",
+        out.get("red_uav_alive_steps_after_mav_death_sum", 0.0),
+    )
+    before_rate = (
+        float(before_launches) / float(before_alive_steps)
+        if float(before_alive_steps) > 0.0 else 0.0
+    )
+    after_rate = (
+        float(after_launches) / float(after_alive_steps)
+        if float(after_alive_steps) > 0.0 else 0.0
+    )
+    out["red_launch_rate_before_mav_death"] = before_rate
+    out["red_launch_rate_after_mav_death"] = after_rate
+    if "red_launch_rate_before_mav_death_sum" in out:
+        out["red_launch_rate_before_mav_death_sum"] = before_rate
+    if "red_launch_rate_after_mav_death_sum" in out:
+        out["red_launch_rate_after_mav_death_sum"] = after_rate
+    return out
+
+
+def _recent_component_mean(records: list[dict], key: str) -> float:
+    values = []
+    for rec in records:
+        comp = rec.get("reward_comp", {})
+        if key in comp:
+            values.append(float(comp[key]))
+    return float(np.mean(values)) if values else 0.0
+
+
 # ---------------------------------------------------------------------------
 #  Multiprocess env helpers — each env in its own process, pipe-based proxy
 # ---------------------------------------------------------------------------
@@ -1506,6 +1568,10 @@ def _run_training_main() -> None:
                                     "red_hit_with_mav_shared_track",
                                     "team_kill_while_mav_alive",
                                     "team_kill_after_mav_death",
+                                    "red_launch_before_mav_death",
+                                    "red_launch_after_mav_death",
+                                    "red_uav_alive_steps_before_mav_death",
+                                    "red_uav_alive_steps_after_mav_death",
                                     "red_launch_rate_before_mav_death",
                                     "red_launch_rate_after_mav_death",
                                     "mav_reward_safety_sum",
@@ -1594,6 +1660,10 @@ def _run_training_main() -> None:
                     if done:
                         outcome = _episode_outcome(rollout_env, truncated, current_ep_len[env_idx])
                         ra, ba = _alive_counts(rollout_env)
+                        episode_reward_comp = _finalize_happo_v1_episode_reward_components(
+                            current_ep_reward_comp[env_idx],
+                            current_ep_len[env_idx],
+                        )
                         recent.append({
                             "return": float(current_ep_return[env_idx].mean()),
                             "winner": outcome["winner"],
@@ -1601,7 +1671,7 @@ def _run_training_main() -> None:
                             "mav": _mav_alive(rollout_env),
                             "red_alive": ra,
                             "blue_alive": ba,
-                            "reward_comp": dict(current_ep_reward_comp[env_idx]),
+                            "reward_comp": episode_reward_comp,
                         })
                         episodes += 1
                         # ---- Terminal episode audit CSV (BEFORE reset) ----
@@ -1624,6 +1694,10 @@ def _run_training_main() -> None:
                             for rid in rollout_env.red_ids:
                                 agent_idx = rollout_env.red_ids.index(rid)
                                 ep_ret_val = float(current_ep_return[env_idx][agent_idx])
+                                agent_component_sums = _finalize_happo_v1_episode_reward_components(
+                                    current_ep_reward_comp_by_agent[env_idx].get(rid, {}),
+                                    current_ep_len[env_idx],
+                                )
                                 rich_logger.write_episode_reward_components(
                                     scenario=Path(args.config).stem,
                                     episode_id=current_ep_id[env_idx],
@@ -1632,7 +1706,7 @@ def _run_training_main() -> None:
                                     team="red",
                                     episode_length=current_ep_len[env_idx],
                                     episode_return=ep_ret_val,
-                                    component_sums=current_ep_reward_comp_by_agent[env_idx].get(rid, {}),
+                                    component_sums=agent_component_sums,
                                     launch_stats=dict(current_ep_launch_stats[env_idx]),
                                     final_state={
                                         "mav_alive_final": int(_mav_alive(rollout_env)),
@@ -1725,6 +1799,15 @@ def _run_training_main() -> None:
             for r in rec:
                 for key, value in r.get("reward_comp", {}).items():
                     rc_sum[key] = rc_sum.get(key, 0.0) + float(value)
+            rc_mean = {
+                key: _recent_component_mean(rec, key)
+                for key in (
+                    "mav_observed_ratio",
+                    "mav_shared_track_ratio",
+                    "red_launch_rate_before_mav_death",
+                    "red_launch_rate_after_mav_death",
+                )
+            }
             writer.writerow([
                 iteration, total_steps, f"{avg_return:.4f}", f"{red_win:.4f}",
                 f"{blue_win:.4f}", f"{draw:.4f}", f"{timeout:.4f}",
@@ -1772,14 +1855,14 @@ def _run_training_main() -> None:
                 f"{rc_sum.get('v1_mav_support', 0):.4f}",
                 f"{rc_sum.get('v1_mav_event', 0):.4f}",
                 f"{rc_sum.get('v1_mav_total', 0):.4f}",
-                f"{rc_sum.get('mav_observed_ratio', 0):.4f}",
-                f"{rc_sum.get('mav_shared_track_ratio', 0):.4f}",
+                f"{rc_mean.get('mav_observed_ratio', 0):.4f}",
+                f"{rc_mean.get('mav_shared_track_ratio', 0):.4f}",
                 f"{rc_sum.get('red_launch_with_mav_shared_track', 0):.4f}",
                 f"{rc_sum.get('red_hit_with_mav_shared_track', 0):.4f}",
                 f"{rc_sum.get('team_kill_while_mav_alive', 0):.4f}",
                 f"{rc_sum.get('team_kill_after_mav_death', 0):.4f}",
-                f"{rc_sum.get('red_launch_rate_before_mav_death', 0):.4f}",
-                f"{rc_sum.get('red_launch_rate_after_mav_death', 0):.4f}",
+                f"{rc_mean.get('red_launch_rate_before_mav_death', 0):.4f}",
+                f"{rc_mean.get('red_launch_rate_after_mav_death', 0):.4f}",
                 f"{rc_sum.get('v1_mav_removed_r_adv', 0):.4f}",
                 f"{rc_sum.get('v1_mav_removed_r_end', 0):.4f}",
                 int(nan_detected),

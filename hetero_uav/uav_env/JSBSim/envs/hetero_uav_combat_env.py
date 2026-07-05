@@ -502,22 +502,34 @@ class HeteroUavCombatEnv(UavCombatEnv):
                         for b in alive_blue)
         else:
             d_min = d_safe
-        if d_min <= d_danger:
-            r_dist = -1.0
-        elif d_min < d_safe:
-            r_dist = -1.0 + (d_min - d_danger) / max(d_safe - d_danger, 1e-6)
+        near_d = float(d_min)
+        if near_d <= d_danger:
+            r_dist = -(1.0 - near_d / max(d_danger, 1e-6))
+        elif near_d < d_safe:
+            r_dist = -0.5 * (1.0 - (near_d - d_danger) / max(d_safe - d_danger, 1e-6))
         else:
-            r_dist = 0.0
+            r_dist = 0.2
         r_threat = -1.0 if mav.check_missile_warning() is not None else 0.0
         blue_launch_window_on_mav = 0.0
         r_aspect = 0.0
+        try:
+            mav_feat = self._tam_v2_feature(mav)
+        except Exception:
+            mav_feat = None
         for blue in alive_blue:
             try:
                 m = self._missile_candidate_metrics(blue, mav)
             except Exception:
-                continue
-            ao = float(m.get("AO_rad", np.pi))
-            r_aspect -= max(0.0, 1.0 - ao / np.pi)
+                m = {}
+            if mav_feat is not None:
+                try:
+                    blue_feat = self._tam_v2_feature(blue)
+                    _ao, ta, _r = get2d_AO_TA_R(mav_feat, blue_feat)
+                    ta = float(ta)
+                    if ta < np.pi / 4.0:
+                        r_aspect -= (1.0 - ta / (np.pi / 4.0))
+                except Exception:
+                    pass
             if m.get("range_ok") and m.get("ao_ok") and m.get("ta_ok"):
                 blue_launch_window_on_mav += 1.0
         r_safety = (
@@ -560,9 +572,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         pos = 0.0
         pos_active = bool(sp.get("pos_active", False))
         if pos_active:
-            # Only active when the config explicitly opts in. Current main
-            # configs keep it log-only because d_b is not paper-grounded here.
-            pos = 0.0
+            raise ValueError(
+                "R_pos is not implemented/paper-grounded for "
+                "happo_ref_v1_mav_support."
+            )
         support = (
             float(sp.get("pos_weight", 0.6)) * pos * float(pos_active)
             + float(sp.get("aware_weight", 0.4)) * aware_raw
@@ -607,12 +620,18 @@ class HeteroUavCombatEnv(UavCombatEnv):
         return float(event), logs
 
     def _happo_v1_episode_support_logs(self, mav_id: str, mav) -> dict:
-        alive_blue = [bid for bid in self.blue_ids if self.blue_planes.get(bid) and self.blue_planes[bid].is_alive]
         mav_obs = self._last_step_obs.get(mav_id, {})
         observed = np.asarray(mav_obs.get("enemy_observed_mask", []), dtype=np.float32).reshape(-1)
-        observed_alive = sum(1 for idx, _bid in enumerate(alive_blue)
-                             if idx < observed.size and observed[idx] > 0.5)
-        mav_observed_ratio = observed_alive / max(len(alive_blue), 1)
+        alive_blue_count = 0
+        observed_alive_count = 0
+        for idx, bid in enumerate(self.blue_ids):
+            blue = self.blue_planes.get(bid)
+            if blue is None or not blue.is_alive:
+                continue
+            alive_blue_count += 1
+            if idx < observed.size and observed[idx] > 0.5:
+                observed_alive_count += 1
+        mav_observed_ratio = observed_alive_count / max(alive_blue_count, 1)
 
         shared = 0.0
         slots = 0.0
@@ -644,6 +663,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         uav_alive_steps = sum(1 for rid in self.red_ids
                               if rid != mav_id and self.agent_roles.get(rid) == "attack_uav"
                               and self.red_planes.get(rid) and self.red_planes[rid].is_alive)
+        red_launch_before = float(len(launches) if mav_alive else 0)
+        red_launch_after = float(0 if mav_alive else len(launches))
+        red_uav_alive_before = float(uav_alive_steps if mav_alive else 0)
+        red_uav_alive_after = float(0 if mav_alive else uav_alive_steps)
         return {
             "mav_observed_ratio": float(mav_observed_ratio),
             "mav_shared_track_ratio": float(mav_shared_track_ratio),
@@ -651,8 +674,12 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "red_hit_with_mav_shared_track": float(shared_hits),
             "team_kill_while_mav_alive": float(team_kills if mav_alive else 0),
             "team_kill_after_mav_death": float(0 if mav_alive else team_kills),
-            "red_launch_rate_before_mav_death": float(len(launches) / max(uav_alive_steps, 1)) if mav_alive else 0.0,
-            "red_launch_rate_after_mav_death": 0.0 if mav_alive else float(len(launches) / max(uav_alive_steps, 1)),
+            "red_launch_before_mav_death": red_launch_before,
+            "red_launch_after_mav_death": red_launch_after,
+            "red_uav_alive_steps_before_mav_death": red_uav_alive_before,
+            "red_uav_alive_steps_after_mav_death": red_uav_alive_after,
+            "red_launch_rate_before_mav_death": red_launch_before / max(red_uav_alive_before, 1.0),
+            "red_launch_rate_after_mav_death": red_launch_after / max(red_uav_alive_after, 1.0),
         }
 
     def _tam_v6v3_td_env(self, distance_m: float, cfg: dict) -> float:
