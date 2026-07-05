@@ -147,7 +147,8 @@ class RichExperimentLogger:
             "episode_length": episode_length, "episode_return": episode_return,
         })
         for k, v in component_sums.items():
-            payload[k] = v
+            if k in payload:
+                payload[k] = v
         if launch_stats:
             for k, v in launch_stats.items():
                 if k in payload:

@@ -336,6 +336,51 @@ def test_v1_episode_ratio_aggregation_uses_mean_not_linear_sum():
     assert out["red_launch_rate_after_mav_death"] == pytest.approx(0.5)
 
 
+def test_rich_logging_v1_mav_fields_in_schema_and_unknown_skipped():
+    """write_episode_reward_components must not crash on v1_mav fields or unknowns."""
+    import tempfile, shutil
+    from scripts.rich_logging import RichExperimentLogger
+    tmp = Path(tempfile.mkdtemp(prefix="v1_log_"))
+    try:
+        logger = RichExperimentLogger(
+            tmp, run_id="t", method_name="t", scenario_name="t",
+            device="cpu", num_envs=1, rollout_length_per_env=256, transitions_per_rollout=256,
+        )
+        v1_fields = {
+            "v1_mav_safety_sum": 1.0, "v1_mav_support_sum": 2.0,
+            "v1_mav_event_sum": 3.0, "v1_mav_total_sum": 6.0,
+            "v1_mav_safety_dist_sum": 0.5, "v1_mav_safety_threat_sum": 0.3,
+            "v1_mav_safety_aspect_sum": 0.2, "v1_mav_safety_danger_m_sum": 1,
+            "v1_mav_safety_safe_m_sum": 2, "v1_mav_support_pos_sum": 0.6,
+            "v1_mav_support_pos_active_sum": 0.0, "v1_mav_support_aware_sum": 0.4,
+            "v1_mav_support_observed_count_sum": 3, "v1_mav_support_aware_raw_sum": 0.4,
+            "v1_mav_event_death_sum": -4.0, "v1_mav_event_team_credit_delta_sum": 0.5,
+            "v1_mav_event_team_credit_used_sum": 0.5, "v1_mav_event_team_credit_cap_sum": 1.0,
+            "v1_mav_removed_v0_overlay_sum": 1.0, "v1_mav_total_pre_clip_sum": 7.0,
+            "v1_mav_blue_launch_window_on_mav_log_sum": 0,
+            "unknown_component_sum": 999.0,  # must not crash
+        }
+        logger.write_episode_reward_components(
+            scenario="test", episode_id="0", agent_id="red_0", role="mav", team="red",
+            episode_length=100, episode_return=10.0, component_sums=v1_fields,
+            outcome="timeout", end_reason="timeout",
+        )
+        logger.close()
+        with open(tmp / "episode_reward_components.csv", newline="", encoding="utf-8") as f:
+            import csv
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 1
+        header = list(rows[0].keys())
+        for field in v1_fields:
+            if field == "unknown_component_sum":
+                assert field not in header
+            else:
+                assert field in header, f"missing {field}"
+        assert rows[0]["v1_mav_safety_sum"] == "1.0"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_v1_needs_last_step_obs_cache_and_mav_never_launches():
     from uav_env import make_env
 
