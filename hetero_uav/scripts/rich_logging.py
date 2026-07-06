@@ -268,8 +268,14 @@ class RichExperimentLogger:
                 "total_reward": comp.get(
                     "tam_v7_total",
                     comp.get(
-                        "v1_mav_total",
-                        comp.get("brma_role_no_missile_total", comp.get("total", comp.get("total_reward", ""))),
+                        "paper_v1_mav_total",
+                        comp.get(
+                            "paper_v1_uav_total",
+                            comp.get(
+                                "v1_mav_total",
+                                comp.get("brma_role_no_missile_total", comp.get("total", comp.get("total_reward", ""))),
+                            ),
+                        ),
                     ),
                 ),
                 "mav_survival_reward": comp.get("mav_survival", ""),

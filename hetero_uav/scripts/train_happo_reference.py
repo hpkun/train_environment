@@ -1413,6 +1413,11 @@ def _run_training_main() -> None:
             "tam_v7_uav_altitude_sum", "tam_v7_uav_speed_sum",
             "tam_v7_uav_boundary_sum", "tam_v7_mav_altitude_sum",
             "tam_v7_mav_speed_sum", "tam_v7_mav_boundary_sum",
+            "paper_v1_uav_flight_sum", "paper_v1_uav_adv_sum",
+            "paper_v1_uav_end_sum", "paper_v1_uav_total_sum",
+            "paper_v1_mav_flight_sum", "paper_v1_mav_safety_sum",
+            "paper_v1_mav_support_sum", "paper_v1_mav_event_raw_sum",
+            "paper_v1_mav_scaled_tam_sum", "paper_v1_mav_total_sum",
             "v1_mav_safety_sum", "v1_mav_support_sum",
             "v1_mav_event_sum", "v1_mav_total_sum",
             "mav_observed_ratio", "mav_shared_track_ratio",
@@ -1699,6 +1704,7 @@ def _run_training_main() -> None:
                             if not (
                                 key.startswith("tam_v7_")
                                 or key.startswith("v1_mav_")
+                                or key.startswith("paper_v1_")
                                 or key in {
                                     "mav_observed_ratio",
                                     "mav_shared_track_ratio",
@@ -1989,6 +1995,16 @@ def _run_training_main() -> None:
                 f"{rc_sum.get('tam_v7_mav_altitude', 0):.4f}",
                 f"{rc_sum.get('tam_v7_mav_speed', 0):.4f}",
                 f"{rc_sum.get('tam_v7_mav_boundary', 0):.4f}",
+                f"{rc_sum.get('paper_v1_uav_flight', 0):.4f}",
+                f"{rc_sum.get('paper_v1_uav_adv', 0):.4f}",
+                f"{rc_sum.get('paper_v1_uav_end', 0):.4f}",
+                f"{rc_sum.get('paper_v1_uav_total', 0):.4f}",
+                f"{rc_sum.get('paper_v1_mav_flight', 0):.4f}",
+                f"{rc_sum.get('paper_v1_mav_safety', 0):.4f}",
+                f"{rc_sum.get('paper_v1_mav_support', 0):.4f}",
+                f"{rc_sum.get('paper_v1_mav_event_raw', 0):.4f}",
+                f"{rc_sum.get('paper_v1_mav_scaled_tam', 0):.4f}",
+                f"{rc_sum.get('paper_v1_mav_total', 0):.4f}",
                 f"{rc_sum.get('v1_mav_safety', 0):.4f}",
                 f"{rc_sum.get('v1_mav_support', 0):.4f}",
                 f"{rc_sum.get('v1_mav_event', 0):.4f}",
