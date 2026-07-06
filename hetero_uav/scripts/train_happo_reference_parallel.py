@@ -75,9 +75,11 @@ from scripts.train_happo_reference import (
     DEFAULT_EVAL_CONFIGS,
     _build_policy,
     _entity_policy_meta,
+    _experiment_base_v2_meta,
     _eval_checkpoint_extra,
     _finalize_happo_v1_episode_reward_components,
     _load_uav_imitation_dataset,
+    _make_env_kwargs_for_reward_mode,
     _recent_component_mean,
     _reject_unsafe_random_scale_mask,
     _reject_unsafe_random_scale_mask_checkpoint,
@@ -139,6 +141,7 @@ def _worker_meta(env) -> dict:
         "agent_ids": list(env.agent_ids),
         "max_steps": int(getattr(env, "max_steps", 0)),
         "role_ids": role_ids,
+        "actual_reward_mode": getattr(env, "hetero_reward_mode", ""),
     }
 
 
@@ -155,8 +158,8 @@ def _env_worker(remote, parent_remote, env_kwargs: dict) -> None:
         env = make_env(
             env_kwargs["config"],
             env_type="jsbsim_hetero",
-            hetero_reward_mode=env_kwargs["reward_mode"],
             max_steps=env_kwargs["max_steps"],
+            **_make_env_kwargs_for_reward_mode(env_kwargs.get("reward_mode")),
         )
         remote.send(("ready", _worker_meta(env), _worker_diag(env)))
         while True:
@@ -421,6 +424,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--uav-imitation-until-steps", type=int, default=0)
     parser.add_argument("--uav-imitation-batch-size", type=int, default=1024)
     parser.add_argument("--enable-rich-logging", action="store_true")
+    parser.add_argument("--rich-log-mode", choices=["full", "summary"], default="summary")
     parser.add_argument("--rich-log-dir", default=None)
     parser.add_argument("--reset-timeout-sec", type=float, default=300.0)
     parser.add_argument("--step-timeout-sec", type=float, default=120.0)
@@ -438,9 +442,10 @@ def _write_runner_status(out_dir: Path, *, worker_restart_count: int,
                          last_worker_timeout_info: dict,
                          exit_reason: str, total_steps: int,
                          latest_iteration: int,
-                         exception_type: str = "",
-                         exception_message: str = "",
-                         failure_checkpoint_saved: bool = False) -> None:
+                        exception_type: str = "",
+                        exception_message: str = "",
+                         failure_checkpoint_saved: bool = False,
+                         extra: dict | None = None) -> None:
     """Write runner_status.json with structured exit information."""
     payload = {
         "status": "normal" if exit_reason == "normal" else "failed",
@@ -464,6 +469,8 @@ def _write_runner_status(out_dir: Path, *, worker_restart_count: int,
         payload["exception_type"] = exception_type
     if exception_message:
         payload["exception_message"] = exception_message
+    if extra:
+        payload.update(extra)
     try:
         (out_dir / "runner_status.json").write_text(
             json.dumps(payload, indent=2, default=str), encoding="utf-8")
@@ -548,39 +555,11 @@ def _run_training(args: argparse.Namespace) -> None:
         "last_worker_timeout_info": {},
     })
 
-    # Resolve reward_mode: CLI takes priority, but validate against YAML
-    import yaml as _yaml
-    _yaml_cfg = {}
-    _yaml_reward = None
-    try:
-        with open(args.config, encoding="utf-8") as _f:
-            _yaml_cfg = _yaml.safe_load(_f) or {}
-        _yaml_reward = _yaml_cfg.get("hetero_reward_mode")
-    except Exception:
-        pass
-    cli_reward_mode = args.reward_mode  # may be None
-    if cli_reward_mode is None:
-        if _yaml_reward is None:
-            raise ValueError(
-                "No --reward-mode provided and config YAML has no hetero_reward_mode. "
-                "Please specify --reward-mode or fix the config."
-            )
-        resolved_reward_mode = _yaml_reward
-    else:
-        if _yaml_reward is not None and cli_reward_mode != _yaml_reward:
-            raise ValueError(
-                f"CLI --reward-mode={cli_reward_mode!r} conflicts with "
-                f"config YAML hetero_reward_mode={_yaml_reward!r}. "
-                f"Use matching values or omit --reward-mode to use the YAML value."
-            )
-        resolved_reward_mode = cli_reward_mode
-    print(f"[reward-mode] resolved: {resolved_reward_mode}", flush=True)
-
     vec_env = ParallelEnv(
         args.num_envs,
         {
             "config": args.config,
-            "reward_mode": resolved_reward_mode,
+            "reward_mode": args.reward_mode,
             "max_steps": args.max_steps,
         },
         reset_timeout=args.reset_timeout_sec,
@@ -590,6 +569,23 @@ def _run_training(args: argparse.Namespace) -> None:
     _RUNNER_RESOURCES["vec_env"] = vec_env
     proxies = [RemoteEnvProxy(meta, diag) for meta, diag in zip(vec_env.metas, vec_env.diags)]
     env = proxies[0]
+    actual_reward_mode = str(vec_env.metas[0].get("actual_reward_mode", args.reward_mode or ""))
+    args.actual_reward_mode = actual_reward_mode
+    base_v2_meta = _experiment_base_v2_meta(
+        actual_reward_mode=actual_reward_mode,
+        rich_logging_enabled=args.enable_rich_logging,
+        rich_log_mode=args.rich_log_mode,
+    )
+    _RUNNER_PROGRESS["base_v2_meta"] = dict(base_v2_meta)
+    print(
+        "[experiment] "
+        f"config={args.config} policy_arch={args.policy_arch} "
+        f"opponent_policy={args.opponent_policy} "
+        f"actual_reward_mode={actual_reward_mode} "
+        f"rich_log_mode={args.rich_log_mode} num_envs={args.num_envs} "
+        f"rollout_length={args.rollout_length} max_steps={args.max_steps}",
+        flush=True,
+    )
     if entity_mode:
         adapter = HeteroEntitySetAdapter()
         actor_dim = 0
@@ -621,10 +617,10 @@ def _run_training(args: argparse.Namespace) -> None:
                     f"checkpoint={meta_pa!r}, CLI={args.policy_arch!r}. "
                     f"Checkpoint: {init_meta_path}"
                 )
-            if meta_rm and meta_rm != resolved_reward_mode:
+            if meta_rm and meta_rm != actual_reward_mode:
                 raise ValueError(
                     f"init checkpoint reward_mode mismatch: "
-                    f"checkpoint={meta_rm!r}, CLI={resolved_reward_mode!r}. "
+                    f"checkpoint={meta_rm!r}, actual={actual_reward_mode!r}. "
                     f"Checkpoint: {init_meta_path}"
                 )
         _reject_unsafe_random_scale_mask_checkpoint(args.policy_arch, init_meta_path)
@@ -690,6 +686,7 @@ def _run_training(args: argparse.Namespace) -> None:
             num_envs=args.num_envs,
             rollout_length_per_env=args.rollout_length,
             transitions_per_rollout=transitions_per_rollout,
+            mode=args.rich_log_mode,
         )
         write_not_available_attention(rich_dir, "happo_reference_v0_parallel", Path(args.config).stem)
         _RUNNER_RESOURCES["rich_logger"] = rich_logger
@@ -704,6 +701,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 num_envs=1,
                 rollout_length_per_env=args.rollout_length,
                 transitions_per_rollout=args.rollout_length,
+                mode=args.rich_log_mode,
             ))
         _RUNNER_RESOURCES["env_rich_loggers"] = env_rich_loggers
 
@@ -740,7 +738,7 @@ def _run_training(args: argparse.Namespace) -> None:
     with train_log.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "iteration", "total_steps", "avg_return", "red_win", "blue_win",
+            "iteration", "total_steps", "actual_reward_mode", "avg_return", "red_win", "blue_win",
             "draw", "timeout", "mav_survival", "red_alive_final",
             "blue_alive_final", "red_missiles_fired", "blue_missiles_fired",
             "red_missile_hits", "blue_missile_hits", "actor_loss_mav", "actor_loss_uav",
@@ -1228,7 +1226,7 @@ def _run_training(args: argparse.Namespace) -> None:
             blue_mh = float(np.mean([r.get("missile", {}).get("blue_hits", 0) for r in rec])) if rec else 0.0
 
             writer.writerow([
-                iteration, total_steps, f"{avg_return:.4f}", f"{red_win:.4f}",
+                iteration, total_steps, actual_reward_mode, f"{avg_return:.4f}", f"{red_win:.4f}",
                 f"{blue_win:.4f}", f"{draw:.4f}", f"{timeout:.4f}",
                 f"{mav_surv:.4f}", f"{red_alive:.2f}", f"{blue_alive:.2f}",
                 red_fired, blue_fired, red_hits, blue_hits, f"{stats['actor_loss_mav']:.6f}",
@@ -1358,7 +1356,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 except Exception:
                     _rtsm = ""
                 meta = {
-                    "policy_arch": args.policy_arch, "reward_mode": resolved_reward_mode,
+                    "policy_arch": args.policy_arch, **base_v2_meta,
                     "config": args.config, "opponent_policy": args.opponent_policy,
                     "init_checkpoint": args.init_checkpoint,
                     "total_env_steps_actual": total_steps, "episodes": episodes,
@@ -1481,7 +1479,7 @@ def _run_training(args: argparse.Namespace) -> None:
         "runner": "multiprocessing_parallel",
         "policy_arch": args.policy_arch,
         "config": args.config,
-        "reward_mode": resolved_reward_mode,
+        **base_v2_meta,
         "opponent_policy": args.opponent_policy,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
@@ -1615,6 +1613,7 @@ def main() -> None:
                 exception_type=exception_type,
                 exception_message=exception_message,
                 failure_checkpoint_saved=failure_checkpoint_saved,
+                extra=dict(_RUNNER_PROGRESS.get("base_v2_meta", {})),
             )
         finally:
             _cleanup_runner(

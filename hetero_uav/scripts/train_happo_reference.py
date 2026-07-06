@@ -127,11 +127,34 @@ def _recent_component_mean(records: list[dict], key: str) -> float:
     return float(np.mean(values)) if values else 0.0
 
 
+def _make_env_kwargs_for_reward_mode(reward_mode: str | None) -> dict:
+    if reward_mode is None:
+        return {}
+    return {"hetero_reward_mode": reward_mode}
+
+
+def _experiment_base_v2_meta(
+    *,
+    actual_reward_mode: str,
+    rich_logging_enabled: bool,
+    rich_log_mode: str,
+) -> dict:
+    full_rich = bool(rich_logging_enabled and rich_log_mode == "full")
+    return {
+        "reward_mode": actual_reward_mode,
+        "actual_reward_mode": actual_reward_mode,
+        "rich_logging_enabled": bool(rich_logging_enabled),
+        "rich_log_mode": rich_log_mode,
+        "per_step_reward_components": full_rich,
+        "aircraft_timeseries": full_rich,
+    }
+
+
 # ---------------------------------------------------------------------------
 #  Multiprocess env helpers — each env in its own process, pipe-based proxy
 # ---------------------------------------------------------------------------
 def _mp_env_worker(remote, parent_remote, config: str,
-                   reward_mode: str, max_steps: int) -> None:
+                   reward_mode: str | None, max_steps: int) -> None:
     """Child-process entry point: construct env, loop on pipe commands."""
     parent_remote.close()
     for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
@@ -140,8 +163,12 @@ def _mp_env_worker(remote, parent_remote, config: str,
     env = None
     try:
         from uav_env import make_env
-        env = make_env(config, env_type="jsbsim_hetero",
-                       hetero_reward_mode=reward_mode, max_steps=max_steps)
+        env = make_env(
+            config,
+            env_type="jsbsim_hetero",
+            max_steps=max_steps,
+            **_make_env_kwargs_for_reward_mode(reward_mode),
+        )
         meta = {
             "red_ids": list(env.red_ids),
             "blue_ids": list(env.blue_ids),
@@ -150,6 +177,7 @@ def _mp_env_worker(remote, parent_remote, config: str,
             "agent_roles": dict(env.agent_roles),
             "agent_types": dict(env.agent_types),
             "agent_models": dict(env.agent_models),
+            "actual_reward_mode": getattr(env, "hetero_reward_mode", reward_mode),
         }
         remote.send(("ready", meta))
         while True:
@@ -195,6 +223,7 @@ class _MpEnvProxy:
         self.agent_roles = dict(meta.get("agent_roles", {}))
         self.agent_types = dict(meta.get("agent_types", {}))
         self.agent_models = dict(meta.get("agent_models", {}))
+        self.hetero_reward_mode = meta.get("actual_reward_mode", "")
         self._remote = remote
         self.current_step = 0
         self.env_dt = 0.0
@@ -878,9 +907,14 @@ def _score_eval(records: list[dict], metric: str = "combined") -> float:
 
 def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int,
                            transitions_per_rollout: int) -> dict:
+    actual_reward_mode = getattr(args, "actual_reward_mode", args.reward_mode)
     return {
         "algorithm": "happo_reference_v0",
-        "reward_mode": args.reward_mode,
+        **_experiment_base_v2_meta(
+            actual_reward_mode=str(actual_reward_mode),
+            rich_logging_enabled=bool(getattr(args, "enable_rich_logging", False)),
+            rich_log_mode=str(getattr(args, "rich_log_mode", "summary")),
+        ),
         "opponent_policy": args.opponent_policy,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
@@ -928,6 +962,7 @@ def _write_runner_status(
     exception: BaseException | None = None,
     failed_episode_id: int | str = "",
     failure_checkpoint_saved: bool = False,
+    extra: dict | None = None,
 ) -> dict:
     nonfinite = _exception_is_nonfinite(exception)
     payload = {
@@ -944,6 +979,8 @@ def _write_runner_status(
         "nonfinite_detected": bool(nonfinite),
         "failure_checkpoint_saved": bool(failure_checkpoint_saved),
     }
+    if extra:
+        payload.update(extra)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "runner_status.json").write_text(
         json.dumps(payload, indent=2), encoding="utf-8"
@@ -978,6 +1015,55 @@ def _write_failure_artifacts(policy, state: dict, exc: BaseException) -> None:
         failed_episode_id=state.get("episode_id", ""),
         failure_checkpoint_saved=checkpoint_saved,
     )
+
+
+def _run_launch_diagnostics_after_training(args, out_dir: Path) -> str:
+    if not getattr(args, "run_launch_diagnostics_after_training", False):
+        return "not_requested"
+    scenarios = list(getattr(args, "launch_diagnostic_scenarios", []) or ["3v2", "5v4"])
+    base_out = _rel(args.launch_diagnostic_output_dir) if args.launch_diagnostic_output_dir else out_dir / "launch_diagnostics"
+    try:
+        for scenario in scenarios:
+            diag_out = base_out / scenario
+            try:
+                output_dir_arg = str(out_dir.relative_to(ROOT))
+            except ValueError:
+                output_dir_arg = str(out_dir)
+            try:
+                diag_out_arg = str(diag_out.relative_to(ROOT))
+            except ValueError:
+                diag_out_arg = str(diag_out)
+            cmd = [
+                sys.executable,
+                "scripts/eval_policy_launch_diagnostics.py",
+                "--output-dir", output_dir_arg,
+                "--checkpoint-name", "latest",
+                "--scenario", str(scenario),
+                "--episodes", str(int(args.launch_diagnostic_episodes)),
+                "--device", str(args.device),
+                "--opponent-policy", str(args.opponent_policy),
+                "--max-steps", str(int(args.max_steps)),
+                "--diagnostic-output-dir", diag_out_arg,
+            ]
+            if scenario == "3v2":
+                cmd += ["--config", str(args.config)]
+            result = subprocess.run(
+                cmd,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=1200,
+            )
+            if result.returncode != 0:
+                print(result.stdout, flush=True)
+                print(result.stderr, flush=True)
+                return "failed"
+        return "success"
+    except Exception as exc:
+        print(f"[launch-diagnostics] failed: {exc}", flush=True)
+        return "failed"
 
 
 def _cleanup_single_runner() -> None:
@@ -1033,7 +1119,11 @@ def _run_training_main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
                         choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"])
-    parser.add_argument("--reward-mode", default="happo_ref_v0")
+    parser.add_argument(
+        "--reward-mode",
+        default=None,
+        help="Override YAML hetero_reward_mode. If omitted, uses the YAML value.",
+    )
     parser.add_argument("--ppo-epochs", type=int, default=2)
     parser.add_argument("--entropy-coef", type=float, default=0.02)
     parser.add_argument("--actor-lr", type=float, default=2e-4)
@@ -1064,6 +1154,12 @@ def _run_training_main() -> None:
     parser.add_argument("--uav-imitation-until-steps", type=int, default=0)
     parser.add_argument("--uav-imitation-batch-size", type=int, default=1024)
     parser.add_argument("--enable-rich-logging", action="store_true")
+    parser.add_argument(
+        "--rich-log-mode",
+        choices=["full", "summary"],
+        default="summary",
+        help="summary skips per-step reward_components and aircraft_timeseries; full keeps legacy rich logs.",
+    )
     parser.add_argument("--rich-log-dir", default=None)
     parser.add_argument("--heartbeat-log", default=None)
     parser.add_argument("--heartbeat-every-steps", type=int, default=50)
@@ -1072,6 +1168,10 @@ def _run_training_main() -> None:
     parser.add_argument("--exit-on-heartbeat-stall", action="store_true")
     parser.add_argument("--timeseries-episodes-limit", type=int, default=3)
     parser.add_argument("--timeseries-step-stride", type=int, default=5)
+    parser.add_argument("--run-launch-diagnostics-after-training", action="store_true")
+    parser.add_argument("--launch-diagnostic-episodes", type=int, default=5)
+    parser.add_argument("--launch-diagnostic-scenarios", nargs="*", default=["3v2", "5v4"])
+    parser.add_argument("--launch-diagnostic-output-dir", default=None)
     args = parser.parse_args()
     _reject_unsafe_random_scale_mask(args)
     if args.num_envs < 1:
@@ -1097,11 +1197,31 @@ def _run_training_main() -> None:
                                args.max_steps)
     else:
         envs = [
-            make_env(args.config, env_type="jsbsim_hetero",
-                     hetero_reward_mode=args.reward_mode, max_steps=args.max_steps)
+            make_env(
+                args.config,
+                env_type="jsbsim_hetero",
+                max_steps=args.max_steps,
+                **_make_env_kwargs_for_reward_mode(args.reward_mode),
+            )
             for _ in range(args.num_envs)
         ]
     env = envs[0]
+    actual_reward_mode = str(getattr(env, "hetero_reward_mode", args.reward_mode or ""))
+    args.actual_reward_mode = actual_reward_mode
+    base_v2_meta = _experiment_base_v2_meta(
+        actual_reward_mode=actual_reward_mode,
+        rich_logging_enabled=args.enable_rich_logging,
+        rich_log_mode=args.rich_log_mode,
+    )
+    print(
+        "[experiment] "
+        f"config={args.config} policy_arch={args.policy_arch} "
+        f"opponent_policy={args.opponent_policy} "
+        f"actual_reward_mode={actual_reward_mode} "
+        f"rich_log_mode={args.rich_log_mode} num_envs={args.num_envs} "
+        f"rollout_length={args.rollout_length} max_steps={args.max_steps}",
+        flush=True,
+    )
     _SINGLE_RUNNER_STATE["envs"] = envs
     entity_mode = args.policy_arch == "hetero_entity_recurrent"
     adapter = HeteroEntitySetAdapter() if entity_mode else HeteroObsAdapterV2()
@@ -1129,6 +1249,7 @@ def _run_training_main() -> None:
         "algorithm": "happo_reference_v0",
         "policy_arch": args.policy_arch,
         "config": args.config,
+        **base_v2_meta,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
         **_entity_policy_meta(policy),
@@ -1208,6 +1329,9 @@ def _run_training_main() -> None:
             num_envs=args.num_envs,
             rollout_length_per_env=args.rollout_length,
             transitions_per_rollout=transitions_per_rollout,
+            mode=args.rich_log_mode,
+            timeseries_episodes_limit=args.timeseries_episodes_limit,
+            timeseries_step_stride=args.timeseries_step_stride,
         )
         _SINGLE_RUNNER_STATE["rich_logger"] = rich_logger
         write_not_available_attention(rich_dir, "happo_reference_v0", Path(args.config).stem)
@@ -1252,7 +1376,7 @@ def _run_training_main() -> None:
     with train_log.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "iteration", "total_steps", "avg_return", "red_win", "blue_win",
+            "iteration", "total_steps", "actual_reward_mode", "avg_return", "red_win", "blue_win",
             "draw", "timeout", "mav_survival", "red_alive_final",
             "blue_alive_final", "red_missiles_fired", "blue_missiles_fired",
             "red_missile_hits", "blue_missile_hits", "actor_loss_mav", "actor_loss_uav",
@@ -1809,7 +1933,7 @@ def _run_training_main() -> None:
                 )
             }
             writer.writerow([
-                iteration, total_steps, f"{avg_return:.4f}", f"{red_win:.4f}",
+                iteration, total_steps, actual_reward_mode, f"{avg_return:.4f}", f"{red_win:.4f}",
                 f"{blue_win:.4f}", f"{draw:.4f}", f"{timeout:.4f}",
                 f"{mav_surv:.4f}", f"{red_alive:.2f}", f"{blue_alive:.2f}",
                 red_fired, blue_fired, red_hits, blue_hits, f"{stats['actor_loss_mav']:.6f}",
@@ -1953,7 +2077,7 @@ def _run_training_main() -> None:
                     (ckpt_dir / "meta.json").write_text(json.dumps({
                         "algorithm": "happo_reference_v0",
                         "policy_arch": args.policy_arch,
-                        "reward_mode": args.reward_mode,
+                        **base_v2_meta,
                         "actor_obs_dim": actor_dim,
                         "critic_state_dim": critic_dim,
                         "entity_dim": getattr(policy, "entity_dim", None),
@@ -1984,6 +2108,7 @@ def _run_training_main() -> None:
                 (out_dir / "_tmp_eval_meta.json").write_text(json.dumps({
                     "algorithm": "happo_reference_v0",
                     "policy_arch": args.policy_arch,
+                    **base_v2_meta,
                     "actor_obs_dim": actor_dim,
                     "critic_state_dim": critic_dim,
                     "entity_dim": getattr(policy, "entity_dim", None),
@@ -2097,7 +2222,7 @@ def _run_training_main() -> None:
                         (out_dir / "best" / "meta.json").write_text(json.dumps({
                             "algorithm": "happo_reference_v0",
                             "policy_arch": args.policy_arch,
-                            "reward_mode": args.reward_mode,
+                            **base_v2_meta,
                             "opponent_policy": args.opponent_policy,
                             "best_score": best_score,
                             "actor_obs_dim": actor_dim,
@@ -2136,7 +2261,7 @@ def _run_training_main() -> None:
         "algorithm": "happo_reference_v0",
         "policy_arch": args.policy_arch,
         "config": args.config,
-        "reward_mode": args.reward_mode,
+        **base_v2_meta,
         "opponent_policy": args.opponent_policy,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
@@ -2169,12 +2294,16 @@ def _run_training_main() -> None:
         **_pure_happo_meta(policy, args),
     }
     (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    launch_diagnostics_status = _run_launch_diagnostics_after_training(args, out_dir)
+    meta["launch_diagnostics_status"] = launch_diagnostics_status
+    (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     _write_runner_status(
         out_dir,
         status="normal",
         total_steps=total_steps,
         iteration=iteration,
+        extra={**base_v2_meta, "launch_diagnostics_status": launch_diagnostics_status},
     )
     if rich_logger is not None:
         rich_logger.write_training_efficiency(total_steps, nan_detected=nan_detected)

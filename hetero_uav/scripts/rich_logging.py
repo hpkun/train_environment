@@ -28,6 +28,9 @@ class RichExperimentLogger:
         num_envs: int,
         rollout_length_per_env: int,
         transitions_per_rollout: int,
+        mode: str = "summary",
+        timeseries_episodes_limit: int | None = None,
+        timeseries_step_stride: int = 1,
     ) -> None:
         self.directory = directory
         self.run_id = run_id
@@ -37,6 +40,11 @@ class RichExperimentLogger:
         self.num_envs = int(num_envs)
         self.rollout_length_per_env = int(rollout_length_per_env)
         self.transitions_per_rollout = int(transitions_per_rollout)
+        if mode not in {"summary", "full"}:
+            raise ValueError(f"unsupported rich logging mode: {mode}")
+        self.mode = mode
+        self.timeseries_episodes_limit = timeseries_episodes_limit
+        self.timeseries_step_stride = max(int(timeseries_step_stride), 1)
         self.start_time = time.time()
         ensure_schema_files(directory)
         self._train_file = (directory / "train_metrics.csv").open("w", newline="", encoding="utf-8")
@@ -44,10 +52,15 @@ class RichExperimentLogger:
         self._train_writer.writeheader()
         self._missile_file = (directory / "missile_events.csv").open("a", newline="", encoding="utf-8")
         self._missile_writer = csv.DictWriter(self._missile_file, fieldnames=MISSILE_EVENTS_COLUMNS)
-        self._reward_file = (directory / "reward_components.csv").open("a", newline="", encoding="utf-8")
-        self._reward_writer = csv.DictWriter(self._reward_file, fieldnames=FILE_SCHEMAS["reward_components.csv"])
-        self._aircraft_file = (directory / "aircraft_timeseries.csv").open("a", newline="", encoding="utf-8")
-        self._aircraft_writer = csv.DictWriter(self._aircraft_file, fieldnames=FILE_SCHEMAS["aircraft_timeseries.csv"])
+        self._reward_file = None
+        self._reward_writer = None
+        self._aircraft_file = None
+        self._aircraft_writer = None
+        if self.mode == "full":
+            self._reward_file = (directory / "reward_components.csv").open("a", newline="", encoding="utf-8")
+            self._reward_writer = csv.DictWriter(self._reward_file, fieldnames=FILE_SCHEMAS["reward_components.csv"])
+            self._aircraft_file = (directory / "aircraft_timeseries.csv").open("a", newline="", encoding="utf-8")
+            self._aircraft_writer = csv.DictWriter(self._aircraft_file, fieldnames=FILE_SCHEMAS["aircraft_timeseries.csv"])
         self._ep_rc_file = (directory / "episode_reward_components.csv").open("a", newline="", encoding="utf-8")
         self._ep_rc_writer = csv.DictWriter(self._ep_rc_file, fieldnames=FILE_SCHEMAS["episode_reward_components.csv"])
         self._seen_missile_event_keys: set[tuple] = set()
@@ -55,13 +68,24 @@ class RichExperimentLogger:
     def close(self) -> None:
         self._train_file.close()
         self._missile_file.close()
-        self._reward_file.close()
-        self._aircraft_file.close()
+        if self._reward_file is not None:
+            self._reward_file.close()
+        if self._aircraft_file is not None:
+            self._aircraft_file.close()
         self._ep_rc_file.close()
 
     def write_aircraft_timeseries(self, env, *, scenario: str, episode_id: int | str,
                                    step: int | str, sim_time: float | str = "") -> None:
         """Write per-step aircraft telemetry for all red and blue agents."""
+        if self.mode != "full" or self._aircraft_writer is None or self._aircraft_file is None:
+            return
+        try:
+            if self.timeseries_episodes_limit is not None and int(episode_id) >= int(self.timeseries_episodes_limit):
+                return
+            if int(step) % self.timeseries_step_stride != 0:
+                return
+        except (TypeError, ValueError):
+            pass
         rows = []
         for aid in list(getattr(env, "red_ids", [])) + list(getattr(env, "blue_ids", [])):
             sim = (env.red_planes.get(aid) or env.blue_planes.get(aid)) if hasattr(env, "red_planes") else None
@@ -220,6 +244,8 @@ class RichExperimentLogger:
         sim_time: float | str = "",
     ) -> None:
         """Write per-agent reward component diagnostics from env info."""
+        if self.mode != "full" or self._reward_writer is None or self._reward_file is None:
+            return
         components = info.get("reward_components", {}) if isinstance(info, dict) else {}
         if not isinstance(components, dict) or not components:
             return

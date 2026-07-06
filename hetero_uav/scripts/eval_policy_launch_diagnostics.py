@@ -30,8 +30,8 @@ from red_attack_audit_utils import alive_counts, collect_step_counts, team_done
 
 
 SCENARIO_CONFIGS = {
-    "3v2": "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0.yaml",
-    "5v4": "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml",
+    "3v2": "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_mav_surrogate_happo_ref_v1_mav_support.yaml",
+    "5v4": "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4_f16_mav_surrogate_happo_ref_v1_mav_support.yaml",
 }
 
 DIAG_FIELDS = [
@@ -40,6 +40,27 @@ DIAG_FIELDS = [
     "episode_id",
     "step",
     "red_id",
+    "shooter_alive",
+    "shooter_role",
+    "shooter_has_missile",
+    "nearest_blue_id",
+    "nearest_blue_alive",
+    "nearest_blue_range_m",
+    "selected_target_id",
+    "selected_target_range_m",
+    "selected_target_AO_rad",
+    "selected_target_TA_rad",
+    "candidate_count",
+    "track_available",
+    "direct_track_available",
+    "mav_shared_track_available",
+    "launch_track_source",
+    "lock_target",
+    "lock_timer",
+    "lock_delay_frames",
+    "cooldown_frames_left",
+    "boresight_ok",
+    "boresight_status",
     "target_id",
     "range_m",
     "AO_rad",
@@ -52,6 +73,12 @@ DIAG_FIELDS = [
     "range_ok",
     "ao_ok",
     "ta_ok",
+    "final_launch_allowed",
+    "actual_missiles_fired_this_step",
+    "predicted_allowed_but_not_fired",
+    "fired_without_predicted_allowed",
+    "launch_block_reason_primary",
+    "launch_block_reason_all",
     "launch_allowed",
     "launch_block_reason",
     "action_pitch",
@@ -75,6 +102,16 @@ SUMMARY_FIELDS = [
     "ao_ok_rate",
     "ta_ok_rate",
     "lock_ready_rate",
+    "cooldown_ready_rate",
+    "deconflict_ok_rate",
+    "track_available_rate",
+    "direct_track_available_rate",
+    "mav_shared_track_available_rate",
+    "final_launch_allowed_rate",
+    "actual_fire_rate",
+    "predicted_allowed_but_not_fired_count",
+    "fired_without_predicted_allowed_count",
+    "recurrent_eval_used",
     "launch_allowed_rate",
     "action_mean_pitch",
     "action_mean_heading",
@@ -171,20 +208,29 @@ def _role_ids(env) -> list[int]:
     return [0 if env.agent_roles.get(rid) == "mav" else 1 for rid in env.red_ids]
 
 
-def _policy_actions(policy, adapter, env, obs, info, device: torch.device) -> np.ndarray:
+def _policy_actions(policy, adapter, env, obs, info, device: torch.device, rnn_hidden=None):
     adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
     actor_obs = np.stack([
         adapted["actor_obs"].get(rid, np.zeros(adapter.flat_actor_obs_dim, dtype=np.float32))
         for rid in env.red_ids
     ])
     with torch.no_grad():
+        kwargs = {
+            "roles": _role_ids(env),
+            "critic_state": torch.as_tensor(adapted["critic_state"], dtype=torch.float32, device=device),
+            "deterministic": True,
+        }
+        if rnn_hidden is not None:
+            kwargs["rnn_hidden"] = torch.as_tensor(rnn_hidden, dtype=torch.float32, device=device)
         out = policy.act(
             torch.as_tensor(actor_obs, dtype=torch.float32, device=device),
-            roles=_role_ids(env),
-            critic_state=torch.as_tensor(adapted["critic_state"], dtype=torch.float32, device=device),
-            deterministic=True,
+            **kwargs,
         )
-    return out["action"].detach().cpu().numpy().astype(np.float32)
+    next_hidden = out.get("rnn_hidden", out.get("next_rnn_hidden"))
+    return (
+        out["action"].detach().cpu().numpy().astype(np.float32),
+        next_hidden.detach().cpu().numpy().astype(np.float32) if next_hidden is not None else rnn_hidden,
+    )
 
 
 def _summarize(rows: list[dict[str, Any]], episodes: int, label: str, scenario: str, arch: str) -> dict[str, Any]:
@@ -195,7 +241,7 @@ def _summarize(rows: list[dict[str, Any]], episodes: int, label: str, scenario: 
             "policy_arch": arch,
             "episodes": episodes,
         }
-    block_counts = Counter(str(r["launch_block_reason"]) for r in rows)
+    block_counts = Counter(str(r.get("launch_block_reason_primary") or r.get("launch_block_reason", "")) for r in rows)
     actions = np.array([
         [float(r["action_pitch"]), float(r["action_heading"]), float(r["action_speed"])]
         for r in rows
@@ -217,8 +263,18 @@ def _summarize(rows: list[dict[str, Any]], episodes: int, label: str, scenario: 
         "range_ok_rate": float(np.mean([bool(r["range_ok"]) for r in rows])),
         "ao_ok_rate": float(np.mean([bool(r["ao_ok"]) for r in rows])),
         "ta_ok_rate": float(np.mean([bool(r["ta_ok"]) for r in rows])),
-        "lock_ready_rate": float(np.mean([bool(r["lock_ready"]) for r in rows])),
-        "launch_allowed_rate": float(np.mean([bool(r["launch_allowed"]) for r in rows])),
+        "lock_ready_rate": float(np.mean([bool(r.get("lock_ready")) for r in rows])),
+        "cooldown_ready_rate": float(np.mean([bool(r.get("cooldown_ready")) for r in rows])),
+        "deconflict_ok_rate": float(np.mean([bool(r.get("deconflict_ok")) for r in rows])),
+        "track_available_rate": float(np.mean([bool(r.get("track_available")) for r in rows])),
+        "direct_track_available_rate": float(np.mean([bool(r.get("direct_track_available")) for r in rows])),
+        "mav_shared_track_available_rate": float(np.mean([bool(r.get("mav_shared_track_available")) for r in rows])),
+        "final_launch_allowed_rate": float(np.mean([bool(r.get("final_launch_allowed", r.get("launch_allowed"))) for r in rows])),
+        "actual_fire_rate": float(np.mean([float(r.get("actual_missiles_fired_this_step", r.get("missiles_fired", 0)) or 0) > 0 for r in rows])),
+        "predicted_allowed_but_not_fired_count": int(sum(int(r.get("predicted_allowed_but_not_fired", 0) or 0) for r in rows)),
+        "fired_without_predicted_allowed_count": int(sum(int(r.get("fired_without_predicted_allowed", 0) or 0) for r in rows)),
+        "recurrent_eval_used": arch in {"brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
+        "launch_allowed_rate": float(np.mean([bool(r.get("launch_allowed")) for r in rows])),
         "action_mean_pitch": float(actions[:, 0].mean()),
         "action_mean_heading": float(actions[:, 1].mean()),
         "action_mean_speed": float(actions[:, 2].mean()),
@@ -226,6 +282,60 @@ def _summarize(rows: list[dict[str, Any]], episodes: int, label: str, scenario: 
         "dominant_block_reason": block_counts.most_common(1)[0][0] if block_counts else "",
         "block_reason_counts_json": json.dumps(dict(block_counts), sort_keys=True),
     }
+
+
+def _track_flags(obs: dict[str, Any], env, rid: str, target_id: str) -> dict[str, Any]:
+    red_obs = obs.get(rid, {}) if isinstance(obs, dict) else {}
+    src = np.asarray(red_obs.get("enemy_track_source", []), dtype=np.float32)
+    direct = False
+    shared = False
+    target_idx = -1
+    if target_id in getattr(env, "blue_ids", []):
+        target_idx = list(env.blue_ids).index(target_id)
+    if src.ndim == 2 and 0 <= target_idx < src.shape[0]:
+        direct = bool(src[target_idx, 0] > 0.5) if src.shape[1] > 0 else False
+        shared = bool(src[target_idx, 1] > 0.5) if src.shape[1] > 1 else False
+    if direct and shared:
+        source = "mixed"
+    elif direct:
+        source = "direct"
+    elif shared:
+        source = "mav_shared"
+    else:
+        source = "none"
+    return {
+        "track_available": direct or shared,
+        "direct_track_available": direct,
+        "mav_shared_track_available": shared,
+        "launch_track_source": source,
+    }
+
+
+def _block_reasons(diag: dict[str, Any], track_available: bool, boresight_ok: bool) -> list[str]:
+    reasons = []
+    if not diag.get("shooter_alive", True):
+        reasons.append("shooter_dead")
+    if not diag.get("has_missile", False):
+        reasons.append("no_missile")
+    if not diag.get("target_alive", False):
+        reasons.append("no_alive_target")
+    if not track_available:
+        reasons.append("no_track")
+    if not diag.get("range_ok", False):
+        reasons.append("out_of_range")
+    if not diag.get("ao_ok", False):
+        reasons.append("ao_blocked")
+    if not diag.get("ta_ok", False):
+        reasons.append("ta_blocked")
+    if not diag.get("lock_ready", False):
+        reasons.append("lock_delay")
+    if not diag.get("cooldown_ready", False):
+        reasons.append("cooldown")
+    if not diag.get("deconflict_ok", False):
+        reasons.append("engaged_deconflict")
+    if not boresight_ok:
+        reasons.append("boresight_blocked")
+    return reasons or ["allowed"]
 
 
 def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -247,6 +357,7 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         Path(args.output_dir).name if args.output_dir else model_path.parent.parent.name
     )
     arch = str(meta.get("policy_arch", "flat"))
+    recurrent_eval_used = arch in {"brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"}
     rows: list[dict[str, Any]] = []
 
     for ep in range(args.episodes):
@@ -254,11 +365,14 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         opponent = OpponentPolicy(mode=args.opponent_policy, seed=args.seed + ep + 17)
         try:
             obs, info = env.reset(seed=args.seed + ep)
+            rnn_hidden = None
+            if recurrent_eval_used:
+                rnn_hidden = np.zeros((len(env.red_ids), int(getattr(policy, "rnn_hidden_size", 128))), dtype=np.float32)
             prev_hits = {"red": 0, "blue": 0}
             terminated = {aid: False for aid in env.agent_ids}
             truncated = {aid: False for aid in env.agent_ids}
             for step in range(1, args.max_steps + 1):
-                actions_np = _policy_actions(policy, adapter, env, obs, info, device)
+                actions_np, rnn_hidden = _policy_actions(policy, adapter, env, obs, info, device, rnn_hidden)
                 action_dict = {rid: actions_np[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
                 action_dict.update(opponent.act(obs, env.blue_ids, env=env))
 
@@ -267,10 +381,19 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                     if env.agent_roles.get(rid) == "mav":
                         continue
                     diag = _diagnose_red_shooter(env, rid)
+                    diag["shooter_alive"] = bool(env.red_planes.get(rid) and env.red_planes[rid].is_alive)
+                    diag["shooter_role"] = env.agent_roles.get(rid, "")
+                    diag["cooldown_frames_left"] = int(getattr(env, "_missile_cooldown", {}).get(rid, 0))
+                    diag["lock_target"] = getattr(env, "_lock_target", {}).get(rid, "")
+                    diag["lock_delay_frames"] = int(getattr(env, "missile_lock_delay_frames", 0))
                     diag["action"] = actions_np[i].tolist()
                     before[rid] = diag
 
                 obs, _rewards, terminated, truncated, info = env.step(action_dict)
+                if rnn_hidden is not None:
+                    for idx, rid in enumerate(env.red_ids):
+                        if not bool(info.get(rid, {}).get("alive", False)):
+                            rnn_hidden[idx, :] = 0.0
                 counts = collect_step_counts(info)
                 mt = info.get("__missile_term__", {})
                 red_hit_total = int(mt.get("red", {}).get("hit", 0)) if isinstance(mt, dict) else 0
@@ -285,12 +408,37 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                 }
                 for rid, diag in before.items():
                     action = diag.pop("action")
+                    target_id = str(diag.get("target_id", ""))
+                    track = _track_flags(obs, env, rid, target_id)
+                    boresight_enabled = bool(getattr(env, "use_boresight_launch_gate", False))
+                    boresight_ok = True if not boresight_enabled else bool(diag.get("boresight_ok", False))
+                    reasons = _block_reasons(diag, bool(track["track_available"]), boresight_ok)
+                    fired_now = int(fired_by_red.get(rid, 0))
+                    final_allowed = bool(diag.get("launch_allowed_predicted", False) and track["track_available"] and boresight_ok)
                     rows.append({
                         "model_label": label,
                         "scenario": args.scenario,
                         "episode_id": ep,
                         "step": step,
                         "red_id": rid,
+                        "shooter_alive": diag.get("shooter_alive", False),
+                        "shooter_role": diag.get("shooter_role", ""),
+                        "shooter_has_missile": diag.get("has_missile", False),
+                        "nearest_blue_id": target_id,
+                        "nearest_blue_alive": diag.get("target_alive", False),
+                        "nearest_blue_range_m": diag.get("range_m", ""),
+                        "selected_target_id": target_id,
+                        "selected_target_range_m": diag.get("range_m", ""),
+                        "selected_target_AO_rad": diag.get("ao_rad", ""),
+                        "selected_target_TA_rad": diag.get("ta_rad", ""),
+                        "candidate_count": 1 if target_id else 0,
+                        **track,
+                        "lock_target": diag.get("lock_target", ""),
+                        "lock_timer": diag.get("lock_timer", 0),
+                        "lock_delay_frames": diag.get("lock_delay_frames", 0),
+                        "cooldown_frames_left": diag.get("cooldown_frames_left", 0),
+                        "boresight_ok": int(boresight_ok),
+                        "boresight_status": "enabled" if boresight_enabled else "not_enabled",
                         "target_id": diag.get("target_id", ""),
                         "range_m": diag.get("range_m", ""),
                         "AO_rad": diag.get("ao_rad", ""),
@@ -303,12 +451,18 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                         "range_ok": diag.get("range_ok", False),
                         "ao_ok": diag.get("ao_ok", False),
                         "ta_ok": diag.get("ta_ok", False),
+                        "final_launch_allowed": final_allowed,
+                        "actual_missiles_fired_this_step": fired_now,
+                        "predicted_allowed_but_not_fired": int(final_allowed and fired_now <= 0),
+                        "fired_without_predicted_allowed": int((not final_allowed) and fired_now > 0),
+                        "launch_block_reason_primary": reasons[0],
+                        "launch_block_reason_all": "|".join(reasons),
                         "launch_allowed": diag.get("launch_allowed_predicted", False),
                         "launch_block_reason": diag.get("launch_block_reason", ""),
                         "action_pitch": float(action[0]),
                         "action_heading": float(action[1]),
                         "action_speed": float(action[2]),
-                        "missiles_fired": fired_by_red.get(rid, 0),
+                        "missiles_fired": fired_now,
                         "missile_hits": red_hit_total,
                         "blue_dead": blue_dead,
                         "terminal_reason": terminal,
@@ -317,6 +471,8 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                     pass
                 if team_done(terminated, truncated):
                     break
+            if rnn_hidden is not None:
+                rnn_hidden[:] = 0.0
         finally:
             env.close()
     return rows, _summarize(rows, args.episodes, label, args.scenario, arch)
