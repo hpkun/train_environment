@@ -352,3 +352,28 @@ def test_logging_schema_contains_paper_v1_fields_and_summary_mode_skips_big_file
         rows = list(csv.reader((tmp_path / filename).open(newline="", encoding="utf-8")))
         assert len(rows) == 1
     assert (tmp_path / "episode_reward_components.csv").exists()
+
+
+def test_paper_v1_reset_clears_episode_state():
+    """Real env.reset must clear _paper_aligned_v1_mav_death_penalized and team_credit."""
+    from uav_env import make_env
+    config = (
+        "uav_env/JSBSim/configs/"
+        "hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1.yaml"
+    )
+    env = make_env(config, max_steps=10)
+    try:
+        obs, _info = env.reset(seed=0)
+        # Set state as if episode progressed
+        env._paper_aligned_v1_mav_death_penalized = True
+        env._paper_aligned_v1_mav_team_credit_used = 123.0
+        # Re-reset and verify cleared
+        obs, _info = env.reset(seed=1)
+        assert env._paper_aligned_v1_mav_death_penalized is False, (
+            f"death_penalized should be False after reset, got {env._paper_aligned_v1_mav_death_penalized}"
+        )
+        assert env._paper_aligned_v1_mav_team_credit_used == 0.0, (
+            f"team_credit_used should be 0 after reset, got {env._paper_aligned_v1_mav_team_credit_used}"
+        )
+    finally:
+        env.close()

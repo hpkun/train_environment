@@ -233,6 +233,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
     def _happo_ref_v1_reset_episode_state(self) -> None:
         self._happo_v1_mav_death_penalized = False
         self._happo_v1_mav_team_credit_used = 0.0
+        self._paper_aligned_v1_mav_death_penalized = False
+        self._paper_aligned_v1_mav_team_credit_used = 0.0
 
     def _tam_brma_paper_v1_reset_episode_state(self) -> None:
         self._paper_aligned_v1_mav_death_penalized = False
