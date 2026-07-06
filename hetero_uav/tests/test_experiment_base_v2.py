@@ -177,3 +177,14 @@ def test_v1_configs_keep_static_environment_contracts():
         assert "missile_launch_range_m" not in cfg
         assert "missile_launch_ao_thresh" not in cfg
         assert "missile_launch_ta_thresh" not in cfg
+
+
+def test_after_training_launch_diagnostic_configs_are_v1_surrogate_configs():
+    from scripts.train_happo_reference import _launch_diagnostic_config_for_scenario
+
+    assert _launch_diagnostic_config_for_scenario("3v2").endswith(
+        "hetero_mav_shared_geo_3v2_f16_mav_surrogate_happo_ref_v1_mav_support.yaml"
+    )
+    assert _launch_diagnostic_config_for_scenario("5v4").endswith(
+        "hetero_mav_shared_geo_5v4_f16_mav_surrogate_happo_ref_v1_mav_support.yaml"
+    )

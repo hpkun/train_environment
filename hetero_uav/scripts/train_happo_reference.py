@@ -1017,11 +1017,25 @@ def _write_failure_artifacts(policy, state: dict, exc: BaseException) -> None:
     )
 
 
+def _launch_diagnostic_config_for_scenario(scenario: str) -> str:
+    mapping = {
+        "3v2": "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_mav_surrogate_happo_ref_v1_mav_support.yaml",
+        "5v4": "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4_f16_mav_surrogate_happo_ref_v1_mav_support.yaml",
+    }
+    if scenario not in mapping:
+        raise ValueError(f"unsupported launch diagnostic scenario: {scenario}")
+    return mapping[scenario]
+
+
 def _run_launch_diagnostics_after_training(args, out_dir: Path) -> str:
     if not getattr(args, "run_launch_diagnostics_after_training", False):
         return "not_requested"
     scenarios = list(getattr(args, "launch_diagnostic_scenarios", []) or ["3v2", "5v4"])
     base_out = _rel(args.launch_diagnostic_output_dir) if args.launch_diagnostic_output_dir else out_dir / "launch_diagnostics"
+    diagnostic_configs = {
+        scenario: _launch_diagnostic_config_for_scenario(scenario)
+        for scenario in scenarios
+    }
     try:
         for scenario in scenarios:
             diag_out = base_out / scenario
@@ -1045,8 +1059,8 @@ def _run_launch_diagnostics_after_training(args, out_dir: Path) -> str:
                 "--max-steps", str(int(args.max_steps)),
                 "--diagnostic-output-dir", diag_out_arg,
             ]
-            if scenario == "3v2":
-                cmd += ["--config", str(args.config)]
+            if scenario in diagnostic_configs:
+                cmd += ["--config", diagnostic_configs[scenario]]
             result = subprocess.run(
                 cmd,
                 cwd=ROOT,
