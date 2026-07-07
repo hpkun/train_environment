@@ -228,6 +228,9 @@ class UavCombatEnv(gymnasium.Env):
                  pid_profile_config: dict | None = None,
                  red_target_selection_mode: str = "closest",
                  missile_launch_range_m: float | None = None,
+                 missile_launch_ao_deg: float | None = None,
+                 missile_launch_ta_deg: float | None = None,
+                 missile_launch_min_range_m: float | None = None,
                  missile_attack_interval_sec: float | None = None,
                  missile_guidance: dict | None = None,
                  missile_evasion: dict | None = None,
@@ -243,6 +246,15 @@ class UavCombatEnv(gymnasium.Env):
             self.MISSILE_LAUNCH_RANGE_THRESH = float(missile_launch_range_m)
         else:
             self._missile_launch_range_m_effective = float(self.MISSILE_LAUNCH_RANGE_THRESH)
+        if missile_launch_ao_deg is not None:
+            self.MISSILE_LAUNCH_AO_THRESH = np.deg2rad(float(missile_launch_ao_deg))
+        if missile_launch_ta_deg is not None:
+            self.MISSILE_LAUNCH_TA_THRESH = np.deg2rad(float(missile_launch_ta_deg))
+        if missile_launch_min_range_m is not None:
+            self.MISSILE_LAUNCH_MIN_RANGE = float(missile_launch_min_range_m)
+        self._missile_launch_ao_deg_effective = float(np.rad2deg(self.MISSILE_LAUNCH_AO_THRESH))
+        self._missile_launch_ta_deg_effective = float(np.rad2deg(self.MISSILE_LAUNCH_TA_THRESH))
+        self._missile_launch_min_range_m_effective = float(self.MISSILE_LAUNCH_MIN_RANGE)
         self.max_num_blue = max_num_blue
         self.max_num_red = max_num_red
         self.num_missiles_per_plane = num_missiles_per_plane
@@ -2170,6 +2182,12 @@ class UavCombatEnv(gymnasium.Env):
         info["death_events"] = [dict(event) for event in self._death_events_step]
         info["effective_missile_launch_range_m"] = getattr(
             self, "_missile_launch_range_m_effective", self.MISSILE_LAUNCH_RANGE_THRESH)
+        info["effective_missile_launch_ao_deg"] = getattr(
+            self, "_missile_launch_ao_deg_effective", float(np.rad2deg(self.MISSILE_LAUNCH_AO_THRESH)))
+        info["effective_missile_launch_ta_deg"] = getattr(
+            self, "_missile_launch_ta_deg_effective", float(np.rad2deg(self.MISSILE_LAUNCH_TA_THRESH)))
+        info["effective_missile_launch_min_range_m"] = getattr(
+            self, "_missile_launch_min_range_m_effective", self.MISSILE_LAUNCH_MIN_RANGE)
         info["effective_missile_attack_interval_sec"] = getattr(
             self, "_missile_attack_interval_sec_effective", 0.5)
         info["use_boresight_launch_gate"] = bool(getattr(
