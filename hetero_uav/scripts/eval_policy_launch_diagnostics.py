@@ -188,8 +188,16 @@ def _build_policy(meta: dict[str, Any], device: torch.device):
         EntityHAPPOReferencePolicy,
         HAPPOReferencePolicy,
     )
+    from algorithms.pure_happo import PureHAPPOPolicy
 
     arch = str(meta.get("policy_arch", "flat"))
+    if arch in {"pure_happo", "pure_happo_tanh"}:
+        return PureHAPPOPolicy(
+            actor_obs_dim=int(meta.get("actor_obs_dim", 96)),
+            critic_state_dim=int(meta.get("critic_state_dim", 480)),
+            action_dim=3,
+            num_agents=int(meta.get("num_agents", meta.get("max_num_red", 3))),
+        ).to(device)
     if arch == "entity_attention":
         return EntityHAPPOReferencePolicy(
             entity_dim=int(meta.get("entity_dim", 19)),

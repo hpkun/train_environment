@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -404,3 +405,42 @@ def test_launch_diagnostics_summary_counts_unknown_actual_source_separately():
     assert summary["red_hit_direct_count"] == 0
     assert summary["red_hit_mav_shared_count"] == 0
     assert summary["red_hit_unknown_source_count"] == 1
+
+
+@pytest.mark.parametrize("arch", ["pure_happo", "pure_happo_tanh"])
+def test_launch_diagnostics_builds_pure_happo_policy_arches(arch: str):
+    import eval_policy_launch_diagnostics as script
+    from algorithms.pure_happo import PureHAPPOPolicy
+
+    policy = script._build_policy(
+        {
+            "policy_arch": arch,
+            "actor_obs_dim": 96,
+            "critic_state_dim": 480,
+            "num_agents": 3,
+        },
+        torch.device("cpu"),
+    )
+
+    assert isinstance(policy, PureHAPPOPolicy)
+    assert policy.actor_obs_dim == 96
+    assert policy.critic_state_dim == 480
+    assert policy.action_dim == 3
+    assert policy.num_agents == 3
+
+
+def test_launch_diagnostics_build_policy_existing_arches_still_work():
+    import eval_policy_launch_diagnostics as script
+    from algorithms.happo import BRMARecurrentMaskedHAPPOReferencePolicy, HAPPOReferencePolicy
+
+    flat = script._build_policy(
+        {"policy_arch": "flat", "actor_obs_dim": 96, "critic_state_dim": 480},
+        torch.device("cpu"),
+    )
+    recurrent = script._build_policy(
+        {"policy_arch": "brma_recurrent_masked", "entity_dim": 19, "critic_state_dim": 480},
+        torch.device("cpu"),
+    )
+
+    assert isinstance(flat, HAPPOReferencePolicy)
+    assert isinstance(recurrent, BRMARecurrentMaskedHAPPOReferencePolicy)
