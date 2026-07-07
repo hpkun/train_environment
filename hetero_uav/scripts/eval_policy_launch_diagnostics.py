@@ -78,6 +78,8 @@ DIAG_FIELDS = [
     "final_launch_allowed",
     "actual_missiles_fired_this_step",
     "actual_red_hit_delta_this_step",
+    "actual_red_hit_direct_delta_this_step",
+    "actual_red_hit_mav_shared_delta_this_step",
     "predicted_allowed_but_not_fired",
     "fired_without_predicted_allowed",
     "predicted_vs_final_mismatch",
@@ -103,6 +105,15 @@ SUMMARY_FIELDS = [
     "steps",
     "red_missiles_fired",
     "missile_hits",
+    "red_launch_direct_count",
+    "red_launch_mav_shared_count",
+    "red_hit_direct_count",
+    "red_hit_mav_shared_count",
+    "red_launch_with_mav_shared_track",
+    "red_hit_with_mav_shared_track",
+    "first_red_launch_step",
+    "first_red_mav_shared_launch_step",
+    "first_red_mav_shared_hit_step",
     "blue_dead_mean",
     "range_ok_rate",
     "ao_ok_rate",
@@ -272,6 +283,33 @@ def _summarize(rows: list[dict[str, Any]], episodes: int, label: str, scenario: 
         missile_hits = int(sum(hit_delta_by_step.values()))
     else:
         missile_hits = int(max(int(r.get("missile_hits", 0) or 0) for r in rows))
+    fired_rows = [
+        r for r in rows
+        if int(r.get("actual_missiles_fired_this_step", r.get("missiles_fired", 0)) or 0) > 0
+    ]
+    hit_rows = [
+        r for r in rows
+        if int(r.get("actual_red_hit_delta_this_step", 0) or 0) > 0
+    ]
+    direct_launches = sum(1 for r in fired_rows if r.get("launch_track_source") == "direct")
+    shared_launches = sum(1 for r in fired_rows if r.get("launch_track_source") == "mav_shared")
+    if any("actual_red_hit_direct_delta_this_step" in r or "actual_red_hit_mav_shared_delta_this_step" in r for r in rows):
+        direct_hits = sum(int(r.get("actual_red_hit_direct_delta_this_step", 0) or 0) for r in rows)
+        shared_hits = sum(int(r.get("actual_red_hit_mav_shared_delta_this_step", 0) or 0) for r in rows)
+    else:
+        direct_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
+                          for r in hit_rows if r.get("launch_track_source") == "direct")
+        shared_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
+                          for r in hit_rows if r.get("launch_track_source") == "mav_shared")
+    first_launch_step = min((int(r.get("step", 0) or 0) for r in fired_rows), default="")
+    first_shared_launch_step = min(
+        (int(r.get("step", 0) or 0) for r in fired_rows if r.get("launch_track_source") == "mav_shared"),
+        default="",
+    )
+    first_shared_hit_step = min(
+        (int(r.get("step", 0) or 0) for r in hit_rows if r.get("launch_track_source") == "mav_shared"),
+        default="",
+    )
     return {
         "model_label": label,
         "scenario": scenario,
@@ -280,6 +318,15 @@ def _summarize(rows: list[dict[str, Any]], episodes: int, label: str, scenario: 
         "steps": int(max(int(r.get("step", 0) or 0) for r in rows)),
         "red_missiles_fired": int(sum(int(r.get("actual_missiles_fired_this_step", r.get("missiles_fired", 0)) or 0) for r in rows)),
         "missile_hits": missile_hits,
+        "red_launch_direct_count": int(direct_launches),
+        "red_launch_mav_shared_count": int(shared_launches),
+        "red_hit_direct_count": int(direct_hits),
+        "red_hit_mav_shared_count": int(shared_hits),
+        "red_launch_with_mav_shared_track": int(shared_launches),
+        "red_hit_with_mav_shared_track": int(shared_hits),
+        "first_red_launch_step": first_launch_step,
+        "first_red_mav_shared_launch_step": first_shared_launch_step,
+        "first_red_mav_shared_hit_step": first_shared_hit_step,
         "blue_dead_mean": float(np.mean(list(blue_dead_by_ep.values()))) if blue_dead_by_ep else 0.0,
         "range_ok_rate": float(np.mean([bool(r["range_ok"]) for r in rows])),
         "ao_ok_rate": float(np.mean([bool(r["ao_ok"]) for r in rows])),
@@ -514,6 +561,16 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                 red_hit_total = int(mt.get("red", {}).get("hit", 0)) if isinstance(mt, dict) else 0
                 red_hit_delta = max(red_hit_total - prev_hits["red"], 0)
                 prev_hits["red"] = red_hit_total
+                hit_delta_by_source = {"direct": 0, "mav_shared": 0}
+                for record in info.get("__launch_quality_done__", []) or []:
+                    if str(record.get("team") or record.get("shooter_team")) != "red":
+                        continue
+                    reason = str(record.get("raw_termination_reason") or record.get("termination_reason") or "")
+                    if reason != "hit":
+                        continue
+                    source = str(record.get("launch_track_source") or "")
+                    if source in hit_delta_by_source:
+                        hit_delta_by_source[source] += 1
                 terminal = _terminal_reason(env, terminated, truncated)
                 blue_dead = alive_counts(env)["blue_dead"]
                 fired_by_red = {
@@ -571,6 +628,8 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                         "final_launch_allowed": final_allowed,
                         "actual_missiles_fired_this_step": fired_now,
                         "actual_red_hit_delta_this_step": red_hit_delta,
+                        "actual_red_hit_direct_delta_this_step": hit_delta_by_source["direct"],
+                        "actual_red_hit_mav_shared_delta_this_step": hit_delta_by_source["mav_shared"],
                         "predicted_allowed_but_not_fired": int(final_allowed and fired_now <= 0),
                         "fired_without_predicted_allowed": int((not final_allowed) and fired_now > 0),
                         "predicted_vs_final_mismatch": pre_step.get("predicted_vs_final_mismatch", 0),

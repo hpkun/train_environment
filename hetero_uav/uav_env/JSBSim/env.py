@@ -227,6 +227,7 @@ class UavCombatEnv(gymnasium.Env):
                  pid_profile_by_role: dict | None = None,
                  pid_profile_config: dict | None = None,
                  red_target_selection_mode: str = "closest",
+                 red_uav_track_policy: str = "direct_or_mav_shared",
                  missile_launch_range_m: float | None = None,
                  missile_launch_ao_deg: float | None = None,
                  missile_launch_ta_deg: float | None = None,
@@ -240,6 +241,15 @@ class UavCombatEnv(gymnasium.Env):
         if red_target_selection_mode not in {"closest", "mav_threat_rank"}:
             raise ValueError(
                 "red_target_selection_mode must be 'closest' or 'mav_threat_rank'"
+            )
+        if red_uav_track_policy not in {
+            "direct_or_mav_shared",
+            "mav_preferred_when_alive",
+            "mav_required_when_alive",
+        }:
+            raise ValueError(
+                "red_uav_track_policy must be 'direct_or_mav_shared', "
+                "'mav_preferred_when_alive', or 'mav_required_when_alive'"
             )
         if missile_launch_range_m is not None:
             self._missile_launch_range_m_effective = float(missile_launch_range_m)
@@ -260,6 +270,7 @@ class UavCombatEnv(gymnasium.Env):
         self.num_missiles_per_plane = num_missiles_per_plane
         self.enable_gcas_for_blue = enable_gcas_for_blue
         self.red_target_selection_mode = red_target_selection_mode
+        self.red_uav_track_policy = red_uav_track_policy
         self.sim_freq = sim_freq
         self.agent_interaction_steps = agent_interaction_steps
         self.max_steps = max_steps
@@ -1058,11 +1069,26 @@ class UavCombatEnv(gymnasium.Env):
             obs_mask = np.asarray(obs.get("enemy_observed_mask", []), dtype=np.float32)
             for bi, bid in enumerate(self.blue_ids):
                 if bid == target_uid and bi < src.shape[0]:
-                    if src[bi, 0] > 0.5:
-                        return True, "direct"
-                    if src[bi, 1] > 0.5:
+                    direct = bool(src[bi, 0] > 0.5)
+                    shared = bool(src.shape[1] > 1 and src[bi, 1] > 0.5)
+                    observed = bool(obs_mask.size > bi and obs_mask[bi] > 0.5)
+                    policy = getattr(self, "red_uav_track_policy", "direct_or_mav_shared")
+                    if policy == "mav_preferred_when_alive" and shared:
                         return True, "mav_shared"
-                    if obs_mask.size > bi and obs_mask[bi] > 0.5:
+                    if policy == "mav_required_when_alive":
+                        if shared:
+                            return True, "mav_shared"
+                        mav = getattr(self, "red_planes", {}).get("red_0")
+                        target = getattr(self, "blue_planes", {}).get(bid)
+                        mav_alive = bool(mav is not None and getattr(mav, "is_alive", False))
+                        mav_observes = bool(target is not None and self._red_mav_observes_target(target))
+                        if mav_alive and mav_observes:
+                            return False, "mav_required_missing_shared"
+                    if direct:
+                        return True, "direct"
+                    if shared:
+                        return True, "mav_shared"
+                    if observed:
                         return True, "direct"
             return False, "unobserved"
         # Blue side: use enemy_track_source / enemy_observed_mask if available
@@ -2190,6 +2216,8 @@ class UavCombatEnv(gymnasium.Env):
             self, "_missile_launch_min_range_m_effective", self.MISSILE_LAUNCH_MIN_RANGE)
         info["effective_missile_attack_interval_sec"] = getattr(
             self, "_missile_attack_interval_sec_effective", 0.5)
+        info["red_uav_track_policy"] = getattr(
+            self, "red_uav_track_policy", "direct_or_mav_shared")
         info["use_boresight_launch_gate"] = bool(getattr(
             self, "use_boresight_launch_gate", False))
         # Drain per-step event buffers so rich logger sees each event exactly once
