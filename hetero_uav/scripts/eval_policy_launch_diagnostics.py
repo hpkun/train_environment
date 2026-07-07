@@ -56,7 +56,10 @@ DIAG_FIELDS = [
     "track_available",
     "direct_track_available",
     "mav_shared_track_available",
+    "pre_step_track_source",
     "launch_track_source",
+    "actual_launch_track_source",
+    "actual_launch_missile_id",
     "lock_target",
     "lock_timer",
     "lock_delay_frames",
@@ -107,8 +110,10 @@ SUMMARY_FIELDS = [
     "missile_hits",
     "red_launch_direct_count",
     "red_launch_mav_shared_count",
+    "red_launch_unknown_source_count",
     "red_hit_direct_count",
     "red_hit_mav_shared_count",
+    "red_hit_unknown_source_count",
     "red_launch_with_mav_shared_track",
     "red_hit_with_mav_shared_track",
     "first_red_launch_step",
@@ -251,7 +256,132 @@ def _policy_actions(policy, adapter, env, obs, info, device: torch.device, rnn_h
     )
 
 
-def _summarize(rows: list[dict[str, Any]], episodes: int, label: str, scenario: str, arch: str) -> dict[str, Any]:
+_KNOWN_TRACK_SOURCES = {"direct", "mav_shared"}
+
+
+def _event_team(record: dict[str, Any]) -> str:
+    return str(record.get("shooter_team") or record.get("team") or "")
+
+
+def _event_source(record: dict[str, Any]) -> str:
+    return str(record.get("launch_track_source") or "")
+
+
+def _event_missile_id(record: dict[str, Any]) -> str:
+    return str(record.get("missile_id") or "")
+
+
+def _launch_event_key(record: dict[str, Any], episode_id: int, step: int) -> tuple[Any, ...]:
+    missile_id = _event_missile_id(record)
+    if missile_id:
+        return ("missile", missile_id)
+    return (
+        "fallback",
+        int(episode_id),
+        int(step),
+        str(record.get("shooter_id") or ""),
+        str(record.get("target_id") or ""),
+        _event_source(record),
+    )
+
+
+def _is_hit_record(record: dict[str, Any]) -> bool:
+    reason = str(record.get("raw_termination_reason") or record.get("termination_reason") or "")
+    return reason == "hit"
+
+
+def _hit_event_key(record: dict[str, Any], episode_id: int, step: int) -> tuple[Any, ...]:
+    missile_id = _event_missile_id(record)
+    if missile_id:
+        return ("missile", missile_id)
+    launch_step = record.get("launch_step", record.get("current_step", step))
+    reason = str(record.get("raw_termination_reason") or record.get("termination_reason") or "")
+    return (
+        "fallback",
+        int(episode_id),
+        launch_step,
+        str(record.get("shooter_id") or ""),
+        str(record.get("target_id") or ""),
+        _event_source(record),
+        reason,
+    )
+
+
+def _record_actual_launch_event(
+    events: dict[tuple[Any, ...], dict[str, Any]],
+    record: dict[str, Any],
+    episode_id: int,
+    step: int,
+) -> None:
+    if _event_team(record) != "red":
+        return
+    key = _launch_event_key(record, episode_id, step)
+    events.setdefault(key, {
+        "episode_id": int(episode_id),
+        "step": int(step),
+        "missile_id": _event_missile_id(record),
+        "shooter_id": str(record.get("shooter_id") or ""),
+        "target_id": str(record.get("target_id") or ""),
+        "source": _event_source(record),
+    })
+
+
+def _record_actual_hit_event(
+    events: dict[tuple[Any, ...], dict[str, Any]],
+    record: dict[str, Any],
+    episode_id: int,
+    step: int,
+) -> None:
+    if _event_team(record) != "red" or not _is_hit_record(record):
+        return
+    key = _hit_event_key(record, episode_id, step)
+    events.setdefault(key, {
+        "episode_id": int(episode_id),
+        "step": int(step),
+        "missile_id": _event_missile_id(record),
+        "shooter_id": str(record.get("shooter_id") or ""),
+        "target_id": str(record.get("target_id") or ""),
+        "source": _event_source(record),
+    })
+
+
+def _count_events_by_source(events: dict[tuple[Any, ...], dict[str, Any]]) -> tuple[int, int, int]:
+    direct = 0
+    shared = 0
+    unknown = 0
+    for event in events.values():
+        source = str(event.get("source") or "")
+        if source == "direct":
+            direct += 1
+        elif source == "mav_shared":
+            shared += 1
+        else:
+            unknown += 1
+    return direct, shared, unknown
+
+
+def _first_event_step(
+    events: dict[tuple[Any, ...], dict[str, Any]],
+    *,
+    source: str | None = None,
+) -> int | str:
+    steps = [
+        int(event.get("step", 0) or 0)
+        for event in events.values()
+        if source is None or str(event.get("source") or "") == source
+    ]
+    return min(steps) if steps else ""
+
+
+def _summarize(
+    rows: list[dict[str, Any]],
+    episodes: int,
+    label: str,
+    scenario: str,
+    arch: str,
+    actual_launch_events: dict[tuple[Any, ...], dict[str, Any]] | None = None,
+    actual_hit_events: dict[tuple[Any, ...], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if not rows:
         return {
             "model_label": label,
@@ -283,33 +413,46 @@ def _summarize(rows: list[dict[str, Any]], episodes: int, label: str, scenario: 
         missile_hits = int(sum(hit_delta_by_step.values()))
     else:
         missile_hits = int(max(int(r.get("missile_hits", 0) or 0) for r in rows))
-    fired_rows = [
-        r for r in rows
-        if int(r.get("actual_missiles_fired_this_step", r.get("missiles_fired", 0)) or 0) > 0
-    ]
-    hit_rows = [
-        r for r in rows
-        if int(r.get("actual_red_hit_delta_this_step", 0) or 0) > 0
-    ]
-    direct_launches = sum(1 for r in fired_rows if r.get("launch_track_source") == "direct")
-    shared_launches = sum(1 for r in fired_rows if r.get("launch_track_source") == "mav_shared")
-    if any("actual_red_hit_direct_delta_this_step" in r or "actual_red_hit_mav_shared_delta_this_step" in r for r in rows):
-        direct_hits = sum(int(r.get("actual_red_hit_direct_delta_this_step", 0) or 0) for r in rows)
-        shared_hits = sum(int(r.get("actual_red_hit_mav_shared_delta_this_step", 0) or 0) for r in rows)
+    if actual_launch_events is not None:
+        direct_launches, shared_launches, unknown_launches = _count_events_by_source(actual_launch_events)
+        first_launch_step = _first_event_step(actual_launch_events)
+        first_shared_launch_step = _first_event_step(actual_launch_events, source="mav_shared")
     else:
-        direct_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
-                          for r in hit_rows if r.get("launch_track_source") == "direct")
-        shared_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
-                          for r in hit_rows if r.get("launch_track_source") == "mav_shared")
-    first_launch_step = min((int(r.get("step", 0) or 0) for r in fired_rows), default="")
-    first_shared_launch_step = min(
-        (int(r.get("step", 0) or 0) for r in fired_rows if r.get("launch_track_source") == "mav_shared"),
-        default="",
-    )
-    first_shared_hit_step = min(
-        (int(r.get("step", 0) or 0) for r in hit_rows if r.get("launch_track_source") == "mav_shared"),
-        default="",
-    )
+        fired_rows = [
+            r for r in rows
+            if int(r.get("actual_missiles_fired_this_step", r.get("missiles_fired", 0)) or 0) > 0
+        ]
+        direct_launches = sum(1 for r in fired_rows if r.get("launch_track_source") == "direct")
+        shared_launches = sum(1 for r in fired_rows if r.get("launch_track_source") == "mav_shared")
+        unknown_launches = sum(1 for r in fired_rows if r.get("launch_track_source") not in _KNOWN_TRACK_SOURCES)
+        first_launch_step = min((int(r.get("step", 0) or 0) for r in fired_rows), default="")
+        first_shared_launch_step = min(
+            (int(r.get("step", 0) or 0) for r in fired_rows if r.get("launch_track_source") == "mav_shared"),
+            default="",
+        )
+    if actual_hit_events is not None:
+        direct_hits, shared_hits, unknown_hits = _count_events_by_source(actual_hit_events)
+        first_shared_hit_step = _first_event_step(actual_hit_events, source="mav_shared")
+    else:
+        hit_rows = [
+            r for r in rows
+            if int(r.get("actual_red_hit_delta_this_step", 0) or 0) > 0
+        ]
+        if any("actual_red_hit_direct_delta_this_step" in r or "actual_red_hit_mav_shared_delta_this_step" in r for r in rows):
+            direct_hits = sum(int(r.get("actual_red_hit_direct_delta_this_step", 0) or 0) for r in rows)
+            shared_hits = sum(int(r.get("actual_red_hit_mav_shared_delta_this_step", 0) or 0) for r in rows)
+            unknown_hits = max(int(missile_hits) - int(direct_hits) - int(shared_hits), 0)
+        else:
+            direct_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
+                              for r in hit_rows if r.get("launch_track_source") == "direct")
+            shared_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
+                              for r in hit_rows if r.get("launch_track_source") == "mav_shared")
+            unknown_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
+                               for r in hit_rows if r.get("launch_track_source") not in _KNOWN_TRACK_SOURCES)
+        first_shared_hit_step = min(
+            (int(r.get("step", 0) or 0) for r in hit_rows if r.get("launch_track_source") == "mav_shared"),
+            default="",
+        )
     return {
         "model_label": label,
         "scenario": scenario,
@@ -320,8 +463,10 @@ def _summarize(rows: list[dict[str, Any]], episodes: int, label: str, scenario: 
         "missile_hits": missile_hits,
         "red_launch_direct_count": int(direct_launches),
         "red_launch_mav_shared_count": int(shared_launches),
+        "red_launch_unknown_source_count": int(unknown_launches),
         "red_hit_direct_count": int(direct_hits),
         "red_hit_mav_shared_count": int(shared_hits),
+        "red_hit_unknown_source_count": int(unknown_hits),
         "red_launch_with_mav_shared_track": int(shared_launches),
         "red_hit_with_mav_shared_track": int(shared_hits),
         "first_red_launch_step": first_launch_step,
@@ -521,6 +666,8 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     arch = str(meta.get("policy_arch", "flat"))
     recurrent_eval_used = arch in {"brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"}
     rows: list[dict[str, Any]] = []
+    actual_launch_events: dict[tuple[Any, ...], dict[str, Any]] = {}
+    actual_hit_events: dict[tuple[Any, ...], dict[str, Any]] = {}
 
     for ep in range(args.episodes):
         env = make_env(config, env_type="jsbsim_hetero", suppress_jsbsim_output=True)
@@ -562,13 +709,21 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                 red_hit_delta = max(red_hit_total - prev_hits["red"], 0)
                 prev_hits["red"] = red_hit_total
                 hit_delta_by_source = {"direct": 0, "mav_shared": 0}
+                actual_launch_by_shooter: dict[str, list[dict[str, Any]]] = {}
+                for record in info.get("__launch_quality_step__", []) or []:
+                    if _event_team(record) != "red":
+                        continue
+                    _record_actual_launch_event(actual_launch_events, record, ep, step)
+                    shooter_id = str(record.get("shooter_id") or "")
+                    if shooter_id:
+                        actual_launch_by_shooter.setdefault(shooter_id, []).append(record)
                 for record in info.get("__launch_quality_done__", []) or []:
-                    if str(record.get("team") or record.get("shooter_team")) != "red":
+                    if _event_team(record) != "red":
                         continue
-                    reason = str(record.get("raw_termination_reason") or record.get("termination_reason") or "")
-                    if reason != "hit":
+                    if not _is_hit_record(record):
                         continue
-                    source = str(record.get("launch_track_source") or "")
+                    _record_actual_hit_event(actual_hit_events, record, ep, step)
+                    source = _event_source(record)
                     if source in hit_delta_by_source:
                         hit_delta_by_source[source] += 1
                 terminal = _terminal_reason(env, terminated, truncated)
@@ -584,6 +739,13 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                     target_id = str(diag.get("target_id", ""))
                     fired_now = int(fired_by_red.get(rid, 0))
                     final_allowed = bool(pre_step["final_launch_allowed"])
+                    launch_records = actual_launch_by_shooter.get(rid, [])
+                    actual_sources = sorted({
+                        _event_source(record) for record in launch_records if _event_source(record)
+                    })
+                    actual_missile_ids = sorted({
+                        _event_missile_id(record) for record in launch_records if _event_missile_id(record)
+                    })
                     rows.append({
                         "model_label": label,
                         "scenario": args.scenario,
@@ -606,7 +768,10 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                         "track_available": pre_step.get("track_available", False),
                         "direct_track_available": pre_step.get("direct_track_available", False),
                         "mav_shared_track_available": pre_step.get("mav_shared_track_available", False),
+                        "pre_step_track_source": pre_step.get("launch_track_source", "none"),
                         "launch_track_source": pre_step.get("launch_track_source", "none"),
+                        "actual_launch_track_source": ";".join(actual_sources),
+                        "actual_launch_missile_id": ";".join(actual_missile_ids),
                         "lock_target": diag.get("lock_target", ""),
                         "lock_timer": diag.get("lock_timer", 0),
                         "lock_delay_frames": diag.get("lock_delay_frames", 0),
@@ -654,7 +819,15 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                 rnn_hidden[:] = 0.0
         finally:
             env.close()
-    return rows, _summarize(rows, args.episodes, label, args.scenario, arch)
+    return rows, _summarize(
+        rows,
+        args.episodes,
+        label,
+        args.scenario,
+        arch,
+        actual_launch_events=actual_launch_events,
+        actual_hit_events=actual_hit_events,
+    )
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
@@ -676,6 +849,15 @@ def _write_md(path: Path, summary: dict[str, Any]) -> None:
         f"- episodes: `{summary.get('episodes')}`",
         f"- red_missiles_fired: `{summary.get('red_missiles_fired')}`",
         f"- missile_hits: `{summary.get('missile_hits')}`",
+        f"- red_launch_direct_count: `{summary.get('red_launch_direct_count')}`",
+        f"- red_launch_mav_shared_count: `{summary.get('red_launch_mav_shared_count')}`",
+        f"- red_launch_unknown_source_count: `{summary.get('red_launch_unknown_source_count')}`",
+        f"- red_hit_direct_count: `{summary.get('red_hit_direct_count')}`",
+        f"- red_hit_mav_shared_count: `{summary.get('red_hit_mav_shared_count')}`",
+        f"- red_hit_unknown_source_count: `{summary.get('red_hit_unknown_source_count')}`",
+        f"- first_red_launch_step: `{summary.get('first_red_launch_step')}`",
+        f"- first_red_mav_shared_launch_step: `{summary.get('first_red_mav_shared_launch_step')}`",
+        f"- first_red_mav_shared_hit_step: `{summary.get('first_red_mav_shared_hit_step')}`",
         f"- blue_dead_mean: `{summary.get('blue_dead_mean')}`",
         f"- range_ok_rate: `{summary.get('range_ok_rate')}`",
         f"- ao_ok_rate: `{summary.get('ao_ok_rate')}`",
@@ -741,6 +923,12 @@ def main() -> int:
         f"fired_without_predicted_allowed_count: {summary.get('fired_without_predicted_allowed_count')}",
         f"red_missiles_fired: {summary.get('red_missiles_fired')}",
         f"missile_hits: {summary.get('missile_hits')}",
+        f"red_launch_direct_count: {summary.get('red_launch_direct_count')}",
+        f"red_launch_mav_shared_count: {summary.get('red_launch_mav_shared_count')}",
+        f"red_launch_unknown_source_count: {summary.get('red_launch_unknown_source_count')}",
+        f"red_hit_direct_count: {summary.get('red_hit_direct_count')}",
+        f"red_hit_mav_shared_count: {summary.get('red_hit_mav_shared_count')}",
+        f"red_hit_unknown_source_count: {summary.get('red_hit_unknown_source_count')}",
     ]:
         try:
             print(line, flush=True)

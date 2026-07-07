@@ -93,6 +93,8 @@ Primary MAV-guidance metrics:
 - `first_red_mav_shared_hit_step`;
 - `red_launch_direct_count`;
 - `red_hit_direct_count`;
+- `red_launch_unknown_source_count`;
+- `red_hit_unknown_source_count`;
 - `red_launch_with_mav_shared_track`;
 - `red_hit_with_mav_shared_track`.
 
@@ -107,7 +109,15 @@ Combat metrics:
 - `red_win`;
 - 5v4 zero-shot transfer metrics.
 
-The rich missile log already records `launch_track_source`. `eval_policy_launch_diagnostics.py` summarizes direct vs MAV-shared launch and hit counts.
+The rich missile log already records `launch_track_source`. `eval_policy_launch_diagnostics.py` summarizes direct vs MAV-shared launch and hit counts from the actual `launch_quality` launch / termination records emitted by the environment, not from pre-step visibility flags.
+
+Diagnostic source semantics:
+
+- direct/shared launch and hit counts are computed from actual launch-quality records.
+- pre-step track flags are only used for envelope diagnostics and may be `mixed` when direct and MAV-shared visibility both exist.
+- actual launch source is the `launch_track_source` recorded by the environment at missile launch time.
+- hit source is inherited from the missile's launch-quality record and deduplicated by `missile_id`.
+- unknown source counts are reported separately if a launch or hit record lacks a clean `direct` or `mav_shared` source.
 
 ## 6. Command Templates
 
@@ -225,4 +235,3 @@ Do not claim:
 - the method removes 3-9 line;
 - diagnostic range/AO/TA variants are part of this main method;
 - `mav_guided_v1` is a complete reproduction of TAM-HAPPO.
-

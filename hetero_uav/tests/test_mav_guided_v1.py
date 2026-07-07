@@ -208,3 +208,199 @@ def test_launch_diagnostics_summary_counts_mav_shared_usage():
     assert summary["red_hit_mav_shared_count"] == 0
     assert summary["first_red_launch_step"] == 10
     assert summary["first_red_mav_shared_launch_step"] == 10
+
+
+def _minimal_diag_row(**overrides):
+    row = {
+        "episode_id": 0,
+        "step": 10,
+        "launch_track_source": "none",
+        "actual_missiles_fired_this_step": 0,
+        "actual_red_hit_delta_this_step": 0,
+        "missile_hits": 0,
+        "blue_dead": 0,
+        "range_ok": True,
+        "ao_ok": True,
+        "ta_ok": True,
+        "lock_ready": True,
+        "cooldown_ready": True,
+        "deconflict_ok": True,
+        "track_available": True,
+        "direct_track_available": True,
+        "mav_shared_track_available": True,
+        "final_launch_allowed": True,
+        "launch_allowed": True,
+        "predicted_allowed_but_not_fired": 0,
+        "fired_without_predicted_allowed": 0,
+        "predicted_vs_final_mismatch": 0,
+        "launch_block_reason_primary": "allowed",
+        "action_pitch": 0.0,
+        "action_heading": 0.0,
+        "action_speed": 0.0,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_launch_diagnostics_summary_uses_actual_launch_records_over_mixed_rows():
+    import eval_policy_launch_diagnostics as script
+
+    rows = [
+        _minimal_diag_row(
+            step=12,
+            launch_track_source="mixed",
+            actual_missiles_fired_this_step=1,
+        )
+    ]
+    actual_launch_events = {
+        ("missile", "m1"): {
+            "step": 12,
+            "missile_id": "m1",
+            "source": "mav_shared",
+        }
+    }
+
+    summary = script._summarize(
+        rows,
+        episodes=1,
+        label="m",
+        scenario="3v2",
+        arch="brma_recurrent_masked",
+        actual_launch_events=actual_launch_events,
+        actual_hit_events={},
+    )
+
+    assert summary["red_launch_mav_shared_count"] == 1
+    assert summary["red_launch_direct_count"] == 0
+    assert summary["red_launch_unknown_source_count"] == 0
+    assert summary["first_red_mav_shared_launch_step"] == 12
+
+
+def test_launch_diagnostics_records_actual_direct_and_shared_launch_events():
+    import eval_policy_launch_diagnostics as script
+
+    events = {}
+    script._record_actual_launch_event(
+        events,
+        {
+            "team": "red",
+            "shooter_id": "red_1",
+            "target_id": "blue_0",
+            "missile_id": "m1",
+            "launch_track_source": "mav_shared",
+        },
+        episode_id=0,
+        step=11,
+    )
+    script._record_actual_launch_event(
+        events,
+        {
+            "shooter_team": "red",
+            "shooter_id": "red_2",
+            "target_id": "blue_1",
+            "missile_id": "m2",
+            "launch_track_source": "direct",
+        },
+        episode_id=0,
+        step=17,
+    )
+    script._record_actual_launch_event(
+        events,
+        {
+            "team": "blue",
+            "shooter_id": "blue_0",
+            "target_id": "red_1",
+            "missile_id": "b1",
+            "launch_track_source": "direct",
+        },
+        episode_id=0,
+        step=18,
+    )
+
+    summary = script._summarize(
+        [_minimal_diag_row(step=11), _minimal_diag_row(step=17)],
+        episodes=1,
+        label="m",
+        scenario="3v2",
+        arch="brma_recurrent_masked",
+        actual_launch_events=events,
+        actual_hit_events={},
+    )
+
+    assert summary["red_launch_mav_shared_count"] == 1
+    assert summary["red_launch_direct_count"] == 1
+    assert summary["red_launch_unknown_source_count"] == 0
+    assert summary["first_red_launch_step"] == 11
+    assert summary["first_red_mav_shared_launch_step"] == 11
+
+
+def test_launch_diagnostics_summary_deduplicates_hits_by_missile_id():
+    import eval_policy_launch_diagnostics as script
+
+    rows = [
+        _minimal_diag_row(step=30, actual_red_hit_delta_this_step=1),
+        _minimal_diag_row(step=30, red_id="red_2", actual_red_hit_delta_this_step=1),
+    ]
+    actual_hit_events = {}
+    hit_record = {
+        "team": "red",
+        "shooter_id": "red_1",
+        "target_id": "blue_0",
+        "missile_id": "m2",
+        "launch_track_source": "mav_shared",
+        "raw_termination_reason": "hit",
+    }
+    script._record_actual_hit_event(actual_hit_events, hit_record, episode_id=0, step=30)
+    script._record_actual_hit_event(actual_hit_events, hit_record, episode_id=0, step=30)
+
+    summary = script._summarize(
+        rows,
+        episodes=1,
+        label="m",
+        scenario="3v2",
+        arch="brma_recurrent_masked",
+        actual_launch_events={},
+        actual_hit_events=actual_hit_events,
+    )
+
+    assert summary["red_hit_mav_shared_count"] == 1
+    assert summary["red_hit_direct_count"] == 0
+    assert summary["red_hit_unknown_source_count"] == 0
+    assert summary["first_red_mav_shared_hit_step"] == 30
+
+
+def test_launch_diagnostics_summary_counts_unknown_actual_source_separately():
+    import eval_policy_launch_diagnostics as script
+
+    rows = [_minimal_diag_row(step=15)]
+    actual_launch_events = {
+        ("missile", "m3"): {
+            "step": 15,
+            "missile_id": "m3",
+            "source": "mixed",
+        }
+    }
+    actual_hit_events = {
+        ("missile", "m3"): {
+            "step": 22,
+            "missile_id": "m3",
+            "source": "mixed",
+        }
+    }
+
+    summary = script._summarize(
+        rows,
+        episodes=1,
+        label="m",
+        scenario="3v2",
+        arch="brma_recurrent_masked",
+        actual_launch_events=actual_launch_events,
+        actual_hit_events=actual_hit_events,
+    )
+
+    assert summary["red_launch_direct_count"] == 0
+    assert summary["red_launch_mav_shared_count"] == 0
+    assert summary["red_launch_unknown_source_count"] == 1
+    assert summary["red_hit_direct_count"] == 0
+    assert summary["red_hit_mav_shared_count"] == 0
+    assert summary["red_hit_unknown_source_count"] == 1
