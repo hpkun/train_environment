@@ -288,7 +288,12 @@ def _event_missile_id(record: dict[str, Any]) -> str:
 def _launch_event_key(record: dict[str, Any], episode_id: int, step: int) -> tuple[Any, ...]:
     missile_id = _event_missile_id(record)
     if missile_id:
-        return ("missile", missile_id)
+        return (
+            "missile",
+            int(episode_id),
+            str(record.get("shooter_id") or ""),
+            missile_id,
+        )
     return (
         "fallback",
         int(episode_id),
@@ -307,7 +312,12 @@ def _is_hit_record(record: dict[str, Any]) -> bool:
 def _hit_event_key(record: dict[str, Any], episode_id: int, step: int) -> tuple[Any, ...]:
     missile_id = _event_missile_id(record)
     if missile_id:
-        return ("missile", missile_id)
+        return (
+            "missile",
+            int(episode_id),
+            str(record.get("shooter_id") or ""),
+            missile_id,
+        )
     launch_step = record.get("launch_step", record.get("current_step", step))
     reason = str(record.get("raw_termination_reason") or record.get("termination_reason") or "")
     return (

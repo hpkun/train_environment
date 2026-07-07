@@ -602,6 +602,84 @@ def test_launch_diagnostics_summary_counts_direct_and_mav_shared_separately():
     assert summary["red_hit_with_mav_shared_track"] == 1
 
 
+def test_launch_diagnostics_dedup_keys_are_episode_scoped():
+    import eval_policy_launch_diagnostics as script
+
+    launch_events = {}
+    hit_events = {}
+    launch_record = {
+        "team": "red",
+        "shooter_id": "red_1",
+        "target_id": "blue_0",
+        "missile_id": "m0",
+        "launch_track_source": "mav_shared",
+    }
+    hit_record = {
+        **launch_record,
+        "raw_termination_reason": "hit",
+    }
+
+    script._record_actual_launch_event(launch_events, launch_record, episode_id=0, step=2)
+    script._record_actual_launch_event(launch_events, launch_record, episode_id=0, step=2)
+    script._record_actual_launch_event(launch_events, launch_record, episode_id=1, step=2)
+    script._record_actual_hit_event(hit_events, hit_record, episode_id=0, step=12)
+    script._record_actual_hit_event(hit_events, hit_record, episode_id=0, step=12)
+    script._record_actual_hit_event(hit_events, hit_record, episode_id=1, step=12)
+
+    summary = script._summarize(
+        [_minimal_diag_row(step=2), _minimal_diag_row(episode_id=1, step=2)],
+        episodes=2,
+        label="m",
+        scenario="3v2",
+        arch="pure_happo",
+        actual_launch_events=launch_events,
+        actual_hit_events=hit_events,
+    )
+
+    assert len(launch_events) == 2
+    assert len(hit_events) == 2
+    assert summary["red_launch_mav_shared_count"] == 2
+    assert summary["red_hit_mav_shared_count"] == 2
+
+
+def test_launch_diagnostics_direct_and_mav_shared_dedup_keys_are_episode_scoped():
+    import eval_policy_launch_diagnostics as script
+
+    launch_events = {}
+    hit_events = {}
+    launch_record = {
+        "team": "red",
+        "shooter_id": "red_2",
+        "target_id": "blue_1",
+        "missile_id": "m0",
+        "launch_track_source": "direct_and_mav_shared",
+    }
+    hit_record = {
+        **launch_record,
+        "raw_termination_reason": "hit",
+    }
+
+    script._record_actual_launch_event(launch_events, launch_record, episode_id=0, step=3)
+    script._record_actual_launch_event(launch_events, launch_record, episode_id=1, step=3)
+    script._record_actual_hit_event(hit_events, hit_record, episode_id=0, step=15)
+    script._record_actual_hit_event(hit_events, hit_record, episode_id=1, step=15)
+
+    summary = script._summarize(
+        [_minimal_diag_row(step=3), _minimal_diag_row(episode_id=1, step=3)],
+        episodes=2,
+        label="m",
+        scenario="3v2",
+        arch="pure_happo",
+        actual_launch_events=launch_events,
+        actual_hit_events=hit_events,
+    )
+
+    assert summary["red_launch_direct_and_mav_shared_count"] == 2
+    assert summary["red_hit_direct_and_mav_shared_count"] == 2
+    assert summary["red_launch_with_mav_shared_track"] == 2
+    assert summary["red_hit_with_mav_shared_track"] == 2
+
+
 @pytest.mark.parametrize("arch", ["pure_happo", "pure_happo_tanh"])
 def test_launch_diagnostics_builds_pure_happo_policy_arches(arch: str):
     import eval_policy_launch_diagnostics as script
