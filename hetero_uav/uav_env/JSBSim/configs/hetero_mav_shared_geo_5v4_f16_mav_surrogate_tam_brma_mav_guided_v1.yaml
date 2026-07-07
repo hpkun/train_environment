@@ -68,7 +68,7 @@ tam_brma_paper_aligned_v1:
     team_credit_per_kill_raw: 100.0
     team_credit_cap_raw: 200.0
   uav:
-    include_r_death: false
+    include_r_death: true
   logging:
     log_removed_mav_r_adv: true
     log_removed_mav_r_end: true
@@ -76,57 +76,57 @@ tam_brma_paper_aligned_v1:
 initial_states:
   blue_0:
     altitude_m: 6000
-    lat: 60.15
+    lat: 60.10
     lon: 119.98
-    speed_mps: 250
-    yaw_deg: 180.0
+    speed_mps: 230
+    yaw_deg: 0.0
   blue_1:
     altitude_m: 6000
-    lat: 60.15
+    lat: 60.10
     lon: 120.02
-    speed_mps: 250
-    yaw_deg: 180.0
+    speed_mps: 230
+    yaw_deg: 0.0
   blue_2:
     altitude_m: 6000
-    lat: 60.19
+    lat: 60.12
     lon: 119.99
-    speed_mps: 250
-    yaw_deg: 180.0
+    speed_mps: 230
+    yaw_deg: 0.0
   blue_3:
     altitude_m: 6000
-    lat: 60.19
+    lat: 60.12
     lon: 120.01
-    speed_mps: 250
-    yaw_deg: 180.0
+    speed_mps: 230
+    yaw_deg: 0.0
   red_0:
-    altitude_m: 6700
-    lat: 60.0
+    altitude_m: 6800
+    lat: 59.99
     lon: 120.0
     speed_mps: 250
     yaw_deg: 0.0
   red_1:
     altitude_m: 6000
-    lat: 60.02
+    lat: 60.00
     lon: 119.98
-    speed_mps: 250
+    speed_mps: 260
     yaw_deg: 0.0
   red_2:
     altitude_m: 6000
-    lat: 60.02
+    lat: 60.00
     lon: 120.02
-    speed_mps: 250
+    speed_mps: 260
     yaw_deg: 0.0
   red_3:
     altitude_m: 6000
     lat: 59.98
     lon: 119.99
-    speed_mps: 250
+    speed_mps: 260
     yaw_deg: 0.0
   red_4:
     altitude_m: 6000
     lat: 59.98
     lon: 120.01
-    speed_mps: 250
+    speed_mps: 260
     yaw_deg: 0.0
 mav_observation_range_m: 80000.0
 max_num_blue: 4

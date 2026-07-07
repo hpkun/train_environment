@@ -6,6 +6,11 @@ heterogeneous air combat. This stage is a learnability check, not the final
 zero-shot scale-transfer stage. GRU, mask, and entity-attention methods should be
 added only after the attack loop is open.
 
+The current version is a rear-aspect teaching geometry. It is designed to open an
+early red-UAV launch window quickly, so that we can verify the training
+environment has a learnable attack signal before restoring harder initial
+geometries.
+
 ## Current Main Config
 
 The 3v2 and 5v4 `mav_guided_v1` configs are updated in place. They keep reward,
@@ -23,6 +28,7 @@ Current settings:
 - `missile_attack_interval_sec: 25.0`
 - `hetero_reward_mode: tam_brma_paper_aligned_v1`
 - `observation_mode: mav_shared_geo`
+- `tam_brma_paper_aligned_v1.uav.include_r_death: true`
 
 Rationale:
 
@@ -33,6 +39,12 @@ Rationale:
   environment learnability.
 - `range=14km`, `AO=60deg`, and `attack interval=25s` are learnability settings
   for opening the early pure-HAPPO attack loop.
+- The 3v2 initial state places red attack UAVs behind same-heading blue UAVs at
+  about 11 km range, inside the 14 km launch range.
+- The 5v4 initial state uses the same rear-aspect teaching pattern without
+  adding a separate ablation config.
+- Existing UAV death penalty is enabled to avoid early-death behavior becoming a
+  local optimum.
 - TA90 / 3-9 line is retained.
 - Range/AO/TA/lock/deconfliction remain active; MAV shared track does not bypass
   launch geometry.
@@ -60,6 +72,8 @@ Primary learnability metrics:
 - `red_launch_unknown_source_count` should stay near 0
 - `red_hit_unknown_source_count` should stay near 0
 - `dominant_block_reason` should not remain stuck at `out_of_range`
+- `shooter_alive_rate`, `shooter_has_missile_rate`, and `geometry_ok_rate` should
+  be checked together to distinguish early death from geometry or lock issues.
 
 Source-specific diagnostics:
 
@@ -152,5 +166,9 @@ Do not claim:
 - MAV directly launches missiles;
 - MAV shared track bypasses launch geometry;
 - the method removes TA90 / 3-9 line;
+- rear-aspect teaching geometry is the final complex-opponent evaluation;
 - this stage proves final zero-shot scale transfer;
 - random masks or recurrent/entity methods are part of this pure-HAPPO probe.
+
+After pure HAPPO can launch and hit stably, harder initial geometry and richer
+network structure can be restored step by step.
