@@ -18,6 +18,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from uav_env import make_env  # noqa: E402
 from uav_env.JSBSim.env import UavCombatEnv  # noqa: E402
+from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv  # noqa: E402
 
 CFG_3V2 = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_mav_guided_v1.yaml"
 CFG_5V4 = "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_mav_guided_v1.yaml"
@@ -46,6 +47,42 @@ def _set_red_obs(env, *, direct: float, shared: float, observed: float = 1.0):
     }
 
 
+def test_mav_shared_geo_obs_marks_direct_and_shared_track_sources(monkeypatch):
+    env = HeteroUavCombatEnv.__new__(HeteroUavCombatEnv)
+    env.agent_roles = {"red_0": "mav", "red_1": "attack_uav"}
+    ego = SimpleNamespace(is_alive=True)
+    mav = SimpleNamespace(is_alive=True)
+    blue = SimpleNamespace(is_alive=True)
+
+    monkeypatch.setattr(env, "_get_sim", lambda aid: {
+        "red_1": ego,
+        "red_0": mav,
+        "blue_0": blue,
+    }.get(aid))
+    monkeypatch.setattr(env, "_get_red_mav_sim", lambda: mav)
+    monkeypatch.setattr(env, "_distance_m", lambda a, b: 1000.0)
+    monkeypatch.setattr(env, "_ego_geo_state", lambda sim: np.ones(7, dtype=np.float32))
+    monkeypatch.setattr(env, "_relative_geo_state", lambda a, b: np.ones(5, dtype=np.float32))
+
+    filled = []
+
+    def fake_fill(*args):
+        filled.append(args[2])
+        args[-1][args[2]] = 1.0
+
+    monkeypatch.setattr(env, "_fill_enemy_full_geo", fake_fill)
+    env.uav_direct_observation_range_m = 10000.0
+    env.mav_observation_range_m = 80000.0
+
+    obs = env._build_mav_shared_geo_obs("red_1", ["red_0"], ["blue_0"])
+
+    assert obs["enemy_track_source"].shape == (1, 2)
+    assert obs["enemy_track_source"][0].tolist() == [1.0, 1.0]
+    assert obs["enemy_observed_mask"][0] == 1.0
+    assert obs["enemy_full_geo_valid_mask"][0] == 1.0
+    assert filled == [0]
+
+
 def test_default_red_uav_track_policy_preserves_legacy_behavior():
     env = make_env(BASE_3V2, max_steps=5)
     try:
@@ -62,17 +99,18 @@ def test_mav_guided_v1_configs_load_and_apply_contract(config: str):
     try:
         assert env.hetero_reward_mode == "tam_brma_paper_aligned_v1"
         assert env.observation_mode == "mav_shared_geo"
-        assert env.red_uav_track_policy == "mav_required_when_alive"
-        assert env.red_target_selection_mode == "mav_threat_rank"
+        assert env.red_uav_track_policy == "mav_preferred_when_alive"
+        assert env.red_target_selection_mode == "closest"
         assert math.degrees(env.MISSILE_LAUNCH_AO_THRESH) == pytest.approx(60.0)
         assert math.degrees(env.MISSILE_LAUNCH_TA_THRESH) == pytest.approx(90.0)
-        assert env.MISSILE_LAUNCH_RANGE_THRESH == pytest.approx(10000.0)
+        assert env.MISSILE_LAUNCH_RANGE_THRESH == pytest.approx(14000.0)
         assert env.MISSILE_LAUNCH_MIN_RANGE == pytest.approx(500.0)
-        assert env._missile_attack_interval_sec_effective == pytest.approx(0.5)
+        assert env._missile_attack_interval_sec_effective == pytest.approx(25.0)
         assert env._num_missiles_for("red_0") == 0
         for rid in env.red_ids[1:]:
             assert env._num_missiles_for(rid) == 2
         assert env.action_space["red_0"].shape == (3,)
+        assert env.observation_space["red_1"].spaces["enemy_track_source"].shape == (len(env.blue_ids), 2)
         assert env.observation_space["red_0"].contains(env.observation_space["red_0"].sample())
     finally:
         env.close()
@@ -82,6 +120,12 @@ def test_direct_or_mav_shared_allows_direct_track():
     env = _dummy_env("direct_or_mav_shared")
     _set_red_obs(env, direct=1.0, shared=0.0)
     assert env._has_launch_track("red_1", "blue_0") == (True, "direct")
+
+
+def test_direct_or_mav_shared_reports_dual_source_track():
+    env = _dummy_env("direct_or_mav_shared")
+    _set_red_obs(env, direct=1.0, shared=1.0)
+    assert env._has_launch_track("red_1", "blue_0") == (True, "direct_and_mav_shared")
 
 
 def test_mav_preferred_when_alive_prefers_shared_track():
@@ -95,6 +139,13 @@ def test_mav_required_when_alive_blocks_direct_only_if_mav_observes(monkeypatch)
     monkeypatch.setattr(env, "_red_mav_observes_target", lambda _target: True)
     _set_red_obs(env, direct=1.0, shared=0.0)
     assert env._has_launch_track("red_1", "blue_0") == (False, "mav_required_missing_shared")
+
+
+def test_mav_required_when_alive_allows_direct_and_shared(monkeypatch):
+    env = _dummy_env("mav_required_when_alive")
+    monkeypatch.setattr(env, "_red_mav_observes_target", lambda _target: True)
+    _set_red_obs(env, direct=1.0, shared=1.0)
+    assert env._has_launch_track("red_1", "blue_0") == (True, "mav_shared")
 
 
 def test_mav_required_when_mav_dead_allows_direct_fallback():
@@ -405,6 +456,47 @@ def test_launch_diagnostics_summary_counts_unknown_actual_source_separately():
     assert summary["red_hit_direct_count"] == 0
     assert summary["red_hit_mav_shared_count"] == 0
     assert summary["red_hit_unknown_source_count"] == 1
+
+
+def test_launch_diagnostics_summary_counts_direct_and_mav_shared_separately():
+    import eval_policy_launch_diagnostics as script
+
+    rows = [_minimal_diag_row(step=15)]
+    actual_launch_events = {
+        ("missile", "m4"): {
+            "step": 15,
+            "missile_id": "m4",
+            "source": "direct_and_mav_shared",
+        }
+    }
+    actual_hit_events = {
+        ("missile", "m4"): {
+            "step": 22,
+            "missile_id": "m4",
+            "source": "direct_and_mav_shared",
+        }
+    }
+
+    summary = script._summarize(
+        rows,
+        episodes=1,
+        label="m",
+        scenario="3v2",
+        arch="brma_recurrent_masked",
+        actual_launch_events=actual_launch_events,
+        actual_hit_events=actual_hit_events,
+    )
+
+    assert summary["red_launch_direct_count"] == 0
+    assert summary["red_launch_mav_shared_count"] == 0
+    assert summary["red_launch_direct_and_mav_shared_count"] == 1
+    assert summary["red_launch_unknown_source_count"] == 0
+    assert summary["red_launch_with_mav_shared_track"] == 1
+    assert summary["red_hit_direct_count"] == 0
+    assert summary["red_hit_mav_shared_count"] == 0
+    assert summary["red_hit_direct_and_mav_shared_count"] == 1
+    assert summary["red_hit_unknown_source_count"] == 0
+    assert summary["red_hit_with_mav_shared_track"] == 1
 
 
 @pytest.mark.parametrize("arch", ["pure_happo", "pure_happo_tanh"])

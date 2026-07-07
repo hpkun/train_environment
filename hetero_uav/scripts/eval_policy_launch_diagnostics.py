@@ -83,6 +83,7 @@ DIAG_FIELDS = [
     "actual_red_hit_delta_this_step",
     "actual_red_hit_direct_delta_this_step",
     "actual_red_hit_mav_shared_delta_this_step",
+    "actual_red_hit_direct_and_mav_shared_delta_this_step",
     "predicted_allowed_but_not_fired",
     "fired_without_predicted_allowed",
     "predicted_vs_final_mismatch",
@@ -110,9 +111,11 @@ SUMMARY_FIELDS = [
     "missile_hits",
     "red_launch_direct_count",
     "red_launch_mav_shared_count",
+    "red_launch_direct_and_mav_shared_count",
     "red_launch_unknown_source_count",
     "red_hit_direct_count",
     "red_hit_mav_shared_count",
+    "red_hit_direct_and_mav_shared_count",
     "red_hit_unknown_source_count",
     "red_launch_with_mav_shared_track",
     "red_hit_with_mav_shared_track",
@@ -264,7 +267,7 @@ def _policy_actions(policy, adapter, env, obs, info, device: torch.device, rnn_h
     )
 
 
-_KNOWN_TRACK_SOURCES = {"direct", "mav_shared"}
+_KNOWN_TRACK_SOURCES = {"direct", "mav_shared", "direct_and_mav_shared"}
 
 
 def _event_team(record: dict[str, Any]) -> str:
@@ -353,9 +356,10 @@ def _record_actual_hit_event(
     })
 
 
-def _count_events_by_source(events: dict[tuple[Any, ...], dict[str, Any]]) -> tuple[int, int, int]:
+def _count_events_by_source(events: dict[tuple[Any, ...], dict[str, Any]]) -> tuple[int, int, int, int]:
     direct = 0
     shared = 0
+    direct_and_shared = 0
     unknown = 0
     for event in events.values():
         source = str(event.get("source") or "")
@@ -363,20 +367,27 @@ def _count_events_by_source(events: dict[tuple[Any, ...], dict[str, Any]]) -> tu
             direct += 1
         elif source == "mav_shared":
             shared += 1
+        elif source == "direct_and_mav_shared":
+            direct_and_shared += 1
         else:
             unknown += 1
-    return direct, shared, unknown
+    return direct, shared, direct_and_shared, unknown
 
 
 def _first_event_step(
     events: dict[tuple[Any, ...], dict[str, Any]],
     *,
     source: str | None = None,
+    sources: set[str] | None = None,
 ) -> int | str:
     steps = [
         int(event.get("step", 0) or 0)
         for event in events.values()
-        if source is None or str(event.get("source") or "") == source
+        if (
+            (source is None and sources is None)
+            or str(event.get("source") or "") == source
+            or (sources is not None and str(event.get("source") or "") in sources)
+        )
     ]
     return min(steps) if steps else ""
 
@@ -422,9 +433,12 @@ def _summarize(
     else:
         missile_hits = int(max(int(r.get("missile_hits", 0) or 0) for r in rows))
     if actual_launch_events is not None:
-        direct_launches, shared_launches, unknown_launches = _count_events_by_source(actual_launch_events)
+        direct_launches, shared_launches, direct_and_shared_launches, unknown_launches = _count_events_by_source(actual_launch_events)
         first_launch_step = _first_event_step(actual_launch_events)
-        first_shared_launch_step = _first_event_step(actual_launch_events, source="mav_shared")
+        first_shared_launch_step = _first_event_step(
+            actual_launch_events,
+            sources={"mav_shared", "direct_and_mav_shared"},
+        )
     else:
         fired_rows = [
             r for r in rows
@@ -432,15 +446,20 @@ def _summarize(
         ]
         direct_launches = sum(1 for r in fired_rows if r.get("launch_track_source") == "direct")
         shared_launches = sum(1 for r in fired_rows if r.get("launch_track_source") == "mav_shared")
+        direct_and_shared_launches = sum(1 for r in fired_rows if r.get("launch_track_source") == "direct_and_mav_shared")
         unknown_launches = sum(1 for r in fired_rows if r.get("launch_track_source") not in _KNOWN_TRACK_SOURCES)
         first_launch_step = min((int(r.get("step", 0) or 0) for r in fired_rows), default="")
         first_shared_launch_step = min(
-            (int(r.get("step", 0) or 0) for r in fired_rows if r.get("launch_track_source") == "mav_shared"),
+            (int(r.get("step", 0) or 0) for r in fired_rows
+             if r.get("launch_track_source") in {"mav_shared", "direct_and_mav_shared"}),
             default="",
         )
     if actual_hit_events is not None:
-        direct_hits, shared_hits, unknown_hits = _count_events_by_source(actual_hit_events)
-        first_shared_hit_step = _first_event_step(actual_hit_events, source="mav_shared")
+        direct_hits, shared_hits, direct_and_shared_hits, unknown_hits = _count_events_by_source(actual_hit_events)
+        first_shared_hit_step = _first_event_step(
+            actual_hit_events,
+            sources={"mav_shared", "direct_and_mav_shared"},
+        )
     else:
         hit_rows = [
             r for r in rows
@@ -449,16 +468,20 @@ def _summarize(
         if any("actual_red_hit_direct_delta_this_step" in r or "actual_red_hit_mav_shared_delta_this_step" in r for r in rows):
             direct_hits = sum(int(r.get("actual_red_hit_direct_delta_this_step", 0) or 0) for r in rows)
             shared_hits = sum(int(r.get("actual_red_hit_mav_shared_delta_this_step", 0) or 0) for r in rows)
-            unknown_hits = max(int(missile_hits) - int(direct_hits) - int(shared_hits), 0)
+            direct_and_shared_hits = sum(int(r.get("actual_red_hit_direct_and_mav_shared_delta_this_step", 0) or 0) for r in rows)
+            unknown_hits = max(int(missile_hits) - int(direct_hits) - int(shared_hits) - int(direct_and_shared_hits), 0)
         else:
             direct_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
                               for r in hit_rows if r.get("launch_track_source") == "direct")
             shared_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
                               for r in hit_rows if r.get("launch_track_source") == "mav_shared")
+            direct_and_shared_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
+                                         for r in hit_rows if r.get("launch_track_source") == "direct_and_mav_shared")
             unknown_hits = sum(int(r.get("actual_red_hit_delta_this_step", 0) or 0)
                                for r in hit_rows if r.get("launch_track_source") not in _KNOWN_TRACK_SOURCES)
         first_shared_hit_step = min(
-            (int(r.get("step", 0) or 0) for r in hit_rows if r.get("launch_track_source") == "mav_shared"),
+            (int(r.get("step", 0) or 0) for r in hit_rows
+             if r.get("launch_track_source") in {"mav_shared", "direct_and_mav_shared"}),
             default="",
         )
     return {
@@ -471,12 +494,14 @@ def _summarize(
         "missile_hits": missile_hits,
         "red_launch_direct_count": int(direct_launches),
         "red_launch_mav_shared_count": int(shared_launches),
+        "red_launch_direct_and_mav_shared_count": int(direct_and_shared_launches),
         "red_launch_unknown_source_count": int(unknown_launches),
         "red_hit_direct_count": int(direct_hits),
         "red_hit_mav_shared_count": int(shared_hits),
+        "red_hit_direct_and_mav_shared_count": int(direct_and_shared_hits),
         "red_hit_unknown_source_count": int(unknown_hits),
-        "red_launch_with_mav_shared_track": int(shared_launches),
-        "red_hit_with_mav_shared_track": int(shared_hits),
+        "red_launch_with_mav_shared_track": int(shared_launches + direct_and_shared_launches),
+        "red_hit_with_mav_shared_track": int(shared_hits + direct_and_shared_hits),
         "first_red_launch_step": first_launch_step,
         "first_red_mav_shared_launch_step": first_shared_launch_step,
         "first_red_mav_shared_hit_step": first_shared_hit_step,
@@ -518,7 +543,7 @@ def _track_flags(obs: dict[str, Any], env, rid: str, target_id: str) -> dict[str
         direct = bool(src[target_idx, 0] > 0.5) if src.shape[1] > 0 else False
         shared = bool(src[target_idx, 1] > 0.5) if src.shape[1] > 1 else False
     if direct and shared:
-        source = "mixed"
+        source = "direct_and_mav_shared"
     elif direct:
         source = "direct"
     elif shared:
@@ -716,7 +741,7 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                 red_hit_total = int(mt.get("red", {}).get("hit", 0)) if isinstance(mt, dict) else 0
                 red_hit_delta = max(red_hit_total - prev_hits["red"], 0)
                 prev_hits["red"] = red_hit_total
-                hit_delta_by_source = {"direct": 0, "mav_shared": 0}
+                hit_delta_by_source = {"direct": 0, "mav_shared": 0, "direct_and_mav_shared": 0}
                 actual_launch_by_shooter: dict[str, list[dict[str, Any]]] = {}
                 for record in info.get("__launch_quality_step__", []) or []:
                     if _event_team(record) != "red":
@@ -803,6 +828,7 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                         "actual_red_hit_delta_this_step": red_hit_delta,
                         "actual_red_hit_direct_delta_this_step": hit_delta_by_source["direct"],
                         "actual_red_hit_mav_shared_delta_this_step": hit_delta_by_source["mav_shared"],
+                        "actual_red_hit_direct_and_mav_shared_delta_this_step": hit_delta_by_source["direct_and_mav_shared"],
                         "predicted_allowed_but_not_fired": int(final_allowed and fired_now <= 0),
                         "fired_without_predicted_allowed": int((not final_allowed) and fired_now > 0),
                         "predicted_vs_final_mismatch": pre_step.get("predicted_vs_final_mismatch", 0),
@@ -859,9 +885,11 @@ def _write_md(path: Path, summary: dict[str, Any]) -> None:
         f"- missile_hits: `{summary.get('missile_hits')}`",
         f"- red_launch_direct_count: `{summary.get('red_launch_direct_count')}`",
         f"- red_launch_mav_shared_count: `{summary.get('red_launch_mav_shared_count')}`",
+        f"- red_launch_direct_and_mav_shared_count: `{summary.get('red_launch_direct_and_mav_shared_count')}`",
         f"- red_launch_unknown_source_count: `{summary.get('red_launch_unknown_source_count')}`",
         f"- red_hit_direct_count: `{summary.get('red_hit_direct_count')}`",
         f"- red_hit_mav_shared_count: `{summary.get('red_hit_mav_shared_count')}`",
+        f"- red_hit_direct_and_mav_shared_count: `{summary.get('red_hit_direct_and_mav_shared_count')}`",
         f"- red_hit_unknown_source_count: `{summary.get('red_hit_unknown_source_count')}`",
         f"- first_red_launch_step: `{summary.get('first_red_launch_step')}`",
         f"- first_red_mav_shared_launch_step: `{summary.get('first_red_mav_shared_launch_step')}`",
@@ -933,9 +961,11 @@ def main() -> int:
         f"missile_hits: {summary.get('missile_hits')}",
         f"red_launch_direct_count: {summary.get('red_launch_direct_count')}",
         f"red_launch_mav_shared_count: {summary.get('red_launch_mav_shared_count')}",
+        f"red_launch_direct_and_mav_shared_count: {summary.get('red_launch_direct_and_mav_shared_count')}",
         f"red_launch_unknown_source_count: {summary.get('red_launch_unknown_source_count')}",
         f"red_hit_direct_count: {summary.get('red_hit_direct_count')}",
         f"red_hit_mav_shared_count: {summary.get('red_hit_mav_shared_count')}",
+        f"red_hit_direct_and_mav_shared_count: {summary.get('red_hit_direct_and_mav_shared_count')}",
         f"red_hit_unknown_source_count: {summary.get('red_hit_unknown_source_count')}",
     ]:
         try:

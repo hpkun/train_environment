@@ -1058,7 +1058,8 @@ class UavCombatEnv(gymnasium.Env):
         """Check whether shooter has track on target (direct or MAV-shared).
 
         Returns (has_track, source) where source is one of:
-          direct, mav_shared, blue_direct, unobserved, role_blocked_mav.
+          direct, mav_shared, direct_and_mav_shared, blue_direct, unobserved,
+          role_blocked_mav.
         """
         role = getattr(self, "agent_roles", {}).get(aid, "")
         if aid.startswith("red_") and role == "mav":
@@ -1073,6 +1074,8 @@ class UavCombatEnv(gymnasium.Env):
                     shared = bool(src.shape[1] > 1 and src[bi, 1] > 0.5)
                     observed = bool(obs_mask.size > bi and obs_mask[bi] > 0.5)
                     policy = getattr(self, "red_uav_track_policy", "direct_or_mav_shared")
+                    if policy == "direct_or_mav_shared" and direct and shared:
+                        return True, "direct_and_mav_shared"
                     if policy == "mav_preferred_when_alive" and shared:
                         return True, "mav_shared"
                     if policy == "mav_required_when_alive":

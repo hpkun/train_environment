@@ -1,7 +1,7 @@
 # mav_guided_v1 main-method config, not a launch-gate diagnostic config.
-# It keeps the BRMA 3-9 line / TA90, 10 km short-range missile contract,
-# lock delay, cooldown, and deconfliction.  Red UAV launch tracks must use
-# MAV shared information when the MAV is alive and observes the target.
+# It keeps the BRMA 3-9 line / TA90, lock delay, cooldown, and deconfliction.
+# Red UAV launch tracks prefer MAV shared information when it is available,
+# while preserving direct fallback for early-training learnability.
 # This config does not change reward, missile dynamics, hit model, PID,
 # aircraft XML, blue rule, action space, or observation dimension.
 action_trim_by_role:
@@ -43,13 +43,13 @@ blue_agent_types:
 enable_gcas_for_blue: true
 env_type: jsbsim_hetero
 hetero_reward_mode: tam_brma_paper_aligned_v1
-red_uav_track_policy: mav_required_when_alive
-red_target_selection_mode: mav_threat_rank
+red_uav_track_policy: mav_preferred_when_alive
+red_target_selection_mode: closest
 missile_launch_ao_deg: 60.0
 missile_launch_ta_deg: 90.0
-missile_launch_range_m: 10000.0
+missile_launch_range_m: 14000.0
 missile_launch_min_range_m: 500.0
-missile_attack_interval_sec: 0.5
+missile_attack_interval_sec: 25.0
 tam_brma_paper_aligned_v1:
   mav_reward_scale: 0.05
   mav_safety:
@@ -149,4 +149,3 @@ pid_profile_by_role:
 acmi_visual_by_role:
   mav: f22
   attack_uav: f16
-

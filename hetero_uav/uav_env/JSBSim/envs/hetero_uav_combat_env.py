@@ -1958,18 +1958,13 @@ class HeteroUavCombatEnv(UavCombatEnv):
                     <= self.mav_observation_range_m
                 )
 
-            if own_direct:
+            if own_direct or mav_shared:
                 enemy_geo_states[i] = self._relative_geo_state(ego_sim, enemy_sim)
                 enemy_observed_mask[i] = 1.0
-                enemy_track_source[i] = np.array([1.0, 0.0], dtype=np.float32)
-                self._fill_enemy_full_geo(
-                    ego_sim, enemy_sim, i, enemy_relative_pos_xyz,
-                    enemy_relative_vel_xyz, enemy_bearing_elevation,
-                    enemy_speed_heading, enemy_full_geo_valid_mask)
-            elif mav_shared:
-                enemy_geo_states[i] = self._relative_geo_state(ego_sim, enemy_sim)
-                enemy_observed_mask[i] = 1.0
-                enemy_track_source[i] = np.array([0.0, 1.0], dtype=np.float32)
+                enemy_track_source[i] = np.array(
+                    [1.0 if own_direct else 0.0, 1.0 if mav_shared else 0.0],
+                    dtype=np.float32,
+                )
                 self._fill_enemy_full_geo(
                     ego_sim, enemy_sim, i, enemy_relative_pos_xyz,
                     enemy_relative_vel_xyz, enemy_bearing_elevation,
