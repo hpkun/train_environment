@@ -21,14 +21,14 @@ Run in this order:
 
 | label | 3v2 config | 5v4 config | changed | unchanged | purpose |
 |---|---|---|---|---|---|
-| baseline | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1.yaml` | none | reward, missile dynamics, hit model, geometry, PID, blue rule, action/obs spaces | reference behavior |
-| diagnostic_range15 | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15.yaml` | launch range 10 km -> 15 km | reward, missile dynamics, hit model, AO, TA, target ranking | tests whether 10 km range is the launch bottleneck |
-| diagnostic_ao60 | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_ao60.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_ao60.yaml` | AO 45 deg -> 60 deg | reward, missile dynamics, hit model, range, TA, target ranking | tests whether AO is too strict |
-| diagnostic_range15_ao60 | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15_ao60.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15_ao60.yaml` | launch range 15 km and AO 60 deg | reward, missile dynamics, hit model, TA, target ranking | tests coupled range/AO bottleneck |
-| diagnostic_mav_rank | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_mav_rank.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_mav_rank.yaml` | red target ranking closest -> `mav_threat_rank` | reward, missile dynamics, hit model, range, AO, TA | tests whether MAV information helps target choice without bypassing launch gates |
-| diagnostic_range15_ao60_mav_rank | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15_ao60_mav_rank.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15_ao60_mav_rank.yaml` | launch range 15 km, AO 60 deg, MAV-aware ranking | reward, missile dynamics, hit model, TA | tests MAV ranking when launch opportunities are less narrow |
-| tam_interval25 | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_tam_interval25.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_tam_interval25.yaml` | attack interval 0.5 s -> 25 s | reward, missile dynamics, hit model, range, AO, TA, ranking | TAM-HAPPO parameter consistency probe, not a first-launch fix |
-| diagnostic_ta60 | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_ta60.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_ta60.yaml` | TA 90 deg -> 60 deg | reward, missile dynamics, hit model, range, AO, ranking | second-stage diagnostic only; deviates from BRMA rear-hemisphere condition |
+| baseline | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1.yaml` | none | reward, missile dynamics, hit model, initial scenario geometry, PID, blue rule, action/obs spaces | reference behavior |
+| diagnostic_range15 | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15.yaml` | launch range 10 km -> 15 km | reward, missile dynamics, hit model, initial scenario geometry, AO, TA, target ranking | tests whether 10 km range is the launch bottleneck |
+| diagnostic_ao60 | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_ao60.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_ao60.yaml` | AO 45 deg -> 60 deg | reward, missile dynamics, hit model, initial scenario geometry, range, TA, target ranking | tests whether AO is too strict |
+| diagnostic_range15_ao60 | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15_ao60.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15_ao60.yaml` | launch range 15 km and AO 60 deg | reward, missile dynamics, hit model, initial scenario geometry, TA, target ranking | tests coupled range/AO bottleneck |
+| diagnostic_mav_rank | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_mav_rank.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_mav_rank.yaml` | red target ranking closest -> `mav_threat_rank` | reward, missile dynamics, hit model, initial scenario geometry, range, AO, TA | tests whether MAV information helps target choice without bypassing launch gates |
+| diagnostic_range15_ao60_mav_rank | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15_ao60_mav_rank.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_range15_ao60_mav_rank.yaml` | launch range 15 km, AO 60 deg, MAV-aware ranking | reward, missile dynamics, hit model, initial scenario geometry, TA | tests MAV ranking when launch opportunities are less narrow |
+| tam_interval25 | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_tam_interval25.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_tam_interval25.yaml` | attack interval 0.5 s -> 25 s | reward, missile dynamics, hit model, initial scenario geometry, range, AO, TA, ranking | TAM-HAPPO parameter consistency probe, not a first-launch fix |
+| diagnostic_ta60 | `hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_ta60.yaml` | `hetero_mav_shared_geo_5v4_f16_mav_surrogate_tam_brma_paper_aligned_v1_diagnostic_ta60.yaml` | TA 90 deg -> 60 deg | reward, missile dynamics, hit model, initial scenario geometry, range, AO, ranking | second-stage diagnostic only; deviates from BRMA rear-hemisphere condition |
 
 ## Judging Criteria
 
@@ -96,7 +96,7 @@ python -u scripts/train_happo_reference.py \
   --num-envs 1 \
   --max-steps 1000 \
   --device cuda \
-  --policy-arch pure_happo \
+  --policy-arch brma_recurrent_masked \
   --opponent-policy brma_rule \
   --reward-mode tam_brma_paper_aligned_v1 \
   --checkpoint-interval-steps 0 \
@@ -115,7 +115,7 @@ python -u scripts/train_happo_reference.py \
   --num-envs 1 \
   --max-steps 1000 \
   --device cuda \
-  --policy-arch pure_happo \
+  --policy-arch brma_recurrent_masked \
   --opponent-policy brma_rule \
   --reward-mode tam_brma_paper_aligned_v1 \
   --checkpoint-interval-steps 25000 \
@@ -151,7 +151,7 @@ python -u scripts/train_happo_reference.py \
   --num-envs 1 \
   --max-steps 1000 \
   --device cuda \
-  --policy-arch pure_happo \
+  --policy-arch brma_recurrent_masked \
   --opponent-policy brma_rule \
   --reward-mode tam_brma_paper_aligned_v1 \
   --eval-during-training \
@@ -192,4 +192,3 @@ The detail CSV does not currently include a literal boolean column named `actual
    - directly tests whether heading/attack-angle alignment is blocking launch even when range is acceptable.
 
 Run `diagnostic_range15_ao60` only after range and AO are understood individually. Run `mav_rank` after confirming that target availability and geometry are not trivially zero. Keep `tam_interval25` as parameter-consistency analysis, not as a fix for early non-launch. Keep `diagnostic_ta60` last because it deliberately relaxes the BRMA rear-hemisphere condition.
-
