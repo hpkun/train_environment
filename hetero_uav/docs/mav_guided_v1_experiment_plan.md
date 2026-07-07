@@ -6,10 +6,10 @@ heterogeneous air combat. This stage is a learnability check, not the final
 zero-shot scale-transfer stage. GRU, mask, and entity-attention methods should be
 added only after the attack loop is open.
 
-The current version is a rear-aspect teaching geometry. It is designed to open an
-early red-UAV launch window quickly, so that we can verify the training
-environment has a learnable attack signal before restoring harder initial
-geometries.
+The current version is an approach-and-fire rear-aspect teaching geometry. It
+places red UAVs behind same-heading blue UAVs just outside the launch range, so
+the environment no longer validates a near-0s immediate-fire smoke case. Red
+UAVs must pursue first, then enter the launch window.
 
 ## Current Main Config
 
@@ -38,9 +38,9 @@ Rationale:
 - `closest` target selection reduces target-ranking complexity while validating
   environment learnability.
 - `range=14km`, `AO=60deg`, and `attack interval=25s` are learnability settings
-  for opening the early pure-HAPPO attack loop.
+  for opening the pure-HAPPO attack loop after a short pursuit.
 - The 3v2 initial state places red attack UAVs behind same-heading blue UAVs at
-  about 11 km range, inside the 14 km launch range.
+  roughly 15 km range, slightly outside the 14 km launch range.
 - The 5v4 initial state uses the same rear-aspect teaching pattern without
   adding a separate ablation config.
 - Existing UAV death penalty is enabled to avoid early-death behavior becoming a
@@ -171,4 +171,6 @@ Do not claim:
 - random masks or recurrent/entity methods are part of this pure-HAPPO probe.
 
 After pure HAPPO can launch and hit stably, harder initial geometry and richer
-network structure can be restored step by step.
+network structure can be restored step by step. The next planned step for this
+configuration is a 500K `pure_happo + num_envs=4` probe, not more firing-chain
+micro-tests.

@@ -74,59 +74,59 @@ tam_brma_paper_aligned_v1:
     log_removed_mav_r_end: true
     log_shared_track_only: true
 initial_states:
-  blue_0:
-    altitude_m: 6000
-    lat: 60.10
-    lon: 119.98
-    speed_mps: 230
-    yaw_deg: 0.0
-  blue_1:
-    altitude_m: 6000
-    lat: 60.10
-    lon: 120.02
-    speed_mps: 230
-    yaw_deg: 0.0
-  blue_2:
-    altitude_m: 6000
-    lat: 60.12
-    lon: 119.99
-    speed_mps: 230
-    yaw_deg: 0.0
-  blue_3:
-    altitude_m: 6000
-    lat: 60.12
-    lon: 120.01
-    speed_mps: 230
-    yaw_deg: 0.0
   red_0:
     altitude_m: 6800
-    lat: 59.99
+    lat: 59.95
     lon: 120.0
     speed_mps: 250
     yaw_deg: 0.0
   red_1:
     altitude_m: 6000
-    lat: 60.00
+    lat: 59.96
     lon: 119.98
     speed_mps: 260
     yaw_deg: 0.0
   red_2:
     altitude_m: 6000
-    lat: 60.00
+    lat: 59.96
     lon: 120.02
     speed_mps: 260
     yaw_deg: 0.0
   red_3:
     altitude_m: 6000
-    lat: 59.98
+    lat: 59.94
     lon: 119.99
     speed_mps: 260
     yaw_deg: 0.0
   red_4:
     altitude_m: 6000
-    lat: 59.98
+    lat: 59.94
     lon: 120.01
     speed_mps: 260
+    yaw_deg: 0.0
+  blue_0:
+    altitude_m: 6000
+    lat: 60.095
+    lon: 119.98
+    speed_mps: 230
+    yaw_deg: 0.0
+  blue_1:
+    altitude_m: 6000
+    lat: 60.095
+    lon: 120.02
+    speed_mps: 230
+    yaw_deg: 0.0
+  blue_2:
+    altitude_m: 6000
+    lat: 60.115
+    lon: 119.99
+    speed_mps: 230
+    yaw_deg: 0.0
+  blue_3:
+    altitude_m: 6000
+    lat: 60.115
+    lon: 120.01
+    speed_mps: 230
     yaw_deg: 0.0
 mav_observation_range_m: 80000.0
 max_num_blue: 4

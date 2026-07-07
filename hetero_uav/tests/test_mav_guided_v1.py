@@ -127,19 +127,19 @@ def test_mav_guided_v1_configs_load_and_apply_contract(config: str):
 
 def test_mav_guided_v1_3v2_initial_geometry_is_rear_aspect_teaching_window():
     init = _load_yaml_config(CFG_3V2)["initial_states"]
-    assert init["red_0"]["lat"] == pytest.approx(59.99)
+    assert init["red_0"]["lat"] == pytest.approx(59.95)
     assert init["red_0"]["lon"] == pytest.approx(120.02)
     assert init["red_0"]["altitude_m"] == pytest.approx(6700)
-    assert init["red_1"]["lat"] == pytest.approx(60.00)
+    assert init["red_1"]["lat"] == pytest.approx(59.96)
     assert init["red_1"]["lon"] == pytest.approx(120.00)
     assert init["red_1"]["speed_mps"] == pytest.approx(260)
-    assert init["red_2"]["lat"] == pytest.approx(60.00)
+    assert init["red_2"]["lat"] == pytest.approx(59.96)
     assert init["red_2"]["lon"] == pytest.approx(120.04)
     assert init["red_2"]["speed_mps"] == pytest.approx(260)
-    assert init["blue_0"]["lat"] == pytest.approx(60.10)
+    assert init["blue_0"]["lat"] == pytest.approx(60.095)
     assert init["blue_0"]["lon"] == pytest.approx(120.00)
     assert init["blue_0"]["speed_mps"] == pytest.approx(230)
-    assert init["blue_1"]["lat"] == pytest.approx(60.10)
+    assert init["blue_1"]["lat"] == pytest.approx(60.095)
     assert init["blue_1"]["lon"] == pytest.approx(120.04)
     assert init["blue_1"]["speed_mps"] == pytest.approx(230)
     assert all(init[aid]["yaw_deg"] == pytest.approx(0.0) for aid in init)
@@ -148,51 +148,66 @@ def test_mav_guided_v1_3v2_initial_geometry_is_rear_aspect_teaching_window():
 def test_mav_guided_v1_5v4_initial_geometry_is_rear_aspect_teaching_window():
     cfg = _load_yaml_config(CFG_5V4)
     init = cfg["initial_states"]
-    assert init["red_0"]["lat"] == pytest.approx(59.99)
+    assert init["red_0"]["lat"] == pytest.approx(59.95)
     assert init["red_0"]["lon"] == pytest.approx(120.00)
     assert init["red_0"]["altitude_m"] == pytest.approx(6800)
-    assert init["red_1"]["lat"] == pytest.approx(60.00)
+    assert init["red_1"]["lat"] == pytest.approx(59.96)
     assert init["red_1"]["lon"] == pytest.approx(119.98)
-    assert init["red_2"]["lat"] == pytest.approx(60.00)
+    assert init["red_2"]["lat"] == pytest.approx(59.96)
     assert init["red_2"]["lon"] == pytest.approx(120.02)
-    assert init["red_3"]["lat"] == pytest.approx(59.98)
+    assert init["red_3"]["lat"] == pytest.approx(59.94)
     assert init["red_3"]["lon"] == pytest.approx(119.99)
-    assert init["red_4"]["lat"] == pytest.approx(59.98)
+    assert init["red_4"]["lat"] == pytest.approx(59.94)
     assert init["red_4"]["lon"] == pytest.approx(120.01)
-    assert init["blue_0"]["lat"] == pytest.approx(60.10)
+    assert init["blue_0"]["lat"] == pytest.approx(60.095)
     assert init["blue_0"]["lon"] == pytest.approx(119.98)
-    assert init["blue_1"]["lat"] == pytest.approx(60.10)
+    assert init["blue_1"]["lat"] == pytest.approx(60.095)
     assert init["blue_1"]["lon"] == pytest.approx(120.02)
-    assert init["blue_2"]["lat"] == pytest.approx(60.12)
+    assert init["blue_2"]["lat"] == pytest.approx(60.115)
     assert init["blue_2"]["lon"] == pytest.approx(119.99)
-    assert init["blue_3"]["lat"] == pytest.approx(60.12)
+    assert init["blue_3"]["lat"] == pytest.approx(60.115)
     assert init["blue_3"]["lon"] == pytest.approx(120.01)
     assert all(init[aid]["yaw_deg"] == pytest.approx(0.0) for aid in init)
     assert all(init[aid]["speed_mps"] == pytest.approx(260) for aid in ["red_1", "red_2", "red_3", "red_4"])
     assert all(init[aid]["speed_mps"] == pytest.approx(230) for aid in ["blue_0", "blue_1", "blue_2", "blue_3"])
 
 
-def test_mav_guided_v1_3v2_static_launch_window_opens_for_red_uav():
+def test_mav_guided_v1_3v2_approach_then_launch_window_opens_for_red_uav():
     code = f"""
 import json
 import numpy as np
 from uav_env import make_env
-env = make_env({CFG_3V2!r}, max_steps=10)
+env = make_env({CFG_3V2!r}, max_steps=200)
 try:
     obs, info = env.reset(seed=7)
+    early_red_launches = []
     red_launches = []
-    for _ in range(5):
-        actions = {{aid: np.array([0.0, 0.0, 0.0], dtype=np.float32) for aid in env.agent_ids}}
+    steps = 0
+    for step in range(1, 201):
+        steps = step
+        actions = {{
+            aid: np.array([0.0, 0.0, 1.0 if str(aid).startswith("red_") else 0.0], dtype=np.float32)
+            for aid in env.agent_ids
+        }}
         obs, reward, terminated, truncated, info = env.step(actions)
         for record in info.get("__launch_quality_step__", []) or []:
             if str(record.get("team") or record.get("shooter_team")) == "red":
-                red_launches.append({{
+                launch = {{
                     "shooter_id": record.get("shooter_id"),
                     "launch_track_source": record.get("launch_track_source"),
-                }})
+                    "step": step,
+                }}
+                if step <= 5:
+                    early_red_launches.append(launch)
+                else:
+                    red_launches.append(launch)
         if red_launches or all(terminated.values()) or all(truncated.values()):
             break
-    print("STATIC_LAUNCH_JSON=" + json.dumps(red_launches, sort_keys=True))
+    print("APPROACH_LAUNCH_JSON=" + json.dumps({{
+        "early_red_launches": early_red_launches,
+        "red_launches": red_launches,
+        "steps": steps,
+    }}, sort_keys=True))
 finally:
     env.close()
 """
@@ -201,14 +216,18 @@ finally:
         cwd=str(ROOT),
         text=True,
         capture_output=True,
-        timeout=60,
+        timeout=120,
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    marker = "STATIC_LAUNCH_JSON="
+    marker = "APPROACH_LAUNCH_JSON="
     line = next((ln for ln in result.stdout.splitlines() if ln.startswith(marker)), "")
     assert line, result.stdout
-    red_launches = yaml.safe_load(line[len(marker):])
-    assert red_launches, "rear-aspect mav_guided_v1 geometry should allow at least one red UAV launch"
+    payload = yaml.safe_load(line[len(marker):])
+    assert payload["early_red_launches"] == []
+    red_launches = payload["red_launches"]
+    assert red_launches, "approach-and-fire mav_guided_v1 geometry should allow at least one red UAV launch"
+    assert min(record["step"] for record in red_launches) > 5
+    assert min(record["step"] for record in red_launches) <= 200
     assert all(record.get("shooter_id") != "red_0" for record in red_launches)
     assert all(
         str(record.get("launch_track_source")) in {"direct", "mav_shared", "direct_and_mav_shared"}
