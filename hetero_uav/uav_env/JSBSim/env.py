@@ -1298,11 +1298,19 @@ class UavCombatEnv(gymnasium.Env):
     def _check_missile_launch(self):
         """Rule-based missile launch with lock-delay + hot-update deconfliction.
 
-        For each armed agent, finds the closest **unengaged** enemy within the
-        sensor cone (AO < 45°, R ∈ [0.5, 10] km, TA > 90° rear-hemisphere).
-        The target must be continuously tracked for 0.25 s before the weapon
-        is released. Launch cooldown is 0.5 s. Both are stored as physics-frame
-        counts derived from ``sim_freq``.
+        For each armed agent, launch candidates must be alive, unengaged,
+        directly or MAV-shared tracked, within
+        ``[MISSILE_LAUNCH_MIN_RANGE, MISSILE_LAUNCH_RANGE_THRESH]``, inside
+        ``MISSILE_LAUNCH_AO_THRESH`` (AO/ATA), and beyond
+        ``MISSILE_LAUNCH_TA_THRESH`` (TA; 3-9 line / rear-hemisphere). The
+        lock delay must be mature, missile cooldown must be ready, and kill
+        cooldown must not block launch.
+
+        These thresholds are runtime parameters and may be overridden by YAML:
+        ``missile_launch_range_m``, ``missile_launch_ao_deg``,
+        ``missile_launch_ta_deg``, ``missile_launch_min_range_m``, and
+        ``missile_attack_interval_sec``. Lock/cooldown values are stored as
+        physics-frame counts derived from ``sim_freq``.
 
         **Hot-update engaged-targets gate (paper §2.1.3):**
         Uses a single shared ``self._engaged_targets`` set (pre-populated by
