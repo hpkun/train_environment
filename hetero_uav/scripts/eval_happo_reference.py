@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -57,6 +58,23 @@ def _load_meta(model_path: Path) -> dict:
     return {}
 
 
+def _config_declares_env_type(config_path: str | Path | None) -> bool:
+    if not config_path:
+        return False
+    path = Path(config_path)
+    if not path.is_absolute():
+        path = ROOT / path
+    if not path.exists():
+        return False
+    with path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    return "env_type" in cfg
+
+
+def _env_type_override_kwargs(config_path: str | Path | None) -> dict:
+    return {} if _config_declares_env_type(config_path) else {"env_type": "jsbsim_hetero"}
+
+
 def _role_ids(env) -> list[int]:
     return [0 if env.agent_roles.get(rid) == "mav" else 1 for rid in env.red_ids]
 
@@ -87,11 +105,12 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
     policy_arch = meta.get("policy_arch", "flat")
     _require_full_geometry_entity_dim(meta, policy_arch)
     policy_arch = meta.get("policy_arch", "flat")
+    action_dim = int(meta.get("action_dim", 3))
     if policy_arch == "hetero_entity_recurrent":
         validate_entity_policy_meta(meta)
         return HeteroEntityRecurrentPolicy(
             entity_dim=int(meta["entity_dim"]),
-            action_dim=3,
+            action_dim=action_dim,
             hidden_dim=int(meta.get("hidden_dim", 128)),
             rnn_hidden_size=int(meta["rnn_hidden_size"]),
             num_attention_heads=int(meta.get("num_attention_heads", 4)),
@@ -102,21 +121,21 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
         return EntityHAPPOReferencePolicy(
             entity_dim=int(meta.get("entity_dim", 30)),
             critic_state_dim=int(meta.get("critic_state_dim")),
-            action_dim=3,
+            action_dim=action_dim,
             max_allies=_ama, max_enemies=_ame,
         ).to(device)
     if policy_arch == "brma_entity":
         return BRMAEntityHAPPOReferencePolicy(
             entity_dim=int(meta.get("entity_dim", 30)),
             critic_state_dim=int(meta.get("critic_state_dim")),
-            action_dim=3,
+            action_dim=action_dim,
             max_allies=_ama, max_enemies=_ame,
         ).to(device)
     if policy_arch == "brma_recurrent":
         return BRMARecurrentHAPPOReferencePolicy(
             entity_dim=int(meta.get("entity_dim", 30)),
             critic_state_dim=int(meta.get("critic_state_dim")),
-            action_dim=3,
+            action_dim=action_dim,
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
             max_allies=_ama, max_enemies=_ame,
         ).to(device)
@@ -124,7 +143,7 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
         return BRMARecurrentMaskedHAPPOReferencePolicy(
             entity_dim=int(meta.get("entity_dim", 30)),
             critic_state_dim=int(meta.get("critic_state_dim")),
-            action_dim=3,
+            action_dim=action_dim,
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
             random_scale_mask=bool(meta.get("random_scale_mask", False)),
             random_mask_prob=float(meta.get("random_mask_prob", 0.25)),
@@ -138,7 +157,7 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
         return PureHAPPOPolicy(
             actor_obs_dim=int(meta.get("actor_obs_dim")),
             critic_state_dim=int(meta.get("critic_state_dim")),
-            action_dim=3, num_agents=num_agents,
+            action_dim=action_dim, num_agents=num_agents,
         ).to(device)
     if policy_arch == "pure_happo_tanh":
         num_agents = int(meta.get("num_agents", 0))
@@ -147,12 +166,13 @@ def _build_policy_from_meta(meta: dict, device: torch.device):
         return PureHAPPOTanhPolicy(
             actor_obs_dim=int(meta.get("actor_obs_dim")),
             critic_state_dim=int(meta.get("critic_state_dim")),
-            action_dim=3, num_agents=num_agents,
+            action_dim=action_dim, num_agents=num_agents,
         ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(
             actor_obs_dim=int(meta.get("actor_obs_dim")),
             critic_state_dim=int(meta.get("critic_state_dim")),
+            action_dim=action_dim,
         ).to(device)
     raise ValueError(f"unsupported checkpoint policy_arch: {policy_arch}")
 
@@ -224,7 +244,7 @@ def _update_missile_stats(stats: dict, info: dict, env, prev_hits: dict) -> None
 def evaluate_config(policy, cfg_path: str, args, adapter, device,
                     rich_logger=None) -> dict:
     cfg_name = Path(cfg_path).stem
-    env = make_env(cfg_path, env_type="jsbsim_hetero")
+    env = make_env(cfg_path, **_env_type_override_kwargs(cfg_path))
     if hasattr(policy, "num_agents") and int(policy.num_agents) != len(env.red_ids):
         raise ValueError(
             f"pure_happo policy was built for {policy.num_agents} red agents "

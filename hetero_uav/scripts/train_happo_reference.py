@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -133,6 +134,42 @@ def _make_env_kwargs_for_reward_mode(reward_mode: str | None) -> dict:
     return {"hetero_reward_mode": reward_mode}
 
 
+def _config_declares_env_type(config_path: str | Path | None) -> bool:
+    if not config_path:
+        return False
+    path = Path(config_path)
+    if not path.is_absolute():
+        path = ROOT / path
+    if not path.exists():
+        return False
+    with path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    return "env_type" in cfg
+
+
+def _env_type_override_kwargs(config_path: str | Path | None) -> dict:
+    return {} if _config_declares_env_type(config_path) else {"env_type": "jsbsim_hetero"}
+
+
+def _infer_env_action_dim(env) -> int:
+    """Infer per-agent continuous action dimension from env.action_space."""
+
+    action_space = getattr(env, "action_space", None)
+    if action_space is None:
+        return 3
+    spaces = getattr(action_space, "spaces", None)
+    if isinstance(spaces, dict):
+        for rid in getattr(env, "red_ids", []):
+            space = spaces.get(rid)
+            shape = getattr(space, "shape", None)
+            if shape:
+                return int(np.prod(shape))
+    shape = getattr(action_space, "shape", None)
+    if shape:
+        return int(np.prod(shape))
+    return 3
+
+
 def _experiment_base_v2_meta(
     *,
     actual_reward_mode: str,
@@ -165,8 +202,8 @@ def _mp_env_worker(remote, parent_remote, config: str,
         from uav_env import make_env
         env = make_env(
             config,
-            env_type="jsbsim_hetero",
             max_steps=max_steps,
+            **_env_type_override_kwargs(config),
             **_make_env_kwargs_for_reward_mode(reward_mode),
         )
         meta = {
@@ -711,6 +748,7 @@ def _load_checkpoint_meta(model_path: str | Path | None) -> dict:
 def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                   device: torch.device, init_checkpoint_meta: str | Path | None = None,
                   num_agents: int = 3,
+                  action_dim: int = 3,
                   brma_random_scale_mask: bool = False,
                   brma_biased_mask: bool = False,
                   brma_random_mask_prob: float = 0.25,
@@ -729,7 +767,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
             validate_entity_policy_meta(meta)
         return HeteroEntityRecurrentPolicy(
             entity_dim=int(meta.get("entity_dim", 21)),
-            action_dim=3,
+            action_dim=action_dim,
             hidden_dim=int(meta.get("hidden_dim", 128)),
             rnn_hidden_size=int(meta.get("rnn_hidden_size", 128)),
             num_attention_heads=int(meta.get("num_attention_heads", 4)),
@@ -737,10 +775,10 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
     if policy_arch in ("pure_happo", "pure_happo_tanh"):
         return PureHAPPOPolicy(
             actor_obs_dim=actor_dim, critic_state_dim=critic_dim,
-            action_dim=3, num_agents=num_agents,
+            action_dim=action_dim, num_agents=num_agents,
         ).to(device)
     if policy_arch == "flat":
-        return HAPPOReferencePolicy(actor_dim, critic_dim).to(device)
+        return HAPPOReferencePolicy(actor_dim, critic_dim, action_dim=action_dim).to(device)
     if policy_arch == "entity_attention":
         meta = {}
         if init_checkpoint_meta is not None:
@@ -757,6 +795,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
         _me = int(max_enemies) if max_enemies is not None else 4
         return EntityHAPPOReferencePolicy(
             entity_dim=entity_dim, critic_state_dim=critic_dim,
+            action_dim=action_dim,
             max_allies=_ma, max_enemies=_me).to(device)
     if policy_arch == "brma_entity":
         meta = {}
@@ -775,7 +814,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
         return BRMAEntityHAPPOReferencePolicy(
             entity_dim=entity_dim,
             critic_state_dim=critic_dim,
-            action_dim=3,
+            action_dim=action_dim,
             max_allies=_ma, max_enemies=_me,
         ).to(device)
     if policy_arch == "brma_recurrent":
@@ -796,7 +835,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
         return BRMARecurrentHAPPOReferencePolicy(
             entity_dim=entity_dim,
             critic_state_dim=critic_dim,
-            action_dim=3,
+            action_dim=action_dim,
             rnn_hidden_size=rnn_hidden_size,
             max_allies=_ma, max_enemies=_me,
         ).to(device)
@@ -818,7 +857,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
         return BRMARecurrentMaskedHAPPOReferencePolicy(
             entity_dim=entity_dim,
             critic_state_dim=critic_dim,
-            action_dim=3,
+            action_dim=action_dim,
             rnn_hidden_size=rnn_hidden_size,
             random_scale_mask=bool(meta.get("random_scale_mask", brma_random_scale_mask)),
             random_mask_prob=float(meta.get("random_mask_prob", brma_random_mask_prob)),
@@ -918,6 +957,7 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int,
         "opponent_policy": args.opponent_policy,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
+        "action_dim": int(getattr(policy, "action_dim", 3)),
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
         "centralized_critic": True,
@@ -1213,13 +1253,14 @@ def _run_training_main() -> None:
         envs = [
             make_env(
                 args.config,
-                env_type="jsbsim_hetero",
                 max_steps=args.max_steps,
+                **_env_type_override_kwargs(args.config),
                 **_make_env_kwargs_for_reward_mode(args.reward_mode),
             )
             for _ in range(args.num_envs)
         ]
     env = envs[0]
+    action_dim = _infer_env_action_dim(env)
     actual_reward_mode = str(getattr(env, "hetero_reward_mode", args.reward_mode or ""))
     args.actual_reward_mode = actual_reward_mode
     base_v2_meta = _experiment_base_v2_meta(
@@ -1256,6 +1297,7 @@ def _run_training_main() -> None:
                            brma_biased_mask=args.brma_biased_mask,
                            brma_random_mask_prob=args.brma_random_mask_prob,
                            num_agents=len(env.red_ids),
+                           action_dim=action_dim,
                            max_allies=getattr(adapter, "max_allies", None),
                            max_enemies=getattr(adapter, "max_enemies", None))
     _SINGLE_RUNNER_STATE["policy"] = policy
@@ -1266,6 +1308,7 @@ def _run_training_main() -> None:
         **base_v2_meta,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
+        "action_dim": action_dim,
         **_entity_policy_meta(policy),
         **_pure_happo_meta(policy, args),
     }
@@ -1454,7 +1497,7 @@ def _run_training_main() -> None:
                     "entity_dim": adapter.entity_dim,
                 }
             buffer = HAPPORolloutBuffer(rollout_transitions, len(env.red_ids), actor_dim,
-                                        critic_dim, 3, roles,
+                                        critic_dim, action_dim, roles,
                                         rnn_hidden_size=getattr(policy, 'rnn_hidden_size', 0),
                                         **buffer_kwargs)
             red_fired = blue_fired = red_hits = blue_hits = 0
@@ -2110,6 +2153,7 @@ def _run_training_main() -> None:
                         **base_v2_meta,
                         "actor_obs_dim": actor_dim,
                         "critic_state_dim": critic_dim,
+                        "action_dim": action_dim,
                         "entity_dim": getattr(policy, "entity_dim", None),
                         "num_agents": len(env.red_ids),
                         "total_env_steps": total_steps,
@@ -2141,6 +2185,7 @@ def _run_training_main() -> None:
                     **base_v2_meta,
                     "actor_obs_dim": actor_dim,
                     "critic_state_dim": critic_dim,
+                    "action_dim": action_dim,
                     "entity_dim": getattr(policy, "entity_dim", None),
                     "attention": args.policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
                     "brma_entity_encoder": args.policy_arch in {"brma_entity", "brma_recurrent", "brma_recurrent_masked", "hetero_entity_recurrent"},
@@ -2257,6 +2302,7 @@ def _run_training_main() -> None:
                             "best_score": best_score,
                             "actor_obs_dim": actor_dim,
                             "critic_state_dim": critic_dim,
+                            "action_dim": action_dim,
                             "entity_dim": getattr(policy, "entity_dim", None),
                             "separate_actors": True,
                             "centralized_critic": True,
@@ -2295,6 +2341,7 @@ def _run_training_main() -> None:
         "opponent_policy": args.opponent_policy,
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
+        "action_dim": action_dim,
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
         "centralized_critic": True,

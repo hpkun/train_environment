@@ -112,7 +112,7 @@ def test_tam_env_strict_rejects_3d_action():
     try:
         env.reset(seed=2)
         actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
-        actions[env.agent_ids[0]] = np.zeros(3, dtype=np.float32)
+        actions[env.red_ids[0]] = np.zeros(3, dtype=np.float32)
         with pytest.raises(ValueError, match="shape=\\(4,\\)"):
             env.step(actions)
     finally:
