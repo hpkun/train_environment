@@ -15,7 +15,7 @@ def _load_yaml(config_path: str | None) -> dict:
 
 
 def make_env(config_path: str | None = None, **kwargs):
-    """Create a hetero or copied BRMA-compatible environment."""
+    """Create a hetero, JSBSim, or TAM direct-FCS diagnostic environment."""
 
     config = _load_yaml(config_path)
     config.update(kwargs)
@@ -30,11 +30,11 @@ def make_env(config_path: str | None = None, **kwargs):
         from .JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
 
         return HeteroUavCombatEnv(**config)
-    if env_type == "brma_original":
-        from .brma_env.make_brma_env import make_brma_env
+    if env_type == "tam":
+        from .tam_env.make_tam_env import make_tam_env
 
-        brma_kwargs = {k: v for k, v in config.items() if k != "config_path"}
-        return make_brma_env(**brma_kwargs)
+        tam_kwargs = {k: v for k, v in config.items() if k != "config_path"}
+        return make_tam_env(**tam_kwargs)
     if env_type != "hetero":
         raise ValueError(f"Unknown env_type: {env_type}")
     from .JSBSim.envs.hetero_uav_env import HeteroUAVEnv
