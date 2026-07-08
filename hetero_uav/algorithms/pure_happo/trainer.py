@@ -11,6 +11,72 @@ import torch.nn.functional as F
 from torch import optim
 
 
+def _safe_float(value) -> float:
+    try:
+        out = float(value)
+        return out if np.isfinite(out) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _param_vector(params) -> torch.Tensor:
+    chunks = [p.detach().flatten().cpu() for p in params]
+    return torch.cat(chunks) if chunks else torch.zeros(1)
+
+
+def _stats_from_tensor(x: torch.Tensor) -> dict:
+    x = x.detach().float().flatten()
+    if x.numel() == 0:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+    return {
+        "mean": float(x.mean().item()),
+        "std": float(x.std(unbiased=False).item()) if x.numel() > 1 else 0.0,
+        "min": float(x.min().item()),
+        "max": float(x.max().item()),
+    }
+
+
+def _valid_ratio_stats(ratio: torch.Tensor, valid: torch.Tensor,
+                       clip_param: float, old_lp: torch.Tensor,
+                       new_lp: torch.Tensor) -> dict:
+    vals = ratio[valid].detach().float()
+    if vals.numel() == 0:
+        return {
+            "ratio_mean": 0.0, "ratio_std": 0.0, "ratio_min": 0.0,
+            "ratio_max": 0.0, "ratio_p95": 0.0, "ratio_p99": 0.0,
+            "clip_fraction": 0.0, "approx_kl_abs": 0.0,
+        }
+    clip = ((vals < 1.0 - clip_param) | (vals > 1.0 + clip_param)).float().mean()
+    kl_abs = (old_lp[valid] - new_lp[valid].detach()).abs().float().mean()
+    return {
+        "ratio_mean": float(vals.mean().item()),
+        "ratio_std": float(vals.std(unbiased=False).item()) if vals.numel() > 1 else 0.0,
+        "ratio_min": float(vals.min().item()),
+        "ratio_max": float(vals.max().item()),
+        "ratio_p95": float(torch.quantile(vals, 0.95).item()),
+        "ratio_p99": float(torch.quantile(vals, 0.99).item()),
+        "clip_fraction": float(clip.item()),
+        "approx_kl_abs": float(kl_abs.item()),
+    }
+
+
+def _explained_variance(values: torch.Tensor, returns: torch.Tensor) -> float:
+    y = returns.detach().float()
+    pred = values.detach().float()
+    if y.numel() == 0:
+        return 0.0
+    var_y = torch.var(y, unbiased=False)
+    if float(var_y.item()) <= 1e-12:
+        return 0.0
+    err = y - pred
+    return float((1.0 - torch.var(err, unbiased=False) / var_y).item())
+
+
+def _mean_for_indices(values: list[float], indices: list[int]) -> float:
+    vals = [_safe_float(values[i]) for i in indices if i < len(values)]
+    return float(np.mean(vals)) if vals else 0.0
+
+
 def _compute_grouped_gae(rewards, values, next_values, dones, env_ids, gamma, lam):
     """GAE grouped by env_id.  next_values[pos] is the bootstrap value
     for transition pos, already stored by the rollout buffer."""
@@ -84,18 +150,32 @@ class PureHAPPOTrainer:
             with torch.no_grad():
                 nv_single = self.policy.value(critic_state[-1:])
             nv = nv_single.expand(T)
-        advantages, returns = _compute_grouped_gae(
+        advantages_raw, returns = _compute_grouped_gae(
             team_reward, values, nv, team_dones, env_ids, self.gamma, self.gae_lambda)
-        if not torch.isfinite(advantages).all() or not torch.isfinite(returns).all():
+        if not torch.isfinite(advantages_raw).all() or not torch.isfinite(returns).all():
             raise ValueError("HAPPO: non-finite GAE output")
+        advantages = advantages_raw
         if T > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         metrics = {
             "actor_loss_per_agent": [0.0]*N, "entropy_per_agent": [0.0]*N,
             "approx_kl_per_agent": [0.0]*N,
+            "approx_kl_abs_per_agent": [0.0]*N,
+            "ratio_mean_per_agent": [0.0]*N,
+            "ratio_std_per_agent": [0.0]*N,
+            "ratio_min_per_agent": [0.0]*N,
+            "ratio_max_per_agent": [0.0]*N,
+            "ratio_p95_per_agent": [0.0]*N,
+            "ratio_p99_per_agent": [0.0]*N,
+            "clip_fraction_per_agent": [0.0]*N,
+            "actor_grad_norm_per_agent": [0.0]*N,
+            "policy_update_norm_per_agent": [0.0]*N,
             "ratio_after_mean_per_agent": [0.0]*N,
             "m_abs_mean_after_each_agent": [],
+            "m_mean_after_each_agent": [],
+            "m_std_after_each_agent": [],
+            "m_abs_max_after_each_agent": [],
             "valid_sample_count_per_agent": [
                 int((active[:, i] > 0.5).sum().item()) for i in range(N)],
         }
@@ -121,6 +201,8 @@ class PureHAPPOTrainer:
                 ratio_i = (new_lp_i - old_lp_i.detach()).exp()
                 if not torch.isfinite(ratio_i).all():
                     raise ValueError(f"HAPPO: non-finite ratio_i agent {i} epoch {epoch}")
+                ratio_stats = _valid_ratio_stats(
+                    ratio_i, valid_i, self.clip_param, old_lp_i, new_lp_i)
 
                 valid_f = valid_i.float()
                 surr1 = ratio_i * M
@@ -128,15 +210,38 @@ class PureHAPPOTrainer:
                 policy_loss = -(torch.min(surr1, surr2) * valid_f).sum() / valid_f.sum().clamp(min=1)
                 ent_mean = (entropy_i * valid_f).sum() / valid_f.sum().clamp(min=1)
                 loss = policy_loss - self.entropy_coef * ent_mean
+                actor_params = list(self.policy.actors[i].parameters()) + [self.policy.action_log_stds[i]]
+                with torch.no_grad():
+                    actor_before = _param_vector(actor_params)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    list(self.policy.actors[i].parameters()) + [self.policy.action_log_stds[i]],
-                    self.max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(actor_params, self.max_grad_norm)
                 self.actor_opts[i].step()
+                with torch.no_grad():
+                    actor_after = _param_vector(actor_params)
+                    update_norm = float(torch.linalg.vector_norm(actor_after - actor_before).item())
                 metrics["actor_loss_per_agent"][i] = float(policy_loss.item())
                 metrics["entropy_per_agent"][i] = float(ent_mean.item())
                 metrics["approx_kl_per_agent"][i] = float(
                     ((old_lp_i - new_lp_i.detach()) * valid_f).sum() / valid_f.sum().clamp(min=1))
+                for key, value in ratio_stats.items():
+                    if key == "ratio_mean":
+                        metrics["ratio_mean_per_agent"][i] = value
+                    elif key == "ratio_std":
+                        metrics["ratio_std_per_agent"][i] = value
+                    elif key == "ratio_min":
+                        metrics["ratio_min_per_agent"][i] = value
+                    elif key == "ratio_max":
+                        metrics["ratio_max_per_agent"][i] = value
+                    elif key == "ratio_p95":
+                        metrics["ratio_p95_per_agent"][i] = value
+                    elif key == "ratio_p99":
+                        metrics["ratio_p99_per_agent"][i] = value
+                    elif key == "clip_fraction":
+                        metrics["clip_fraction_per_agent"][i] = value
+                    elif key == "approx_kl_abs":
+                        metrics["approx_kl_abs_per_agent"][i] = value
+                metrics["actor_grad_norm_per_agent"][i] = _safe_float(grad_norm.item())
+                metrics["policy_update_norm_per_agent"][i] = update_norm
                 with torch.no_grad():
                     after_lp_i, _, _ = self.policy.evaluate_agent_actions(i, obs_i, act_i)
                     ratio_after = (after_lp_i - old_lp_i).exp()
@@ -144,15 +249,26 @@ class PureHAPPOTrainer:
                     metrics["ratio_after_mean_per_agent"][i] = float(ratio_after[valid_i].mean().item())
                     M = (M * ratio_after).detach()
                 metrics["m_abs_mean_after_each_agent"].append(float(M.abs().mean().item()))
+                metrics["m_mean_after_each_agent"].append(float(M.mean().item()))
+                metrics["m_std_after_each_agent"].append(
+                    float(M.float().std(unbiased=False).item()) if M.numel() > 1 else 0.0)
+                metrics["m_abs_max_after_each_agent"].append(float(M.abs().max().item()))
 
         self.critic_opt.zero_grad()
         new_values = self.policy.value(critic_state)
-        critic_loss = F.mse_loss(new_values, returns) * self.value_coef
+        critic_loss_unscaled = F.mse_loss(new_values, returns)
+        critic_loss = critic_loss_unscaled * self.value_coef
         if not torch.isfinite(critic_loss):
             raise ValueError("HAPPO: non-finite critic_loss")
+        critic_params = list(self.policy.critic.parameters())
+        with torch.no_grad():
+            critic_before = _param_vector(critic_params)
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy.critic.parameters(), self.max_grad_norm)
+        critic_grad_norm = torch.nn.utils.clip_grad_norm_(critic_params, self.max_grad_norm)
         self.critic_opt.step()
+        with torch.no_grad():
+            critic_after = _param_vector(critic_params)
+            critic_update_norm = float(torch.linalg.vector_norm(critic_after - critic_before).item())
 
         with torch.no_grad():
             _, _, _, means_all = self.policy.evaluate_actions(actor_obs, critic_state, actions)
@@ -161,8 +277,34 @@ class PureHAPPOTrainer:
 
         log_std_vals = torch.stack([p.data for p in self.policy.action_log_stds])
         v = metrics["valid_sample_count_per_agent"]
+        active_sample_ratio = [float(count) / float(max(T, 1)) for count in v]
         ls_mav = log_std_vals[0] if N > 0 else torch.zeros(3)
         ls_uav = log_std_vals[1:].flatten() if N > 1 else torch.zeros(3)
+        raw_adv_stats = _stats_from_tensor(advantages_raw)
+        norm_adv_stats = _stats_from_tensor(advantages)
+        return_stats = _stats_from_tensor(returns)
+        value_stats = _stats_from_tensor(values)
+        value_ev = _explained_variance(values, returns)
+        mav_indices = [0] if N > 0 else []
+        uav_indices = list(range(1, N))
+        action_names = ("pitch", "heading", "speed")
+        action_stats = {}
+        for role_name, tensor in (
+            ("mav", means_all[:, 0:1, :] if N > 0 else means_all[:, 0:0, :]),
+            ("uav", means_all[:, 1:, :] if N > 1 else means_all[:, 0:0, :]),
+        ):
+            flat = tensor.reshape(-1, means_all.shape[-1]) if tensor.numel() else torch.zeros((0, means_all.shape[-1]), device=means_all.device)
+            for dim, name in enumerate(action_names):
+                if dim >= means_all.shape[-1] or flat.numel() == 0:
+                    vals = torch.zeros(0, device=means_all.device)
+                else:
+                    vals = flat[:, dim]
+                action_stats[f"{role_name}_action_mean_{name}"] = float(vals.mean().item()) if vals.numel() else 0.0
+                action_stats[f"{role_name}_action_std_{name}"] = (
+                    float(vals.std(unbiased=False).item()) if vals.numel() > 1 else 0.0)
+                action_stats[f"{role_name}_action_mean_abs_{name}"] = float(vals.abs().mean().item()) if vals.numel() else 0.0
+                action_stats[f"{role_name}_action_saturation_{name}"] = (
+                    float((vals.abs() >= 0.999).float().mean().item()) if vals.numel() else 0.0)
         return {
             "actor_loss_mean": float(np.mean([metrics["actor_loss_per_agent"][i] for i in range(N) if v[i] > 0])) if any(x > 0 for x in v) else 0.0,
             "actor_loss_per_agent": metrics["actor_loss_per_agent"],
@@ -171,6 +313,27 @@ class PureHAPPOTrainer:
             "approx_kl_mean": float(np.mean([metrics["approx_kl_per_agent"][i] for i in range(N) if v[i] > 0])) if any(x > 0 for x in v) else 0.0,
             "approx_kl_per_agent": metrics["approx_kl_per_agent"],
             "critic_loss": float(critic_loss.item()),
+            "critic_loss_unscaled": float(critic_loss_unscaled.item()),
+            "critic_loss_scaled": float(critic_loss.item()),
+            "critic_grad_norm": _safe_float(critic_grad_norm.item()),
+            "critic_update_norm": critic_update_norm,
+            "advantage_raw_mean": raw_adv_stats["mean"],
+            "advantage_raw_std": raw_adv_stats["std"],
+            "advantage_raw_min": raw_adv_stats["min"],
+            "advantage_raw_max": raw_adv_stats["max"],
+            "advantage_norm_mean": norm_adv_stats["mean"],
+            "advantage_norm_std": norm_adv_stats["std"],
+            "advantage_norm_min": norm_adv_stats["min"],
+            "advantage_norm_max": norm_adv_stats["max"],
+            "return_mean": return_stats["mean"],
+            "return_std": return_stats["std"],
+            "return_min": return_stats["min"],
+            "return_max": return_stats["max"],
+            "value_pred_mean": value_stats["mean"],
+            "value_pred_std": value_stats["std"],
+            "value_pred_min": value_stats["min"],
+            "value_pred_max": value_stats["max"],
+            "value_explained_variance": value_ev,
             "last_update_order": list(order),
             "action_log_std_min": float(log_std_vals.min().item()),
             "action_log_std_max": float(log_std_vals.max().item()),
@@ -187,11 +350,44 @@ class PureHAPPOTrainer:
             "entropy_uav": float(np.mean(metrics["entropy_per_agent"][1:])) if N > 1 else 0.0,
             "approx_kl_mav": metrics["approx_kl_per_agent"][0] if N > 0 else 0.0,
             "approx_kl_uav": float(np.mean(metrics["approx_kl_per_agent"][1:])) if N > 1 else 0.0,
+            "approx_kl_abs_mav": metrics["approx_kl_abs_per_agent"][0] if N > 0 else 0.0,
+            "approx_kl_abs_uav": _mean_for_indices(metrics["approx_kl_abs_per_agent"], uav_indices),
+            "clip_fraction_mav": metrics["clip_fraction_per_agent"][0] if N > 0 else 0.0,
+            "clip_fraction_uav": _mean_for_indices(metrics["clip_fraction_per_agent"], uav_indices),
+            "ratio_mean_mav": metrics["ratio_mean_per_agent"][0] if N > 0 else 0.0,
+            "ratio_mean_uav": _mean_for_indices(metrics["ratio_mean_per_agent"], uav_indices),
+            "ratio_std_mav": metrics["ratio_std_per_agent"][0] if N > 0 else 0.0,
+            "ratio_std_uav": _mean_for_indices(metrics["ratio_std_per_agent"], uav_indices),
+            "ratio_p95_mav": metrics["ratio_p95_per_agent"][0] if N > 0 else 0.0,
+            "ratio_p95_uav": _mean_for_indices(metrics["ratio_p95_per_agent"], uav_indices),
+            "ratio_p99_mav": metrics["ratio_p99_per_agent"][0] if N > 0 else 0.0,
+            "ratio_p99_uav": _mean_for_indices(metrics["ratio_p99_per_agent"], uav_indices),
+            "actor_grad_norm_mav": metrics["actor_grad_norm_per_agent"][0] if N > 0 else 0.0,
+            "actor_grad_norm_uav": _mean_for_indices(metrics["actor_grad_norm_per_agent"], uav_indices),
+            "policy_update_norm_mav": metrics["policy_update_norm_per_agent"][0] if N > 0 else 0.0,
+            "policy_update_norm_uav": _mean_for_indices(metrics["policy_update_norm_per_agent"], uav_indices),
             "mav_active_sample_count": v[0] if N > 0 else 0,
             "uav_active_sample_count": sum(v[1:]) if N > 1 else 0,
+            "entropy_mav_valid_count": v[0] if N > 0 else 0,
+            "entropy_uav_valid_count": sum(v[1:]) if N > 1 else 0,
             "mav_action_saturation_rate": mav_sat,
             "uav_action_saturation_rate": uav_sat,
+            **action_stats,
             "ratio_after_mean_per_agent": metrics["ratio_after_mean_per_agent"],
             "m_abs_mean_after_each_agent": metrics["m_abs_mean_after_each_agent"],
+            "m_mean_after_each_agent": metrics["m_mean_after_each_agent"],
+            "m_std_after_each_agent": metrics["m_std_after_each_agent"],
+            "m_abs_max_after_each_agent": metrics["m_abs_max_after_each_agent"],
             "valid_sample_count_per_agent": v,
+            "active_sample_ratio_per_agent": active_sample_ratio,
+            "ratio_mean_per_agent": metrics["ratio_mean_per_agent"],
+            "ratio_std_per_agent": metrics["ratio_std_per_agent"],
+            "ratio_min_per_agent": metrics["ratio_min_per_agent"],
+            "ratio_max_per_agent": metrics["ratio_max_per_agent"],
+            "ratio_p95_per_agent": metrics["ratio_p95_per_agent"],
+            "ratio_p99_per_agent": metrics["ratio_p99_per_agent"],
+            "clip_fraction_per_agent": metrics["clip_fraction_per_agent"],
+            "approx_kl_abs_per_agent": metrics["approx_kl_abs_per_agent"],
+            "actor_grad_norm_per_agent": metrics["actor_grad_norm_per_agent"],
+            "policy_update_norm_per_agent": metrics["policy_update_norm_per_agent"],
         }

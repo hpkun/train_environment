@@ -170,6 +170,52 @@ def _infer_env_action_dim(env) -> int:
     return 3
 
 
+def _finite_metric(value, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+        return out if np.isfinite(out) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _format_metric(value) -> str:
+    return f"{_finite_metric(value):.6f}"
+
+
+def _array_distribution_stats(array: np.ndarray, prefix: str) -> dict:
+    arr = np.asarray(array)
+    if arr.size == 0:
+        return {
+            f"{prefix}_mean": 0.0,
+            f"{prefix}_std": 0.0,
+            f"{prefix}_abs_max": 0.0,
+            f"{prefix}_nan_count": 0.0,
+        }
+    nan_count = int((~np.isfinite(arr)).sum())
+    finite = arr[np.isfinite(arr)].astype(np.float64)
+    if finite.size == 0:
+        return {
+            f"{prefix}_mean": 0.0,
+            f"{prefix}_std": 0.0,
+            f"{prefix}_abs_max": 0.0,
+            f"{prefix}_nan_count": float(nan_count),
+        }
+    return {
+        f"{prefix}_mean": float(finite.mean()),
+        f"{prefix}_std": float(finite.std()),
+        f"{prefix}_abs_max": float(np.max(np.abs(finite))),
+        f"{prefix}_nan_count": float(nan_count),
+    }
+
+
+def _rollout_distribution_stats(buffer) -> dict:
+    n = len(buffer)
+    return {
+        **_array_distribution_stats(buffer.actor_obs[:n], "actor_obs"),
+        **_array_distribution_stats(buffer.critic_state[:n], "critic_state"),
+    }
+
+
 def _experiment_base_v2_meta(
     *,
     actual_reward_mode: str,
@@ -395,6 +441,44 @@ DEFAULT_EVAL_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0_f22_pid.yaml",
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4_f22_pid.yaml",
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_7v6_f22_pid.yaml",
+]
+
+MARL_DYNAMICS_TRAIN_FIELDS = [
+    "clip_fraction_mav", "clip_fraction_uav",
+    "approx_kl_abs_mav", "approx_kl_abs_uav",
+    "ratio_mean_mav", "ratio_mean_uav",
+    "ratio_std_mav", "ratio_std_uav",
+    "ratio_p95_mav", "ratio_p95_uav",
+    "ratio_p99_mav", "ratio_p99_uav",
+    "actor_grad_norm_mav", "actor_grad_norm_uav", "critic_grad_norm",
+    "policy_update_norm_mav", "policy_update_norm_uav", "critic_update_norm",
+    "critic_loss_unscaled", "critic_loss_scaled", "value_explained_variance",
+    "value_pred_mean", "value_pred_std", "return_mean", "return_std",
+    "advantage_raw_mean", "advantage_raw_std", "advantage_raw_min", "advantage_raw_max",
+    "advantage_norm_mean", "advantage_norm_std", "advantage_norm_min", "advantage_norm_max",
+    "mav_action_mean_pitch", "mav_action_mean_heading", "mav_action_mean_speed",
+    "uav_action_mean_pitch", "uav_action_mean_heading", "uav_action_mean_speed",
+    "mav_action_std_pitch", "mav_action_std_heading", "mav_action_std_speed",
+    "uav_action_std_pitch", "uav_action_std_heading", "uav_action_std_speed",
+    "mav_action_mean_abs_pitch", "mav_action_mean_abs_heading", "mav_action_mean_abs_speed",
+    "uav_action_mean_abs_pitch", "uav_action_mean_abs_heading", "uav_action_mean_abs_speed",
+    "mav_action_saturation_pitch", "mav_action_saturation_heading", "mav_action_saturation_speed",
+    "uav_action_saturation_pitch", "uav_action_saturation_heading", "uav_action_saturation_speed",
+    "rollout_transitions", "ppo_epochs", "actor_lr", "critic_lr", "clip_param",
+    "entropy_coef", "gamma", "gae_lambda", "max_grad_norm",
+    "actor_obs_mean", "actor_obs_std", "actor_obs_abs_max", "actor_obs_nan_count",
+    "critic_state_mean", "critic_state_std", "critic_state_abs_max", "critic_state_nan_count",
+]
+
+UPDATE_DIAGNOSTIC_ARRAY_FIELDS = [
+    "actor_loss_per_agent", "entropy_per_agent", "approx_kl_per_agent",
+    "approx_kl_abs_per_agent", "clip_fraction_per_agent",
+    "ratio_mean_per_agent", "ratio_std_per_agent", "ratio_p95_per_agent",
+    "ratio_p99_per_agent", "actor_grad_norm_per_agent",
+    "policy_update_norm_per_agent", "valid_sample_count_per_agent",
+    "active_sample_ratio_per_agent", "last_update_order",
+    "m_mean_after_each_agent", "m_std_after_each_agent",
+    "m_abs_mean_after_each_agent", "m_abs_max_after_each_agent",
 ]
 
 
@@ -1468,6 +1552,7 @@ def _run_training_main() -> None:
             "team_kill_while_mav_alive", "team_kill_after_mav_death",
             "red_launch_rate_before_mav_death", "red_launch_rate_after_mav_death",
             "mav_removed_r_adv_sum", "mav_removed_r_end_sum",
+            *MARL_DYNAMICS_TRAIN_FIELDS,
             "nan_detected",
         ])
         eval_writer = None
@@ -1972,6 +2057,31 @@ def _run_training_main() -> None:
                     uav_imitation_batch=imitation_batch,
                     uav_imitation_coef=args.uav_imitation_coef if imitation_active else 0.0,
                 )
+            stats.update(_rollout_distribution_stats(buffer))
+            stats.update({
+                "rollout_transitions": rollout_transitions,
+                "ppo_epochs": args.ppo_epochs,
+                "actor_lr": args.actor_lr,
+                "critic_lr": args.critic_lr,
+                "clip_param": args.clip_param,
+                "entropy_coef": args.entropy_coef,
+                "gamma": args.gamma,
+                "gae_lambda": args.gae_lambda,
+                "max_grad_norm": args.max_grad_norm,
+            })
+            update_diag = {
+                "iteration": iteration,
+                "total_steps": total_steps,
+                "policy_arch": args.policy_arch,
+            }
+            for key in UPDATE_DIAGNOSTIC_ARRAY_FIELDS:
+                if key in stats:
+                    value = stats.get(key)
+                    if isinstance(value, np.ndarray):
+                        value = value.tolist()
+                    update_diag[key] = value
+            with (out_dir / "update_diagnostics.jsonl").open("a", encoding="utf-8") as _udf:
+                _udf.write(json.dumps(update_diag, ensure_ascii=False) + "\n")
             rec = list(recent)
             n = max(len(rec), 1)
             avg_return = float(np.mean([r["return"] for r in rec])) if rec else 0.0
@@ -2062,6 +2172,7 @@ def _run_training_main() -> None:
                 f"{rc_mean.get('red_launch_rate_after_mav_death', 0):.4f}",
                 f"{rc_sum.get('v1_mav_removed_r_adv', 0):.4f}",
                 f"{rc_sum.get('v1_mav_removed_r_end', 0):.4f}",
+                *[_format_metric(stats.get(field, 0.0)) for field in MARL_DYNAMICS_TRAIN_FIELDS],
                 int(nan_detected),
             ])
             if rich_logger is not None:
