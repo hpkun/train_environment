@@ -61,6 +61,16 @@ FIELDNAMES = [
     "alive",
     "altitude_m",
     "speed_mps",
+    "true_speed_mps",
+    "airspeed_mps",
+    "alpha_rad",
+    "beta_rad",
+    "p_rad_s",
+    "q_rad_s",
+    "r_rad_s",
+    "low_speed_flag",
+    "high_altitude_flag",
+    "low_altitude_flag",
     "roll_rad",
     "pitch_rad",
     "heading_rad",
@@ -75,6 +85,12 @@ FIELDNAMES = [
     "roll_rate_rad_s",
     "nz_current_g",
     "nz_error_g",
+    "raw_nz_sensor_g",
+    "effective_nz_g",
+    "nz_error_clipped_g",
+    "tam_aileron_sign",
+    "tam_elevator_sign",
+    "tam_rudder_sign",
     "pitch_rate_rad_s",
     "yaw_rate_rad_s",
     "raw_aileron",
@@ -116,6 +132,12 @@ def _wrapped_angle_delta(new_angle: float, old_angle: float) -> float:
     return float((float(new_angle) - float(old_angle) + np.pi) % (2.0 * np.pi) - np.pi)
 
 
+def _angle_delta_for_key(key: str, new_value: float, old_value: float) -> float:
+    if key in {"heading_rad", "roll_rad"}:
+        return _wrapped_angle_delta(new_value, old_value)
+    return float(new_value) - float(old_value)
+
+
 def _finite_or_empty(value):
     if value is None:
         return ""
@@ -128,12 +150,18 @@ def _finite_or_empty(value):
     return val
 
 
-def _make_actions(env, scenario_action: np.ndarray, agent_id: str | None) -> dict:
+def _make_actions_for_mode(
+    agent_ids, scenario_action: np.ndarray, agent_id: str | None, mode: str
+) -> dict:
     actions = {}
-    neutral = SCENARIOS["neutral"]
-    for aid in env.agent_ids:
+    neutral = _scenarios_for_mode(mode)["neutral"]
+    for aid in agent_ids:
         actions[aid] = scenario_action.copy() if agent_id in (None, aid) else neutral.copy()
     return actions
+
+
+def _make_actions(env, scenario_action: np.ndarray, agent_id: str | None, mode: str) -> dict:
+    return _make_actions_for_mode(env.agent_ids, scenario_action, agent_id, mode)
 
 
 def _nonfinite_state(row: dict) -> bool:
@@ -172,6 +200,16 @@ def _row_from_info(
         "alive": bool(diag.get("alive", False)),
         "altitude_m": _finite_or_empty(diag.get("altitude_m")),
         "speed_mps": _finite_or_empty(diag.get("speed_mps")),
+        "true_speed_mps": _finite_or_empty(diag.get("true_speed_mps")),
+        "airspeed_mps": _finite_or_empty(diag.get("airspeed_mps")),
+        "alpha_rad": _finite_or_empty(diag.get("alpha_rad")),
+        "beta_rad": _finite_or_empty(diag.get("beta_rad")),
+        "p_rad_s": _finite_or_empty(diag.get("p_rad_s")),
+        "q_rad_s": _finite_or_empty(diag.get("q_rad_s")),
+        "r_rad_s": _finite_or_empty(diag.get("r_rad_s")),
+        "low_speed_flag": bool(diag.get("low_speed_flag", False)),
+        "high_altitude_flag": bool(diag.get("high_altitude_flag", False)),
+        "low_altitude_flag": bool(diag.get("low_altitude_flag", False)),
         "roll_rad": _finite_or_empty(diag.get("roll_rad")),
         "pitch_rad": _finite_or_empty(diag.get("pitch_rad")),
         "heading_rad": _finite_or_empty(diag.get("heading_rad")),
@@ -186,6 +224,12 @@ def _row_from_info(
         "roll_rate_rad_s": _finite_or_empty(terms.get("roll_rate_rad_s")),
         "nz_current_g": _finite_or_empty(terms.get("nz_current_g")),
         "nz_error_g": _finite_or_empty(terms.get("nz_error_g")),
+        "raw_nz_sensor_g": _finite_or_empty(terms.get("raw_nz_sensor_g")),
+        "effective_nz_g": _finite_or_empty(terms.get("effective_nz_g")),
+        "nz_error_clipped_g": _finite_or_empty(terms.get("nz_error_clipped_g")),
+        "tam_aileron_sign": _finite_or_empty(terms.get("tam_aileron_sign")),
+        "tam_elevator_sign": _finite_or_empty(terms.get("tam_elevator_sign")),
+        "tam_rudder_sign": _finite_or_empty(terms.get("tam_rudder_sign")),
         "pitch_rate_rad_s": _finite_or_empty(terms.get("pitch_rate_rad_s")),
         "yaw_rate_rad_s": _finite_or_empty(terms.get("yaw_rate_rad_s")),
         "raw_aileron": _finite_or_empty(terms.get("raw_aileron")),
@@ -209,16 +253,82 @@ def _row_from_info(
     return row
 
 
-def _print_summary(scenario: str, rows: list[dict], missiles_per_plane: int):
+def _number_values(rows: list[dict], *keys: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        for key in keys:
+            value = row.get(key)
+            if value in ("", None):
+                continue
+            try:
+                val = float(value)
+            except Exception:
+                continue
+            if np.isfinite(val):
+                values.append(val)
+                break
+    return values
+
+
+def _scenario_summary(
+    rows: list[dict],
+    *,
+    low_speed_threshold: float,
+    high_altitude_threshold: float,
+    low_altitude_threshold: float,
+) -> dict:
+    speeds = _number_values(rows, "true_speed_mps", "speed_mps")
+    altitudes = _number_values(rows, "altitude_m")
+    g_values = _number_values(rows, "g_load_total", "g_load")
+    min_speed = min(speeds) if speeds else None
+    max_alt = max(altitudes) if altitudes else None
+    min_alt = min(altitudes) if altitudes else None
+    max_g = max(g_values) if g_values else None
+    return {
+        "done_or_crash": any(
+            (not bool(row.get("alive"))) or bool(row.get("terminated")) or bool(row.get("truncated"))
+            for row in rows
+        ),
+        "any_low_speed": bool(min_speed is not None and min_speed < low_speed_threshold),
+        "min_speed": min_speed,
+        "max_alt": max_alt,
+        "min_alt": min_alt,
+        "max_g_load_total": max_g,
+        "any_high_altitude": bool(max_alt is not None and max_alt > high_altitude_threshold),
+        "any_low_altitude": bool(min_alt is not None and min_alt < low_altitude_threshold),
+        "nonfinite": any(bool(row.get("nonfinite_state")) for row in rows),
+    }
+
+
+def _print_summary(
+    scenario: str,
+    rows: list[dict],
+    missiles_per_plane: int,
+    *,
+    low_speed_threshold: float,
+    high_altitude_threshold: float,
+    low_altitude_threshold: float,
+):
     by_agent: dict[str, list[dict]] = {}
     for row in rows:
         by_agent.setdefault(str(row["agent_id"]), []).append(row)
 
-    crashed = any((not bool(row.get("alive"))) or bool(row.get("terminated")) for row in rows)
-    nonfinite = any(bool(row.get("nonfinite_state")) for row in rows)
+    summary = _scenario_summary(
+        rows,
+        low_speed_threshold=low_speed_threshold,
+        high_altitude_threshold=high_altitude_threshold,
+        low_altitude_threshold=low_altitude_threshold,
+    )
     print(
         f"[tam-direct-fcs] scenario={scenario} "
-        f"missiles_per_plane={missiles_per_plane} crash={crashed} nonfinite={nonfinite}"
+        f"missiles_per_plane={missiles_per_plane} "
+        f"done_or_crash={summary['done_or_crash']} "
+        f"low_speed={summary['any_low_speed']} "
+        f"min_speed={summary['min_speed']} "
+        f"max_alt={summary['max_alt']} "
+        f"min_alt={summary['min_alt']} "
+        f"max_g={summary['max_g_load_total']} "
+        f"nonfinite={summary['nonfinite']}"
     )
     for aid, agent_rows in by_agent.items():
         first = agent_rows[0]
@@ -226,9 +336,7 @@ def _print_summary(scenario: str, rows: list[dict], missiles_per_plane: int):
         def delta(key: str):
             if first.get(key) == "" or last.get(key) == "":
                 return ""
-            if key == "heading_rad":
-                return _wrapped_angle_delta(float(last[key]), float(first[key]))
-            return float(last[key]) - float(first[key])
+            return _angle_delta_for_key(key, float(last[key]), float(first[key]))
         print(
             "  "
             f"{aid}: final_alt={last.get('altitude_m')} "
@@ -266,7 +374,7 @@ def run(args: argparse.Namespace) -> int:
                     ))
             action = scenarios[name]
             for step in range(args.steps):
-                actions = _make_actions(env, action, args.agent_id)
+                actions = _make_actions(env, action, args.agent_id, args.tam_control_mode)
                 _obs, rewards, terminated, truncated, info = env.step(actions)
                 for aid in env.agent_ids:
                     rows.append(_row_from_info(
@@ -278,7 +386,14 @@ def run(args: argparse.Namespace) -> int:
         finally:
             env.close()
         scenario_rows.extend(rows)
-        _print_summary(name, rows, args.num_missiles_per_plane)
+        _print_summary(
+            name,
+            rows,
+            args.num_missiles_per_plane,
+            low_speed_threshold=args.low_speed_threshold,
+            high_altitude_threshold=args.high_altitude_threshold,
+            low_altitude_threshold=args.low_altitude_threshold,
+        )
 
     out_path = Path(args.output_csv)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -308,6 +423,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tam-throttle-min", type=float, default=0.4)
     parser.add_argument("--tam-throttle-max", type=float, default=0.9)
     parser.add_argument("--tam-surface-limit", type=float, default=1.0)
+    parser.add_argument("--low-speed-threshold", type=float, default=120.0)
+    parser.add_argument("--high-altitude-threshold", type=float, default=10000.0)
+    parser.add_argument("--low-altitude-threshold", type=float, default=2500.0)
     return parser
 
 

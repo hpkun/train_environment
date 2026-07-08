@@ -58,13 +58,21 @@ class TamCombatEnv(HeteroUavCombatEnv):
         self.tam_yaw_rate_limit_rad_s = np.deg2rad(float(
             kwargs.pop("tam_yaw_rate_limit_deg_s", 20.0)
         ))
+        self.tam_nz_sensor_sign = float(kwargs.pop("tam_nz_sensor_sign", -1.0))
+        self.tam_nz_feedback_abs = bool(kwargs.pop("tam_nz_feedback_abs", False))
+        self.tam_nz_error_clip_g = float(kwargs.pop("tam_nz_error_clip_g", 3.0))
+        self.tam_aileron_sign = float(kwargs.pop("tam_aileron_sign", 1.0))
         self.tam_elevator_sign = float(kwargs.pop("tam_elevator_sign", -1.0))
+        self.tam_rudder_sign = float(kwargs.pop("tam_rudder_sign", 1.0))
         self.tam_bank_kp = float(kwargs.pop("tam_bank_kp", 1.2))
         self.tam_roll_rate_kd = float(kwargs.pop("tam_roll_rate_kd", 0.3))
         self.tam_nz_kp = float(kwargs.pop("tam_nz_kp", 0.18))
         self.tam_pitch_rate_kd = float(kwargs.pop("tam_pitch_rate_kd", 0.05))
         self.tam_yaw_rate_kp = float(kwargs.pop("tam_yaw_rate_kp", 0.8))
         self.tam_yaw_rate_kd = float(kwargs.pop("tam_yaw_rate_kd", 0.2))
+        self.tam_low_speed_warn_mps = float(kwargs.pop("tam_low_speed_warn_mps", 120.0))
+        self.tam_high_altitude_warn_m = float(kwargs.pop("tam_high_altitude_warn_m", 10000.0))
+        self.tam_low_altitude_warn_m = float(kwargs.pop("tam_low_altitude_warn_m", 2500.0))
         self.tam_nan_action_policy = str(kwargs.pop("tam_nan_action_policy", "zero_clip"))
         self.tam_record_control_diagnostics = bool(
             kwargs.pop("tam_record_control_diagnostics", True)
@@ -98,6 +106,8 @@ class TamCombatEnv(HeteroUavCombatEnv):
             raise ValueError("tam_nz_min_g must be less than tam_nz_max_g")
         if self.tam_yaw_rate_limit_rad_s <= 0.0:
             raise ValueError("tam_yaw_rate_limit_deg_s must be positive")
+        if self.tam_nz_error_clip_g <= 0.0:
+            raise ValueError("tam_nz_error_clip_g must be positive")
         if self.tam_nan_action_policy != "zero_clip":
             raise ValueError("tam_nan_action_policy currently only supports 'zero_clip'")
         if self.tam_parent_action_overrides_enabled:
@@ -322,6 +332,12 @@ class TamCombatEnv(HeteroUavCombatEnv):
         value = self._read_fcs_property(sim, prop)
         return 0.0 if value is None else float(value)
 
+    def _effective_nz_g(self, raw_nz_sensor_g: float) -> float:
+        raw = float(raw_nz_sensor_g)
+        if self.tam_nz_feedback_abs:
+            return abs(raw)
+        return self.tam_nz_sensor_sign * raw
+
     def _apply_maneuver_fcs_controls(self, targets: dict):
         """Convert maneuver commands to direct FCS outputs using ownship state."""
 
@@ -347,15 +363,21 @@ class TamCombatEnv(HeteroUavCombatEnv):
             p_rate = self._read_property_or_zero(sim, "velocities/p-rad_sec")
             q_rate = self._read_property_or_zero(sim, "velocities/q-rad_sec")
             r_rate = self._read_property_or_zero(sim, "velocities/r-rad_sec")
-            nz_current = self._read_property_or_zero(sim, "accelerations/n-pilot-z-norm")
+            raw_nz_sensor = self._read_property_or_zero(sim, "accelerations/n-pilot-z-norm")
+            effective_nz = self._effective_nz_g(raw_nz_sensor)
 
             bank_error = self._wrap_angle_rad(float(bank_cmd) - roll)
-            raw_aileron = self.tam_bank_kp * bank_error - self.tam_roll_rate_kd * p_rate
-            nz_error = float(nz_cmd) - nz_current
-            raw_elevator = self.tam_elevator_sign * (
-                self.tam_nz_kp * nz_error - self.tam_pitch_rate_kd * q_rate
+            raw_aileron = self.tam_aileron_sign * (
+                self.tam_bank_kp * bank_error - self.tam_roll_rate_kd * p_rate
             )
-            raw_rudder = (
+            nz_error = float(nz_cmd) - effective_nz
+            nz_error_clipped = float(np.clip(
+                nz_error, -self.tam_nz_error_clip_g, self.tam_nz_error_clip_g
+            ))
+            raw_elevator = self.tam_elevator_sign * (
+                self.tam_nz_kp * nz_error_clipped - self.tam_pitch_rate_kd * q_rate
+            )
+            raw_rudder = self.tam_rudder_sign * (
                 self.tam_yaw_rate_kp * (float(yaw_rate_cmd) - r_rate)
                 - self.tam_yaw_rate_kd * r_rate
             )
@@ -372,11 +394,17 @@ class TamCombatEnv(HeteroUavCombatEnv):
                 "bank_error_rad": float(bank_error),
                 "roll_rate_rad_s": float(p_rate),
                 "nz_cmd_g": float(nz_cmd),
-                "nz_current_g": float(nz_current),
+                "raw_nz_sensor_g": float(raw_nz_sensor),
+                "effective_nz_g": float(effective_nz),
+                "nz_current_g": float(effective_nz),
                 "nz_error_g": float(nz_error),
+                "nz_error_clipped_g": float(nz_error_clipped),
                 "pitch_rate_rad_s": float(q_rate),
                 "yaw_rate_cmd_rad_s": float(yaw_rate_cmd),
                 "yaw_rate_rad_s": float(r_rate),
+                "tam_aileron_sign": float(self.tam_aileron_sign),
+                "tam_elevator_sign": float(self.tam_elevator_sign),
+                "tam_rudder_sign": float(self.tam_rudder_sign),
                 "raw_aileron": float(raw_aileron),
                 "raw_elevator": float(raw_elevator),
                 "raw_rudder": float(raw_rudder),
@@ -413,6 +441,16 @@ class TamCombatEnv(HeteroUavCombatEnv):
                 "alive": alive,
                 "altitude_m": None,
                 "speed_mps": None,
+                "true_speed_mps": None,
+                "airspeed_mps": None,
+                "alpha_rad": None,
+                "beta_rad": None,
+                "p_rad_s": None,
+                "q_rad_s": None,
+                "r_rad_s": None,
+                "low_speed_flag": None,
+                "high_altitude_flag": None,
+                "low_altitude_flag": None,
                 "roll_rad": None,
                 "pitch_rad": None,
                 "heading_rad": None,
@@ -433,9 +471,17 @@ class TamCombatEnv(HeteroUavCombatEnv):
                     pass
                 try:
                     velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
-                    diag["speed_mps"] = float(np.linalg.norm(velocity))
+                    true_speed = float(np.linalg.norm(velocity))
+                    diag["speed_mps"] = true_speed
+                    diag["true_speed_mps"] = true_speed
                 except Exception:
                     pass
+                diag["airspeed_mps"] = self._read_fcs_property(sim, "velocities/vc-mps")
+                diag["alpha_rad"] = self._read_fcs_property(sim, "aero/alpha-rad")
+                diag["beta_rad"] = self._read_fcs_property(sim, "aero/beta-rad")
+                diag["p_rad_s"] = self._read_fcs_property(sim, "velocities/p-rad_sec")
+                diag["q_rad_s"] = self._read_fcs_property(sim, "velocities/q-rad_sec")
+                diag["r_rad_s"] = self._read_fcs_property(sim, "velocities/r-rad_sec")
                 try:
                     rpy = np.asarray(sim.get_rpy(), dtype=np.float64).reshape(-1)
                     diag["roll_rad"] = float(rpy[0])
@@ -457,6 +503,13 @@ class TamCombatEnv(HeteroUavCombatEnv):
                     total = float(np.sqrt(gx * gx + gy * gy + gz * gz))
                     diag["g_load_total"] = total
                     diag["g_load"] = total
+                speed_for_flag = diag["true_speed_mps"]
+                alt_for_flag = diag["altitude_m"]
+                if speed_for_flag is not None:
+                    diag["low_speed_flag"] = bool(speed_for_flag < self.tam_low_speed_warn_mps)
+                if alt_for_flag is not None:
+                    diag["high_altitude_flag"] = bool(alt_for_flag > self.tam_high_altitude_warn_m)
+                    diag["low_altitude_flag"] = bool(alt_for_flag < self.tam_low_altitude_warn_m)
             diagnostics[aid] = diag
         return diagnostics
 

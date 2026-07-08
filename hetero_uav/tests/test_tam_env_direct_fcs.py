@@ -482,3 +482,115 @@ def test_tam_response_script_wrapped_angle_delta():
 
     assert diag._wrapped_angle_delta(-np.pi + 0.1, np.pi - 0.1) == pytest.approx(0.2)
     assert diag._wrapped_angle_delta(np.pi - 0.1, -np.pi + 0.1) == pytest.approx(-0.2)
+
+
+def test_tam_maneuver_fcs_nz_sensor_sign_applied():
+    env = _make_tam_env(max_steps=5, tam_control_mode="maneuver_fcs")
+    try:
+        assert env._effective_nz_g(-0.75) == pytest.approx(0.75)
+        env.tam_nz_sensor_sign = 1.0
+        assert env._effective_nz_g(-0.75) == pytest.approx(-0.75)
+        env.tam_nz_feedback_abs = True
+        assert env._effective_nz_g(-0.75) == pytest.approx(0.75)
+    finally:
+        env.close()
+
+
+def test_tam_maneuver_fcs_records_raw_and_effective_nz():
+    env = _make_tam_env(max_steps=5, tam_control_mode="maneuver_fcs")
+    try:
+        env.reset(seed=30)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+        terms = info["tam_controller_terms"][env.agent_ids[0]]
+        for key in ("raw_nz_sensor_g", "effective_nz_g", "nz_error_clipped_g"):
+            assert key in terms
+    finally:
+        env.close()
+
+
+def test_tam_maneuver_fcs_sign_adapters_present():
+    env = _make_tam_env(max_steps=5, tam_control_mode="maneuver_fcs")
+    try:
+        env.reset(seed=31)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+        terms = info["tam_controller_terms"][env.agent_ids[0]]
+        assert terms["tam_aileron_sign"] == pytest.approx(1.0)
+        assert terms["tam_elevator_sign"] == pytest.approx(-1.0)
+        assert terms["tam_rudder_sign"] == pytest.approx(1.0)
+    finally:
+        env.close()
+
+
+def test_tam_control_diagnostics_speed_alpha_beta_rates_fields():
+    env = _make_tam_env(max_steps=5, tam_control_mode="maneuver_fcs")
+    try:
+        env.reset(seed=32)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+        diag = info["tam_control_diagnostics"][env.agent_ids[0]]
+        for key in (
+            "true_speed_mps",
+            "airspeed_mps",
+            "alpha_rad",
+            "beta_rad",
+            "p_rad_s",
+            "q_rad_s",
+            "r_rad_s",
+            "low_speed_flag",
+            "high_altitude_flag",
+            "low_altitude_flag",
+        ):
+            assert key in diag
+    finally:
+        env.close()
+
+
+def test_response_script_summary_uses_truncated_and_low_speed():
+    from scripts import diagnose_tam_direct_fcs_response as diag
+
+    rows = [
+        {
+            "alive": True,
+            "terminated": False,
+            "truncated": True,
+            "true_speed_mps": 80.0,
+            "speed_mps": 90.0,
+            "altitude_m": 11000.0,
+            "g_load_total": 2.0,
+            "nonfinite_state": False,
+        }
+    ]
+    summary = diag._scenario_summary(
+        rows,
+        low_speed_threshold=120.0,
+        high_altitude_threshold=10000.0,
+        low_altitude_threshold=2500.0,
+    )
+    assert summary["done_or_crash"] is True
+    assert summary["any_low_speed"] is True
+    assert summary["any_high_altitude"] is True
+    assert summary["min_speed"] == pytest.approx(80.0)
+    assert summary["max_g_load_total"] == pytest.approx(2.0)
+
+
+def test_response_script_roll_delta_wrapped():
+    from scripts import diagnose_tam_direct_fcs_response as diag
+
+    assert diag._angle_delta_for_key("roll_rad", -np.pi + 0.1, np.pi - 0.1) == pytest.approx(0.2)
+    assert diag._angle_delta_for_key("heading_rad", np.pi - 0.1, -np.pi + 0.1) == pytest.approx(-0.2)
+    assert diag._angle_delta_for_key("pitch_rad", 0.3, 0.1) == pytest.approx(0.2)
+
+
+def test_response_script_mode_specific_neutral():
+    from scripts import diagnose_tam_direct_fcs_response as diag
+
+    raw = diag._make_actions_for_mode(["a"], np.ones(4, dtype=np.float32), None, "raw_direct_fcs")
+    maneuver = diag._make_actions_for_mode(["a"], np.ones(4, dtype=np.float32), None, "maneuver_fcs")
+    np.testing.assert_allclose(raw["a"], np.ones(4, dtype=np.float32))
+    np.testing.assert_allclose(maneuver["a"], np.ones(4, dtype=np.float32))
+    raw_neutral = diag._make_actions_for_mode(["a"], np.ones(4, dtype=np.float32), "other", "raw_direct_fcs")
+    maneuver_neutral = diag._make_actions_for_mode(["a"], np.ones(4, dtype=np.float32), "other", "maneuver_fcs")
+    np.testing.assert_allclose(raw_neutral["a"], diag.RAW_DIRECT_FCS_SCENARIOS["neutral"])
+    np.testing.assert_allclose(maneuver_neutral["a"], diag.MANEUVER_FCS_SCENARIOS["neutral"])
