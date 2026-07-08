@@ -53,9 +53,17 @@ FIELDNAMES = [
     "aileron_cmd",
     "elevator_cmd",
     "rudder_cmd",
+    "g_load",
+    "g_load_total",
+    "g_load_x",
+    "g_load_y",
+    "g_load_z",
     "reward",
     "terminated",
     "truncated",
+    "initial_frame",
+    "crash_or_done",
+    "nonfinite_state",
 ]
 
 
@@ -87,11 +95,31 @@ def _make_actions(env, scenario_action: np.ndarray, agent_id: str | None) -> dic
     return actions
 
 
-def _row_from_info(step: int, scenario: str, aid: str, rewards, terminated, truncated, info) -> dict:
+def _nonfinite_state(row: dict) -> bool:
+    for key in ("altitude_m", "speed_mps", "roll_rad", "pitch_rad", "heading_rad"):
+        value = row.get(key)
+        if value == "":
+            continue
+        if not np.isfinite(float(value)):
+            return True
+    return False
+
+
+def _row_from_info(
+    step: int,
+    scenario: str,
+    aid: str,
+    rewards,
+    terminated,
+    truncated,
+    info,
+    *,
+    initial_frame: bool = False,
+) -> dict:
     diag = (info.get("tam_control_diagnostics", {}) or {}).get(aid, {}) or {}
     fcs = (info.get("tam_applied_fcs", {}) or {}).get(aid)
     fcs = fcs if isinstance(fcs, (list, tuple)) and len(fcs) >= 4 else [None, None, None, None]
-    return {
+    row = {
         "step": step,
         "scenario": scenario,
         "agent_id": aid,
@@ -105,25 +133,32 @@ def _row_from_info(step: int, scenario: str, aid: str, rewards, terminated, trun
         "aileron_cmd": _finite_or_empty(fcs[1]),
         "elevator_cmd": _finite_or_empty(fcs[2]),
         "rudder_cmd": _finite_or_empty(fcs[3]),
-        "reward": _finite_or_empty((rewards or {}).get(aid)),
+        "g_load": _finite_or_empty(diag.get("g_load")),
+        "g_load_total": _finite_or_empty(diag.get("g_load_total")),
+        "g_load_x": _finite_or_empty(diag.get("g_load_x")),
+        "g_load_y": _finite_or_empty(diag.get("g_load_y")),
+        "g_load_z": _finite_or_empty(diag.get("g_load_z")),
+        "reward": "" if initial_frame else _finite_or_empty((rewards or {}).get(aid)),
         "terminated": bool((terminated or {}).get(aid, False)),
         "truncated": bool((truncated or {}).get(aid, False)),
+        "initial_frame": bool(initial_frame),
     }
+    row["crash_or_done"] = bool((not row["alive"]) or row["terminated"] or row["truncated"])
+    row["nonfinite_state"] = _nonfinite_state(row)
+    return row
 
 
-def _print_summary(scenario: str, rows: list[dict]):
+def _print_summary(scenario: str, rows: list[dict], missiles_per_plane: int):
     by_agent: dict[str, list[dict]] = {}
     for row in rows:
         by_agent.setdefault(str(row["agent_id"]), []).append(row)
 
-    crashed = any((not row["alive"]) or row["terminated"] for row in rows)
-    nonfinite = False
-    for key in ("altitude_m", "speed_mps", "roll_rad", "pitch_rad", "heading_rad"):
-        for row in rows:
-            value = row.get(key)
-            if value != "" and not np.isfinite(float(value)):
-                nonfinite = True
-    print(f"[tam-direct-fcs] scenario={scenario} crash={crashed} nonfinite={nonfinite}")
+    crashed = any((not bool(row.get("alive"))) or bool(row.get("terminated")) for row in rows)
+    nonfinite = any(bool(row.get("nonfinite_state")) for row in rows)
+    print(
+        f"[tam-direct-fcs] scenario={scenario} "
+        f"missiles_per_plane={missiles_per_plane} crash={crashed} nonfinite={nonfinite}"
+    )
     for aid, agent_rows in by_agent.items():
         first = agent_rows[0]
         last = agent_rows[-1]
@@ -150,10 +185,20 @@ def run(args: argparse.Namespace) -> int:
             env_type="tam",
             max_steps=args.steps,
             suppress_jsbsim_output=True,
+            num_missiles_per_plane=args.num_missiles_per_plane,
+            strict_action_shape=args.strict_action_shape,
+            tam_throttle_min=args.tam_throttle_min,
+            tam_throttle_max=args.tam_throttle_max,
+            tam_surface_limit=args.tam_surface_limit,
         )
         rows: list[dict] = []
         try:
-            env.reset(seed=args.seed + scenario_index)
+            _obs, reset_info = env.reset(seed=args.seed + scenario_index)
+            if args.record_initial_frame:
+                for aid in env.agent_ids:
+                    rows.append(_row_from_info(
+                        -1, name, aid, {}, {}, {}, reset_info, initial_frame=True
+                    ))
             action = SCENARIOS[name]
             for step in range(args.steps):
                 actions = _make_actions(env, action, args.agent_id)
@@ -162,12 +207,13 @@ def run(args: argparse.Namespace) -> int:
                     rows.append(_row_from_info(
                         step, name, aid, rewards, terminated, truncated, info
                     ))
-                if all(terminated.values()) or all(truncated.values()):
+                if (not args.continue_after_agent_done
+                        and (all(terminated.values()) or all(truncated.values()))):
                     break
         finally:
             env.close()
         scenario_rows.extend(rows)
-        _print_summary(name, rows)
+        _print_summary(name, rows, args.num_missiles_per_plane)
 
     out_path = Path(args.output_csv)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -187,6 +233,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-csv", default="outputs/tam_direct_fcs_response.csv")
     parser.add_argument("--scenario", default="all", choices=["all", *SCENARIOS.keys()])
     parser.add_argument("--agent-id", default=None)
+    parser.add_argument("--num-missiles-per-plane", type=int, default=0)
+    parser.add_argument("--record-initial-frame", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--continue-after-agent-done", action="store_true")
+    parser.add_argument("--strict-action-shape", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--tam-throttle-min", type=float, default=0.4)
+    parser.add_argument("--tam-throttle-max", type=float, default=0.9)
+    parser.add_argument("--tam-surface-limit", type=float, default=1.0)
     return parser
 
 

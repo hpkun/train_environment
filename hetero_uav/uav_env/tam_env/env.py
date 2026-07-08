@@ -15,6 +15,8 @@ must not reuse the PID target-control override path.
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import gymnasium
 import numpy as np
 
@@ -58,6 +60,7 @@ class TamCombatEnv(HeteroUavCombatEnv):
             kwargs.pop("tam_parent_action_overrides_enabled", False)
         )
         self._validate_tam_config()
+        self._apply_tam_missile_count_override(kwargs)
 
         super().__init__(*args, **kwargs)
         self.action_space = gymnasium.spaces.Dict({
@@ -78,6 +81,17 @@ class TamCombatEnv(HeteroUavCombatEnv):
                 "tam_env phase 1 does not implement parent PID action overrides"
             )
 
+    @staticmethod
+    def _apply_tam_missile_count_override(kwargs: dict):
+        if "num_missiles_per_plane" not in kwargs or "aircraft_type_params" not in kwargs:
+            return
+        count = int(kwargs["num_missiles_per_plane"])
+        params = deepcopy(kwargs.get("aircraft_type_params") or {})
+        for value in params.values():
+            if isinstance(value, dict):
+                value["num_missiles"] = count
+        kwargs["aircraft_type_params"] = params
+
     def _reset_tam_control_logs(self):
         self._last_tam_raw_actions: dict[str, list[float | str] | None] = {}
         self._last_tam_sanitized_actions: dict[str, list[float] | None] = {}
@@ -86,6 +100,12 @@ class TamCombatEnv(HeteroUavCombatEnv):
         self._last_tam_applied_fcs: dict[str, list[float] | None] = {}
         self._last_effective_actions = {}
         self._last_action_trim_applied = {}
+
+    def reset(self, *args, **kwargs):
+        self._reset_tam_control_logs()
+        obs, _info = super().reset(*args, **kwargs)
+        self._reset_tam_control_logs()
+        return obs, self._get_info()
 
     def _apply_action_trim(self, actions: dict) -> dict:
         """Bypass inherited 3-D PID action trim for TAM direct-FCS actions."""
@@ -133,14 +153,28 @@ class TamCombatEnv(HeteroUavCombatEnv):
             return np.zeros(4, dtype=np.float32)
 
         try:
-            arr = np.asarray(action, dtype=np.float32).reshape(-1)
+            raw_arr = np.asarray(action, dtype=np.float32)
         except Exception as exc:
             raise ValueError(f"tam_env action for {aid} cannot be converted to float") from exc
-        self._last_tam_raw_actions[aid] = self._json_list(arr)
+        self._last_tam_raw_actions[aid] = self._json_list(raw_arr)
+
+        if self.strict_action_shape and raw_arr.shape != (4,):
+            raise ValueError(
+                f"tam_env action for {aid} must have shape=(4,), got shape={raw_arr.shape}"
+            )
+        if (not self.strict_action_shape
+                and not self.tam_allow_non_strict_padding
+                and raw_arr.shape != (4,)):
+            raise ValueError(
+                f"tam_env action for {aid} must have shape=(4,), got shape={raw_arr.shape}"
+            )
+        arr = raw_arr.reshape(-1)
 
         if not alive:
             warnings.append("inactive_action_ignored")
             return None
+        if raw_arr.shape != (4,):
+            warnings.append(f"non_strict_reshaped_from_{raw_arr.shape}_to_flat")
         if arr.size == 4:
             return arr
         if self.strict_action_shape:
@@ -255,9 +289,13 @@ class TamCombatEnv(HeteroUavCombatEnv):
                 "fcs_throttle_cmd": None,
                 "fcs_aileron_cmd": None,
                 "fcs_elevator_cmd": None,
-                "fcs_rudder_cmd": None,
-                "g_load": None,
-            }
+            "fcs_rudder_cmd": None,
+            "g_load": None,
+            "g_load_total": None,
+            "g_load_x": None,
+            "g_load_y": None,
+            "g_load_z": None,
+        }
             if sim is not None:
                 try:
                     diag["altitude_m"] = float(np.asarray(sim.get_geodetic()).reshape(-1)[2])
@@ -279,7 +317,16 @@ class TamCombatEnv(HeteroUavCombatEnv):
                 diag["fcs_aileron_cmd"] = self._read_fcs_property(sim, "fcs/aileron-cmd-norm")
                 diag["fcs_elevator_cmd"] = self._read_fcs_property(sim, "fcs/elevator-cmd-norm")
                 diag["fcs_rudder_cmd"] = self._read_fcs_property(sim, "fcs/rudder-cmd-norm")
-                diag["g_load"] = self._read_fcs_property(sim, "accelerations/n-pilot-z-norm")
+                gx = self._read_fcs_property(sim, "accelerations/n-pilot-x-norm")
+                gy = self._read_fcs_property(sim, "accelerations/n-pilot-y-norm")
+                gz = self._read_fcs_property(sim, "accelerations/n-pilot-z-norm")
+                diag["g_load_x"] = gx
+                diag["g_load_y"] = gy
+                diag["g_load_z"] = gz
+                if gx is not None and gy is not None and gz is not None:
+                    total = float(np.sqrt(gx * gx + gy * gy + gz * gz))
+                    diag["g_load_total"] = total
+                    diag["g_load"] = total
             diagnostics[aid] = diag
         return diagnostics
 

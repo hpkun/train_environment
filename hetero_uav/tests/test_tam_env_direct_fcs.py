@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import importlib.util
 
 import numpy as np
@@ -21,6 +22,7 @@ def _make_tam_env(max_steps: int = 20, **kwargs):
         env_type="tam",
         max_steps=max_steps,
         suppress_jsbsim_output=True,
+        num_missiles_per_plane=0,
         **kwargs,
     )
 
@@ -83,6 +85,28 @@ def test_tam_env_reset_and_neutral_steps():
         env.close()
 
 
+def test_tam_reset_clears_action_logs():
+    env = _make_tam_env(max_steps=8)
+    try:
+        env.reset(seed=10)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+        assert info["tam_raw_actions"]
+
+        _obs, info = env.reset(seed=11)
+        assert info["tam_raw_actions"] == {}
+        assert info["tam_sanitized_actions"] == {}
+        assert info["tam_fcs_commands"] == {}
+        assert info["tam_applied_fcs"] == {}
+        assert info["tam_action_warnings"] == {}
+        assert env._last_effective_actions == {}
+        assert env._last_action_trim_applied == {}
+        assert info["tam_control_mode"] == "direct_fcs_box4"
+        assert "tam_control_diagnostics" in info
+    finally:
+        env.close()
+
+
 def test_tam_env_strict_rejects_3d_action():
     env = _make_tam_env(max_steps=5)
     try:
@@ -95,6 +119,29 @@ def test_tam_env_strict_rejects_3d_action():
         env.close()
 
 
+@pytest.mark.parametrize(
+    "bad_action",
+    [
+        np.zeros((1, 4), dtype=np.float32),
+        np.zeros((4, 1), dtype=np.float32),
+        np.zeros((2, 2), dtype=np.float32),
+        np.float32(0.0),
+        [[0.0, 0.0, 0.0, 0.0]],
+    ],
+)
+def test_tam_strict_rejects_2d_shape_even_size4(bad_action):
+    env = _make_tam_env(max_steps=5)
+    try:
+        env.reset(seed=12)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        aid = env.agent_ids[0]
+        actions[aid] = bad_action
+        with pytest.raises(ValueError, match=rf"{aid}.*shape=\(4,\).*got shape"):
+            env.step(actions)
+    finally:
+        env.close()
+
+
 def test_tam_env_strict_rejects_missing_alive_action():
     env = _make_tam_env(max_steps=5)
     try:
@@ -102,6 +149,38 @@ def test_tam_env_strict_rejects_missing_alive_action():
         actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
         actions.pop(env.agent_ids[0])
         with pytest.raises(ValueError, match="missing action"):
+            env.step(actions)
+    finally:
+        env.close()
+
+
+def test_tam_non_strict_padding_allows_flatten_only_when_enabled():
+    env = _make_tam_env(
+        max_steps=5,
+        strict_action_shape=False,
+        tam_allow_non_strict_padding=True,
+    )
+    try:
+        env.reset(seed=13)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        aid = env.agent_ids[0]
+        actions[aid] = np.zeros((1, 4), dtype=np.float32)
+        _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+        warnings = info["tam_action_warnings"][aid]
+        assert any("non_strict" in warning or "reshaped" in warning for warning in warnings)
+    finally:
+        env.close()
+
+    env = _make_tam_env(
+        max_steps=5,
+        strict_action_shape=False,
+        tam_allow_non_strict_padding=False,
+    )
+    try:
+        env.reset(seed=14)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        actions[env.agent_ids[0]] = np.zeros((1, 4), dtype=np.float32)
+        with pytest.raises(ValueError, match="shape=\\(4,\\)"):
             env.step(actions)
     finally:
         env.close()
@@ -170,6 +249,24 @@ def test_tam_info_contains_direct_fcs_diagnostics():
         assert "tam_control_diagnostics" in info
         assert info["tam_parent_action_overrides_enabled"] is False
         assert set(info["tam_control_diagnostics"]) == set(env.agent_ids)
+    finally:
+        env.close()
+
+
+def test_tam_control_diagnostics_g_load_total_fields():
+    env = _make_tam_env(max_steps=5)
+    try:
+        env.reset(seed=15)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+        for diag in info["tam_control_diagnostics"].values():
+            for key in ("g_load", "g_load_total", "g_load_x", "g_load_y", "g_load_z"):
+                assert key in diag
+            xyz = [diag["g_load_x"], diag["g_load_y"], diag["g_load_z"]]
+            if all(value is not None for value in xyz):
+                expected = float(np.sqrt(sum(float(value) ** 2 for value in xyz)))
+                assert diag["g_load_total"] == pytest.approx(expected)
+                assert diag["g_load"] == pytest.approx(expected)
     finally:
         env.close()
 
@@ -252,3 +349,29 @@ def test_tam_direct_axis_smoke_longer(action: np.ndarray):
             assert "tam_applied_fcs" in info
     finally:
         env.close()
+
+
+def test_tam_response_script_imports():
+    from scripts import diagnose_tam_direct_fcs_response as diag
+
+    parser = diag.build_parser()
+    args = parser.parse_args(["--steps", "1", "--scenario", "neutral"])
+    assert args.steps == 1
+    assert args.scenario == "neutral"
+
+
+def test_tam_response_script_short_no_missile_run(tmp_path):
+    from scripts import diagnose_tam_direct_fcs_response as diag
+
+    out_csv = tmp_path / "tam_response.csv"
+    rc = diag.main([
+        "--steps", "1",
+        "--scenario", "neutral",
+        "--output-csv", str(out_csv),
+    ])
+    assert rc == 0
+    rows = list(csv.DictReader(out_csv.open("r", encoding="utf-8")))
+    assert rows
+    assert "initial_frame" in rows[0]
+    assert "g_load_total" in rows[0]
+    assert any(row["step"] == "-1" and row["initial_frame"] == "True" for row in rows)
