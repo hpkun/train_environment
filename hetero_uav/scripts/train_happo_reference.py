@@ -2098,9 +2098,11 @@ def _run_training_main() -> None:
                     value = stats.get(key)
                     if isinstance(value, np.ndarray):
                         value = value.tolist()
+                    elif isinstance(value, (np.integer, np.floating)):
+                        value = float(value) if isinstance(value, np.floating) else int(value)
                     update_diag[key] = value
             with (out_dir / "update_diagnostics.jsonl").open("a", encoding="utf-8") as _udf:
-                _udf.write(json.dumps(update_diag, ensure_ascii=False) + "\n")
+                _udf.write(json.dumps(update_diag, ensure_ascii=False, default=str) + "\n")
             rec = list(recent)
             n = max(len(rec), 1)
             avg_return = float(np.mean([r["return"] for r in rec])) if rec else 0.0
