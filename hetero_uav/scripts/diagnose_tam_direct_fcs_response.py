@@ -27,7 +27,7 @@ DEFAULT_CONFIG = (
     "hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_brma_mav_guided_v1.yaml"
 )
 
-SCENARIOS: dict[str, np.ndarray] = {
+RAW_DIRECT_FCS_SCENARIOS: dict[str, np.ndarray] = {
     "neutral": np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
     "throttle_high": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
     "aileron_pos": np.array([0.0, 0.2, 0.0, 0.0], dtype=np.float32),
@@ -38,10 +38,25 @@ SCENARIOS: dict[str, np.ndarray] = {
     "rudder_neg": np.array([0.0, 0.0, 0.0, -0.2], dtype=np.float32),
 }
 
+MANEUVER_FCS_SCENARIOS: dict[str, np.ndarray] = {
+    "neutral": np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    "throttle_high": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    "bank_left": np.array([0.0, -0.5, 0.0, 0.0], dtype=np.float32),
+    "bank_right": np.array([0.0, 0.5, 0.0, 0.0], dtype=np.float32),
+    "pull_up": np.array([0.0, 0.0, 0.5, 0.0], dtype=np.float32),
+    "push_down": np.array([0.0, 0.0, -0.5, 0.0], dtype=np.float32),
+    "yaw_left": np.array([0.0, 0.0, 0.0, -0.5], dtype=np.float32),
+    "yaw_right": np.array([0.0, 0.0, 0.0, 0.5], dtype=np.float32),
+}
+
+SCENARIOS = RAW_DIRECT_FCS_SCENARIOS
+
 
 FIELDNAMES = [
     "step",
     "scenario",
+    "tam_control_mode",
+    "tam_command_semantics",
     "agent_id",
     "alive",
     "altitude_m",
@@ -53,6 +68,21 @@ FIELDNAMES = [
     "aileron_cmd",
     "elevator_cmd",
     "rudder_cmd",
+    "bank_cmd_rad",
+    "nz_cmd_g",
+    "yaw_rate_cmd_rad_s",
+    "bank_error_rad",
+    "roll_rate_rad_s",
+    "nz_current_g",
+    "nz_error_g",
+    "pitch_rate_rad_s",
+    "yaw_rate_rad_s",
+    "raw_aileron",
+    "raw_elevator",
+    "raw_rudder",
+    "clipped_aileron",
+    "clipped_elevator",
+    "clipped_rudder",
     "g_load",
     "g_load_total",
     "g_load_x",
@@ -67,12 +97,23 @@ FIELDNAMES = [
 ]
 
 
-def _scenario_names(selected: str) -> list[str]:
+def _scenarios_for_mode(mode: str) -> dict[str, np.ndarray]:
+    if mode == "maneuver_fcs":
+        return MANEUVER_FCS_SCENARIOS
+    return RAW_DIRECT_FCS_SCENARIOS
+
+
+def _scenario_names(selected: str, mode: str) -> list[str]:
+    scenarios = _scenarios_for_mode(mode)
     if selected == "all":
-        return list(SCENARIOS)
-    if selected not in SCENARIOS:
-        raise ValueError(f"unknown scenario {selected!r}; choose one of {sorted(SCENARIOS)} or all")
+        return list(scenarios)
+    if selected not in scenarios:
+        raise ValueError(f"unknown scenario {selected!r}; choose one of {sorted(scenarios)} or all")
     return [selected]
+
+
+def _wrapped_angle_delta(new_angle: float, old_angle: float) -> float:
+    return float((float(new_angle) - float(old_angle) + np.pi) % (2.0 * np.pi) - np.pi)
 
 
 def _finite_or_empty(value):
@@ -117,11 +158,16 @@ def _row_from_info(
     initial_frame: bool = False,
 ) -> dict:
     diag = (info.get("tam_control_diagnostics", {}) or {}).get(aid, {}) or {}
+    terms = (info.get("tam_controller_terms", {}) or {}).get(aid, {}) or {}
     fcs = (info.get("tam_applied_fcs", {}) or {}).get(aid)
     fcs = fcs if isinstance(fcs, (list, tuple)) and len(fcs) >= 4 else [None, None, None, None]
+    command = (info.get("tam_control_commands", {}) or {}).get(aid)
+    command = command if isinstance(command, (list, tuple)) and len(command) >= 4 else [None, None, None, None]
     row = {
         "step": step,
         "scenario": scenario,
+        "tam_control_mode": str(info.get("tam_control_mode", "")),
+        "tam_command_semantics": "|".join(info.get("tam_command_semantics", []) or []),
         "agent_id": aid,
         "alive": bool(diag.get("alive", False)),
         "altitude_m": _finite_or_empty(diag.get("altitude_m")),
@@ -133,6 +179,21 @@ def _row_from_info(
         "aileron_cmd": _finite_or_empty(fcs[1]),
         "elevator_cmd": _finite_or_empty(fcs[2]),
         "rudder_cmd": _finite_or_empty(fcs[3]),
+        "bank_cmd_rad": _finite_or_empty(command[1] if info.get("tam_control_mode") == "maneuver_fcs" else ""),
+        "nz_cmd_g": _finite_or_empty(command[2] if info.get("tam_control_mode") == "maneuver_fcs" else ""),
+        "yaw_rate_cmd_rad_s": _finite_or_empty(command[3] if info.get("tam_control_mode") == "maneuver_fcs" else ""),
+        "bank_error_rad": _finite_or_empty(terms.get("bank_error_rad")),
+        "roll_rate_rad_s": _finite_or_empty(terms.get("roll_rate_rad_s")),
+        "nz_current_g": _finite_or_empty(terms.get("nz_current_g")),
+        "nz_error_g": _finite_or_empty(terms.get("nz_error_g")),
+        "pitch_rate_rad_s": _finite_or_empty(terms.get("pitch_rate_rad_s")),
+        "yaw_rate_rad_s": _finite_or_empty(terms.get("yaw_rate_rad_s")),
+        "raw_aileron": _finite_or_empty(terms.get("raw_aileron")),
+        "raw_elevator": _finite_or_empty(terms.get("raw_elevator")),
+        "raw_rudder": _finite_or_empty(terms.get("raw_rudder")),
+        "clipped_aileron": _finite_or_empty(terms.get("clipped_aileron")),
+        "clipped_elevator": _finite_or_empty(terms.get("clipped_elevator")),
+        "clipped_rudder": _finite_or_empty(terms.get("clipped_rudder")),
         "g_load": _finite_or_empty(diag.get("g_load")),
         "g_load_total": _finite_or_empty(diag.get("g_load_total")),
         "g_load_x": _finite_or_empty(diag.get("g_load_x")),
@@ -165,6 +226,8 @@ def _print_summary(scenario: str, rows: list[dict], missiles_per_plane: int):
         def delta(key: str):
             if first.get(key) == "" or last.get(key) == "":
                 return ""
+            if key == "heading_rad":
+                return _wrapped_angle_delta(float(last[key]), float(first[key]))
             return float(last[key]) - float(first[key])
         print(
             "  "
@@ -178,7 +241,8 @@ def _print_summary(scenario: str, rows: list[dict], missiles_per_plane: int):
 
 def run(args: argparse.Namespace) -> int:
     scenario_rows: list[dict] = []
-    scenario_names = _scenario_names(args.scenario)
+    scenario_names = _scenario_names(args.scenario, args.tam_control_mode)
+    scenarios = _scenarios_for_mode(args.tam_control_mode)
     for scenario_index, name in enumerate(scenario_names):
         env = make_env(
             args.config,
@@ -190,6 +254,7 @@ def run(args: argparse.Namespace) -> int:
             tam_throttle_min=args.tam_throttle_min,
             tam_throttle_max=args.tam_throttle_max,
             tam_surface_limit=args.tam_surface_limit,
+            tam_control_mode=args.tam_control_mode,
         )
         rows: list[dict] = []
         try:
@@ -199,7 +264,7 @@ def run(args: argparse.Namespace) -> int:
                     rows.append(_row_from_info(
                         -1, name, aid, {}, {}, {}, reset_info, initial_frame=True
                     ))
-            action = SCENARIOS[name]
+            action = scenarios[name]
             for step in range(args.steps):
                 actions = _make_actions(env, action, args.agent_id)
                 _obs, rewards, terminated, truncated, info = env.step(actions)
@@ -231,8 +296,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-csv", default="outputs/tam_direct_fcs_response.csv")
-    parser.add_argument("--scenario", default="all", choices=["all", *SCENARIOS.keys()])
+    all_scenarios = sorted(set(RAW_DIRECT_FCS_SCENARIOS) | set(MANEUVER_FCS_SCENARIOS))
+    parser.add_argument("--scenario", default="all", choices=["all", *all_scenarios])
     parser.add_argument("--agent-id", default=None)
+    parser.add_argument("--tam-control-mode", default="raw_direct_fcs",
+                        choices=["raw_direct_fcs", "maneuver_fcs"])
     parser.add_argument("--num-missiles-per-plane", type=int, default=0)
     parser.add_argument("--record-initial-frame", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--continue-after-agent-done", action="store_true")

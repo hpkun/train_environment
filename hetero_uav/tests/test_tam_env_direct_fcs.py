@@ -52,7 +52,7 @@ def test_tam_env_factory_env_type_tam():
         env.close()
 
 
-def test_tam_env_action_space_is_direct_fcs_box4():
+def test_tam_env_action_space_is_raw_direct_fcs():
     env = _make_tam_env(max_steps=5)
     try:
         assert set(env.action_space.spaces) == set(env.agent_ids)
@@ -101,7 +101,7 @@ def test_tam_reset_clears_action_logs():
         assert info["tam_action_warnings"] == {}
         assert env._last_effective_actions == {}
         assert env._last_action_trim_applied == {}
-        assert info["tam_control_mode"] == "direct_fcs_box4"
+        assert info["tam_control_mode"] == "raw_direct_fcs"
         assert "tam_control_diagnostics" in info
     finally:
         env.close()
@@ -243,7 +243,7 @@ def test_tam_info_contains_direct_fcs_diagnostics():
         env.reset(seed=6)
         actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
         _obs, _rewards, _terminated, _truncated, info = env.step(actions)
-        assert info["tam_control_mode"] == "direct_fcs_box4"
+        assert info["tam_control_mode"] == "raw_direct_fcs"
         assert info["tam_action_order"] == ["throttle", "aileron", "elevator", "rudder"]
         assert "tam_fcs_commands" in info
         assert "tam_control_diagnostics" in info
@@ -299,7 +299,7 @@ def test_tam_no_pid_target_fields_required(monkeypatch):
 
         actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
         _obs, _rewards, _terminated, _truncated, info = env.step(actions)
-        assert info["tam_control_mode"] == "direct_fcs_box4"
+        assert info["tam_control_mode"] == "raw_direct_fcs"
     finally:
         env.close()
 
@@ -345,7 +345,7 @@ def test_tam_direct_axis_smoke_longer(action: np.ndarray):
         actions = {aid: action.copy() for aid in env.agent_ids}
         for _ in range(10):
             _obs, _rewards, _terminated, _truncated, info = env.step(actions)
-            assert info["tam_control_mode"] == "direct_fcs_box4"
+            assert info["tam_control_mode"] == "raw_direct_fcs"
             assert "tam_applied_fcs" in info
     finally:
         env.close()
@@ -375,3 +375,110 @@ def test_tam_response_script_short_no_missile_run(tmp_path):
     assert "initial_frame" in rows[0]
     assert "g_load_total" in rows[0]
     assert any(row["step"] == "-1" and row["initial_frame"] == "True" for row in rows)
+
+
+def test_tam_maneuver_fcs_action_space_still_box4():
+    env = _make_tam_env(max_steps=5, tam_control_mode="maneuver_fcs")
+    try:
+        for aid in env.agent_ids:
+            assert env.action_space.spaces[aid].shape == (4,)
+    finally:
+        env.close()
+
+
+def test_tam_maneuver_fcs_zero_action_semantics():
+    env = _make_tam_env(max_steps=5, tam_control_mode="maneuver_fcs")
+    try:
+        commands = env._tam_maneuver_action_to_commands(
+            np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        )
+        assert commands == pytest.approx((0.65, 0.0, 1.0, 0.0))
+    finally:
+        env.close()
+
+
+def test_tam_maneuver_fcs_does_not_call_pid(monkeypatch):
+    env = _make_tam_env(max_steps=5, tam_control_mode="maneuver_fcs")
+    try:
+        env.reset(seed=20)
+
+        def fail_compute_control(*_args, **_kwargs):
+            raise AssertionError("PID compute_control should not be called by maneuver_fcs")
+
+        for pid in env.pid_controllers.values():
+            monkeypatch.setattr(pid, "compute_control", fail_compute_control)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+        assert info["tam_control_mode"] == "maneuver_fcs"
+    finally:
+        env.close()
+
+
+def test_tam_maneuver_fcs_info_contains_commands_and_terms():
+    env = _make_tam_env(max_steps=5, tam_control_mode="maneuver_fcs")
+    try:
+        env.reset(seed=21)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+        assert info["tam_command_semantics"] == [
+            "throttle", "bank_cmd_rad", "nz_cmd_g", "yaw_rate_cmd_rad_s"
+        ]
+        aid = env.agent_ids[0]
+        assert len(info["tam_control_commands"][aid]) == 4
+        terms = info["tam_controller_terms"][aid]
+        for key in (
+            "bank_error_rad",
+            "roll_rate_rad_s",
+            "nz_cmd_g",
+            "nz_current_g",
+            "nz_error_g",
+            "pitch_rate_rad_s",
+            "yaw_rate_cmd_rad_s",
+            "yaw_rate_rad_s",
+            "raw_aileron",
+            "raw_elevator",
+            "raw_rudder",
+            "clipped_aileron",
+            "clipped_elevator",
+            "clipped_rudder",
+        ):
+            assert key in terms
+    finally:
+        env.close()
+
+
+def test_tam_maneuver_fcs_short_neutral_smoke():
+    env = _make_tam_env(max_steps=12, tam_control_mode="maneuver_fcs")
+    try:
+        env.reset(seed=22)
+        actions = {aid: np.zeros(4, dtype=np.float32) for aid in env.agent_ids}
+        for _ in range(10):
+            _obs, _rewards, _terminated, _truncated, info = env.step(actions)
+            assert info["tam_control_mode"] == "maneuver_fcs"
+            assert "tam_applied_fcs" in info
+    finally:
+        env.close()
+
+
+def test_response_script_supports_maneuver_fcs(tmp_path):
+    from scripts import diagnose_tam_direct_fcs_response as diag
+
+    out_csv = tmp_path / "tam_maneuver_response.csv"
+    rc = diag.main([
+        "--steps", "1",
+        "--scenario", "neutral",
+        "--tam-control-mode", "maneuver_fcs",
+        "--output-csv", str(out_csv),
+    ])
+    assert rc == 0
+    rows = list(csv.DictReader(out_csv.open("r", encoding="utf-8")))
+    assert rows
+    assert rows[0]["tam_control_mode"] == "maneuver_fcs"
+    assert "tam_command_semantics" in rows[0]
+
+
+def test_tam_response_script_wrapped_angle_delta():
+    from scripts import diagnose_tam_direct_fcs_response as diag
+
+    assert diag._wrapped_angle_delta(-np.pi + 0.1, np.pi - 0.1) == pytest.approx(0.2)
+    assert diag._wrapped_angle_delta(np.pi - 0.1, -np.pi + 0.1) == pytest.approx(-0.2)

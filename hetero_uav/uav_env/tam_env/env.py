@@ -46,9 +46,25 @@ class TamCombatEnv(HeteroUavCombatEnv):
 
     def __init__(self, *args, **kwargs):
         self.strict_action_shape = bool(kwargs.pop("strict_action_shape", True))
+        self.tam_control_mode = str(kwargs.pop("tam_control_mode", "raw_direct_fcs"))
         self.tam_throttle_min = float(kwargs.pop("tam_throttle_min", self.THROTTLE_MIN))
         self.tam_throttle_max = float(kwargs.pop("tam_throttle_max", self.THROTTLE_MAX))
         self.tam_surface_limit = float(kwargs.pop("tam_surface_limit", 1.0))
+        self.tam_bank_limit_rad = np.deg2rad(float(kwargs.pop("tam_bank_limit_deg", 70.0)))
+        self.tam_neutral_nz_g = float(kwargs.pop("tam_neutral_nz_g", 1.0))
+        self.tam_nz_delta_g = float(kwargs.pop("tam_nz_delta_g", 4.0))
+        self.tam_nz_min_g = float(kwargs.pop("tam_nz_min_g", 0.0))
+        self.tam_nz_max_g = float(kwargs.pop("tam_nz_max_g", 6.0))
+        self.tam_yaw_rate_limit_rad_s = np.deg2rad(float(
+            kwargs.pop("tam_yaw_rate_limit_deg_s", 20.0)
+        ))
+        self.tam_elevator_sign = float(kwargs.pop("tam_elevator_sign", -1.0))
+        self.tam_bank_kp = float(kwargs.pop("tam_bank_kp", 1.2))
+        self.tam_roll_rate_kd = float(kwargs.pop("tam_roll_rate_kd", 0.3))
+        self.tam_nz_kp = float(kwargs.pop("tam_nz_kp", 0.18))
+        self.tam_pitch_rate_kd = float(kwargs.pop("tam_pitch_rate_kd", 0.05))
+        self.tam_yaw_rate_kp = float(kwargs.pop("tam_yaw_rate_kp", 0.8))
+        self.tam_yaw_rate_kd = float(kwargs.pop("tam_yaw_rate_kd", 0.2))
         self.tam_nan_action_policy = str(kwargs.pop("tam_nan_action_policy", "zero_clip"))
         self.tam_record_control_diagnostics = bool(
             kwargs.pop("tam_record_control_diagnostics", True)
@@ -72,8 +88,16 @@ class TamCombatEnv(HeteroUavCombatEnv):
     def _validate_tam_config(self):
         if not (0.0 <= self.tam_throttle_min < self.tam_throttle_max <= 1.0):
             raise ValueError("tam_throttle_min/max must satisfy 0 <= min < max <= 1")
+        if self.tam_control_mode not in {"raw_direct_fcs", "maneuver_fcs"}:
+            raise ValueError("tam_control_mode must be 'raw_direct_fcs' or 'maneuver_fcs'")
         if not (0.0 < self.tam_surface_limit <= 1.0):
             raise ValueError("tam_surface_limit must be in (0, 1]")
+        if self.tam_bank_limit_rad <= 0.0:
+            raise ValueError("tam_bank_limit_deg must be positive")
+        if not (self.tam_nz_min_g < self.tam_nz_max_g):
+            raise ValueError("tam_nz_min_g must be less than tam_nz_max_g")
+        if self.tam_yaw_rate_limit_rad_s <= 0.0:
+            raise ValueError("tam_yaw_rate_limit_deg_s must be positive")
         if self.tam_nan_action_policy != "zero_clip":
             raise ValueError("tam_nan_action_policy currently only supports 'zero_clip'")
         if self.tam_parent_action_overrides_enabled:
@@ -96,6 +120,8 @@ class TamCombatEnv(HeteroUavCombatEnv):
         self._last_tam_raw_actions: dict[str, list[float | str] | None] = {}
         self._last_tam_sanitized_actions: dict[str, list[float] | None] = {}
         self._last_tam_fcs_commands: dict[str, list[float] | None] = {}
+        self._last_tam_control_commands: dict[str, list[float] | None] = {}
+        self._last_tam_controller_terms: dict[str, dict] = {}
         self._last_tam_action_warnings: dict[str, list[str]] = {}
         self._last_tam_applied_fcs: dict[str, list[float] | None] = {}
         self._last_effective_actions = {}
@@ -217,6 +243,33 @@ class TamCombatEnv(HeteroUavCombatEnv):
             rudder,
         )
 
+    def _tam_maneuver_action_to_commands(
+        self, action: np.ndarray
+    ) -> tuple[float, float, float, float]:
+        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        if action.size != 4:
+            raise ValueError(f"tam_env maneuver action must have shape=(4,), got size={action.size}")
+        throttle = self.tam_throttle_min + (float(action[0]) + 1.0) * 0.5 * (
+            self.tam_throttle_max - self.tam_throttle_min
+        )
+        bank_cmd = float(action[1]) * self.tam_bank_limit_rad
+        nz_cmd = self.tam_neutral_nz_g + float(action[2]) * self.tam_nz_delta_g
+        nz_cmd = float(np.clip(nz_cmd, self.tam_nz_min_g, self.tam_nz_max_g))
+        yaw_rate_cmd = float(action[3]) * self.tam_yaw_rate_limit_rad_s
+        return (
+            float(np.clip(throttle, self.tam_throttle_min, self.tam_throttle_max)),
+            float(bank_cmd),
+            float(nz_cmd),
+            float(yaw_rate_cmd),
+        )
+
+    def _tam_action_to_control_commands(
+        self, action: np.ndarray
+    ) -> tuple[float, float, float, float]:
+        if self.tam_control_mode == "maneuver_fcs":
+            return self._tam_maneuver_action_to_commands(action)
+        return self._tam_action_to_fcs(action)
+
     def _parse_actions(self, actions: dict) -> dict:
         """Parse TAM direct-FCS Box(4) actions into JSBSim command tuples."""
 
@@ -233,9 +286,10 @@ class TamCombatEnv(HeteroUavCombatEnv):
                 targets[aid] = None
                 continue
             sanitized = self._sanitize_tam_action(aid, validated)
-            fcs = self._tam_action_to_fcs(sanitized)
+            fcs = self._tam_action_to_control_commands(sanitized)
             self._last_tam_sanitized_actions[aid] = self._round_list(sanitized)
             self._last_tam_fcs_commands[aid] = self._round_list(fcs)
+            self._last_tam_control_commands[aid] = self._round_list(fcs)
             self._last_effective_actions[aid] = self._round_list(sanitized)
             targets[aid] = fcs
         return targets
@@ -260,10 +314,86 @@ class TamCombatEnv(HeteroUavCombatEnv):
             sim.set_property_value("fcs/rudder-cmd-norm", float(rudder))
             self._last_tam_applied_fcs[aid] = self._round_list(target)
 
+    @staticmethod
+    def _wrap_angle_rad(value: float) -> float:
+        return float((value + np.pi) % (2.0 * np.pi) - np.pi)
+
+    def _read_property_or_zero(self, sim, prop: str) -> float:
+        value = self._read_fcs_property(sim, prop)
+        return 0.0 if value is None else float(value)
+
+    def _apply_maneuver_fcs_controls(self, targets: dict):
+        """Convert maneuver commands to direct FCS outputs using ownship state."""
+
+        self._last_tam_applied_fcs = {}
+        self._last_tam_controller_terms = {}
+        for aid in self.agent_ids:
+            command = targets.get(aid)
+            if command is None:
+                self._last_tam_applied_fcs[aid] = None
+                self._last_tam_controller_terms[aid] = {}
+                continue
+            sim = self._get_sim(aid)
+            if sim is None or not sim.is_alive:
+                self._last_tam_applied_fcs[aid] = None
+                self._last_tam_controller_terms[aid] = {}
+                continue
+
+            throttle, bank_cmd, nz_cmd, yaw_rate_cmd = command
+            try:
+                roll = float(np.asarray(sim.get_rpy(), dtype=np.float64).reshape(-1)[0])
+            except Exception:
+                roll = 0.0
+            p_rate = self._read_property_or_zero(sim, "velocities/p-rad_sec")
+            q_rate = self._read_property_or_zero(sim, "velocities/q-rad_sec")
+            r_rate = self._read_property_or_zero(sim, "velocities/r-rad_sec")
+            nz_current = self._read_property_or_zero(sim, "accelerations/n-pilot-z-norm")
+
+            bank_error = self._wrap_angle_rad(float(bank_cmd) - roll)
+            raw_aileron = self.tam_bank_kp * bank_error - self.tam_roll_rate_kd * p_rate
+            nz_error = float(nz_cmd) - nz_current
+            raw_elevator = self.tam_elevator_sign * (
+                self.tam_nz_kp * nz_error - self.tam_pitch_rate_kd * q_rate
+            )
+            raw_rudder = (
+                self.tam_yaw_rate_kp * (float(yaw_rate_cmd) - r_rate)
+                - self.tam_yaw_rate_kd * r_rate
+            )
+
+            aileron = float(np.clip(raw_aileron, -self.tam_surface_limit, self.tam_surface_limit))
+            elevator = float(np.clip(raw_elevator, -self.tam_surface_limit, self.tam_surface_limit))
+            rudder = float(np.clip(raw_rudder, -self.tam_surface_limit, self.tam_surface_limit))
+            sim.set_property_value("fcs/throttle-cmd-norm", float(throttle))
+            sim.set_property_value("fcs/aileron-cmd-norm", aileron)
+            sim.set_property_value("fcs/elevator-cmd-norm", elevator)
+            sim.set_property_value("fcs/rudder-cmd-norm", rudder)
+            self._last_tam_applied_fcs[aid] = self._round_list((throttle, aileron, elevator, rudder))
+            self._last_tam_controller_terms[aid] = {
+                "bank_error_rad": float(bank_error),
+                "roll_rate_rad_s": float(p_rate),
+                "nz_cmd_g": float(nz_cmd),
+                "nz_current_g": float(nz_current),
+                "nz_error_g": float(nz_error),
+                "pitch_rate_rad_s": float(q_rate),
+                "yaw_rate_cmd_rad_s": float(yaw_rate_cmd),
+                "yaw_rate_rad_s": float(r_rate),
+                "raw_aileron": float(raw_aileron),
+                "raw_elevator": float(raw_elevator),
+                "raw_rudder": float(raw_rudder),
+                "clipped_aileron": float(aileron),
+                "clipped_elevator": float(elevator),
+                "clipped_rudder": float(rudder),
+            }
+
+    def _apply_tam_controls(self, targets: dict):
+        if self.tam_control_mode == "maneuver_fcs":
+            return self._apply_maneuver_fcs_controls(targets)
+        return self._apply_direct_fcs_controls(targets)
+
     def _apply_pid_controls(self, targets: dict):
         """Compatibility hook: tam_env intentionally overrides inherited PID control."""
 
-        return self._apply_direct_fcs_controls(targets)
+        return self._apply_tam_controls(targets)
 
     def _read_fcs_property(self, sim, prop: str) -> float | None:
         try:
@@ -333,8 +463,17 @@ class TamCombatEnv(HeteroUavCombatEnv):
     def _get_info(self, reward_components: dict | None = None) -> dict:
         info = super()._get_info(reward_components)
         info.update({
-            "tam_control_mode": "direct_fcs_box4",
-            "tam_action_order": ["throttle", "aileron", "elevator", "rudder"],
+            "tam_control_mode": self.tam_control_mode,
+            "tam_action_order": (
+                ["throttle", "roll_cmd", "pitch_or_load_cmd", "yaw_cmd"]
+                if self.tam_control_mode == "maneuver_fcs"
+                else ["throttle", "aileron", "elevator", "rudder"]
+            ),
+            "tam_command_semantics": (
+                ["throttle", "bank_cmd_rad", "nz_cmd_g", "yaw_rate_cmd_rad_s"]
+                if self.tam_control_mode == "maneuver_fcs"
+                else ["throttle", "aileron", "elevator", "rudder"]
+            ),
             "tam_throttle_range": [self.tam_throttle_min, self.tam_throttle_max],
             "tam_surface_limit": self.tam_surface_limit,
             "tam_strict_action_shape": self.strict_action_shape,
@@ -346,9 +485,11 @@ class TamCombatEnv(HeteroUavCombatEnv):
             ),
             "tam_raw_actions": dict(self._last_tam_raw_actions),
             "tam_sanitized_actions": dict(self._last_tam_sanitized_actions),
+            "tam_control_commands": dict(self._last_tam_control_commands),
             "tam_fcs_commands": dict(self._last_tam_fcs_commands),
             "tam_applied_fcs": dict(self._last_tam_applied_fcs),
             "tam_action_warnings": dict(self._last_tam_action_warnings),
+            "tam_controller_terms": dict(self._last_tam_controller_terms),
             "tam_control_diagnostics": (
                 self._tam_control_diagnostics()
                 if self.tam_record_control_diagnostics else {}
