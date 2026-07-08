@@ -32,10 +32,12 @@ class OpponentPolicy:
     - ``greedy_fsm``: finite-state scripted policy (debug only).
     - ``brma_rule``: delegates to ``rule_based_agent.py`` — the canonical
       BRMA-MAPPO paper-aligned blue opponent for all formal experiments.
+    - ``fixed_route``: diagnostic-only fixed level-flight blue route; it does
+      not track red agents, evade, or call ``rule_based_agent``.
 
-    ``zero`` / ``random`` / ``rule_nearest`` / ``greedy_fsm`` are retained
-    for internal debugging only and are NOT part of the formal experiment
-    protocol.
+    ``zero`` / ``random`` / ``rule_nearest`` / ``greedy_fsm`` /
+    ``fixed_route`` are retained for internal debugging only and are NOT part
+    of the formal experiment protocol.
     """
 
     MODES = {
@@ -44,6 +46,7 @@ class OpponentPolicy:
         "rule_nearest",
         "greedy_fsm",
         "brma_rule",
+        "fixed_route",
     }
 
     def __init__(self, mode: str = "zero", seed: int | None = None):
@@ -80,6 +83,9 @@ class OpponentPolicy:
     def act(self, obs_dict: dict, blue_ids: list[str],
             deterministic: bool = True, env=None) -> dict[str, np.ndarray]:
         del deterministic
+        if self.mode == "fixed_route":
+            return self._fixed_route_actions(blue_ids, env)
+
         self.last_states = {}
         self.last_assigned_targets: dict[str, int] = {}
         self.used_env_refresh_engaged_targets = False
@@ -123,6 +129,19 @@ class OpponentPolicy:
             bid: self._rule_nearest_action(obs_dict.get(bid, {}))
             for bid in blue_ids
         }
+
+    def _fixed_route_actions(self, blue_ids: list[str], env=None) -> dict[str, np.ndarray]:
+        if env is not None and hasattr(env, "refresh_engaged_targets"):
+            try:
+                env.refresh_engaged_targets()
+                self.used_env_refresh_engaged_targets = True
+            except Exception:
+                pass
+        velocity_min = float(getattr(env, "VELOCITY_MIN", 102.0)) if env is not None else 102.0
+        velocity_max = float(getattr(env, "VELOCITY_MAX", 408.0)) if env is not None else 408.0
+        speed_action = 2.0 * (230.0 - velocity_min) / max(velocity_max - velocity_min, 1e-6) - 1.0
+        action = self._clip_action([0.0, 0.0, speed_action])
+        return {bid: action.copy().astype(np.float32) for bid in blue_ids}
 
     def _brma_rule_actions(self, obs_dict, blue_ids, env,
                            pursuit_mode: str = "delta10") -> dict[str, np.ndarray]:

@@ -1132,7 +1132,7 @@ def _run_training_main() -> None:
                         help="Non-self entity drop probability for BRMA random scale mask.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
-                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule"])
+                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "fixed_route"])
     parser.add_argument(
         "--reward-mode",
         default=None,
