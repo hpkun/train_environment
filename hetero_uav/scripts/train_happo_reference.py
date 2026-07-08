@@ -452,8 +452,14 @@ MARL_DYNAMICS_TRAIN_FIELDS = [
     "ratio_p99_mav", "ratio_p99_uav",
     "actor_grad_norm_mav", "actor_grad_norm_uav", "critic_grad_norm",
     "policy_update_norm_mav", "policy_update_norm_uav", "critic_update_norm",
-    "critic_loss_unscaled", "critic_loss_scaled", "value_explained_variance",
-    "value_pred_mean", "value_pred_std", "return_mean", "return_std",
+    "critic_epochs", "critic_loss_unscaled", "critic_loss_scaled",
+    "critic_loss_mean_over_epochs", "critic_loss_first_epoch", "critic_loss_last_epoch",
+    "critic_grad_norm_mean_over_epochs", "critic_grad_norm_max_over_epochs",
+    "value_explained_variance",
+    "value_explained_variance_old", "value_explained_variance_new",
+    "value_pred_mean", "value_pred_std",
+    "value_pred_old_mean", "value_pred_old_std", "value_pred_new_mean", "value_pred_new_std",
+    "return_mean", "return_std",
     "advantage_raw_mean", "advantage_raw_std", "advantage_raw_min", "advantage_raw_max",
     "advantage_norm_mean", "advantage_norm_std", "advantage_norm_min", "advantage_norm_max",
     "mav_action_mean_pitch", "mav_action_mean_heading", "mav_action_mean_speed",
@@ -464,6 +470,12 @@ MARL_DYNAMICS_TRAIN_FIELDS = [
     "uav_action_mean_abs_pitch", "uav_action_mean_abs_heading", "uav_action_mean_abs_speed",
     "mav_action_saturation_pitch", "mav_action_saturation_heading", "mav_action_saturation_speed",
     "uav_action_saturation_pitch", "uav_action_saturation_heading", "uav_action_saturation_speed",
+    "mav_action_mean_pitch_active", "mav_action_mean_heading_active", "mav_action_mean_speed_active",
+    "uav_action_mean_pitch_active", "uav_action_mean_heading_active", "uav_action_mean_speed_active",
+    "mav_action_std_pitch_active", "mav_action_std_heading_active", "mav_action_std_speed_active",
+    "uav_action_std_pitch_active", "uav_action_std_heading_active", "uav_action_std_speed_active",
+    "mav_action_saturation_pitch_active", "mav_action_saturation_heading_active", "mav_action_saturation_speed_active",
+    "uav_action_saturation_pitch_active", "uav_action_saturation_heading_active", "uav_action_saturation_speed_active",
     "rollout_transitions", "ppo_epochs", "actor_lr", "critic_lr", "clip_param",
     "entropy_coef", "gamma", "gae_lambda", "max_grad_norm",
     "actor_obs_mean", "actor_obs_std", "actor_obs_abs_max", "actor_obs_nan_count",
@@ -479,6 +491,7 @@ UPDATE_DIAGNOSTIC_ARRAY_FIELDS = [
     "active_sample_ratio_per_agent", "last_update_order",
     "m_mean_after_each_agent", "m_std_after_each_agent",
     "m_abs_mean_after_each_agent", "m_abs_max_after_each_agent",
+    "critic_loss_per_epoch", "critic_grad_norm_per_epoch",
 ]
 
 
@@ -578,6 +591,8 @@ def _pure_happo_meta(policy, args=None) -> dict:
         "bounded_action_distribution": "tanh_squashed_gaussian",
         "logprob_correction": "tanh_jacobian",
     }
+    if args is not None:
+        meta["critic_epochs"] = int(getattr(args, "critic_epochs", 1))
     return meta
 
 
@@ -1266,6 +1281,7 @@ def _run_training_main() -> None:
     parser.add_argument("--entropy-coef", type=float, default=0.02)
     parser.add_argument("--actor-lr", type=float, default=2e-4)
     parser.add_argument("--critic-lr", type=float, default=5e-4)
+    parser.add_argument("--critic-epochs", type=int, default=1)
     parser.add_argument("--clip-param", type=float, default=0.2)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
@@ -1314,6 +1330,8 @@ def _run_training_main() -> None:
     _reject_unsafe_random_scale_mask(args)
     if args.num_envs < 1:
         raise ValueError("--num-envs must be >= 1")
+    if args.critic_epochs < 1:
+        raise ValueError("--critic-epochs must be >= 1")
     if args.device == "cuda" and not torch.cuda.is_available():
         args.device = "cpu"
 
@@ -1408,7 +1426,7 @@ def _run_training_main() -> None:
             clip_param=args.clip_param, entropy_coef=args.entropy_coef,
             max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
             gamma=args.gamma, gae_lambda=args.gae_lambda,
-            seed=args.seed,
+            seed=args.seed, critic_epochs=args.critic_epochs,
         )
     else:
         trainer = HAPPOReferenceTrainer(
@@ -2061,6 +2079,7 @@ def _run_training_main() -> None:
             stats.update({
                 "rollout_transitions": rollout_transitions,
                 "ppo_epochs": args.ppo_epochs,
+                "critic_epochs": args.critic_epochs,
                 "actor_lr": args.actor_lr,
                 "critic_lr": args.critic_lr,
                 "clip_param": args.clip_param,

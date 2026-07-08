@@ -104,13 +104,16 @@ class PureHAPPOTrainer:
                  clip_param=0.2, entropy_coef=0.01, value_coef=0.5,
                  max_grad_norm=10.0, ppo_epochs=5,
                  gamma=0.99, gae_lambda=0.95,
-                 seed=None):
+                 seed=None, critic_epochs: int = 1):
+        if int(critic_epochs) < 1:
+            raise ValueError("critic_epochs must be >= 1")
         self.policy = policy
         self.clip_param = clip_param
         self.entropy_coef = entropy_coef
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         self.ppo_epochs = ppo_epochs
+        self.critic_epochs = int(critic_epochs)
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.rng = np.random.default_rng(seed)
@@ -254,21 +257,29 @@ class PureHAPPOTrainer:
                     float(M.float().std(unbiased=False).item()) if M.numel() > 1 else 0.0)
                 metrics["m_abs_max_after_each_agent"].append(float(M.abs().max().item()))
 
-        self.critic_opt.zero_grad()
-        new_values = self.policy.value(critic_state)
-        critic_loss_unscaled = F.mse_loss(new_values, returns)
-        critic_loss = critic_loss_unscaled * self.value_coef
-        if not torch.isfinite(critic_loss):
-            raise ValueError("HAPPO: non-finite critic_loss")
         critic_params = list(self.policy.critic.parameters())
         with torch.no_grad():
             critic_before = _param_vector(critic_params)
-        critic_loss.backward()
-        critic_grad_norm = torch.nn.utils.clip_grad_norm_(critic_params, self.max_grad_norm)
-        self.critic_opt.step()
+        critic_loss_per_epoch = []
+        critic_grad_norm_per_epoch = []
+        critic_loss_unscaled = torch.tensor(0.0, device=critic_state.device)
+        critic_loss = torch.tensor(0.0, device=critic_state.device)
+        for critic_epoch in range(self.critic_epochs):
+            self.critic_opt.zero_grad()
+            new_values = self.policy.value(critic_state)
+            critic_loss_unscaled = F.mse_loss(new_values, returns)
+            critic_loss = critic_loss_unscaled * self.value_coef
+            if not torch.isfinite(critic_loss):
+                raise ValueError(f"HAPPO: non-finite critic_loss epoch {critic_epoch}")
+            critic_loss.backward()
+            critic_grad_norm = torch.nn.utils.clip_grad_norm_(critic_params, self.max_grad_norm)
+            self.critic_opt.step()
+            critic_loss_per_epoch.append(float(critic_loss_unscaled.item()))
+            critic_grad_norm_per_epoch.append(_safe_float(critic_grad_norm.item()))
         with torch.no_grad():
             critic_after = _param_vector(critic_params)
             critic_update_norm = float(torch.linalg.vector_norm(critic_after - critic_before).item())
+            new_values_final = self.policy.value(critic_state)
 
         with torch.no_grad():
             _, _, _, means_all = self.policy.evaluate_actions(actor_obs, critic_state, actions)
@@ -283,28 +294,49 @@ class PureHAPPOTrainer:
         raw_adv_stats = _stats_from_tensor(advantages_raw)
         norm_adv_stats = _stats_from_tensor(advantages)
         return_stats = _stats_from_tensor(returns)
-        value_stats = _stats_from_tensor(values)
-        value_ev = _explained_variance(values, returns)
+        value_old_stats = _stats_from_tensor(values)
+        value_new_stats = _stats_from_tensor(new_values_final)
+        value_ev_old = _explained_variance(values, returns)
+        value_ev_new = _explained_variance(new_values_final, returns)
         mav_indices = [0] if N > 0 else []
         uav_indices = list(range(1, N))
         action_names = ("pitch", "heading", "speed")
         action_stats = {}
-        for role_name, tensor in (
-            ("mav", means_all[:, 0:1, :] if N > 0 else means_all[:, 0:0, :]),
-            ("uav", means_all[:, 1:, :] if N > 1 else means_all[:, 0:0, :]),
+        for role_name, tensor, mask in (
+            (
+                "mav",
+                means_all[:, 0:1, :] if N > 0 else means_all[:, 0:0, :],
+                active[:, 0:1] if N > 0 else active[:, 0:0],
+            ),
+            (
+                "uav",
+                means_all[:, 1:, :] if N > 1 else means_all[:, 0:0, :],
+                active[:, 1:] if N > 1 else active[:, 0:0],
+            ),
         ):
             flat = tensor.reshape(-1, means_all.shape[-1]) if tensor.numel() else torch.zeros((0, means_all.shape[-1]), device=means_all.device)
+            flat_mask = mask.reshape(-1) > 0.5 if mask.numel() else torch.zeros((0,), dtype=torch.bool, device=means_all.device)
             for dim, name in enumerate(action_names):
                 if dim >= means_all.shape[-1] or flat.numel() == 0:
                     vals = torch.zeros(0, device=means_all.device)
                 else:
                     vals = flat[:, dim]
+                active_vals = vals[flat_mask] if vals.numel() and flat_mask.numel() else torch.zeros(0, device=means_all.device)
                 action_stats[f"{role_name}_action_mean_{name}"] = float(vals.mean().item()) if vals.numel() else 0.0
                 action_stats[f"{role_name}_action_std_{name}"] = (
                     float(vals.std(unbiased=False).item()) if vals.numel() > 1 else 0.0)
                 action_stats[f"{role_name}_action_mean_abs_{name}"] = float(vals.abs().mean().item()) if vals.numel() else 0.0
                 action_stats[f"{role_name}_action_saturation_{name}"] = (
                     float((vals.abs() >= 0.999).float().mean().item()) if vals.numel() else 0.0)
+                action_stats[f"{role_name}_action_mean_{name}_active"] = (
+                    float(active_vals.mean().item()) if active_vals.numel() else 0.0)
+                action_stats[f"{role_name}_action_std_{name}_active"] = (
+                    float(active_vals.std(unbiased=False).item()) if active_vals.numel() > 1 else 0.0)
+                action_stats[f"{role_name}_action_saturation_{name}_active"] = (
+                    float((active_vals.abs() >= 0.999).float().mean().item()) if active_vals.numel() else 0.0)
+        critic_loss_mean = float(np.mean(critic_loss_per_epoch)) if critic_loss_per_epoch else 0.0
+        critic_grad_mean = float(np.mean(critic_grad_norm_per_epoch)) if critic_grad_norm_per_epoch else 0.0
+        critic_grad_max = float(np.max(critic_grad_norm_per_epoch)) if critic_grad_norm_per_epoch else 0.0
         return {
             "actor_loss_mean": float(np.mean([metrics["actor_loss_per_agent"][i] for i in range(N) if v[i] > 0])) if any(x > 0 for x in v) else 0.0,
             "actor_loss_per_agent": metrics["actor_loss_per_agent"],
@@ -315,7 +347,14 @@ class PureHAPPOTrainer:
             "critic_loss": float(critic_loss.item()),
             "critic_loss_unscaled": float(critic_loss_unscaled.item()),
             "critic_loss_scaled": float(critic_loss.item()),
-            "critic_grad_norm": _safe_float(critic_grad_norm.item()),
+            "critic_loss_mean_over_epochs": critic_loss_mean,
+            "critic_loss_first_epoch": critic_loss_per_epoch[0] if critic_loss_per_epoch else 0.0,
+            "critic_loss_last_epoch": critic_loss_per_epoch[-1] if critic_loss_per_epoch else 0.0,
+            "critic_loss_per_epoch": critic_loss_per_epoch,
+            "critic_grad_norm": critic_grad_norm_per_epoch[-1] if critic_grad_norm_per_epoch else 0.0,
+            "critic_grad_norm_mean_over_epochs": critic_grad_mean,
+            "critic_grad_norm_max_over_epochs": critic_grad_max,
+            "critic_grad_norm_per_epoch": critic_grad_norm_per_epoch,
             "critic_update_norm": critic_update_norm,
             "advantage_raw_mean": raw_adv_stats["mean"],
             "advantage_raw_std": raw_adv_stats["std"],
@@ -329,11 +368,22 @@ class PureHAPPOTrainer:
             "return_std": return_stats["std"],
             "return_min": return_stats["min"],
             "return_max": return_stats["max"],
-            "value_pred_mean": value_stats["mean"],
-            "value_pred_std": value_stats["std"],
-            "value_pred_min": value_stats["min"],
-            "value_pred_max": value_stats["max"],
-            "value_explained_variance": value_ev,
+            "value_pred_old_mean": value_old_stats["mean"],
+            "value_pred_old_std": value_old_stats["std"],
+            "value_pred_old_min": value_old_stats["min"],
+            "value_pred_old_max": value_old_stats["max"],
+            "value_pred_new_mean": value_new_stats["mean"],
+            "value_pred_new_std": value_new_stats["std"],
+            "value_pred_new_min": value_new_stats["min"],
+            "value_pred_new_max": value_new_stats["max"],
+            "value_explained_variance_old": value_ev_old,
+            "value_explained_variance_new": value_ev_new,
+            "value_pred_mean": value_new_stats["mean"],
+            "value_pred_std": value_new_stats["std"],
+            "value_pred_min": value_new_stats["min"],
+            "value_pred_max": value_new_stats["max"],
+            "value_explained_variance": value_ev_new,
+            "critic_epochs": self.critic_epochs,
             "last_update_order": list(order),
             "action_log_std_min": float(log_std_vals.min().item()),
             "action_log_std_max": float(log_std_vals.max().item()),

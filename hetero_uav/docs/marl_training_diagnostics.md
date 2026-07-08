@@ -21,14 +21,21 @@ PPO update health:
 Critic and target quality:
 
 - `critic_loss_unscaled`, `critic_loss_scaled`
+- `critic_epochs`
+- `critic_loss_mean_over_epochs`
+- `critic_loss_first_epoch`, `critic_loss_last_epoch`
+- `critic_grad_norm_mean_over_epochs`, `critic_grad_norm_max_over_epochs`
 - `value_explained_variance`
-- `value_pred_mean/std`
+- `value_explained_variance_old`, `value_explained_variance_new`
+- `value_pred_old_mean/std`, `value_pred_new_mean/std`
+- `value_pred_mean/std`, mapped to the post-update critic prediction
 - `return_mean/std`
 - `advantage_raw_*`, `advantage_norm_*`
 
 Action distribution:
 
 - per-role action mean/std/mean-abs/saturation for pitch, heading, speed
+- active-only per-role action mean/std/saturation for pitch, heading, speed
 - existing `action_log_std_*` fields remain available
 
 Sample quality:
@@ -45,6 +52,7 @@ contains arrays that are too wide for stable CSV columns:
 
 - per-agent actor loss, entropy, KL, clip fraction, ratio statistics
 - per-agent grad norms and parameter update norms
+- per-critic-epoch loss and grad norm
 - HAPPO correction factor summaries after each sequential agent update
 - active sample ratios and counts per agent
 

@@ -12,14 +12,21 @@ from pathlib import Path
 SUMMARY_FIELDS = [
     "avg_return", "red_win", "blue_win", "draw", "timeout", "mav_survival",
     "red_alive_final", "blue_alive_final", "actor_loss_mav", "actor_loss_uav",
-    "critic_loss", "critic_loss_unscaled", "critic_loss_scaled", "entropy_mav",
+    "critic_loss", "critic_loss_unscaled", "critic_loss_scaled",
+    "critic_epochs", "critic_loss_mean_over_epochs",
+    "critic_loss_first_epoch", "critic_loss_last_epoch",
+    "critic_grad_norm_mean_over_epochs", "critic_grad_norm_max_over_epochs",
+    "entropy_mav",
     "entropy_uav", "approx_kl_mav", "approx_kl_uav", "approx_kl_abs_mav",
     "approx_kl_abs_uav", "clip_fraction_mav", "clip_fraction_uav",
     "ratio_mean_mav", "ratio_mean_uav", "ratio_std_mav", "ratio_std_uav",
     "ratio_p95_mav", "ratio_p95_uav", "ratio_p99_mav", "ratio_p99_uav",
     "actor_grad_norm_mav", "actor_grad_norm_uav", "critic_grad_norm",
     "policy_update_norm_mav", "policy_update_norm_uav", "critic_update_norm",
-    "value_explained_variance", "value_pred_mean", "value_pred_std",
+    "value_explained_variance", "value_explained_variance_old",
+    "value_explained_variance_new", "value_pred_mean", "value_pred_std",
+    "value_pred_old_mean", "value_pred_old_std", "value_pred_new_mean",
+    "value_pred_new_std",
     "return_mean", "return_std", "advantage_raw_mean", "advantage_raw_std",
     "advantage_raw_min", "advantage_raw_max", "advantage_norm_mean",
     "advantage_norm_std", "advantage_norm_min", "advantage_norm_max",
@@ -32,6 +39,15 @@ SUMMARY_FIELDS = [
     "uav_action_mean_pitch", "uav_action_mean_heading", "uav_action_mean_speed",
     "mav_action_std_pitch", "mav_action_std_heading", "mav_action_std_speed",
     "uav_action_std_pitch", "uav_action_std_heading", "uav_action_std_speed",
+    "mav_action_saturation_pitch_active", "mav_action_saturation_heading_active",
+    "mav_action_saturation_speed_active", "uav_action_saturation_pitch_active",
+    "uav_action_saturation_heading_active", "uav_action_saturation_speed_active",
+    "mav_action_mean_pitch_active", "mav_action_mean_heading_active",
+    "mav_action_mean_speed_active", "uav_action_mean_pitch_active",
+    "uav_action_mean_heading_active", "uav_action_mean_speed_active",
+    "mav_action_std_pitch_active", "mav_action_std_heading_active",
+    "mav_action_std_speed_active", "uav_action_std_pitch_active",
+    "uav_action_std_heading_active", "uav_action_std_speed_active",
     "mav_active_sample_count", "uav_active_sample_count",
     "paper_v1_uav_flight_sum", "paper_v1_uav_adv_sum",
     "paper_v1_uav_end_sum", "paper_v1_uav_total_sum",
@@ -135,6 +151,60 @@ def _summarize_terminal(rows: list[dict], start: int, end: int) -> dict:
     return out
 
 
+def _array_mean(rows: list[dict], key: str) -> list[float]:
+    arrays = [row.get(key) for row in rows if isinstance(row.get(key), list)]
+    max_len = max((len(arr) for arr in arrays), default=0)
+    out = []
+    for idx in range(max_len):
+        vals = []
+        for arr in arrays:
+            if idx >= len(arr):
+                continue
+            try:
+                value = float(arr[idx])
+                if math.isfinite(value):
+                    vals.append(value)
+            except (TypeError, ValueError):
+                pass
+        out.append(_mean(vals))
+    return out
+
+
+def _array_max(rows: list[dict], key: str) -> list[float]:
+    arrays = [row.get(key) for row in rows if isinstance(row.get(key), list)]
+    max_len = max((len(arr) for arr in arrays), default=0)
+    out = []
+    for idx in range(max_len):
+        vals = []
+        for arr in arrays:
+            if idx >= len(arr):
+                continue
+            try:
+                value = float(arr[idx])
+                if math.isfinite(value):
+                    vals.append(value)
+            except (TypeError, ValueError):
+                pass
+        out.append(max(vals) if vals else 0.0)
+    return out
+
+
+def _summarize_update_diagnostics(rows: list[dict], start: int, end: int) -> dict:
+    part = _rows_in_phase(rows, start, end)
+    if not part:
+        return {"update_diagnostics_rows": 0}
+    return {
+        "update_diagnostics_rows": len(part),
+        "valid_sample_count_per_agent_mean": _array_mean(part, "valid_sample_count_per_agent"),
+        "active_sample_ratio_per_agent_mean": _array_mean(part, "active_sample_ratio_per_agent"),
+        "clip_fraction_per_agent_mean": _array_mean(part, "clip_fraction_per_agent"),
+        "approx_kl_per_agent_mean": _array_mean(part, "approx_kl_per_agent"),
+        "entropy_per_agent_mean": _array_mean(part, "entropy_per_agent"),
+        "m_abs_max_after_each_agent_mean": _array_mean(part, "m_abs_max_after_each_agent"),
+        "m_abs_max_after_each_agent_max": _array_max(part, "m_abs_max_after_each_agent"),
+    }
+
+
 def _flag_phases(phase_rows: list[dict]) -> dict:
     flags = defaultdict(list)
     kl_values = [
@@ -182,6 +252,17 @@ def _flag_phases(phase_rows: list[dict]) -> dict:
             and row.get("paper_v1_mav_safety_sum", 0.0) > abs(row.get("paper_v1_uav_adv_sum", 0.0))
         ):
             flags["reward_misalignment"].append(label)
+        if row.get("value_explained_variance_new", row.get("value_explained_variance", 0.0)) < 0.0 and (
+            row.get("return_std", 0.0) > 2.0 * max(row.get("value_pred_new_std", row.get("value_pred_std", 0.0)), 1e-6)
+        ):
+            flags["critic_underfit"].append(label)
+        if (
+            row.get("value_explained_variance_new", 0.0) > row.get("value_explained_variance_old", 0.0) + 0.05
+            or row.get("critic_loss_last_epoch", 0.0) < row.get("critic_loss_first_epoch", 0.0)
+        ):
+            flags["critic_improved_by_epochs"].append(label)
+        if row.get("value_pred_new_std", row.get("value_pred_std", 0.0)) < 0.1 and row.get("return_std", 0.0) > 1.0:
+            flags["value_collapse"].append(label)
     return {key: sorted(set(value)) for key, value in flags.items()}
 
 
@@ -199,6 +280,7 @@ def analyze(output_dir: str | Path, phase_bins: str | None = None) -> dict:
         for field in SUMMARY_FIELDS:
             row[field] = _mean([_num(item, field) for item in part]) if part else 0.0
         row.update(_summarize_terminal(terminal_rows, start, end))
+        row["update_diagnostics_summary"] = _summarize_update_diagnostics(update_rows, start, end)
         summary_rows.append(row)
     flags = _flag_phases(summary_rows)
     _write_csv(out_dir / "learning_dynamics_summary.csv", summary_rows)
@@ -261,17 +343,46 @@ def _write_report(path: Path, payload: dict) -> None:
         "",
         "## Phase Summary",
         "",
-        "| phase | return | red_win | timeout | mav_surv | KL_uav | clip_uav | critic | EV | uav_sat |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| phase | return | red_win | timeout | mav_surv | KL_uav | clip_uav | critic_first | critic_last | EV_old | EV_new | grad_mean/max | uav_sat_active |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for row in payload["phases"]:
+        uav_sat_active = max(
+            row.get("uav_action_saturation_pitch_active", row.get("uav_action_saturation_pitch", 0.0)),
+            row.get("uav_action_saturation_heading_active", row.get("uav_action_saturation_heading", 0.0)),
+            row.get("uav_action_saturation_speed_active", row.get("uav_action_saturation_speed", 0.0)),
+        )
         lines.append(
             f"| {row['phase']} | {row['avg_return']:.3f} | {row['red_win']:.3f} | "
             f"{row['timeout']:.3f} | {row['mav_survival']:.3f} | "
             f"{row['approx_kl_uav']:.5f} | {row['clip_fraction_uav']:.3f} | "
-            f"{row['critic_loss']:.3f} | {row['value_explained_variance']:.3f} | "
-            f"{row['uav_action_saturation_rate']:.3f} |"
+            f"{row['critic_loss_first_epoch']:.3f} | {row['critic_loss_last_epoch']:.3f} | "
+            f"{row['value_explained_variance_old']:.3f} | {row['value_explained_variance_new']:.3f} | "
+            f"{row['critic_grad_norm_mean_over_epochs']:.3f}/{row['critic_grad_norm_max_over_epochs']:.3f} | "
+            f"{uav_sat_active:.3f} |"
         )
+    lines.extend([
+        "",
+        "## Per-agent Sample/Update Diagnostics",
+        "",
+    ])
+    for row in payload["phases"]:
+        summary = row.get("update_diagnostics_summary", {})
+        lines.append(f"### {row['phase']}")
+        lines.append("")
+        lines.append(f"- update rows: {summary.get('update_diagnostics_rows', 0)}")
+        for key in (
+            "valid_sample_count_per_agent_mean",
+            "active_sample_ratio_per_agent_mean",
+            "clip_fraction_per_agent_mean",
+            "approx_kl_per_agent_mean",
+            "entropy_per_agent_mean",
+            "m_abs_max_after_each_agent_mean",
+            "m_abs_max_after_each_agent_max",
+        ):
+            if key in summary:
+                lines.append(f"- {key}: {summary[key]}")
+        lines.append("")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

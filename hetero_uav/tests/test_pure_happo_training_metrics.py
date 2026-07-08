@@ -54,7 +54,9 @@ def test_pure_happo_update_returns_training_dynamics_metrics():
         "value_explained_variance", "advantage_raw_mean", "advantage_norm_std",
         "m_mean_after_each_agent", "m_std_after_each_agent", "m_abs_max_after_each_agent",
         "mav_action_mean_pitch", "uav_action_saturation_speed",
-        "active_sample_ratio_per_agent",
+        "active_sample_ratio_per_agent", "value_explained_variance_old",
+        "value_explained_variance_new", "mav_action_mean_pitch_active",
+        "uav_action_saturation_heading_active",
     ]
     for key in required:
         assert key in metrics
@@ -67,19 +69,62 @@ def test_pure_happo_update_returns_training_dynamics_metrics():
     assert all(np.isfinite(float(value)) for value in scalar_values)
     assert len(metrics["valid_sample_count_per_agent"]) == 3
     assert len(metrics["active_sample_ratio_per_agent"]) == 3
+    assert metrics["critic_epochs"] == 1
+    assert len(metrics["critic_loss_per_epoch"]) == 1
+    assert len(metrics["critic_grad_norm_per_epoch"]) == 1
+
+
+def test_pure_happo_critic_epochs_records_per_epoch_metrics():
+    policy = PureHAPPOPolicy(num_agents=3)
+    trainer = PureHAPPOTrainer(policy, ppo_epochs=1, critic_epochs=3, seed=7)
+    metrics = trainer.update(_fake_buffer(policy))
+
+    assert metrics["critic_epochs"] == 3
+    assert len(metrics["critic_loss_per_epoch"]) == 3
+    assert len(metrics["critic_grad_norm_per_epoch"]) == 3
+    assert "critic_loss_first_epoch" in metrics
+    assert "critic_loss_last_epoch" in metrics
+    assert "critic_grad_norm_mean_over_epochs" in metrics
+    assert "critic_grad_norm_max_over_epochs" in metrics
+    assert "value_pred_old_mean" in metrics
+    assert "value_pred_new_mean" in metrics
+    assert "value_explained_variance_old" in metrics
+    assert "value_explained_variance_new" in metrics
+    scalar_values = [
+        value for value in metrics.values()
+        if isinstance(value, (float, int, np.floating, np.integer))
+    ]
+    assert all(np.isfinite(float(value)) for value in scalar_values)
+
+
+def test_pure_happo_critic_epochs_must_be_positive():
+    policy = PureHAPPOPolicy(num_agents=3)
+    for bad_value in (0, -1):
+        try:
+            PureHAPPOTrainer(policy, critic_epochs=bad_value)
+        except ValueError as exc:
+            assert "critic_epochs" in str(exc)
+        else:
+            raise AssertionError("critic_epochs <= 0 should raise")
 
 
 def test_train_log_field_contract_contains_new_marl_diagnostics():
     for field in [
         "clip_fraction_mav", "approx_kl_abs_uav", "critic_loss_unscaled",
-        "value_explained_variance", "advantage_raw_std",
+        "critic_epochs", "critic_loss_mean_over_epochs", "critic_loss_first_epoch",
+        "critic_loss_last_epoch", "critic_grad_norm_mean_over_epochs",
+        "critic_grad_norm_max_over_epochs", "value_explained_variance",
+        "value_explained_variance_old", "value_explained_variance_new",
+        "value_pred_old_mean", "value_pred_new_mean", "advantage_raw_std",
         "uav_action_saturation_heading", "rollout_transitions",
-        "actor_obs_abs_max", "critic_state_nan_count",
+        "uav_action_saturation_heading_active", "actor_obs_abs_max",
+        "critic_state_nan_count",
     ]:
         assert field in MARL_DYNAMICS_TRAIN_FIELDS
     for field in [
         "actor_loss_per_agent", "clip_fraction_per_agent",
         "valid_sample_count_per_agent", "m_abs_max_after_each_agent",
+        "critic_loss_per_epoch", "critic_grad_norm_per_epoch",
     ]:
         assert field in UPDATE_DIAGNOSTIC_ARRAY_FIELDS
     source = Path("scripts/train_happo_reference.py").read_text(encoding="utf-8")
@@ -93,9 +138,11 @@ def test_update_diagnostics_jsonl_payload_roundtrip(tmp_path):
         "total_steps": 10,
         "actor_loss_per_agent": [0.1, 0.2, 0.3],
         "clip_fraction_per_agent": [0.0, 0.1, 0.2],
+        "critic_loss_per_epoch": [3.0, 2.0],
     }
     path = tmp_path / "update_diagnostics.jsonl"
     path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["actor_loss_per_agent"] == [0.1, 0.2, 0.3]
+    assert rows[0]["critic_loss_per_epoch"] == [3.0, 2.0]
