@@ -1854,6 +1854,7 @@ def _run_training_main() -> None:
                         for key, value in comp.items():
                             if not (
                                 key.startswith("tam_v7_")
+                                or key.startswith("tam_table1_")
                                 or key.startswith("v1_mav_")
                                 or key.startswith("paper_v1_")
                                 or key in {
