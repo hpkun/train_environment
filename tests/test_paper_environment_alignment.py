@@ -1,4 +1,6 @@
 import math
+import ast
+from pathlib import Path
 
 import numpy as np
 
@@ -16,6 +18,7 @@ from rule_based_agent import (
     _ego_speed_mps,
     _entity_range_m,
     _relative_bearing_rad,
+    _simple_body_vector_to_world_bearing,
     reset_rule_memory,
 )
 from train_vanilla_mappo import Config, _compute_obs_dim, _flatten_obs
@@ -134,6 +137,67 @@ def test_paper_strict_safe_pursuit_does_not_use_heading_as_speed():
     pursuit_throttle = (90.0 + 100.0 * 0.8) / 306.0
     assert math.isclose(float(action[2]), pursuit_throttle, rel_tol=1e-6)
     assert not math.isclose(float(action[2]), low_speed_throttle, rel_tol=1e-6)
+
+
+def test_run_one_episode_does_not_reference_outer_args():
+    tree = ast.parse(Path("evaluate_vanilla_mappo.py").read_text(encoding="utf-8"))
+    func = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_one_episode"
+    )
+    names = {node.id for node in ast.walk(func) if isinstance(node, ast.Name)}
+    assert "args" not in names
+
+
+def test_paper_strict_world_bearing_zero_roll_pitch_matches_yaw_plane():
+    state = np.array(
+        [1000.0, 1000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, math.sqrt(2) * 1000.0],
+        dtype=np.float32,
+    )
+    ego = np.array([0.0, 0.0, 6000.0, 250.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0],
+                   dtype=np.float32)
+
+    bearing = _simple_body_vector_to_world_bearing(state, ego, own_heading=float(ego[6]))
+
+    assert math.isclose(bearing, 0.5 + math.pi / 4.0, rel_tol=1e-6, abs_tol=1e-6)
+
+
+def test_paper_strict_world_bearing_front_target_cardinal_headings():
+    state = np.array(
+        [1000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1000.0],
+        dtype=np.float32,
+    )
+    ego_north = np.array([0.0, 0.0, 6000.0, 250.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                         dtype=np.float32)
+    ego_east = ego_north.copy()
+    ego_east[6] = math.pi / 2.0
+
+    assert math.isclose(
+        _simple_body_vector_to_world_bearing(state, ego_north, own_heading=float(ego_north[6])),
+        0.0,
+        abs_tol=1e-6,
+    )
+    assert math.isclose(
+        _simple_body_vector_to_world_bearing(state, ego_east, own_heading=float(ego_east[6])),
+        math.pi / 2.0,
+        abs_tol=1e-6,
+    )
+
+
+def test_paper_strict_world_bearing_uses_roll_pitch_for_3d_body_vector():
+    state = np.array(
+        [0.0, 0.0, 1000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1000.0],
+        dtype=np.float32,
+    )
+    ego = np.array(
+        [0.0, 0.0, 6000.0, 250.0, math.pi / 2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        dtype=np.float32,
+    )
+
+    bearing = _simple_body_vector_to_world_bearing(state, ego, own_heading=float(ego[6]))
+
+    assert np.isfinite(bearing)
+    assert math.isclose(bearing, -math.pi / 2.0, abs_tol=1e-6)
 
 
 def test_flatten_obs_dim_matches_compute_obs_dim_for_paper_strict():

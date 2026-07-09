@@ -305,10 +305,24 @@ def _simple_body_vector_to_world_bearing(
     if _is_paper_strict_entity(state_arr) and ego.size >= 10:
         x = float(state_arr[0])
         y = float(state_arr[1])
+        z = float(state_arr[2])
+        roll = float(ego[4])
+        pitch = float(ego[5])
         heading = float(own_heading) if own_heading is not None else float(ego[6])
-        if not np.all(np.isfinite([x, y, heading])):
+        if not np.all(np.isfinite([x, y, z, roll, pitch, heading])):
             return None
-        return _wrap_pi(heading + float(np.arctan2(y, x)))
+        cr, sr = np.cos(roll), np.sin(roll)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        cy, sy = np.cos(heading), np.sin(heading)
+        body_to_inertial = np.array([
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr],
+        ], dtype=np.float64)
+        inertial = body_to_inertial @ np.array([x, y, z], dtype=np.float64)
+        if not np.all(np.isfinite(inertial[:2])) or np.linalg.norm(inertial[:2]) < 1e-9:
+            return None
+        return _wrap_pi(float(np.arctan2(inertial[1], inertial[0])))
 
     if ego.size < 11:
         return None
