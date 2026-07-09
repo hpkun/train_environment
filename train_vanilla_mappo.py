@@ -287,6 +287,7 @@ LAUNCH_QUALITY_DETAIL_FIELDS = (
     "shooter_alt_m",
     "target_alt_m",
     "target_alive_at_launch",
+    "raw_termination_reason",
     "termination_reason",
     "is_success",
     "flight_time_sec",

@@ -53,6 +53,101 @@ POLICY_ARCH_CHOICES = [
     "brma_recurrent_masked", "tam_categorical_recurrent",
 ]
 TAM_CATEGORICAL_ARCH = "tam_categorical_recurrent"
+TAM_MANEUVER_ACTION_ORDER = ("throttle", "roll_cmd", "pitch_or_load_cmd", "yaw_cmd")
+LEGACY_ACTION_ORDER = ("pitch", "heading", "speed")
+TAM_ACTION_STAT_KINDS = ("mean", "std", "mean_abs", "saturation", "active")
+
+TRAIN_LOG_BASE_HEADER = [
+    "iteration", "total_steps", "avg_return", "red_win", "blue_win",
+    "draw", "timeout", "mav_survival", "red_alive_final",
+    "blue_alive_final", "red_missiles_fired", "blue_missiles_fired",
+    "missile_hits", "actor_loss_mav", "actor_loss_uav",
+    "critic_loss", "entropy_mav", "entropy_uav",
+    "mav_action_saturation_rate", "uav_action_saturation_rate",
+    "entropy_mav_valid_count", "entropy_uav_valid_count",
+    "mav_active_sample_count", "uav_active_sample_count",
+    "action_log_std_mav_min", "action_log_std_mav_max",
+    "action_log_std_mav_mean", "action_log_std_uav_min",
+    "action_log_std_uav_max", "action_log_std_uav_mean",
+    "approx_kl_mav", "approx_kl_uav",
+    "mav_actor_lr_effective", "uav_actor_lr_effective",
+    "mav_entropy_coef_effective", "uav_entropy_coef_effective",
+    "mav_clip_param_effective", "uav_clip_param_effective",
+    "mav_target_kl", "uav_target_kl",
+    "mav_kl_early_stop_count", "uav_kl_early_stop_count",
+    "mav_update_skipped_by_kl", "uav_update_skipped_by_kl",
+    "neutral_prior_probs_mav", "neutral_prior_probs_uav",
+    "kl_to_neutral_mav", "kl_to_neutral_uav",
+    "per_axis_kl_to_neutral_mav", "per_axis_kl_to_neutral_uav",
+    "dominant_bin_mav_throttle", "dominant_bin_mav_aileron",
+    "dominant_bin_mav_elevator", "dominant_bin_mav_rudder",
+    "dominant_bin_uav_throttle", "dominant_bin_uav_aileron",
+    "dominant_bin_uav_elevator", "dominant_bin_uav_rudder",
+    "mav_shared_update_mode", "mav_shared_step_enabled",
+    "mav_shared_grad_norm_before_clear", "uav_shared_step_enabled",
+    "grad_norm_shared_from_mav", "grad_norm_shared_from_uav",
+    "mav_death_step_mean_recent", "mav_death_step_median_recent",
+    "mav_death_reason_top_recent", "mav_crash_lowalt_rate_recent",
+    "mav_missile_kill_rate_recent",
+    "red_0_fired_rollout", "red_1_fired_rollout", "red_2_fired_rollout",
+    "red_0_hits_rollout", "red_1_hits_rollout", "red_2_hits_rollout",
+    "red_uav_fired_rollout", "red_uav_hits_rollout",
+    "mask_keep_ratio", "mask_entropy", "masked_entity_count",
+    "edge_bin_rate", "low_bin_rate", "high_bin_rate",
+    "max_action_prob_mav", "max_action_prob_uav",
+    "action_bin_usage_mav", "action_bin_usage_uav",
+    "throttle_high_rate", "surface_edge_rate",
+    "grad_norm_actor", "grad_norm_shared", "grad_norm_mav_head",
+    "grad_norm_uav_head", "grad_norm_critic",
+    "correction_factor_mean", "correction_factor_max", "correction_factor_min",
+    "paper_mode", "paper_config_passed",
+    "actor_lr_effective", "critic_lr_effective",
+    "entropy_coef_effective", "clip_param_effective",
+    "gamma_effective", "gae_lambda_effective",
+    "max_grad_norm_effective", "ppo_epochs_effective",
+    "paper_hyperparams_passed", "advantage_mode",
+    "paper_advantage_mode_passed", "per_agent_advantage_enabled",
+    "critic_target_mode", "dilution_ratio_abs",
+    "happo_update_granularity",
+    "agent_update_order", "shared_step_count", "mav_head_step_count",
+    "uav_head_step_count", "agent_metrics_json",
+    "entropy_mav_raw", "entropy_uav_raw",
+    "entropy_mav_per_axis_mean", "entropy_uav_per_axis_mean",
+    "entropy_bonus_mav", "entropy_bonus_uav",
+    "actor_surrogate_loss_mav_abs", "actor_surrogate_loss_uav_abs",
+    "entropy_to_policy_loss_ratio_mav", "entropy_to_policy_loss_ratio_uav",
+    "advantage_mean_red_0", "advantage_std_red_0",
+    "advantage_min_red_0", "advantage_max_red_0",
+    "active_sample_count_red_0", "death_transition_count_red_0",
+    "death_transition_used_for_actor_red_0",
+    "nan_detected",
+]
+
+EPISODE_TERMINATION_FIELDS = [
+    "episode_id", "episode_length", "winner", "end_reason",
+    "red_alive_final", "blue_alive_final", "mav_alive_final",
+    "red_dead_count", "blue_dead_count",
+    "red_missiles_fired", "blue_missiles_fired",
+    "red_missile_hits", "blue_missile_hits",
+    "red_crash_count", "blue_crash_count",
+    "red_low_altitude_flag_count", "red_high_altitude_flag_count",
+    "red_low_speed_flag_count", "red_overload_or_nonfinite_count",
+    "first_red_death_step", "first_red_death_agent", "first_red_death_reason",
+    "mav_death_step", "mav_death_reason",
+]
+
+TAM_CONTROL_SUMMARY_FIELDS = [
+    "total_steps", "episode_id", "agent_id", "alive",
+    "altitude_m", "true_speed_mps", "low_speed_flag",
+    "high_altitude_flag", "low_altitude_flag", "g_load_total",
+    "roll_rad", "pitch_rad", "heading_rad",
+    "fcs_throttle_cmd", "fcs_aileron_cmd", "fcs_elevator_cmd", "fcs_rudder_cmd",
+    "raw_action_0", "raw_action_1", "raw_action_2", "raw_action_3",
+    "sanitized_action_0", "sanitized_action_1", "sanitized_action_2", "sanitized_action_3",
+    "tam_control_command_0", "tam_control_command_1", "tam_control_command_2", "tam_control_command_3",
+    "tam_applied_fcs_0", "tam_applied_fcs_1", "tam_applied_fcs_2", "tam_applied_fcs_3",
+    "tam_blue_legacy_pid_rule_adapter", "tam_blue_legacy_pid_applied",
+]
 
 
 def _resolve_policy_arch(requested_policy_arch: str, action_distribution: str):
@@ -381,6 +476,81 @@ def _action_dim_from_env(env) -> int:
     return dims.pop()
 
 
+def _tam_control_mode_from_env(env, action_dim: int) -> str:
+    if int(action_dim) == 4 and getattr(env, "action_interface", "") == "tam_direct_fcs_4d":
+        return "maneuver_fcs"
+    return "legacy_pid_3d"
+
+
+def _maneuver_action_log_fields(action_dim: int, tam_control_mode: str) -> list[str]:
+    if int(action_dim) != 4 or tam_control_mode != "maneuver_fcs":
+        return []
+    return [
+        f"{role}_action_{stat}_{axis}"
+        for role in ("mav", "uav")
+        for stat in TAM_ACTION_STAT_KINDS
+        for axis in TAM_MANEUVER_ACTION_ORDER
+    ]
+
+
+def _train_log_header(action_dim: int, tam_control_mode: str) -> list[str]:
+    return TRAIN_LOG_BASE_HEADER + _maneuver_action_log_fields(action_dim, tam_control_mode)
+
+
+def _action_semantics_meta(action_dim: int, tam_control_mode: str) -> dict:
+    order = TAM_MANEUVER_ACTION_ORDER if int(action_dim) == 4 and tam_control_mode == "maneuver_fcs" else LEGACY_ACTION_ORDER
+    values = list(order)
+    meta = {"action_semantics": values}
+    if int(action_dim) == 4 and tam_control_mode == "maneuver_fcs":
+        meta["tam_action_order"] = values
+    return meta
+
+
+def _maneuver_action_stats(actions, active_masks, role_ids, action_dim: int,
+                           tam_control_mode: str,
+                           action_distribution: str = "continuous_quantized",
+                           action_levels: int = 40) -> dict[str, float]:
+    if int(action_dim) != 4 or tam_control_mode != "maneuver_fcs":
+        return {}
+    arr = np.asarray(actions, dtype=np.float64)
+    if action_distribution == "multidiscrete_categorical":
+        denom = max(float(action_levels - 1), 1.0)
+        arr = np.clip(arr, 0.0, denom) / denom * 2.0 - 1.0
+    active = np.asarray(active_masks, dtype=np.float64)
+    roles = np.asarray(role_ids, dtype=np.int64).reshape(-1)
+    out: dict[str, float] = {}
+    for role_name, role_id in (("mav", 0), ("uav", 1)):
+        role_mask = roles == role_id
+        if arr.ndim != 3 or not role_mask.any():
+            selected = np.zeros((0, 4), dtype=np.float64)
+        else:
+            selected = arr[:, role_mask, :4]
+            selected_active = active[:, role_mask] > 0.5
+            selected = selected[selected_active]
+        for axis_index, axis in enumerate(TAM_MANEUVER_ACTION_ORDER):
+            values = selected[:, axis_index] if selected.size else np.asarray([], dtype=np.float64)
+            if values.size:
+                out[f"{role_name}_action_mean_{axis}"] = float(np.mean(values))
+                out[f"{role_name}_action_std_{axis}"] = float(np.std(values))
+                out[f"{role_name}_action_mean_abs_{axis}"] = float(np.mean(np.abs(values)))
+                out[f"{role_name}_action_saturation_{axis}"] = float(np.mean(np.abs(values) >= 0.95))
+                out[f"{role_name}_action_active_{axis}"] = int(values.size)
+            else:
+                out[f"{role_name}_action_mean_{axis}"] = 0.0
+                out[f"{role_name}_action_std_{axis}"] = 0.0
+                out[f"{role_name}_action_mean_abs_{axis}"] = 0.0
+                out[f"{role_name}_action_saturation_{axis}"] = 0.0
+                out[f"{role_name}_action_active_{axis}"] = 0
+    return out
+
+
+def _maneuver_action_row_values(stats: dict, action_dim: int, tam_control_mode: str) -> list:
+    return [
+        stats.get(field, 0)
+        for field in _maneuver_action_log_fields(action_dim, tam_control_mode)
+    ]
+
+
 def _rel(path: str | Path) -> Path:
     p = Path(path)
     return p if p.is_absolute() else ROOT / p
@@ -604,6 +774,181 @@ def _episode_outcome(env, truncated: dict, length: int) -> dict:
     return {"winner": winner, "end_reason": reason}
 
 
+def _open_episode_termination_summary(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w", newline="", encoding="utf-8")
+    writer = csv.DictWriter(handle, fieldnames=EPISODE_TERMINATION_FIELDS)
+    writer.writeheader()
+    return writer, handle
+
+
+def _new_episode_diag(episode_id: int) -> dict:
+    return {
+        "episode_id": int(episode_id),
+        "red_missiles_fired": 0,
+        "blue_missiles_fired": 0,
+        "red_missile_hits": 0,
+        "blue_missile_hits": 0,
+        "red_crash_count": 0,
+        "blue_crash_count": 0,
+        "red_low_altitude_flag_count": 0,
+        "red_high_altitude_flag_count": 0,
+        "red_low_speed_flag_count": "",
+        "red_overload_or_nonfinite_count": 0,
+        "first_red_death_step": "",
+        "first_red_death_agent": "",
+        "first_red_death_reason": "",
+        "mav_death_step": "",
+        "mav_death_reason": "",
+    }
+
+
+def _record_episode_step_diag(diag: dict, info: dict, red_ids: list[str],
+                              blue_ids: list[str]) -> None:
+    for aid in red_ids + blue_ids:
+        fired = int(info.get(aid, {}).get("missiles_fired_this_step", 0) or 0)
+        if aid.startswith("red_"):
+            diag["red_missiles_fired"] += fired
+        else:
+            diag["blue_missiles_fired"] += fired
+    for record in info.get("__launch_quality_done__", []) or []:
+        reason = str(record.get("termination_reason", "")).lower()
+        hit = bool(record.get("is_success") or record.get("hit_success") or reason == "hit")
+        if not hit:
+            continue
+        owner = str(record.get("owner_id") or record.get("shooter_id") or "")
+        if owner.startswith("red_"):
+            diag["red_missile_hits"] += 1
+        elif owner.startswith("blue_"):
+            diag["blue_missile_hits"] += 1
+    for event in info.get("death_events", []) or []:
+        aid = str(event.get("agent_id", ""))
+        side = str(event.get("side", ""))
+        reason = str(event.get("death_reason") or "")
+        is_red = side == "red" or aid.startswith("red_")
+        is_blue = side == "blue" or aid.startswith("blue_")
+        if is_red and diag.get("first_red_death_agent", "") == "":
+            diag["first_red_death_step"] = event.get("step", "")
+            diag["first_red_death_agent"] = aid
+            diag["first_red_death_reason"] = reason or "unknown"
+        if aid == "red_0" and diag.get("mav_death_step", "") == "":
+            diag["mav_death_step"] = event.get("step", "")
+            diag["mav_death_reason"] = reason or "unknown"
+        crash = bool(event.get("crash")) or reason.startswith("Crash")
+        if crash and is_red:
+            diag["red_crash_count"] += 1
+        if crash and is_blue:
+            diag["blue_crash_count"] += 1
+        if is_red and bool(event.get("low_altitude")):
+            diag["red_low_altitude_flag_count"] += 1
+        if is_red and bool(event.get("high_altitude")):
+            diag["red_high_altitude_flag_count"] += 1
+        if is_red and (bool(event.get("over_g")) or reason in {"Crash_OverG", "Crash_NonFiniteState"}):
+            diag["red_overload_or_nonfinite_count"] += 1
+
+
+def _write_episode_termination_summary(writer, row: dict) -> None:
+    writer.writerow({field: row.get(field, "") for field in EPISODE_TERMINATION_FIELDS})
+
+
+def _open_tam_control_summary(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w", newline="", encoding="utf-8")
+    writer = csv.DictWriter(handle, fieldnames=TAM_CONTROL_SUMMARY_FIELDS)
+    writer.writeheader()
+    return writer, handle
+
+
+def _write_tam_control_summary_row(writer, row: dict) -> None:
+    writer.writerow({field: row.get(field, "") for field in TAM_CONTROL_SUMMARY_FIELDS})
+
+
+def _four_values(raw) -> list:
+    if raw is None:
+        return ["", "", "", ""]
+    arr = np.asarray(raw).reshape(-1).tolist()
+    return [(float(v) if isinstance(v, (int, float, np.integer, np.floating)) else v) for v in (arr + ["", "", "", ""])[:4]]
+
+
+def _tam_control_summary_rows(env, info: dict, raw_actions: dict,
+                              *, total_steps: int, episode_id: int) -> list[dict]:
+    rows = []
+    commands = getattr(env, "_last_tam_action_commands", {}) or {}
+    effective = info.get("last_effective_actions", {}) if isinstance(info, dict) else {}
+    for aid in getattr(env, "agent_ids", []):
+        sim = env._get_sim(aid) if hasattr(env, "_get_sim") else None
+        alive = bool(sim is not None and sim.is_alive)
+        altitude = speed = g_load = roll = pitch = heading = ""
+        low_speed = high_alt = low_alt = ""
+        if sim is not None:
+            try:
+                altitude = float(sim.get_geodetic()[2])
+                high_alt = int(altitude > float(getattr(env, "BATTLEFIELD_ALTITUDE_MAX", 10000.0)))
+                low_alt = int(altitude < float(getattr(env, "BATTLEFIELD_ALTITUDE_MIN", 2500.0)))
+            except Exception:
+                pass
+            try:
+                vel = np.asarray(sim.get_velocity(), dtype=np.float64)
+                speed = float(np.linalg.norm(vel))
+                low_speed = int(speed < float(getattr(env, "VELOCITY_MIN", 102.0)))
+            except Exception:
+                pass
+            try:
+                nx = abs(float(sim.get_property_value("accelerations/n-pilot-x-norm")))
+                ny = abs(float(sim.get_property_value("accelerations/n-pilot-y-norm")))
+                nz = abs(float(sim.get_property_value("accelerations/n-pilot-z-norm")))
+                g_load = float(np.sqrt(nx ** 2 + ny ** 2 + nz ** 2))
+            except Exception:
+                pass
+            try:
+                roll, pitch, heading = [float(v) for v in sim.get_rpy()]
+            except Exception:
+                pass
+        command = commands.get(aid, {}) if isinstance(commands, dict) else {}
+        raw = _four_values(command.get("raw_action", raw_actions.get(aid)))
+        sanitized = _four_values(effective.get(aid, raw_actions.get(aid)))
+        control = _four_values([
+            command.get("throttle_cmd_norm", ""),
+            command.get("aileron_cmd_norm", ""),
+            command.get("elevator_cmd_norm", ""),
+            command.get("rudder_cmd_norm", ""),
+        ])
+        readback = command.get("readback_values", {}) if isinstance(command, dict) else {}
+        applied = _four_values([
+            readback.get("fcs/throttle-cmd-norm", command.get("throttle_cmd_norm", "")),
+            readback.get("fcs/aileron-cmd-norm", command.get("aileron_cmd_norm", "")),
+            readback.get("fcs/elevator-cmd-norm", command.get("elevator_cmd_norm", "")),
+            readback.get("fcs/rudder-cmd-norm", command.get("rudder_cmd_norm", "")),
+        ])
+        row = {
+            "total_steps": total_steps,
+            "episode_id": episode_id,
+            "agent_id": aid,
+            "alive": int(alive),
+            "altitude_m": altitude,
+            "true_speed_mps": speed,
+            "low_speed_flag": low_speed,
+            "high_altitude_flag": high_alt,
+            "low_altitude_flag": low_alt,
+            "g_load_total": g_load,
+            "roll_rad": roll,
+            "pitch_rad": pitch,
+            "heading_rad": heading,
+            "fcs_throttle_cmd": control[0],
+            "fcs_aileron_cmd": control[1],
+            "fcs_elevator_cmd": control[2],
+            "fcs_rudder_cmd": control[3],
+            "tam_blue_legacy_pid_rule_adapter": int(aid.startswith("blue_")),
+            "tam_blue_legacy_pid_applied": int(aid.startswith("blue_") and aid not in commands),
+        }
+        row.update({f"raw_action_{i}": raw[i] for i in range(4)})
+        row.update({f"sanitized_action_{i}": sanitized[i] for i in range(4)})
+        row.update({f"tam_control_command_{i}": control[i] for i in range(4)})
+        row.update({f"tam_applied_fcs_{i}": applied[i] for i in range(4)})
+        rows.append(row)
+    return rows
+
+
 def _run_eval(model_path: str, args, summary_json: str) -> list[dict] | None:
     cmd = [
         sys.executable, "-u", str(ROOT / "scripts" / "eval_tam_happo_direct.py"),
@@ -627,6 +972,51 @@ def _run_eval(model_path: str, args, summary_json: str) -> list[dict] | None:
         return json.loads((ROOT / summary_json).read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _append_eval_records(eval_log: Path, records: list[dict] | None, args,
+                         *, total_steps: int, iteration) -> None:
+    if not records:
+        return
+    exists = eval_log.exists() and eval_log.stat().st_size > 0
+    with eval_log.open("a", newline="", encoding="utf-8") as eval_f:
+        writer = csv.writer(eval_f)
+        if not exists:
+            writer.writerow([
+                "total_steps", "iteration", "scenario", "config", "red_win_rate",
+                "blue_win_rate", "draw_rate", "timeout_rate",
+                "mav_survival_rate", "red_uav_fired_mean", "red_uav_hits_mean",
+                "blue_dead_mean", "red_missile_hits_mean", "avg_episode_len",
+                "eval_deterministic", "train_sampling_mode", "eval_action_selection",
+            ])
+        for r in records:
+            cfg_stem = Path(r.get("config", "")).stem
+            writer.writerow([
+                total_steps, iteration, cfg_stem, r["config"],
+                r["red_win_rate"], r["blue_win_rate"], r["draw_rate"],
+                r["timeout_rate"], r["mav_survival_rate"],
+                r.get("red_uav_fired_mean", ""), r.get("red_uav_hits_mean", ""),
+                r["blue_dead_mean"], r["red_missile_hits_mean"],
+                r.get("avg_length", ""),
+                r.get("eval_deterministic", not args.stochastic_eval),
+                "stochastic",
+                r.get("eval_action_selection", "sample" if args.stochastic_eval else "argmax"),
+            ])
+
+
+def _maybe_run_final_eval(out_dir: Path, latest_model: Path, args,
+                          *, total_steps: int, iteration: int, last_eval: int) -> None:
+    if not args.eval_during_training or args.no_subprocess_eval:
+        return
+    if int(last_eval) == int(total_steps):
+        return
+    tmp_json = str((out_dir / "_final_eval.json").relative_to(ROOT))
+    records = _run_eval(str(latest_model), args, tmp_json)
+    _append_eval_records(
+        out_dir / "eval_log.csv", records, args,
+        total_steps=total_steps, iteration=f"final_{iteration}",
+    )
+    (out_dir / "_final_eval.json").unlink(missing_ok=True)
 
 
 def _score_eval(records: list[dict]) -> float:
@@ -702,6 +1092,9 @@ def _eval_checkpoint_extra(args, policy, actor_dim: int, critic_dim: int, action
         "tam_action_distribution": getattr(policy, "action_distribution", "continuous_quantized"),
         "action_space": ("MultiDiscrete" if getattr(policy, "action_distribution", "") == "multidiscrete_categorical" else "Box"),
         "tam_action_levels": getattr(policy, "action_levels", None),
+        "tam_control_mode": "maneuver_fcs" if int(action_dim) == 4 else "legacy_pid_3d",
+        **_action_semantics_meta(
+            action_dim, "maneuver_fcs" if int(action_dim) == 4 else "legacy_pid_3d"),
         **_trainer_contract_meta(policy),
         "entity_dim": getattr(policy, "entity_dim", None),
         "separate_actors": True,
@@ -914,6 +1307,10 @@ def _run_training_main() -> None:
     parser.add_argument("--exit-on-heartbeat-stall", action="store_true")
     parser.add_argument("--timeseries-episodes-limit", type=int, default=3)
     parser.add_argument("--timeseries-step-stride", type=int, default=5)
+    parser.add_argument("--log-tam-control-summary", action="store_true",
+                        help="Write lightweight per-step TAM control diagnostics.")
+    parser.add_argument("--tam-control-summary-stride", type=int, default=5,
+                        help="Step stride for --log-tam-control-summary.")
     args = parser.parse_args()
     args = resolve_tam_update_params(args)
     if args.num_envs < 1:
@@ -959,6 +1356,7 @@ def _run_training_main() -> None:
     action_distribution = getattr(env, "tam_action_distribution", "continuous_quantized")
     action_levels = int(getattr(env, "tam_action_levels", 40))
     action_space_class = type(env.action_space[env.red_ids[0]]).__name__
+    tam_control_mode = _tam_control_mode_from_env(env, action_dim)
     (
         args.requested_policy_arch,
         args.effective_policy_arch,
@@ -999,6 +1397,8 @@ def _run_training_main() -> None:
         "tam_action_distribution": action_distribution,
         "action_space": action_space_class,
         "tam_action_levels": action_levels,
+        "tam_control_mode": tam_control_mode,
+        **_action_semantics_meta(action_dim, tam_control_mode),
         "num_envs": args.num_envs,
         "rollout_length": args.rollout_length,
         "multi_env_rollout_mode": "serial_env_batching",
@@ -1136,75 +1536,12 @@ def _run_training_main() -> None:
             for _ in range(args.num_envs)
         ]
     episode_start_pending = [True for _ in range(args.num_envs)]
+    episode_diag = [_new_episode_diag(current_ep_id[i]) for i in range(args.num_envs)]
 
     train_log = out_dir / "train_log.csv"
     with train_log.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "iteration", "total_steps", "avg_return", "red_win", "blue_win",
-            "draw", "timeout", "mav_survival", "red_alive_final",
-            "blue_alive_final", "red_missiles_fired", "blue_missiles_fired",
-            "missile_hits", "actor_loss_mav", "actor_loss_uav",
-            "critic_loss", "entropy_mav", "entropy_uav",
-            "mav_action_saturation_rate", "uav_action_saturation_rate",
-            "entropy_mav_valid_count", "entropy_uav_valid_count",
-            "mav_active_sample_count", "uav_active_sample_count",
-            "action_log_std_mav_min", "action_log_std_mav_max",
-            "action_log_std_mav_mean", "action_log_std_uav_min",
-            "action_log_std_uav_max", "action_log_std_uav_mean",
-            "approx_kl_mav", "approx_kl_uav",
-            "mav_actor_lr_effective", "uav_actor_lr_effective",
-            "mav_entropy_coef_effective", "uav_entropy_coef_effective",
-            "mav_clip_param_effective", "uav_clip_param_effective",
-            "mav_target_kl", "uav_target_kl",
-            "mav_kl_early_stop_count", "uav_kl_early_stop_count",
-            "mav_update_skipped_by_kl", "uav_update_skipped_by_kl",
-            "neutral_prior_probs_mav", "neutral_prior_probs_uav",
-            "kl_to_neutral_mav", "kl_to_neutral_uav",
-            "per_axis_kl_to_neutral_mav", "per_axis_kl_to_neutral_uav",
-            "dominant_bin_mav_throttle", "dominant_bin_mav_aileron",
-            "dominant_bin_mav_elevator", "dominant_bin_mav_rudder",
-            "dominant_bin_uav_throttle", "dominant_bin_uav_aileron",
-            "dominant_bin_uav_elevator", "dominant_bin_uav_rudder",
-            "mav_shared_update_mode", "mav_shared_step_enabled",
-            "mav_shared_grad_norm_before_clear", "uav_shared_step_enabled",
-            "grad_norm_shared_from_mav", "grad_norm_shared_from_uav",
-            "mav_death_step_mean_recent", "mav_death_step_median_recent",
-            "mav_death_reason_top_recent", "mav_crash_lowalt_rate_recent",
-            "mav_missile_kill_rate_recent",
-            "red_0_fired_rollout", "red_1_fired_rollout", "red_2_fired_rollout",
-            "red_0_hits_rollout", "red_1_hits_rollout", "red_2_hits_rollout",
-            "red_uav_fired_rollout", "red_uav_hits_rollout",
-            "mask_keep_ratio", "mask_entropy", "masked_entity_count",
-            "edge_bin_rate", "low_bin_rate", "high_bin_rate",
-            "max_action_prob_mav", "max_action_prob_uav",
-            "action_bin_usage_mav", "action_bin_usage_uav",
-            "throttle_high_rate", "surface_edge_rate",
-            "grad_norm_actor", "grad_norm_shared", "grad_norm_mav_head",
-            "grad_norm_uav_head", "grad_norm_critic",
-            "correction_factor_mean", "correction_factor_max", "correction_factor_min",
-            "paper_mode", "paper_config_passed",
-            "actor_lr_effective", "critic_lr_effective",
-            "entropy_coef_effective", "clip_param_effective",
-            "gamma_effective", "gae_lambda_effective",
-            "max_grad_norm_effective", "ppo_epochs_effective",
-            "paper_hyperparams_passed", "advantage_mode",
-            "paper_advantage_mode_passed", "per_agent_advantage_enabled",
-            "critic_target_mode", "dilution_ratio_abs",
-            "happo_update_granularity",
-            "agent_update_order", "shared_step_count", "mav_head_step_count",
-            "uav_head_step_count", "agent_metrics_json",
-            "entropy_mav_raw", "entropy_uav_raw",
-            "entropy_mav_per_axis_mean", "entropy_uav_per_axis_mean",
-            "entropy_bonus_mav", "entropy_bonus_uav",
-            "actor_surrogate_loss_mav_abs", "actor_surrogate_loss_uav_abs",
-            "entropy_to_policy_loss_ratio_mav", "entropy_to_policy_loss_ratio_uav",
-            "advantage_mean_red_0", "advantage_std_red_0",
-            "advantage_min_red_0", "advantage_max_red_0",
-            "active_sample_count_red_0", "death_transition_count_red_0",
-            "death_transition_used_for_actor_red_0",
-            "nan_detected",
-        ])
+        writer.writerow(_train_log_header(action_dim, tam_control_mode))
         subprocess_eval_wanted = args.eval_during_training and not args.no_subprocess_eval
         eval_writer = None
         eval_f = None
@@ -1219,6 +1556,12 @@ def _run_training_main() -> None:
                 "eval_deterministic", "train_sampling_mode", "eval_action_selection",
             ])
         last_eval = -999999 if args.eval_at_start else 0
+        episode_summary_writer, episode_summary_f = _open_episode_termination_summary(
+            out_dir / "episode_termination_summary.csv")
+        tam_control_writer = tam_control_f = None
+        if args.log_tam_control_summary:
+            tam_control_writer, tam_control_f = _open_tam_control_summary(
+                out_dir / "tam_control_summary.csv")
         for iteration in range(1, iterations + 1):
             _SINGLE_RUNNER_STATE["iteration"] = iteration
             rollout_transitions = min(transitions_per_rollout, args.total_env_steps - total_steps)
@@ -1459,6 +1802,10 @@ def _run_training_main() -> None:
                     _record_rollout_agent_missiles(
                         agent_missiles, next_info, rollout_env.red_ids
                     )
+                    _record_episode_step_diag(
+                        episode_diag[env_idx], next_info,
+                        rollout_env.red_ids, rollout_env.blue_ids,
+                    )
                     mt = next_info.get("__missile_term__", {})
                     if isinstance(mt, dict):
                         red_hit_total = int(mt.get("red", {}).get("hit", 0))
@@ -1467,9 +1814,41 @@ def _run_training_main() -> None:
                         hits += max(blue_hit_total - prev_hit_totals[env_idx]["blue"], 0)
                         prev_hit_totals[env_idx]["red"] = red_hit_total
                         prev_hit_totals[env_idx]["blue"] = blue_hit_total
+                    if (
+                        tam_control_writer is not None
+                        and args.tam_control_summary_stride > 0
+                        and total_steps % args.tam_control_summary_stride == 0
+                    ):
+                        for row in _tam_control_summary_rows(
+                            rollout_env, next_info, action_dict,
+                            total_steps=total_steps,
+                            episode_id=current_ep_id[env_idx],
+                        ):
+                            _write_tam_control_summary_row(tam_control_writer, row)
+                        tam_control_f.flush()
                     if done:
                         outcome = _episode_outcome(rollout_env, truncated, current_ep_len[env_idx])
                         ra, ba = _alive_counts(rollout_env)
+                        diag = dict(episode_diag[env_idx])
+                        diag.update({
+                            "episode_id": current_ep_id[env_idx],
+                            "episode_length": current_ep_len[env_idx],
+                            "winner": outcome["winner"],
+                            "end_reason": outcome["end_reason"],
+                            "red_alive_final": ra,
+                            "blue_alive_final": ba,
+                            "mav_alive_final": int(_mav_alive(rollout_env)),
+                            "red_dead_count": len(rollout_env.red_ids) - ra,
+                            "blue_dead_count": len(rollout_env.blue_ids) - ba,
+                        })
+                        if not _mav_alive(rollout_env) and diag.get("mav_death_step", "") == "":
+                            diag["mav_death_step"] = current_ep_len[env_idx]
+                            diag["mav_death_reason"] = (
+                                rollout_env._death_reasons.get("red_0")
+                                or "other_or_unknown"
+                            )
+                        _write_episode_termination_summary(episode_summary_writer, diag)
+                        episode_summary_f.flush()
                         recent.append({
                             "return": float(current_ep_return[env_idx].mean()),
                             "winner": outcome["winner"],
@@ -1507,6 +1886,7 @@ def _run_training_main() -> None:
                         )
                         next_obs, next_info = rollout_env.reset(seed=args.seed + total_steps + env_idx)
                         current_ep_id[env_idx] += 1
+                        episode_diag[env_idx] = _new_episode_diag(current_ep_id[env_idx])
                         _SINGLE_RUNNER_STATE["episode_id"] = current_ep_id[env_idx]
                         if rnn_hidden is not None:
                             rnn_hidden[env_idx][:] = 0.0
@@ -1534,6 +1914,15 @@ def _run_training_main() -> None:
             if nan_detected:
                 break
             stats = trainer.update(buffer)
+            stats.update(_maneuver_action_stats(
+                buffer.actions[:len(buffer)],
+                buffer.active_masks[:len(buffer)],
+                roles,
+                action_dim,
+                tam_control_mode,
+                action_distribution=action_distribution,
+                action_levels=action_levels,
+            ))
             rec = list(recent)
             n = max(len(rec), 1)
             avg_return = float(np.mean([r["return"] for r in rec])) if rec else 0.0
@@ -1661,6 +2050,7 @@ def _run_training_main() -> None:
                     "death_transition_used_for_actor_red_0",
                 )],
                 int(nan_detected),
+                *_maneuver_action_row_values(stats, action_dim, tam_control_mode),
             ])
             if rich_logger is not None:
                 red_dead = max(0.0, float(len(env.red_ids)) - red_alive)
@@ -1827,6 +2217,8 @@ def _run_training_main() -> None:
                     "tam_action_distribution": action_distribution,
                     "action_space": action_space_class,
                     "tam_action_levels": action_levels,
+                    "tam_control_mode": tam_control_mode,
+                    **_action_semantics_meta(action_dim, tam_control_mode),
                     **_trainer_contract_meta(policy),
                     "entity_dim": getattr(policy, "entity_dim", None),
                     "attention": args.effective_policy_arch in {"entity_attention", "brma_entity", "brma_recurrent", "brma_recurrent_masked", TAM_CATEGORICAL_ARCH},
@@ -1930,6 +2322,8 @@ def _run_training_main() -> None:
                             "tam_action_distribution": action_distribution,
                             "action_space": action_space_class,
                             "tam_action_levels": action_levels,
+                            "tam_control_mode": tam_control_mode,
+                            **_action_semantics_meta(action_dim, tam_control_mode),
                             **_trainer_contract_meta(policy),
                             "entity_dim": getattr(policy, "entity_dim", None),
                             "separate_actors": True,
@@ -1953,6 +2347,9 @@ def _run_training_main() -> None:
                 (out_dir / "_tmp_eval_meta.json").unlink(missing_ok=True)
                 (out_dir / "meta.json").unlink(missing_ok=True)
                 (out_dir / "_tmp_eval.json").unlink(missing_ok=True)
+        episode_summary_f.close()
+        if tam_control_f is not None:
+            tam_control_f.close()
         if eval_f is not None:
             eval_f.close()
 
@@ -1981,6 +2378,8 @@ def _run_training_main() -> None:
         "tam_action_distribution": action_distribution,
         "action_space": action_space_class,
         "tam_action_levels": action_levels,
+        "tam_control_mode": tam_control_mode,
+        **_action_semantics_meta(action_dim, tam_control_mode),
         "actor_lr_effective": float(args.actor_lr),
         "critic_lr_effective": float(args.critic_lr),
         "entropy_coef_effective": float(args.entropy_coef),
@@ -2028,6 +2427,10 @@ def _run_training_main() -> None:
     }
     (out_dir / "latest" / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "main_experiment_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    _maybe_run_final_eval(
+        out_dir, latest_model, args,
+        total_steps=total_steps, iteration=iteration, last_eval=last_eval,
+    )
     _write_runner_status(
         out_dir,
         status="normal",

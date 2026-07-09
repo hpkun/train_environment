@@ -6,6 +6,7 @@ import numpy as np
 
 from my_uav_env import UavCombatEnv
 from my_uav_env.alignment.los_geometry import compute_body_x_q_los
+from my_uav_env.alignment.launch_quality import LAUNCH_QUALITY_FIELDS, make_launch_quality_record
 from my_uav_env.alignment.reward_utils import (
     REWARD_VERSION,
     ta_angle_advantage_fixed,
@@ -73,6 +74,44 @@ def test_blue_gcas_default_is_disabled():
         assert env.obs_mode == "paper_strict"
     finally:
         env.close()
+
+
+def test_paper_default_disables_legacy_post_hit_kill_gates():
+    env = UavCombatEnv()
+    try:
+        assert env.enable_kill_cooldown_gate is False
+        assert env.enable_single_kill_per_step_gate is False
+    finally:
+        env.close()
+
+
+def test_legacy_post_hit_kill_gates_are_explicitly_guarded():
+    source = Path("my_uav_env/env.py").read_text(encoding="utf-8")
+    assert "on_kill_cooldown = self.enable_kill_cooldown_gate" in source
+    assert "if self.enable_kill_cooldown_gate and shooter_id in self._agents_deny_kill" in source
+    assert "self.enable_single_kill_per_step_gate" in source
+
+
+def test_launch_quality_keeps_raw_termination_reason_field():
+    record = make_launch_quality_record(
+        team="red",
+        shooter_id="red_0",
+        target_id="blue_0",
+        current_step=1,
+        physics_frame=2,
+        range_m=1000.0,
+        AO_rad=0.1,
+        TA_rad=2.0,
+        shooter_pos=np.array([0.0, 0.0, 6000.0]),
+        shooter_vel=np.array([250.0, 0.0, 0.0]),
+        target_pos=np.array([1000.0, 0.0, 6000.0]),
+        target_vel=np.array([200.0, 0.0, 0.0]),
+        target_alive_at_launch=True,
+    )
+
+    assert "raw_termination_reason" in LAUNCH_QUALITY_FIELDS
+    assert "raw_termination_reason" in record
+    assert "raw_termination_reason" in Path("train_vanilla_mappo.py").read_text(encoding="utf-8")
 
 
 def test_paper_strict_observation_entities_are_10_dim():

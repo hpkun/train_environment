@@ -155,7 +155,7 @@ class UavCombatEnv(gymnasium.Env):
 
     MISSILE_COOLDOWN_STEPS = 30        # default 0.5 s at 60 Hz; __init__ scales with sim_freq
     MISSILE_LOCK_DELAY_FRAMES = 15     # default 0.25 s at 60 Hz; __init__ scales with sim_freq
-    KILL_COOLDOWN_STEPS = 3            # env steps — same agent cannot score another kill within 3 steps
+    KILL_COOLDOWN_STEPS = 3            # legacy engineering guard; disabled by default
     MISSILE_LAUNCH_AO_THRESH = np.deg2rad(45)
     MISSILE_LAUNCH_RANGE_THRESH = 10000.0  # m — paper: photoelectric sensor max range
     MISSILE_LAUNCH_MIN_RANGE = 500.0      # m — minimum safe launch distance (prevents point-blank self-hit)
@@ -197,6 +197,8 @@ class UavCombatEnv(gymnasium.Env):
     def __init__(self, max_num_blue=2, max_num_red=2, num_missiles_per_plane=999,
                  sim_freq=60, agent_interaction_steps=12, max_steps=1400,
                  enable_gcas_for_blue: bool = False,
+                 enable_kill_cooldown_gate: bool = False,
+                 enable_single_kill_per_step_gate: bool = False,
                  obs_mode: str = "paper_strict",
                  suppress_jsbsim_output: bool = True,
                  render_mode=None):
@@ -205,6 +207,8 @@ class UavCombatEnv(gymnasium.Env):
         self.max_num_red = max_num_red
         self.num_missiles_per_plane = num_missiles_per_plane
         self.enable_gcas_for_blue = enable_gcas_for_blue
+        self.enable_kill_cooldown_gate = enable_kill_cooldown_gate
+        self.enable_single_kill_per_step_gate = enable_single_kill_per_step_gate
         self.sim_freq = sim_freq
         self.agent_interaction_steps = agent_interaction_steps
         self.max_steps = max_steps
@@ -488,14 +492,15 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
 
-        # 0. Pre-compute kill-cooldown denial set (before physics loop).
-        #    An agent that scored a kill within the last KILL_COOLDOWN_STEPS
-        #    env steps is blocked from scoring another kill this step.
+        # 0. Optional legacy anti-burst guard (off for paper_strict baseline).
+        #    The paper defines launch interval/deconfliction, not post-hit
+        #    kill denial.  Keep this available only for explicit debugging.
         self._agents_deny_kill = set()
-        for aid in self.agent_ids:
-            last_kill = self._last_kill_step.get(aid, -999)
-            if self.current_step - last_kill < self.KILL_COOLDOWN_STEPS:
-                self._agents_deny_kill.add(aid)
+        if self.enable_kill_cooldown_gate:
+            for aid in self.agent_ids:
+                last_kill = self._last_kill_step.get(aid, -999)
+                if self.current_step - last_kill < self.KILL_COOLDOWN_STEPS:
+                    self._agents_deny_kill.add(aid)
         self._step_kill_count = {aid: 0 for aid in self.agent_ids}
 
         # 1. Parse actions and compute PID control targets
@@ -804,10 +809,9 @@ class UavCombatEnv(gymnasium.Env):
                 self._lock_timer[aid] = 0
                 self._lock_target[aid] = None
 
-            # ---- Launch when lock mature, weapon ready, and shooter
-            #      is not on kill cooldown ----
+            # ---- Launch when lock mature and weapon ready ----
             # (best_enemy is already guaranteed unengaged by the filter above)
-            on_kill_cooldown = aid in self._agents_deny_kill
+            on_kill_cooldown = self.enable_kill_cooldown_gate and aid in self._agents_deny_kill
             lock_mature = (best_enemy is not None
                            and self._lock_timer[aid] >= self.missile_lock_delay_frames)
             if lock_mature:
@@ -920,6 +924,7 @@ class UavCombatEnv(gymnasium.Env):
         except Exception:
             step_delta = ""
         record.update({
+            "raw_termination_reason": raw_reason,
             "termination_reason": reason,
             "is_success": bool(missile.is_success),
             "flight_time_sec": float(getattr(missile, "_t", _nan_float())),
@@ -932,12 +937,9 @@ class UavCombatEnv(gymnasium.Env):
     def _update_missiles(self):
         """Advance all in-flight missiles and process hit/miss events.
 
-        Kill-cooldown enforcement (paper §2.1.3: 0.5 s between kills):
-          - If the shooter is on kill cooldown, the hit is overridden to MISS
-            and the target is revived (its shotdown is reversed).
-          - Single-target lock: each agent may score at most ONE kill per env
-            step, preventing "AOE" multi-target damage when several missiles
-            from the same shooter arrive in the same physics window.
+        Optional legacy anti-burst gates can block post-hit kills for debugging,
+        but both are disabled by default because the paper specifies launch
+        interval/deconfliction rather than a post-hit kill cooldown.
         """
         for mid, missile in list(self._missiles_in_flight.items()):
             was_done_before = missile.is_done
@@ -954,7 +956,7 @@ class UavCombatEnv(gymnasium.Env):
 
                 # ---- Kill-cooldown gate ----
                 # Shooter has scored a kill too recently → override to MISS.
-                if shooter_id in self._agents_deny_kill:
+                if self.enable_kill_cooldown_gate and shooter_id in self._agents_deny_kill:
                     missile._status = MissileSimulator.MISS
                     missile._termination_reason = "kill_cooldown_blocked"
                     # Reverse the shotdown that missile.run() applied
@@ -967,7 +969,8 @@ class UavCombatEnv(gymnasium.Env):
                 # An agent may score at most 1 kill per env step.  If the same
                 # shooter already killed a different target this step, block
                 # any further kills.
-                if self._step_kill_count.get(shooter_id, 0) >= 1:
+                if (self.enable_single_kill_per_step_gate
+                        and self._step_kill_count.get(shooter_id, 0) >= 1):
                     missile._status = MissileSimulator.MISS
                     missile._termination_reason = "multi_kill_blocked"
                     if missile.target_aircraft is not None:
