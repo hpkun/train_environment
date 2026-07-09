@@ -133,7 +133,8 @@ class TamCombatEnv(HeteroUavCombatEnv):
         self._last_tam_control_commands: dict[str, list[float] | None] = {}
         self._last_tam_controller_terms: dict[str, dict] = {}
         self._last_tam_action_warnings: dict[str, list[str]] = {}
-        self._last_tam_blue_legacy_pid_rule_adapter: dict[str, bool] = {}
+        self._last_tam_blue_legacy_pid_rule_adapter: dict[str, bool | str] = {}
+        self._last_tam_blue_legacy_pid_applied: dict[str, bool] = {}
         self._last_tam_blue_legacy_pid_targets: dict[str, list[float] | None] = {}
         self._last_tam_applied_fcs: dict[str, list[float] | None] = {}
         self._last_effective_actions = {}
@@ -313,16 +314,27 @@ class TamCombatEnv(HeteroUavCombatEnv):
             raw_action = actions.get(aid)
             if aid.startswith("blue_") and raw_action is not None:
                 raw_arr = np.asarray(raw_action, dtype=np.float32)
-                if raw_arr.shape == (3,) and alive:
+                if raw_arr.shape == (3,):
                     self._last_tam_raw_actions[aid] = self._json_list(raw_arr)
                     self._last_tam_sanitized_actions[aid] = None
                     self._last_tam_fcs_commands[aid] = None
                     self._last_effective_actions[aid] = None
+                    self._last_tam_control_commands[aid] = None
+                    if not alive:
+                        self._last_tam_action_warnings.setdefault(aid, []).append(
+                            "blue_legacy_pid_rule_adapter_inactive_ignored"
+                        )
+                        self._last_tam_blue_legacy_pid_rule_adapter[aid] = "inactive_ignored"
+                        self._last_tam_blue_legacy_pid_applied[aid] = False
+                        self._last_tam_blue_legacy_pid_targets[aid] = None
+                        targets[aid] = None
+                        continue
                     self._last_tam_action_warnings.setdefault(aid, []).append(
                         "blue_legacy_pid_rule_adapter"
                     )
                     pid_target = self._legacy_pid_rule_action_to_target(aid, raw_arr)
                     self._last_tam_blue_legacy_pid_rule_adapter[aid] = True
+                    self._last_tam_blue_legacy_pid_applied[aid] = True
                     self._last_tam_blue_legacy_pid_targets[aid] = self._round_list(pid_target)
                     targets[aid] = ("legacy_pid_rule_adapter", pid_target)
                     continue
@@ -332,6 +344,7 @@ class TamCombatEnv(HeteroUavCombatEnv):
                 self._last_tam_fcs_commands[aid] = None
                 self._last_effective_actions[aid] = None
                 self._last_tam_blue_legacy_pid_rule_adapter[aid] = False
+                self._last_tam_blue_legacy_pid_applied[aid] = False
                 targets[aid] = None
                 continue
             sanitized = self._sanitize_tam_action(aid, validated)
@@ -341,6 +354,7 @@ class TamCombatEnv(HeteroUavCombatEnv):
             self._last_tam_control_commands[aid] = self._round_list(fcs)
             self._last_effective_actions[aid] = self._round_list(sanitized)
             self._last_tam_blue_legacy_pid_rule_adapter[aid] = False
+            self._last_tam_blue_legacy_pid_applied[aid] = False
             targets[aid] = fcs
         return targets
 
@@ -603,6 +617,7 @@ class TamCombatEnv(HeteroUavCombatEnv):
             "tam_blue_legacy_pid_rule_adapter": dict(
                 self._last_tam_blue_legacy_pid_rule_adapter
             ),
+            "tam_blue_legacy_pid_applied": dict(self._last_tam_blue_legacy_pid_applied),
             "tam_blue_legacy_pid_targets": dict(self._last_tam_blue_legacy_pid_targets),
             "tam_controller_terms": dict(self._last_tam_controller_terms),
             "tam_control_diagnostics": (

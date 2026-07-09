@@ -2,6 +2,8 @@
 # This config keeps the mav_guided_v1 scenario, reward, observation, missile
 # model, launch gate, blue rule, and initial geometry unchanged.  It only uses
 # tam_env with maneuver_fcs Box(4) actions for pipeline compatibility checks.
+# The F16 MAV surrogate here is diagnostic-only; final F22 MAV experiments need
+# a separate F22 maneuver_fcs config.
 env_type: tam
 tam_control_mode: maneuver_fcs
 

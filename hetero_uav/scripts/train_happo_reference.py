@@ -154,6 +154,9 @@ def _env_type_override_kwargs(config_path: str | Path | None) -> dict:
 def _infer_env_action_dim(env) -> int:
     """Infer per-agent continuous action dimension from env.action_space."""
 
+    env_action_dim = getattr(env, "action_dim", None)
+    if env_action_dim is not None:
+        return int(env_action_dim)
     action_space = getattr(env, "action_space", None)
     if action_space is None:
         return 3
@@ -261,6 +264,7 @@ def _mp_env_worker(remote, parent_remote, config: str,
             "agent_types": dict(env.agent_types),
             "agent_models": dict(env.agent_models),
             "actual_reward_mode": getattr(env, "hetero_reward_mode", reward_mode),
+            "action_dim": _infer_env_action_dim(env),
         }
         remote.send(("ready", meta))
         while True:
@@ -307,6 +311,7 @@ class _MpEnvProxy:
         self.agent_types = dict(meta.get("agent_types", {}))
         self.agent_models = dict(meta.get("agent_models", {}))
         self.hetero_reward_mode = meta.get("actual_reward_mode", "")
+        self.action_dim = int(meta.get("action_dim", 3))
         self._remote = remote
         self.current_step = 0
         self.env_dt = 0.0
