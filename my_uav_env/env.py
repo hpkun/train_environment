@@ -142,8 +142,7 @@ class UavCombatEnv(gymnasium.Env):
     #   V ∈ [0.3, 1.2] Mach   velocity act[2] ∈ [-1, 1] → [102, 408] m/s
     #
     # Both teams share identical action authority per paper specification.
-    # GCAS for Blue is the ONLY remaining team asymmetry (hard-coded baseline
-    # safety net that Red must learn through reward shaping).
+    # Blue-only GCAS is retained only as an explicit engineering debug option.
     #
     # Velocity:  F-16 F100-PW-229 MilThrust ≈ 17 800 lbf; jet can sustain M0.8–1.0
     #            in level flight at 10 kft.  Mach reference: a ≈ 340 m/s at sea level,
@@ -191,8 +190,9 @@ class UavCombatEnv(gymnasium.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, max_num_blue=2, max_num_red=2, num_missiles_per_plane=999,
-                 sim_freq=60, agent_interaction_steps=12, max_steps=1000,
-                 enable_gcas_for_blue: bool = True,
+                 sim_freq=60, agent_interaction_steps=12, max_steps=1400,
+                 enable_gcas_for_blue: bool = False,
+                 obs_mode: str = "engineering",
                  suppress_jsbsim_output: bool = True,
                  render_mode=None):
         super().__init__()
@@ -204,6 +204,10 @@ class UavCombatEnv(gymnasium.Env):
         self.agent_interaction_steps = agent_interaction_steps
         self.max_steps = max_steps
         self.suppress_jsbsim_output = suppress_jsbsim_output
+        if obs_mode not in ("engineering", "paper_strict"):
+            raise ValueError("obs_mode must be 'engineering' or 'paper_strict'")
+        self.obs_mode = obs_mode
+        self.entity_dim = 10 if obs_mode == "paper_strict" else 11
         self.physics_dt = 1.0 / sim_freq
         self.env_dt = agent_interaction_steps * self.physics_dt
         self.missile_cooldown_frames = int(round(0.5 * self.sim_freq))
@@ -225,13 +229,13 @@ class UavCombatEnv(gymnasium.Env):
         for i, aid in enumerate(self.blue_ids):
             obs_spaces[aid] = gymnasium.spaces.Dict({
                 "ego_state": gymnasium.spaces.Box(
-                    low=-np.inf, high=np.inf, shape=(11,), dtype=np.float32),
+                    low=-np.inf, high=np.inf, shape=(self.entity_dim,), dtype=np.float32),
                 "ally_states": gymnasium.spaces.Box(
                     low=-np.inf, high=np.inf,
-                    shape=(max_num_blue - 1, 11), dtype=np.float32),
+                    shape=(max_num_blue - 1, self.entity_dim), dtype=np.float32),
                 "enemy_states": gymnasium.spaces.Box(
                     low=-np.inf, high=np.inf,
-                    shape=(max_num_red, 11), dtype=np.float32),
+                    shape=(max_num_red, self.entity_dim), dtype=np.float32),
                 "death_mask": gymnasium.spaces.Box(
                     low=0, high=1,
                     shape=(max_num_blue + max_num_red,), dtype=np.int64),
@@ -245,13 +249,13 @@ class UavCombatEnv(gymnasium.Env):
         for i, aid in enumerate(self.red_ids):
             obs_spaces[aid] = gymnasium.spaces.Dict({
                 "ego_state": gymnasium.spaces.Box(
-                    low=-np.inf, high=np.inf, shape=(11,), dtype=np.float32),
+                    low=-np.inf, high=np.inf, shape=(self.entity_dim,), dtype=np.float32),
                 "ally_states": gymnasium.spaces.Box(
                     low=-np.inf, high=np.inf,
-                    shape=(max_num_red - 1, 11), dtype=np.float32),
+                    shape=(max_num_red - 1, self.entity_dim), dtype=np.float32),
                 "enemy_states": gymnasium.spaces.Box(
                     low=-np.inf, high=np.inf,
-                    shape=(max_num_blue, 11), dtype=np.float32),
+                    shape=(max_num_blue, self.entity_dim), dtype=np.float32),
                 "death_mask": gymnasium.spaces.Box(
                     low=0, high=1,
                     shape=(max_num_blue + max_num_red,), dtype=np.int64),
@@ -1280,6 +1284,9 @@ class UavCombatEnv(gymnasium.Env):
         return obs
 
     def _get_agent_obs(self, agent_id: str) -> dict:
+        if self.obs_mode == "paper_strict":
+            return self._get_agent_obs_paper_strict(agent_id)
+
         sim = self._get_sim(agent_id)
         alive = sim is not None and sim.is_alive
         color = "Blue" if agent_id.startswith("blue") else "Red"
@@ -1389,6 +1396,67 @@ class UavCombatEnv(gymnasium.Env):
 
         return {
             "ego_state": ego_state,
+            "ally_states": ally_vecs,
+            "enemy_states": enemy_vecs,
+            "death_mask": death_mask,
+            "missile_warning": missile_warning,
+            "altitude": altitude,
+            "velocity": velocity,
+        }
+
+    def _get_agent_obs_paper_strict(self, agent_id: str) -> dict:
+        """Build Table 1 / Table 2 10-dim observations for reset/step."""
+        from my_uav_env.alignment.state_extractor import (
+            extract_relative_state,
+            extract_self_state_with_meta,
+        )
+
+        sim = self._get_sim(agent_id)
+        alive = sim is not None and sim.is_alive
+        color = "Blue" if agent_id.startswith("blue") else "Red"
+        blue_sims = [self.blue_planes[bid] for bid in self.blue_ids]
+        red_sims = [self.red_planes[rid] for rid in self.red_ids]
+
+        if alive:
+            ego_state, _meta = extract_self_state_with_meta(sim)
+        else:
+            ego_state = np.zeros(10, dtype=np.float32)
+
+        if color == "Blue":
+            ally_sims = [s for s in blue_sims if s.uid != agent_id]
+            enemy_sims = red_sims
+            max_allies = self.max_num_blue - 1
+            max_enemies = self.max_num_red
+        else:
+            ally_sims = [s for s in red_sims if s.uid != agent_id]
+            enemy_sims = blue_sims
+            max_allies = self.max_num_red - 1
+            max_enemies = self.max_num_blue
+
+        ally_vecs = np.zeros((max_allies, 10), dtype=np.float32)
+        enemy_vecs = np.zeros((max_enemies, 10), dtype=np.float32)
+        if alive:
+            for j, ally in enumerate(ally_sims):
+                if ally.is_alive:
+                    ally_vecs[j] = extract_relative_state(
+                        sim, ally, radar_detected=True)
+            for j, enemy in enumerate(enemy_sims):
+                if enemy.is_alive:
+                    radar_detected = self._is_detected_by_radar(sim, enemy)
+                    enemy_vecs[j] = extract_relative_state(
+                        sim, enemy, radar_detected=radar_detected)
+
+        all_sims_ordered = blue_sims + red_sims
+        death_mask = np.array([1 if s.is_alive else 0 for s in all_sims_ordered], dtype=np.int64)
+        mw = 1.0 if alive and sim.check_missile_warning() is not None else 0.0
+        missile_warning = np.array([mw], dtype=np.float32)
+        alt_m = sim.get_geodetic()[2] if alive else 0.0
+        altitude = np.array([alt_m], dtype=np.float32)
+        vel = sim.get_velocity() if alive else np.zeros(3)
+        velocity = np.array([vel[0], vel[1], vel[2]], dtype=np.float32)
+
+        return {
+            "ego_state": ego_state.astype(np.float32),
             "ally_states": ally_vecs,
             "enemy_states": enemy_vecs,
             "death_mask": death_mask,

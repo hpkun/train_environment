@@ -35,6 +35,19 @@ EXPERIMENT_PRESETS = {
         "checkpoint_dir": "checkpoints/vanilla_2v2_smoke",
     },
     # ---- vanilla main ----
+    "vanilla_6v6_paper_main": {
+        "num_red": 6,
+        "num_blue": 6,
+        "num_envs": 8,
+        "total_env_steps": 10_000_000,
+        "replay_buffer_size": 2000,
+        "max_episode_length": 1400,
+        "obs_mode": "paper_strict",
+        "device": "auto",
+        "log_file": "logs/vanilla_6v6_paper_main.csv",
+        "results_file": "results/vanilla_6v6_paper_main_results.csv",
+        "checkpoint_dir": "checkpoints/vanilla_6v6_paper_main",
+    },
     "vanilla_2v2_main": {
         "num_red": 2,
         "num_blue": 2,
@@ -42,6 +55,7 @@ EXPERIMENT_PRESETS = {
         "total_env_steps": 10_000_000,
         "replay_buffer_size": 2000,
         "max_episode_length": 1400,
+        "obs_mode": "engineering",
         "device": "auto",
         "log_file": "logs/vanilla_2v2_main.csv",
         "results_file": "results/vanilla_2v2_main_results.csv",

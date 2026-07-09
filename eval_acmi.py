@@ -168,8 +168,9 @@ class VisualMissileTracker:
 # ==============================================================================
 
 def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
-             num_red: int = 2, num_blue: int = 2, max_steps: int = 1400,
-             draw_boundary: bool = False, boundary_half_size: float = 40000.0):
+             num_red: int = 6, num_blue: int = 6, max_steps: int = 1400,
+             draw_boundary: bool = False, boundary_half_size: float = 40000.0,
+             obs_mode: str = "paper_strict"):
     """Load a model, run one episode with TacView recording, save .acmi."""
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -180,6 +181,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
     try:
         env = UavCombatEnv(max_num_blue=num_blue, max_num_red=num_red,
                            max_steps=max_steps,
+                           obs_mode=obs_mode,
                            enable_gcas_for_blue=False,
                            suppress_jsbsim_output=True)
     except Exception:
@@ -213,7 +215,8 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                 env.close()
                 return
 
-            obs_dim = _compute_obs_dim(num_red, num_blue, is_red=True)
+            obs_dim = _compute_obs_dim(
+                num_red, num_blue, is_red=True, obs_mode=obs_mode)
 
             if ckpt_obs_dim != obs_dim:
                 total_agents = (ckpt_obs_dim - 5) // 12
@@ -511,9 +514,12 @@ if __name__ == "__main__":
                             help="红方使用随机策略")
         parser.add_argument("--output", type=str, default="eval_battle.acmi",
                             help="输出 .acmi 文件路径")
-        parser.add_argument("--num-red", type=int, default=2)
-        parser.add_argument("--num-blue", type=int, default=2)
+        parser.add_argument("--num-red", type=int, default=6)
+        parser.add_argument("--num-blue", type=int, default=6)
         parser.add_argument("--max-steps", type=int, default=1400)
+        parser.add_argument("--obs-mode", type=str,
+                            choices=("paper_strict", "engineering"),
+                            default="paper_strict")
         parser.add_argument("--draw-boundary", action="store_true", default=False,
                             help="Draw battlefield boundary in ACMI for debugging.")
         parser.add_argument("--boundary-half-size", type=float, default=40000.0,
@@ -543,7 +549,8 @@ if __name__ == "__main__":
                  num_red=args.num_red, num_blue=args.num_blue,
                  max_steps=args.max_steps,
                  draw_boundary=args.draw_boundary,
-                 boundary_half_size=args.boundary_half_size)
+                 boundary_half_size=args.boundary_half_size,
+                 obs_mode=args.obs_mode)
     except Exception:
         print("FATAL: 未捕获的异常:", flush=True)
         traceback.print_exc()

@@ -80,11 +80,11 @@ except AttributeError:
 class Config:
     # ---- 环境 (从局部冲突开始，降低协同难度) ----
     num_envs: int = 8           
-    num_red: int = 2            # 💡 强烈建议先从 2v2 或 1v1 开始训练！
-    num_blue: int = 2           # 等模型在 2v2 收敛后，再将权重加载到 6v6 中微调
-    max_episode_length: int = 1400  
+    num_red: int = 6
+    num_blue: int = 6
     max_episode_length: int = 1400
     enable_blue_gcas: bool = False
+    obs_mode: str = "paper_strict"
     resume_from_best: bool = False
     action_dim: int = 3
 
@@ -124,7 +124,8 @@ class Config:
 #  纯 MLP Actor / Critic (展平观测 → GRU → MLP)
 # ==============================================================================
 
-def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool) -> int:
+def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool,
+                     obs_mode: str = "paper_strict") -> int:
     """计算展平后的观测向量维度。"""
     if is_red:
         n_ally = num_red - 1
@@ -133,7 +134,8 @@ def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool) -> int:
         n_ally = num_blue - 1
         n_enemy = num_red
     total_entities = 1 + max(n_ally, 0) + n_enemy
-    return 11 * total_entities + (num_red + num_blue) + 1 + 1 + 3  # entities + death_mask + missile_warning + altitude + velocity
+    entity_dim = 10 if obs_mode == "paper_strict" else 11
+    return entity_dim * total_entities + (num_red + num_blue) + 1 + 1 + 3
 
 
 class VanillaActor(nn.Module):
@@ -1372,6 +1374,9 @@ def parse_args():
                         default=defaults.entropy_coef)
     parser.add_argument("--enable-blue-gcas", action="store_true",
                         default=defaults.enable_blue_gcas)
+    parser.add_argument("--obs-mode", type=str,
+                        choices=("paper_strict", "engineering"),
+                        default=defaults.obs_mode)
     parser.add_argument("--resume-from-best", action="store_true",
                         default=defaults.resume_from_best)
     parser.add_argument("--log-file", type=str, default=defaults.log_file)
@@ -1391,7 +1396,7 @@ _VANILLA_PRESET_CLI_FLAGS = {
     "num_red", "num_blue", "num_envs", "total_env_steps",
     "max_episode_length", "replay_buffer_size", "n_minibatches",
     "actor_lr", "critic_lr", "entropy_coef",
-    "enable_blue_gcas", "resume_from_best",
+    "enable_blue_gcas", "obs_mode", "resume_from_best",
     "log_file", "results_file", "launch_quality_file",
     "checkpoint_dir", "device",
 }
@@ -1428,6 +1433,7 @@ def make_config_from_args(args) -> Config:
     config.critic_lr = args.critic_lr
     config.entropy_coef = args.entropy_coef
     config.enable_blue_gcas = args.enable_blue_gcas
+    config.obs_mode = args.obs_mode
     config.resume_from_best = args.resume_from_best
     config.log_file = args.log_file
     config.results_file = args.results_file
@@ -1494,7 +1500,9 @@ def main():
     device = _select_device(config.device)
 
     # 计算展平观测维度 (红方视角)
-    obs_dim = _compute_obs_dim(config.num_red, config.num_blue, is_red=True)
+    obs_dim = _compute_obs_dim(
+        config.num_red, config.num_blue, is_red=True,
+        obs_mode=config.obs_mode)
 
     # ---- 持久化：创建 checkpoint 目录 ----
     os.makedirs(config.checkpoint_dir, exist_ok=True)
@@ -1546,6 +1554,7 @@ def main():
     print(f"  seed: {config.seed}")
     print(f"  device: {device}")
     print(f"  reward_version: {REWARD_VERSION}")
+    print(f"  obs_mode: {config.obs_mode}")
     print(f"架构: Vanilla MLP + GRU (无注意力, 无掩码)")
     print(f"场景: {config.num_red}v{config.num_blue} (红方 RL, 蓝方规则)")
     print(f"展平 obs 维度: {obs_dim}")
@@ -1562,6 +1571,7 @@ def main():
     num_steps = config.replay_buffer_size // config.num_envs
     env_kwargs = dict(max_num_blue=config.num_blue, max_num_red=config.num_red,
                       max_steps=config.max_episode_length,
+                      obs_mode=config.obs_mode,
                       enable_gcas_for_blue=config.enable_blue_gcas)
     print(f"正在启动 {config.num_envs} 个 worker 进程...", flush=True)
     vec_env = SubprocVecEnv(config.num_envs, env_kwargs)

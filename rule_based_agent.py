@@ -307,6 +307,38 @@ def _simple_center_bearing(own_position: np.ndarray | None, current_heading: flo
     return _wrap_pi(np.arctan2(-float(pos[1]), -float(pos[0])))
 
 
+def _is_paper_strict_entity(vec: np.ndarray) -> bool:
+    return np.asarray(vec).shape[-1] == 10
+
+
+def _entity_range_m(vec: np.ndarray) -> float:
+    vec = np.asarray(vec, dtype=np.float32)
+    if _is_paper_strict_entity(vec):
+        return float(vec[9])
+    return float(vec[5]) * 80000.0
+
+
+def _entity_bearing_rad(vec: np.ndarray) -> float:
+    vec = np.asarray(vec, dtype=np.float32)
+    if _is_paper_strict_entity(vec):
+        return float(vec[7])
+    return float(vec[3]) * np.pi
+
+
+def _entity_aspect_proxy_rad(vec: np.ndarray) -> float:
+    vec = np.asarray(vec, dtype=np.float32)
+    if _is_paper_strict_entity(vec):
+        return abs(float(vec[8]))
+    return abs(float(vec[4]) * np.pi)
+
+
+def _entity_delta_alt_m(vec: np.ndarray) -> float:
+    vec = np.asarray(vec, dtype=np.float32)
+    if _is_paper_strict_entity(vec):
+        return -float(vec[2])
+    return float(vec[2]) * 10000.0
+
+
 def _simple_valid_targets(
     obs: dict,
     num_blue: int,
@@ -327,7 +359,7 @@ def _simple_valid_targets(
         state = np.asarray(enemy_states[red_idx], dtype=np.float32)
         if state.size < 6 or np.allclose(state, 0.0):
             continue
-        range_m = float(state[5]) * 80000.0
+        range_m = _entity_range_m(state)
         if not np.isfinite(range_m) or range_m <= 1.0:
             continue
         candidates.append((range_m, red_idx, state))
@@ -444,13 +476,13 @@ def _blue_simple_pursuit_action_impl(
         target_idx, target_state, range_m = _simple_nearest_target(obs, num_blue, num_red)
 
     if target_state is not None:
-        ao = float(target_state[3]) * np.pi if target_state.size > 3 else 0.0
+        ao = _entity_bearing_rad(target_state)
         geo_heading = _simple_body_vector_to_world_bearing(
             target_state, np.asarray(obs.get("ego_state", []), dtype=np.float32), our_heading)
         desired_heading = geo_heading if geo_heading is not None else _wrap_pi(our_heading + ao)
         _simple_last_seen_bearing[blue_id] = desired_heading
         _simple_lost_steps[blue_id] = 0
-        delta_alt = float(target_state[2]) * 10000.0 if target_state.size > 2 else 0.0
+        delta_alt = _entity_delta_alt_m(target_state)
         pitch = np.clip(delta_alt / max(float(range_m or 300.0), 300.0) * 2.0 + _TRIM_BASELINE, -0.20, 0.25)
         if alt_m < SAFE_COMBAT_ALT:
             pitch = max(float(pitch), 0.0)
@@ -485,9 +517,11 @@ def _target_track_quality(tgt_vec: np.ndarray) -> str:
     vec = np.asarray(tgt_vec, dtype=np.float32)
     if vec.ndim != 1 or vec.shape[0] < 6 or np.allclose(vec, 0.0):
         return "invalid"
-    R = float(vec[5]) * 80000.0
+    R = _entity_range_m(vec)
     if R < 1.0:
         return "invalid"
+    if _is_paper_strict_entity(vec):
+        return "radar" if abs(float(vec[5])) > 1e-4 else "awacs"
     TA = abs(float(vec[4]) * np.pi)
     return "radar" if TA > 1e-4 else "awacs"
 
@@ -498,9 +532,9 @@ def _target_selection_score(tgt_vec: np.ndarray) -> float:
     quality = _target_track_quality(tgt_vec)
     if quality == "invalid":
         return 0.0
-    R = float(tgt_vec[5]) * 80000.0
-    AO = float(tgt_vec[3]) * np.pi
-    TA = abs(float(tgt_vec[4]) * np.pi)
+    R = _entity_range_m(tgt_vec)
+    AO = _entity_bearing_rad(tgt_vec)
+    TA = _entity_aspect_proxy_rad(tgt_vec)
     if quality == "radar":
         TA_eff = max(TA, np.deg2rad(5))
         quality_weight = 1.0
@@ -522,7 +556,7 @@ def blue_coordinated_actions(
     engaged_targets: set[str] | None = None,
     own_positions: dict[str, np.ndarray] | None = None,
     own_headings: dict[str, float] | None = None,
-    pursuit_mode: str = "delta10",
+    pursuit_mode: str = "safe_pursuit",
 ) -> dict[str, np.ndarray]:
     """Greedy target deconfliction: distribute blues across different reds.
 
@@ -654,7 +688,7 @@ def blue_pursuit_action(obs: dict, num_blue: int, num_red: int, blue_id: int,
                         missile_warning: bool = False,
                         own_position: np.ndarray | None = None,
                         own_heading: float | None = None,
-                        pursuit_mode: str = "delta10") -> np.ndarray:
+                        pursuit_mode: str = "safe_pursuit") -> np.ndarray:
     """Per-aircraft entry point (legacy — prefer ``blue_coordinated_actions``)."""
     return _blue_pursuit_action_impl(obs, num_blue, num_red, blue_id,
                                      forced_target_idx=None,
@@ -675,7 +709,7 @@ def _blue_pursuit_action_impl(
     forced_target_idx: int | None,
     own_position: np.ndarray | None = None,
     own_heading: float | None = None,
-    pursuit_mode: str = "delta10",
+    pursuit_mode: str = "safe_pursuit",
 ) -> np.ndarray:
     """四层状态机自动驾驶仪（优先级从高到低）。
 

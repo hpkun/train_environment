@@ -1,45 +1,62 @@
-# Current environment alignment status
+﻿# Current environment alignment status
+
+## 0. Current paper-aligned defaults
+
+Current reward version: `paper_eq20_ta_alt_eq17_3dlos_v1`.
+
+Vanilla main environment defaults now target the paper setting: 6v6,
+`max_episode_length=1400`, `obs_mode="paper_strict"`, and
+`enable_gcas_for_blue=False`.
+
+The situation reward uses paper Eq.20 Ta original scale, including `Ta=10`
+for `q_LOS <= 4 deg`, paper Eq.21 Td with meter inputs converted to km, and
+3D body-x q_LOS. The legacy 11-dim engineering observation remains available
+only via `obs_mode="engineering"`.
+
+Engineering assumptions retained: altitude reward thresholds, RCS front/side
+approximation, photoelectric cone half-angle, missile physical parameters,
+and optional Blue-only GCAS/debug safety layers.
 
 Last updated: after situation-reward 3D body-x q_LOS switch.
 
 ## 1. Current reward / environment version
 
 ```python
-REWARD_VERSION = "fixed_ta_alt_eq17_3dlos_v1"
+REWARD_VERSION = "paper_eq20_ta_alt_eq17_3dlos_v1"
 ```
 
 This version includes:
 
-1. **fixed Ta curve** — continuous, non-negative, normalized `[0, 1]` angle-advantage function
+1. **fixed Ta curve** 鈥?continuous, non-negative, normalized `[0, 1]` angle-advantage function
    (`ta_angle_advantage_fixed`).
-2. **pairwise eq.17-style altitude reward** — mean of `altitude_reward_paper_eq17` over
+2. **pairwise eq.17-style altitude reward** 鈥?mean of `altitude_reward_paper_eq17` over
    alive enemies, with high-altitude `0.1` tail.
-3. **3D body-x q_LOS situation reward** — `_situation_reward()` uses
+3. **3D body-x q_LOS situation reward** 鈥?`_situation_reward()` uses
    `compute_body_x_q_los(ego_pos, ego_rpy, enemy_pos)` instead of the old 2D horizontal
    `get2d_AO_TA_R`.
-4. **3D Euclidean distance in situation reward** — `compute_3d_range` replaces the old
+4. **3D Euclidean distance in situation reward** 鈥?`compute_3d_range` replaces the old
    horizontal-only `R`.
-5. **signed AO collinear fix** — `_make_entity_vec` uses `_signed_ao_from_unsigned_and_side`
-   so a target directly behind (unsigned AO ≈ π) is no longer collapsed to 0 in the 11-dim
+5. **signed AO collinear fix** 鈥?`_make_entity_vec` uses `_signed_ao_from_unsigned_and_side`
+   so a target directly behind (unsigned AO 鈮?蟺) is no longer collapsed to 0 in the 11-dim
    entity observation vector.
 
 Older reward versions (`fixed_ta_v1`, `fixed_ta_alt_eq17_v1`, and legacy pre-pass19 logs)
-should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
+should **not** be mixed with `paper_eq20_ta_alt_eq17_3dlos_v1` results.
 
 ## 2. Aligned or mostly aligned items
 
 | Item | Paper reference | Status |
 |---|---|---|
-| JSBSim F-16 flight dynamics | §2.2 | Shared engine for both teams |
-| PID Bank-to-Turn high-level action | §2.4 | Three-loop roll/pitch/velocity PID with gimbal protection, heading LPF, anti-inversion |
-| Action range pitch/heading/velocity | §2.4 | pitch ±90°, heading ±180°, velocity 102–408 m/s |
+| JSBSim F-16 flight dynamics | 搂2.2 | Shared engine for both teams |
+| PID Bank-to-Turn high-level action | 搂2.4 | Three-loop roll/pitch/velocity PID with gimbal protection, heading LPF, anti-inversion |
+| Action range pitch/heading/velocity | 搂2.4 | pitch 卤90掳, heading 卤180掳, velocity 102鈥?08 m/s |
 | Missile cooldown | 0.5 s | `missile_cooldown_frames` scaled with `sim_freq` |
 | Missile lock delay | 0.25 s | `missile_lock_delay_frames` scaled with `sim_freq` |
 | Missile hit probability | directional | Uses missile velocity vs LOS dot product; `MissileSimulator` resolves hit/miss |
-| Radar FOV | ±60° azimuth, [-10°,+32°] elevation | `_is_detected_by_radar` checks both |
+| Radar FOV | 卤60掳 azimuth, [-10掳,+32掳] elevation | `_is_detected_by_radar` checks both |
 | Radar Rmax | `Rmax = K * RCS^(1/4)` | `_compute_radar_max_range` uses `RADAR_K * rcs^0.25` |
-| Boundary reward (eq.18) | `-10` if `\|x\|` or `\|y\|` > 4×10⁴ | `_boundary_penalty` uses `BATTLEFIELD_HALF_SIZE` |
-| Roll reward (eq.16) | Dual-condition `\|φ\|>π/4 & \|θ\|>π/4` | `_roll_penalty` matches formula |
+| Boundary reward (eq.18) | `-10` if `\|x\|` or `\|y\|` > 4脳10鈦?| `_boundary_penalty` uses `BATTLEFIELD_HALF_SIZE` |
+| Roll reward (eq.16) | Dual-condition `\|蠁\|>蟺/4 & \|胃\|>蟺/4` | `_roll_penalty` matches formula |
 | Altitude reward (eq.17-style) | Pairwise relative, quadratic segments | `_altitude_reward` uses `altitude_reward_pairwise_mean_eq17` |
 | Situation reward geometry | 3D body-frame LOS | `_situation_reward` uses `compute_body_x_q_los` + `compute_3d_range` |
 | Terminal reward (eq.23) | Team-level `r_end`, per-agent share | Computed as `raw_r_end / max_num_team`, sum equals paper value |
@@ -52,12 +69,12 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | RCS model | Front/side approximation, not paper table interpolation | P2 |
 | Pitch reward (eq.15) | Middle-segment slope needs paper text visual verification | P1 |
 | Speed reward (eq.19) | Mach conversion constant (340 m/s) approximate; needs paper verification | P1 |
-| Ta scale | Current `fixed_ta_v1` uses `[0, 1]` scale; paper eq.20 may use `10` first segment | P1 — needs ablation, not silent swap |
-| q_LOS definition | Current choice is body-x LOS angle; velocity-q candidate exists in `situation_reward_candidates.py` | P1 — pending paper confirmation |
+| Ta scale | Paper Eq.20 original scale is the current default | aligned |
+| q_LOS definition | Current choice is body-x LOS angle; velocity-q candidate exists in `situation_reward_candidates.py` | P1 鈥?pending paper confirmation |
 | Observation space | Still 11-dim engineering Dict, not strict Table 1 / Table 2 10-dim | P1 |
 | Strict paper observation | `train_attention_mappo.py --obs-adapter strict` uses strict 10-dim actor observations with normalization | P1 |
 | Strict observation API | `UavCombatEnv.get_strict_entity_observation()` and `get_strict_team_observations()` exposed; `reset()`/`step()` still return 11-dim engineering Dict | P1 |
-| Critic global state | `train_attention_mappo.py --critic-state strict-global` wires strict team global state into critic; `--critic-state engineering` keeps legacy flattened obs | P1 — needs training validation |
+| Critic global state | `train_attention_mappo.py --critic-state strict-global` wires strict team global state into critic; `--critic-state engineering` keeps legacy flattened obs | P1 鈥?needs training validation |
 | Global state candidate | `global_state.py` wired into attention training via `--critic-state strict-global` (2v2 dim=88 vs engineering 106) | P1 |
 | Blue rule policy | No-target cruise boundary patrol tuned: starts ~12km before boundary (was 18km), heading gain pressure-scaled (gentle early, strong near edge). Combat / target selection unchanged | P2 |
 | `num_missiles_per_plane` | Default `999` (no limit); paper does not specify a fixed value | P2 |
@@ -66,7 +83,7 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 | BRMA mask generator | Standalone API added: `BRMAMaskGenerator`, count-constrained random/biased masks, mask fusion, Gumbel-ST. **Not wired** into rollout/PPO; no behavior change | P1 |
 | BRMA rollout schema | `BRMARolloutStorage` available for per-timestep mask/p/dual-logprob/next-obs storage. Default disabled; `AttentionRolloutBuffer` accepts optional config but does not use it yet | P1 |
 | BRMA dual actor API | `AttentionActor.evaluate_dual_actions` computes p(a\|e) and p(a\|emask) log-probs/entropy in one call. Optional masked-path `soft_keep_mask` gives a differentiable BRMA suppression path; `forward()` default behavior unchanged. Not wired into rollout/PPO | P1 |
-| BRMA collection dry-run | `collect_brma_dry_run_step` links mask generator → dual actor eval → rollout storage offline. Validates full pipeline shape/type; no training impact | P1 |
+| BRMA collection dry-run | `collect_brma_dry_run_step` links mask generator 鈫?dual actor eval 鈫?rollout storage offline. Validates full pipeline shape/type; no training impact | P1 |
 | BRMA live dry-run scaffold | `--brma-mode dry-run` available in `train_attention_mappo.py`. Collects BRMA diagnostics only; does not affect action/PPO/mask generator training. Default `off` | P1 |
 | BRMA standalone loss API | `brma.losses` provides `BRMALossConfig`, exact diagonal-Gaussian KL, maskable-set entropy, and a retained log-prob proxy mode. Not wired into PPO or a mask-generator optimizer; entropy form still needs visual verification | P1 |
 | BRMA differentiable soft-mask actor API | `EntityObservationEncoder` accepts optional `soft_keep_mask` keep weights and applies them to entity embeddings before attention. Default off; Eq.35 attention matrix row/column convention still needs visual verification | P1 |
@@ -82,26 +99,26 @@ should **not** be mixed with `fixed_ta_alt_eq17_3dlos_v1` results.
 my_uav_env/
   alignment/
     __init__.py
-    reward_utils.py          — REWARD_VERSION, Ta/Td/pitch/speed/altitude helpers
-    los_geometry.py           — canonical compute_body_x_q_los, compute_3d_range, etc.
-    entity_obs.py             — build_entity_observation, infer_entity_layout
-    obs_adapter.py            — 11→10 placeholder adapter (build_paper_entity_observation_from_env_obs)
-    state_extractor.py        — strict Table 1/2 extractor prototype (not wired)
-    geometry_diagnostics.py   — AO/TA/q_LOS comparison tool
-    situation_reward_candidates.py — 2D AO/TA, 3D body-x, 3D velocity candidate formulas
-  env.py                      — UavCombatEnv (uses los_geometry, reward_utils)
+    reward_utils.py          鈥?REWARD_VERSION, Ta/Td/pitch/speed/altitude helpers
+    los_geometry.py           鈥?canonical compute_body_x_q_los, compute_3d_range, etc.
+    entity_obs.py             鈥?build_entity_observation, infer_entity_layout
+    obs_adapter.py            鈥?11鈫?0 placeholder adapter (build_paper_entity_observation_from_env_obs)
+    state_extractor.py        鈥?strict Table 1/2 extractor prototype (not wired)
+    geometry_diagnostics.py   鈥?AO/TA/q_LOS comparison tool
+    situation_reward_candidates.py 鈥?2D AO/TA, 3D body-x, 3D velocity candidate formulas
+  env.py                      鈥?UavCombatEnv (uses los_geometry, reward_utils)
 
 Root compatibility shims (still retained):
-  reward_utils.py             → from my_uav_env.alignment.reward_utils import *
-  entity_obs_utils.py         → from my_uav_env.alignment.entity_obs import *
-  paper_obs_utils.py          → from my_uav_env.alignment.obs_adapter import *
-  paper_state_extractor.py    → from my_uav_env.alignment.state_extractor import *
+  reward_utils.py             鈫?from my_uav_env.alignment.reward_utils import *
+  entity_obs_utils.py         鈫?from my_uav_env.alignment.entity_obs import *
+  paper_obs_utils.py          鈫?from my_uav_env.alignment.obs_adapter import *
+  paper_state_extractor.py    鈫?from my_uav_env.alignment.state_extractor import *
 ```
 
 ## 5. Recommended next steps
 
 1. **Do not delete root compatibility shims yet.** They protect external imports.
-2. **Run a short 2v2 vanilla baseline** under `fixed_ta_alt_eq17_3dlos_v1` to verify the
+2. **Run a short 6v6 vanilla baseline** under `paper_eq20_ta_alt_eq17_3dlos_v1` to verify the
    3D q_LOS switch does not destabilise training.
 3. **Evaluate the trained baseline** with `evaluate_vanilla_mappo.py` to get metrics under
    the new reward version.

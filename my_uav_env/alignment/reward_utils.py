@@ -2,27 +2,27 @@
 
 These helpers document and test situation-reward Ta/Td formulas.  The
 ``current`` functions preserve historical behavior for audits; the fixed Ta
-function is the normalized non-negative version used by the environment.
+function now implements the paper Eq.20 original scale used by the environment.
 """
 from __future__ import annotations
 
 import math
 from typing import Callable
 
-REWARD_VERSION = "fixed_ta_alt_eq17_3dlos_v1"
+REWARD_VERSION = "paper_eq20_ta_alt_eq17_3dlos_v1"
 """Reward version identifier for logs and evaluation outputs.
 
-``fixed_ta_alt_eq17_3dlos_v1`` means:
+``paper_eq20_ta_alt_eq17_3dlos_v1`` means:
 
-1. situation reward Ta uses the ``fixed_ta_v1`` continuous, non-negative,
-   normalized curve;
+1. situation reward Ta uses the paper Eq.20 original scale, including
+   ``Ta=10`` when ``q_LOS <= 4 deg``;
 2. altitude reward uses a pairwise eq.17-style curve with the high-altitude
    0.1 tail;
 3. situation reward geometry has switched from 2D horizontal AO/TA to
    3D body-x q_LOS and 3D Euclidean distance.
 
-``fixed_ta_alt_eq17_v1`` and earlier logs should not be mixed with
-``fixed_ta_alt_eq17_3dlos_v1`` results.
+``fixed_ta_alt_eq17_3dlos_v1`` and earlier logs should not be mixed with
+``paper_eq20_ta_alt_eq17_3dlos_v1`` results.
 """
 
 
@@ -51,30 +51,19 @@ def td_distance_advantage_current(distance_m: float) -> float:
 
 
 def ta_angle_advantage_fixed(q_deg: float) -> float:
-    """Normalized, continuous, non-negative angle-advantage curve.
-
-    This keeps the current reward scale near [0, 1].  It does not adopt the
-    possible paper ``10`` scale; that should be handled as a separate reward
-    scale ablation if needed.
-    """
+    """Paper Eq.20 angle-advantage curve using the original reward scale."""
     q = abs(q_deg)
     if q <= 4.0:
-        value = 1.0
-    elif q <= 15.0:
-        value = 1.0 - 0.5 * (q - 4.0) / (15.0 - 4.0)
-    elif q <= 35.0:
-        value = 0.5 * (1.0 - (q - 15.0) / (35.0 - 15.0))
-    else:
-        value = 0.0
-    return max(0.0, min(1.0, value))
+        return 10.0
+    if q <= 15.0:
+        return 1.0 + 2.0 * (15.0 - q) / 15.0
+    if q <= 35.0:
+        return 1.0 - (q - 15.0) / (35.0 - 15.0)
+    return 0.0
 
 
 def ta_angle_advantage_candidate_continuous(q_deg: float) -> float:
-    """Backward-compatible alias for the fixed Ta curve.
-
-    Kept for comparison scripts from pass18.  The curve is a normalized
-    candidate, not a claim that the paper's original eq.20 uses this scale.
-    """
+    """Backward-compatible alias for the current paper Eq.20 Ta curve."""
     return ta_angle_advantage_fixed(q_deg)
 
 

@@ -31,14 +31,17 @@ def parse_args():
         description="Evaluate vanilla MAPPO baseline over multiple episodes.")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--random", action="store_true")
-    parser.add_argument("--num-red", type=int, default=2)
-    parser.add_argument("--num-blue", type=int, default=2)
+    parser.add_argument("--num-red", type=int, default=6)
+    parser.add_argument("--num-blue", type=int, default=6)
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=1400)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, choices=("auto", "cpu", "cuda"),
                         default="auto")
     parser.add_argument("--enable-blue-gcas", action="store_true", default=False)
+    parser.add_argument("--obs-mode", type=str,
+                        choices=("paper_strict", "engineering"),
+                        default="paper_strict")
     parser.add_argument("--output", type=str,
                         default="results/eval_vanilla_mappo.csv")
     return parser.parse_args()
@@ -105,7 +108,8 @@ def _load_actor(args, device: torch.device):
 
     state = torch.load(checkpoint, map_location=device, weights_only=False)
     ckpt_obs_dim, hidden, rnn_hidden = _infer_actor_shapes(state)
-    obs_dim = _compute_obs_dim(args.num_red, args.num_blue, is_red=True)
+    obs_dim = _compute_obs_dim(
+        args.num_red, args.num_blue, is_red=True, obs_mode=args.obs_mode)
     if ckpt_obs_dim != obs_dim:
         raise SystemExit(
             "ERROR: checkpoint obs_dim does not match current evaluation scale.\n"
@@ -136,11 +140,12 @@ def _death_counts(death_reasons: dict[str, str], ids: list[str]) -> Counter:
 
 def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                     max_steps: int, device: torch.device, episode_idx: int,
-                    enable_blue_gcas: bool):
+                    enable_blue_gcas: bool, obs_mode: str):
     env = UavCombatEnv(
         max_num_blue=num_blue,
         max_num_red=num_red,
         max_steps=max_steps,
+        obs_mode=obs_mode,
         enable_gcas_for_blue=enable_blue_gcas,
         suppress_jsbsim_output=True,
     )
@@ -329,6 +334,7 @@ def main():
                 device=device,
                 episode_idx=ep,
                 enable_blue_gcas=args.enable_blue_gcas,
+                obs_mode=args.obs_mode,
             )
             rows.append(row)
             writer.writerow(row)
