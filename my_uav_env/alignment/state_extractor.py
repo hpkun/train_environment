@@ -1,8 +1,8 @@
-"""Prototype extractor for strict paper-style 10-dim observations.
+"""Extractor for strict paper-style 10-dim observations.
 
-This module does not modify ``UavCombatEnv.observation_space`` and is not wired
-into any training script.  It is a first pass at constructing Table 1 / Table 2
-style observations from simulator state for later validation.
+``UavCombatEnv`` uses this module on its ``obs_mode="paper_strict"`` reset/step
+observation path. It builds paper Table 1 / Table 2 style observations from
+simulator state while keeping the legacy engineering observation path separate.
 """
 from __future__ import annotations
 

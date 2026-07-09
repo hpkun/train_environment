@@ -127,10 +127,12 @@ class UavCombatEnv(gymnasium.Env):
       - target_heading:  ±180° absolute (act[1] → ψ ∈ (−π, π])
       - target_velocity: 0.3–1.2 Mach ≈ 102–408 m/s (act[2] → V)
 
-    Observation space (per agent): Dict with keys
-      - "ego_state"     (11,)       self state (body-frame relative)
-      - "ally_states"   (max_allies-1, 11)  allied aircraft (body-frame, excluding self)
-      - "enemy_states"  (max_enemies, 11)    enemy aircraft (body-frame)
+    Observation space (per agent): Dict with keys. obs_mode="paper_strict"
+    uses 10-dim paper Table 1/Table 2 ego/ally/enemy entities; obs_mode=
+    "engineering" uses the legacy normalized 11-dim entity layout.
+      - "ego_state"     (entity_dim,)       self state
+      - "ally_states"   (max_allies-1, entity_dim)  allied aircraft, excluding self
+      - "enemy_states"  (max_enemies, entity_dim)    enemy aircraft
       - "death_mask"    (max_allies+max_enemies,)  1=alive, 0=dead
     """
 
@@ -167,8 +169,11 @@ class UavCombatEnv(gymnasium.Env):
     RCS_FRONTAL = 0.1                         # m² — front ±30° mean RCS
     RCS_SIDE = 2.0                            # m² — broadside RCS
 
-    # ---- Battlefield boundaries (paper Table 4: 80×80×10 km) ----
-    BATTLEFIELD_HALF_SIZE = 40000.0   # m — core area ±40 km (paper eq 18: |x|,|y| > 4×10⁴)
+    # ---- Battlefield boundaries ----
+    # Paper eq.18 uses |x|,|y| > 4e4. Table 4 describes 100 km x 100 km x
+    # 10 km, so the two statements are not fully identical; reward/boundary
+    # logic follows eq.18 here.
+    BATTLEFIELD_HALF_SIZE = 40000.0   # m, core area +/-40 km
     BATTLEFIELD_ALTITUDE_MAX = 10000.0  # m — ceiling
     BATTLEFIELD_ALTITUDE_MIN = 2500.0   # m — floor (crash)
     OVERLOAD_G_LIMIT = 9.0             # paper Table 4: max load factor 9g
@@ -192,7 +197,7 @@ class UavCombatEnv(gymnasium.Env):
     def __init__(self, max_num_blue=2, max_num_red=2, num_missiles_per_plane=999,
                  sim_freq=60, agent_interaction_steps=12, max_steps=1400,
                  enable_gcas_for_blue: bool = False,
-                 obs_mode: str = "engineering",
+                 obs_mode: str = "paper_strict",
                  suppress_jsbsim_output: bool = True,
                  render_mode=None):
         super().__init__()

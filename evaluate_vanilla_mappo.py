@@ -187,7 +187,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                     obs_np = obs[rid]
                     alive = not np.allclose(obs_np["ego_state"], 0.0)
                     if alive:
-                        obs_batch.append(_flatten_obs(obs_np))
+                        obs_batch.append(_flatten_obs(obs_np, obs_mode=args.obs_mode))
                         alive_indices.append(i)
                     else:
                         actions[rid] = np.zeros(3, dtype=np.float32)

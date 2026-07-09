@@ -10,7 +10,15 @@ from my_uav_env.alignment.reward_utils import (
     td_distance_advantage,
 )
 from my_uav_env.alignment.state_extractor import extract_relative_state
-from train_vanilla_mappo import Config
+from rule_based_agent import (
+    _blue_simple_pursuit_action_impl,
+    _ego_roll_pitch_heading,
+    _ego_speed_mps,
+    _entity_range_m,
+    _relative_bearing_rad,
+    reset_rule_memory,
+)
+from train_vanilla_mappo import Config, _compute_obs_dim, _flatten_obs
 
 
 def test_ta_uses_paper_eq20_scale():
@@ -59,6 +67,7 @@ def test_blue_gcas_default_is_disabled():
     env = UavCombatEnv()
     try:
         assert env.enable_gcas_for_blue is False
+        assert env.obs_mode == "paper_strict"
     finally:
         env.close()
 
@@ -79,6 +88,82 @@ def test_paper_strict_observation_entities_are_10_dim():
         assert np.isfinite(red_obs["ego_state"]).all()
     finally:
         env.close()
+
+
+def test_rule_helpers_read_paper_strict_ego_and_entity_layout():
+    obs = {
+        "ego_state": np.array(
+            [0.0, 0.0, 6000.0, 250.0, 0.1, 0.2, 1.3, 0.0, 0.0, -5.0],
+            dtype=np.float32,
+        ),
+    }
+    entity = np.array(
+        [1000.0, 200.0, -50.0, 0.0, 0.0, 220.0, 0.0, 0.75, 0.4, 1234.0],
+        dtype=np.float32,
+    )
+
+    assert _ego_speed_mps(obs) == 250.0
+    assert np.allclose(_ego_roll_pitch_heading(obs), (0.1, 0.2, 1.3))
+    assert np.allclose(_ego_roll_pitch_heading(obs, own_heading=2.0), (0.1, 0.2, 2.0))
+    assert _entity_range_m(entity) == 1234.0
+    assert _relative_bearing_rad(entity) == 0.75
+
+
+def test_paper_strict_safe_pursuit_does_not_use_heading_as_speed():
+    reset_rule_memory()
+    obs = {
+        "ego_state": np.array(
+            [0.0, 0.0, 6000.0, 250.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            dtype=np.float32,
+        ),
+        "enemy_states": np.array(
+            [[2000.0, 0.0, 0.0, 0.0, 0.0, 230.0, 0.0, 0.0, 0.0, 2000.0]],
+            dtype=np.float32,
+        ),
+        "ally_states": np.zeros((0, 10), dtype=np.float32),
+        "death_mask": np.array([1, 1], dtype=np.float32),
+        "missile_warning": np.array([0.0], dtype=np.float32),
+        "altitude": np.array([6000.0], dtype=np.float32),
+        "velocity": np.array([250.0, 0.0, 0.0], dtype=np.float32),
+    }
+
+    action = _blue_simple_pursuit_action_impl(
+        obs, num_blue=1, num_red=1, blue_id=0, forced_target_idx=None)
+
+    low_speed_throttle = (90.0 + 100.0 * 1.0) / 306.0
+    pursuit_throttle = (90.0 + 100.0 * 0.8) / 306.0
+    assert math.isclose(float(action[2]), pursuit_throttle, rel_tol=1e-6)
+    assert not math.isclose(float(action[2]), low_speed_throttle, rel_tol=1e-6)
+
+
+def test_flatten_obs_dim_matches_compute_obs_dim_for_paper_strict():
+    obs = {
+        "ego_state": np.zeros(10, dtype=np.float32),
+        "ally_states": np.zeros((0, 10), dtype=np.float32),
+        "enemy_states": np.zeros((1, 10), dtype=np.float32),
+        "death_mask": np.ones(2, dtype=np.float32),
+        "missile_warning": np.array([1.0], dtype=np.float32),
+        "altitude": np.array([6100.0], dtype=np.float32),
+        "velocity": np.array([200.0, 0.0, 0.0], dtype=np.float32),
+    }
+
+    flat = _flatten_obs(obs, obs_mode="paper_strict")
+    assert flat.shape == (_compute_obs_dim(1, 1, is_red=True, obs_mode="paper_strict"),)
+
+
+def test_flatten_obs_dim_matches_compute_obs_dim_for_engineering():
+    obs = {
+        "ego_state": np.zeros(11, dtype=np.float32),
+        "ally_states": np.zeros((0, 11), dtype=np.float32),
+        "enemy_states": np.zeros((1, 11), dtype=np.float32),
+        "death_mask": np.ones(2, dtype=np.float32),
+        "missile_warning": np.array([1.0], dtype=np.float32),
+        "altitude": np.array([6100.0], dtype=np.float32),
+        "velocity": np.array([200.0, 0.0, 0.0], dtype=np.float32),
+    }
+
+    flat = _flatten_obs(obs, obs_mode="engineering")
+    assert flat.shape == (_compute_obs_dim(1, 1, is_red=True, obs_mode="engineering"),)
 
 
 def test_missile_timing_scales_with_sim_freq():

@@ -219,7 +219,10 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                 num_red, num_blue, is_red=True, obs_mode=obs_mode)
 
             if ckpt_obs_dim != obs_dim:
-                total_agents = (ckpt_obs_dim - 5) // 12
+                if obs_mode == "paper_strict":
+                    total_agents = ckpt_obs_dim // 11
+                else:
+                    total_agents = (ckpt_obs_dim - 5) // 12
                 print(f"ERROR: 维度不匹配！", flush=True)
                 print(f"  Checkpoint obs_dim = {ckpt_obs_dim}  (训练时约 {total_agents} 个智能体总数)",
                       flush=True)
@@ -320,7 +323,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                     obs_np = obs[rid]
                     alive = not np.allclose(obs_np["ego_state"], 0.0)
                     if alive:
-                        obs_batch.append(_flatten_obs(obs_np))
+                        obs_batch.append(_flatten_obs(obs_np, obs_mode=obs_mode))
                         alive_indices.append(i)
                     else:
                         actions[rid] = np.zeros(3, dtype=np.float32)

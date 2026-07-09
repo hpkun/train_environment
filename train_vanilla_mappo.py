@@ -124,8 +124,15 @@ class Config:
 #  纯 MLP Actor / Critic (展平观测 → GRU → MLP)
 # ==============================================================================
 
+def _include_aux_obs_default(obs_mode: str, include_aux_obs: bool | None = None) -> bool:
+    if include_aux_obs is not None:
+        return bool(include_aux_obs)
+    return obs_mode != "paper_strict"
+
+
 def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool,
-                     obs_mode: str = "paper_strict") -> int:
+                     obs_mode: str = "paper_strict",
+                     include_aux_obs: bool | None = None) -> int:
     """计算展平后的观测向量维度。"""
     if is_red:
         n_ally = num_red - 1
@@ -135,7 +142,10 @@ def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool,
         n_enemy = num_red
     total_entities = 1 + max(n_ally, 0) + n_enemy
     entity_dim = 10 if obs_mode == "paper_strict" else 11
-    return entity_dim * total_entities + (num_red + num_blue) + 1 + 1 + 3
+    dim = entity_dim * total_entities + (num_red + num_blue)
+    if _include_aux_obs_default(obs_mode, include_aux_obs):
+        dim += 1 + 1 + 3
+    return dim
 
 
 class VanillaActor(nn.Module):
@@ -201,17 +211,22 @@ class CentralizedCritic(nn.Module):
 # ==============================================================================
 #  观测展平工具
 # ==============================================================================
-def _flatten_obs(obs_np: dict) -> np.ndarray:
+def _flatten_obs(obs_np: dict, obs_mode: str = "paper_strict",
+                 include_aux_obs: bool | None = None) -> np.ndarray:
     """将 Dict 观测展平为一维向量。"""
-    return np.concatenate([
+    parts = [
         obs_np["ego_state"].ravel(),
         obs_np["ally_states"].ravel(),
         obs_np["enemy_states"].ravel(),
         obs_np["death_mask"].astype(np.float32).ravel(),
-        obs_np["missile_warning"].ravel(),
-        (obs_np["altitude"].ravel() / 10000.0).astype(np.float32),
-        (obs_np["velocity"].ravel() / 600.0).astype(np.float32),
-    ])
+    ]
+    if _include_aux_obs_default(obs_mode, include_aux_obs):
+        parts.extend([
+            obs_np["missile_warning"].ravel(),
+            (obs_np["altitude"].ravel() / 10000.0).astype(np.float32),
+            (obs_np["velocity"].ravel() / 600.0).astype(np.float32),
+        ])
+    return np.concatenate(parts)
 
 
 LAUNCH_DIAG_BASE_KEYS = (
@@ -1709,7 +1724,7 @@ def main():
                 dead_agent_records = []
                 for i, rid in enumerate(red_ids):
                     obs_np = env_obs[rid]
-                    obs_flat = _flatten_obs(obs_np)
+                    obs_flat = _flatten_obs(obs_np, obs_mode=config.obs_mode)
                     red_obs_flat_all.append(obs_flat)
                     alive = not np.allclose(obs_np["ego_state"], 0.0)
                     if alive:
@@ -1904,7 +1919,7 @@ def main():
             global_obs_parts = []
             for rid in red_ids:
                 if rid in env_obs:
-                    global_obs_parts.append(_flatten_obs(env_obs[rid]))
+                    global_obs_parts.append(_flatten_obs(env_obs[rid], obs_mode=config.obs_mode))
                 else:
                     global_obs_parts.append(np.zeros(obs_dim, dtype=np.float32))
             bootstrap_global_obs_list.append(np.concatenate(global_obs_parts))

@@ -10,13 +10,15 @@ Action-space contract (env.py ``_parse_actions``, paper §2.4):
     action[1] = heading_cmd  ∈ [−1, 1]  → target_heading ∈ [−180°, +180°]  (absolute ψ)
     action[2] = vel_cmd      ∈ [−1, 1]  → target_velocity ∈ [102, 408] m/s (M0.3–M1.2)
 
-Observation vector (11-dim entity, env.py ``_make_entity_vec``, body-frame):
-    [Δx, Δy, Δz, AO_signed, TA, R, V_tgt,
-     sin(φ), cos(φ), sin(θ), cos(θ)]
-    idx: 0   1   2      3      4  5   6       7       8       9      10
-
-Key: AO_signed ∈ [−π, π]  (+ right, − left)
-     TA        ∈ [0, π]    (unsigned)
+Observation layouts:
+    paper_strict ego_state (10, Table 1):
+      [x, y, h, V, roll, pitch, heading, alpha, beta, Vd]
+    paper_strict entity (10, Table 2):
+      [x_body, y_body, z_body, theta_v, psi_v, V_tgt,
+       theta_LOS, psi_LOS, q_LOS, d]
+    engineering entity (11, legacy, normalized body-frame):
+      [dx, dy, dz, AO_signed, TA, R, V_tgt,
+       sin(roll), cos(roll), sin(pitch), cos(pitch)]
 
 Internal action convention (before rescaling):
     pitch_cmd_int    ∈ [−1, 1]  → ±90°  (full paper §2.4 authority)
@@ -166,6 +168,45 @@ def _current_heading_from_obs(obs: dict) -> float:
     return float(np.arctan2(float(obs["velocity"][1]), float(obs["velocity"][0])))
 
 
+def _obs_uses_paper_strict_ego(obs: dict) -> bool:
+    return np.asarray(obs.get("ego_state", [])).shape[-1] == 10
+
+
+def _ego_speed_mps(obs: dict) -> float:
+    """Return ownship speed in m/s for either observation layout."""
+
+    ego = np.asarray(obs.get("ego_state", []), dtype=np.float32)
+    if ego.size >= 10 and _obs_uses_paper_strict_ego(obs):
+        return float(ego[3])
+    if ego.size > 6:
+        return float(ego[6]) * 600.0
+    velocity = np.asarray(obs.get("velocity", np.zeros(3)), dtype=np.float32)
+    return float(np.linalg.norm(velocity))
+
+
+def _ego_roll_pitch_heading(obs: dict, own_heading: float | None = None) -> tuple[float, float, float]:
+    """Return ownship roll, pitch, heading in radians for either layout."""
+
+    ego = np.asarray(obs.get("ego_state", []), dtype=np.float32)
+    if ego.size >= 10 and _obs_uses_paper_strict_ego(obs):
+        heading = float(own_heading) if own_heading is not None else float(ego[6])
+        return float(ego[4]), float(ego[5]), heading
+
+    roll = float(np.arctan2(float(ego[7]) if ego.size > 7 else 0.0,
+                            float(ego[8]) if ego.size > 8 else 1.0))
+    pitch = float(np.arctan2(float(ego[9]) if ego.size > 9 else 0.0,
+                             float(ego[10]) if ego.size > 10 else 1.0))
+    if own_heading is not None:
+        heading = float(own_heading)
+    else:
+        velocity = np.asarray(obs.get("velocity", np.zeros(3)), dtype=np.float32)
+        if velocity.size >= 2 and np.linalg.norm(velocity[:2]) > 1e-6:
+            heading = float(np.arctan2(float(velocity[1]), float(velocity[0])))
+        else:
+            heading = 0.0
+    return roll, pitch, heading
+
+
 def _blue_cruise_heading_command(
     obs: dict,
     blue_id: int,
@@ -260,11 +301,20 @@ def _simple_body_vector_to_world_bearing(
     if state is None or np.asarray(state).size < 3:
         return None
     ego = np.asarray(ego_state, dtype=np.float32)
+    state_arr = np.asarray(state, dtype=np.float32)
+    if _is_paper_strict_entity(state_arr) and ego.size >= 10:
+        x = float(state_arr[0])
+        y = float(state_arr[1])
+        heading = float(own_heading) if own_heading is not None else float(ego[6])
+        if not np.all(np.isfinite([x, y, heading])):
+            return None
+        return _wrap_pi(heading + float(np.arctan2(y, x)))
+
     if ego.size < 11:
         return None
-    x = float(state[0]) * battlefield_half_size
-    y = float(state[1]) * battlefield_half_size
-    up = float(state[2]) * battlefield_altitude_max
+    x = float(state_arr[0]) * battlefield_half_size
+    y = float(state_arr[1]) * battlefield_half_size
+    up = float(state_arr[2]) * battlefield_altitude_max
     if not np.all(np.isfinite([x, y, up])):
         return None
 
@@ -325,6 +375,10 @@ def _entity_bearing_rad(vec: np.ndarray) -> float:
     return float(vec[3]) * np.pi
 
 
+def _relative_bearing_rad(entity_vec: np.ndarray) -> float:
+    return _entity_bearing_rad(entity_vec)
+
+
 def _entity_aspect_proxy_rad(vec: np.ndarray) -> float:
     vec = np.asarray(vec, dtype=np.float32)
     if _is_paper_strict_entity(vec):
@@ -337,6 +391,10 @@ def _entity_delta_alt_m(vec: np.ndarray) -> float:
     if _is_paper_strict_entity(vec):
         return -float(vec[2])
     return float(vec[2]) * 10000.0
+
+
+def _relative_delta_alt_m(entity_vec: np.ndarray) -> float:
+    return _entity_delta_alt_m(entity_vec)
 
 
 def _simple_valid_targets(
@@ -407,21 +465,12 @@ def _blue_simple_pursuit_action_impl(
     heading hysteresis, bank damping, or G compensation.
     """
 
-    ego_state = np.asarray(obs.get("ego_state", np.zeros(11)), dtype=np.float32)
     velocity = np.asarray(obs.get("velocity", np.zeros(3)), dtype=np.float32)
     altitude = np.asarray(obs.get("altitude", [SAFE_COMBAT_ALT]), dtype=np.float32).reshape(-1)
-    ego_roll = np.arctan2(float(ego_state[7]) if ego_state.size > 7 else 0.0,
-                          float(ego_state[8]) if ego_state.size > 8 else 1.0)
-    ego_vel = float(ego_state[6]) * 600.0 if ego_state.size > 6 else float(np.linalg.norm(velocity))
+    _ego_roll, _ego_pitch, our_heading = _ego_roll_pitch_heading(obs, own_heading)
+    ego_vel = _ego_speed_mps(obs)
     alt_m = float(altitude[0]) if altitude.size else SAFE_COMBAT_ALT
     v_up = float(velocity[2]) if velocity.size > 2 else 0.0
-    if own_heading is None:
-        if velocity.size >= 2 and np.linalg.norm(velocity[:2]) > 1e-6:
-            our_heading = float(np.arctan2(float(velocity[1]), float(velocity[0])))
-        else:
-            our_heading = 0.0
-    else:
-        our_heading = float(own_heading)
 
     def _record(source: str, target_idx: int | None, state: np.ndarray | None,
                 range_m: float | None, desired_heading: float, action: np.ndarray,
@@ -435,8 +484,10 @@ def _blue_simple_pursuit_action_impl(
             "simple_lost_steps": int(_simple_lost_steps.get(blue_id, 0)),
             "selected_target_idx": target_idx,
             "selected_range_m": range_m if range_m is not None else "",
-            "selected_AO_rad": float(state[3]) * np.pi if state is not None and state.size > 3 else "",
-            "selected_TA_rad": float(state[4]) * np.pi if state is not None and state.size > 4 else "",
+            "selected_bearing_rad": _relative_bearing_rad(state) if state is not None else "",
+            "selected_aspect_proxy_rad": _entity_aspect_proxy_rad(state) if state is not None else "",
+            "selected_AO_rad": _relative_bearing_rad(state) if state is not None else "",
+            "selected_TA_rad": _entity_aspect_proxy_rad(state) if state is not None else "",
             "selected_target_quality": _target_track_quality(state) if state is not None else "invalid",
             "selected_rel_body_x_norm": float(state[0]) if state is not None and state.size > 0 else "",
             "selected_rel_body_y_norm": float(state[1]) if state is not None and state.size > 1 else "",
@@ -476,13 +527,13 @@ def _blue_simple_pursuit_action_impl(
         target_idx, target_state, range_m = _simple_nearest_target(obs, num_blue, num_red)
 
     if target_state is not None:
-        ao = _entity_bearing_rad(target_state)
+        ao = _relative_bearing_rad(target_state)
         geo_heading = _simple_body_vector_to_world_bearing(
             target_state, np.asarray(obs.get("ego_state", []), dtype=np.float32), our_heading)
         desired_heading = geo_heading if geo_heading is not None else _wrap_pi(our_heading + ao)
         _simple_last_seen_bearing[blue_id] = desired_heading
         _simple_lost_steps[blue_id] = 0
-        delta_alt = _entity_delta_alt_m(target_state)
+        delta_alt = _relative_delta_alt_m(target_state)
         pitch = np.clip(delta_alt / max(float(range_m or 300.0), 300.0) * 2.0 + _TRIM_BASELINE, -0.20, 0.25)
         if alt_m < SAFE_COMBAT_ALT:
             pitch = max(float(pitch), 0.0)
