@@ -15,6 +15,7 @@ def test_rich_logger_writes_missile_events(tmp_path):
         num_envs=1,
         rollout_length_per_env=4,
         transitions_per_rollout=4,
+        mode="full",
     )
     try:
         logger.write_missile_events(

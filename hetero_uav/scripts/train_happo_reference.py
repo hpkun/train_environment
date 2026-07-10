@@ -12,7 +12,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from pathlib import Path
 
 import numpy as np
@@ -452,7 +452,22 @@ DEFAULT_EVAL_CONFIGS = [
     "uav_env/JSBSim/configs/hetero_mav_shared_geo_7v6_f22_pid.yaml",
 ]
 
+PURE_HAPPO_DEFAULTS = {
+    "actor_lr": 5e-4,
+    "critic_lr": 5e-4,
+    "clip_param": 0.2,
+    "entropy_coef": 0.01,
+    "value_coef": 0.5,
+    "max_grad_norm": 10.0,
+    "ppo_epochs": 5,
+    "critic_epochs": 5,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "train_eval_episodes": 10,
+}
+
 MARL_DYNAMICS_TRAIN_FIELDS = [
+    "actor_loss_mean", "entropy_mean",
     "clip_fraction_mav", "clip_fraction_uav",
     "approx_kl_abs_mav", "approx_kl_abs_uav",
     "ratio_mean_mav", "ratio_mean_uav",
@@ -468,7 +483,7 @@ MARL_DYNAMICS_TRAIN_FIELDS = [
     "value_explained_variance_old", "value_explained_variance_new",
     "value_pred_mean", "value_pred_std",
     "value_pred_old_mean", "value_pred_old_std", "value_pred_new_mean", "value_pred_new_std",
-    "return_mean", "return_std",
+    "return_mean", "return_std", "return_min", "return_max",
     "advantage_raw_mean", "advantage_raw_std", "advantage_raw_min", "advantage_raw_max",
     "advantage_norm_mean", "advantage_norm_std", "advantage_norm_min", "advantage_norm_max",
     "mav_action_mean_pitch", "mav_action_mean_heading", "mav_action_mean_speed",
@@ -477,6 +492,8 @@ MARL_DYNAMICS_TRAIN_FIELDS = [
     "uav_action_std_pitch", "uav_action_std_heading", "uav_action_std_speed",
     "mav_action_mean_abs_pitch", "mav_action_mean_abs_heading", "mav_action_mean_abs_speed",
     "uav_action_mean_abs_pitch", "uav_action_mean_abs_heading", "uav_action_mean_abs_speed",
+    "mav_action_mean_abs_pitch_active", "mav_action_mean_abs_heading_active", "mav_action_mean_abs_speed_active",
+    "uav_action_mean_abs_pitch_active", "uav_action_mean_abs_heading_active", "uav_action_mean_abs_speed_active",
     "mav_action_saturation_pitch", "mav_action_saturation_heading", "mav_action_saturation_speed",
     "uav_action_saturation_pitch", "uav_action_saturation_heading", "uav_action_saturation_speed",
     "mav_action_mean_pitch_active", "mav_action_mean_heading_active", "mav_action_mean_speed_active",
@@ -486,9 +503,18 @@ MARL_DYNAMICS_TRAIN_FIELDS = [
     "mav_action_saturation_pitch_active", "mav_action_saturation_heading_active", "mav_action_saturation_speed_active",
     "uav_action_saturation_pitch_active", "uav_action_saturation_heading_active", "uav_action_saturation_speed_active",
     "rollout_transitions", "ppo_epochs", "actor_lr", "critic_lr", "clip_param",
-    "entropy_coef", "gamma", "gae_lambda", "max_grad_norm",
+    "entropy_coef", "value_coef", "gamma", "gae_lambda", "max_grad_norm",
     "actor_obs_mean", "actor_obs_std", "actor_obs_abs_max", "actor_obs_nan_count",
     "critic_state_mean", "critic_state_std", "critic_state_abs_max", "critic_state_nan_count",
+    "reward_nan_count", "action_nan_count", "value_nan_count",
+    "log_prob_nan_count", "gradient_nonfinite_count",
+    "avg_return_per_decision", "avg_episode_length",
+    "attack_uav_reward_target_distance_mean", "reward_target_valid_ratio",
+    "reward_distance_le_5km_ratio", "reward_distance_5_to_10km_ratio",
+    "reward_distance_ge_10km_ratio", "uav_first_horizontal_oob_count",
+    "mav_low_altitude_death_count", "reward_identity_max_error",
+    "reward_identity_max_error_mav", "reward_identity_max_error_uav",
+    "reward_identity_failure_count",
 ]
 
 UPDATE_DIAGNOSTIC_ARRAY_FIELDS = [
@@ -598,11 +624,69 @@ def _pure_happo_meta(policy, args=None) -> dict:
         "happo_update_unit": "agent",
         "policy_arch": "pure_happo",
         "bounded_action_distribution": "tanh_squashed_gaussian",
+        "action_distribution_type": "tanh_squashed_gaussian",
         "logprob_correction": "tanh_jacobian",
+        "attention": False,
+        "recurrent": False,
+        "random_scale_mask": False,
+        "biased_mask": False,
+        "entity_encoder": False,
+        "mask_generator": False,
+        "separate_actors": True,
+        "centralized_critic": True,
+        "sequential_update": True,
+        "advantage_normalization": True,
+        "optimizer": "Adam",
+        "actor_hidden_sizes": [256, 128],
+        "critic_hidden_sizes": [256, 128],
+        "initial_action_log_std": float(getattr(
+            policy,
+            "initial_action_log_std",
+            policy.action_log_stds[0].detach().mean().item(),
+        )),
     }
     if args is not None:
-        meta["critic_epochs"] = int(getattr(args, "critic_epochs", 1))
+        for key in (
+            "actor_lr", "critic_lr", "clip_param", "entropy_coef", "value_coef",
+            "max_grad_norm", "ppo_epochs", "critic_epochs", "gamma", "gae_lambda",
+            "rollout_length", "num_envs", "max_steps", "seed", "opponent_policy",
+        ):
+            meta[key] = getattr(args, key)
+        meta["transitions_per_rollout"] = int(args.rollout_length) * int(args.num_envs)
     return meta
+
+
+def _apply_policy_specific_defaults(args) -> None:
+    pure = str(args.policy_arch) == "pure_happo"
+    legacy = {
+        "actor_lr": 2e-4, "critic_lr": 5e-4, "clip_param": 0.2,
+        "entropy_coef": 0.02, "value_coef": 0.5, "max_grad_norm": 10.0,
+        "ppo_epochs": 2, "critic_epochs": 1, "gamma": 0.99,
+        "gae_lambda": 0.95, "train_eval_episodes": 1,
+    }
+    selected = PURE_HAPPO_DEFAULTS if pure else legacy
+    for key, value in selected.items():
+        if getattr(args, key, None) is None:
+            setattr(args, key, value)
+
+
+def _resolve_pure_happo_eval_configs(args, policy) -> list[str]:
+    configs = list(args.eval_configs) if args.eval_configs else [str(args.config)]
+    train_path = Path(args.config).resolve()
+    if len(configs) != 1 or Path(configs[0]).resolve() != train_path:
+        raise ValueError(
+            "pure_happo fixed-agent evaluation requires exactly the training 3V2 config; "
+            "5V4/other scale evaluation is not supported"
+        )
+    cfg_path = ROOT / configs[0] if not Path(configs[0]).is_absolute() else Path(configs[0])
+    with cfg_path.open(encoding="utf-8") as handle:
+        config_data = yaml.safe_load(handle) or {}
+    eval_num_red = int(config_data.get("max_num_red", -1))
+    if eval_num_red != int(policy.num_agents):
+        raise ValueError(
+            f"pure_happo policy has {policy.num_agents} fixed actors but eval config has {eval_num_red} red agents"
+        )
+    return configs
 
 
 _SINGLE_RUNNER_STATE = {
@@ -1029,6 +1113,7 @@ def _run_eval(model_path: str, args, summary_json: str, train_num_agents: int = 
         "--device", str(args.device),
         "--opponent-policy", args.opponent_policy,
         "--max-steps-override", str(args.max_steps),
+        "--seed", str(args.seed),
         "--summary-json", summary_json,
         "--configs", *configs,
     ]
@@ -1286,19 +1371,20 @@ def _run_training_main() -> None:
         default=None,
         help="Override YAML hetero_reward_mode. If omitted, uses the YAML value.",
     )
-    parser.add_argument("--ppo-epochs", type=int, default=2)
-    parser.add_argument("--entropy-coef", type=float, default=0.02)
-    parser.add_argument("--actor-lr", type=float, default=2e-4)
-    parser.add_argument("--critic-lr", type=float, default=5e-4)
-    parser.add_argument("--critic-epochs", type=int, default=1)
-    parser.add_argument("--clip-param", type=float, default=0.2)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--max-grad-norm", type=float, default=10.0)
+    parser.add_argument("--ppo-epochs", type=int, default=None)
+    parser.add_argument("--entropy-coef", type=float, default=None)
+    parser.add_argument("--actor-lr", type=float, default=None)
+    parser.add_argument("--critic-lr", type=float, default=None)
+    parser.add_argument("--critic-epochs", type=int, default=None)
+    parser.add_argument("--clip-param", type=float, default=None)
+    parser.add_argument("--value-coef", type=float, default=None)
+    parser.add_argument("--gamma", type=float, default=None)
+    parser.add_argument("--gae-lambda", type=float, default=None)
+    parser.add_argument("--max-grad-norm", type=float, default=None)
     parser.add_argument("--eval-during-training", action="store_true")
     parser.add_argument("--eval-interval-steps", type=int, default=25000)
     parser.add_argument("--eval-at-start", action="store_true")
-    parser.add_argument("--train-eval-episodes", type=int, default=1)
+    parser.add_argument("--train-eval-episodes", type=int, default=None)
     parser.add_argument("--eval-configs", nargs="*", default=None)
     parser.add_argument("--save-eval-checkpoints", action="store_true",
                         help="Save every eval checkpoint and maintain best_3v2/best_5v4/best_7v6/best_combined.")
@@ -1336,11 +1422,19 @@ def _run_training_main() -> None:
     parser.add_argument("--launch-diagnostic-scenarios", nargs="*", default=["3v2", "5v4"])
     parser.add_argument("--launch-diagnostic-output-dir", default=None)
     args = parser.parse_args()
+    _apply_policy_specific_defaults(args)
     _reject_unsafe_random_scale_mask(args)
     if args.num_envs < 1:
         raise ValueError("--num-envs must be >= 1")
     if args.critic_epochs < 1:
         raise ValueError("--critic-epochs must be >= 1")
+    if args.policy_arch == "pure_happo":
+        if args.init_checkpoint:
+            raise ValueError("pure_happo formal training must start from scratch; --init-checkpoint is not allowed")
+        if args.uav_imitation_dataset or args.uav_imitation_coef > 0.0:
+            raise ValueError("pure_happo formal training does not allow imitation or BC inputs")
+        if args.brma_biased_mask or args.brma_random_scale_mask:
+            raise ValueError("pure_happo does not allow BRMA random/biased mask modules")
     if args.device == "cuda" and not torch.cuda.is_available():
         args.device = "cpu"
 
@@ -1388,6 +1482,16 @@ def _run_training_main() -> None:
         f"rollout_length={args.rollout_length} max_steps={args.max_steps}",
         flush=True,
     )
+    if args.policy_arch == "pure_happo":
+        print(
+            "[pure_happo] "
+            f"actor_lr={args.actor_lr} critic_lr={args.critic_lr} "
+            f"clip={args.clip_param} entropy={args.entropy_coef} value_coef={args.value_coef} "
+            f"max_grad_norm={args.max_grad_norm} ppo_epochs={args.ppo_epochs} "
+            f"critic_epochs={args.critic_epochs} gamma={args.gamma} "
+            f"gae_lambda={args.gae_lambda} seed={args.seed}",
+            flush=True,
+        )
     _SINGLE_RUNNER_STATE["envs"] = envs
     entity_mode = args.policy_arch == "hetero_entity_recurrent"
     adapter = HeteroEntitySetAdapter() if entity_mode else HeteroObsAdapterV2()
@@ -1433,6 +1537,7 @@ def _run_training_main() -> None:
         trainer = PureHAPPOTrainer(
             policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
             clip_param=args.clip_param, entropy_coef=args.entropy_coef,
+            value_coef=args.value_coef,
             max_grad_norm=args.max_grad_norm, ppo_epochs=args.ppo_epochs,
             gamma=args.gamma, gae_lambda=args.gae_lambda,
             seed=args.seed, critic_epochs=args.critic_epochs,
@@ -1502,7 +1607,8 @@ def _run_training_main() -> None:
             timeseries_step_stride=args.timeseries_step_stride,
         )
         _SINGLE_RUNNER_STATE["rich_logger"] = rich_logger
-        write_not_available_attention(rich_dir, "happo_reference_v0", Path(args.config).stem)
+        if args.rich_log_mode == "full":
+            write_not_available_attention(rich_dir, "happo_reference_v0", Path(args.config).stem)
     iterations = int(math.ceil(args.total_env_steps / transitions_per_rollout))
     total_steps = 0
     episodes = 0
@@ -1620,6 +1726,15 @@ def _run_training_main() -> None:
                                         rnn_hidden_size=getattr(policy, 'rnn_hidden_size', 0),
                                         **buffer_kwargs)
             red_fired = blue_fired = red_hits = blue_hits = 0
+            rollout_reward_sums: defaultdict[str, float] = defaultdict(float)
+            rollout_reward_steps = 0
+            rollout_target_distance_sum = 0.0
+            rollout_target_valid_count = 0
+            rollout_target_zone_counts = [0, 0, 0]
+            rollout_uav_oob_count = 0
+            rollout_mav_low_altitude_death_count = 0
+            rollout_identity_max = {"mav": 0.0, "uav": 0.0}
+            rollout_identity_failures = 0
             while len(buffer) < rollout_transitions and total_steps < args.total_env_steps:
                 for env_idx, rollout_env in enumerate(envs):
                     if len(buffer) >= rollout_transitions or total_steps >= args.total_env_steps:
@@ -1919,6 +2034,53 @@ def _run_training_main() -> None:
                                 sum_key = key + "_sum"
                                 agent_acc[sum_key] = agent_acc.get(sum_key, 0.0) + delta
                     if rc and isinstance(rc, dict):
+                        for rid in rollout_env.red_ids:
+                            comp = rc.get(rid, {}) if isinstance(rc, dict) else {}
+                            if not isinstance(comp, dict):
+                                continue
+                            role = rollout_env.agent_roles.get(rid, "")
+                            if role == "mav":
+                                identity_keys = (
+                                    "brma_pitch", "brma_roll", "brma_vel",
+                                    "mav_dist_weighted", "mav_threat_weighted",
+                                    "mav_aspect_weighted", "mav_pos_weighted",
+                                    "mav_aware_weighted", "mav_event_total",
+                                )
+                                identity_role = "mav"
+                            else:
+                                identity_keys = (
+                                    "brma_pitch", "brma_roll", "brma_vel",
+                                    "tam_speed_weighted", "tam_angle_weighted",
+                                    "tam_distance_weighted", "uav_event_total",
+                                )
+                                identity_role = "uav"
+                            identity_sum = sum(float(comp.get(key, 0.0) or 0.0) for key in identity_keys)
+                            identity_error = abs(float(comp.get("total", 0.0) or 0.0) - identity_sum)
+                            rollout_identity_max[identity_role] = max(
+                                rollout_identity_max[identity_role], identity_error
+                            )
+                            if identity_error > 1e-6:
+                                rollout_identity_failures += 1
+                                raise ValueError(
+                                    f"reward identity failure agent={rid} step={total_steps} "
+                                    f"error={identity_error:.9g}"
+                                )
+                            if role != "mav" and float(comp.get("tam_geometry_valid", 0.0) or 0.0) > 0.5:
+                                distance = float(comp.get("reward_target_distance_m", 0.0) or 0.0)
+                                rollout_target_distance_sum += distance
+                                rollout_target_valid_count += 1
+                                if distance <= 5000.0:
+                                    rollout_target_zone_counts[0] += 1
+                                elif distance < 10000.0:
+                                    rollout_target_zone_counts[1] += 1
+                                else:
+                                    rollout_target_zone_counts[2] += 1
+                            if role != "mav" and float(comp.get("uav_event_first_horizontal_out_of_zone", 0.0) or 0.0) != 0.0:
+                                rollout_uav_oob_count += 1
+                            if role == "mav" and float(comp.get("mav_event_death", 0.0) or 0.0) < 0.0:
+                                altitude = float(comp.get("max_altitude_m", 0.0) or 0.0)
+                                if altitude < float(getattr(rollout_env, "BATTLEFIELD_ALTITUDE_MIN", 2500.0)):
+                                    rollout_mav_low_altitude_death_count += 1
                         active_count = 0.0
                         eff = {
                             "effective_team_brma_flight": 0.0,
@@ -1995,6 +2157,17 @@ def _run_training_main() -> None:
                         current_ep_reward_comp[env_idx]["active_red_count"] = (
                             current_ep_reward_comp[env_idx].get("active_red_count", 0.0) + active_count
                         )
+                        for key, value in normalized.items():
+                            rollout_reward_sums[key] += value
+                        rollout_reward_sums["effective_component_sum"] += component_sum
+                        rollout_reward_sums["effective_total_minus_component_sum"] += (
+                            normalized["effective_team_total"] - component_sum
+                        )
+                        rollout_reward_sums["active_red_count"] += active_count
+                        rollout_reward_sums["effective_initial_team_mean_total"] += (
+                            float(eff["effective_team_total"]) / max(float(len(rollout_env.red_ids)), 1.0)
+                        )
+                        rollout_reward_steps += 1
                     # Episode-local launch stats
                     for aid in rollout_env.agent_ids:
                         fired = int(next_info.get(aid, {}).get("missiles_fired_this_step", 0))
@@ -2065,6 +2238,7 @@ def _run_training_main() -> None:
                         )
                         recent.append({
                             "return": float(current_ep_return[env_idx].mean()),
+                            "episode_length": int(current_ep_len[env_idx]),
                             "winner": outcome["winner"],
                             "end_reason": outcome["end_reason"],
                             "mav": _mav_alive(rollout_env),
@@ -2185,6 +2359,33 @@ def _run_training_main() -> None:
                     uav_imitation_coef=args.uav_imitation_coef if imitation_active else 0.0,
                 )
             stats.update(_rollout_distribution_stats(buffer))
+            reward_step_denom = max(rollout_reward_steps, 1)
+            for key in (
+                "effective_team_brma_flight", "effective_team_uav_speed",
+                "effective_team_uav_angle", "effective_team_uav_distance",
+                "effective_team_uav_event", "effective_team_mav_safety",
+                "effective_team_mav_support", "effective_team_mav_event",
+                "effective_team_total", "effective_component_sum",
+                "effective_total_minus_component_sum", "active_red_count",
+                "effective_initial_team_mean_total",
+            ):
+                stats[key] = rollout_reward_sums[key] / reward_step_denom
+            stats.update({
+                "initial_red_count": float(len(env.red_ids)),
+                "attack_uav_reward_target_distance_mean": (
+                    rollout_target_distance_sum / max(rollout_target_valid_count, 1)
+                ),
+                "reward_target_valid_ratio": rollout_target_valid_count / max(rollout_reward_steps * max(len(env.red_ids) - 1, 1), 1),
+                "reward_distance_le_5km_ratio": rollout_target_zone_counts[0] / max(rollout_target_valid_count, 1),
+                "reward_distance_5_to_10km_ratio": rollout_target_zone_counts[1] / max(rollout_target_valid_count, 1),
+                "reward_distance_ge_10km_ratio": rollout_target_zone_counts[2] / max(rollout_target_valid_count, 1),
+                "uav_first_horizontal_oob_count": float(rollout_uav_oob_count),
+                "mav_low_altitude_death_count": float(rollout_mav_low_altitude_death_count),
+                "reward_identity_max_error_mav": rollout_identity_max["mav"],
+                "reward_identity_max_error_uav": rollout_identity_max["uav"],
+                "reward_identity_max_error": max(rollout_identity_max.values()),
+                "reward_identity_failure_count": float(rollout_identity_failures),
+            })
             stats.update({
                 "rollout_transitions": rollout_transitions,
                 "ppo_epochs": args.ppo_epochs,
@@ -2193,6 +2394,7 @@ def _run_training_main() -> None:
                 "critic_lr": args.critic_lr,
                 "clip_param": args.clip_param,
                 "entropy_coef": args.entropy_coef,
+                "value_coef": args.value_coef,
                 "gamma": args.gamma,
                 "gae_lambda": args.gae_lambda,
                 "max_grad_norm": args.max_grad_norm,
@@ -2235,6 +2437,15 @@ def _run_training_main() -> None:
                     "red_launch_rate_after_mav_death",
                 )
             }
+            stats["avg_episode_length"] = (
+                float(np.mean([r.get("episode_length", 0) for r in rec])) if rec else 0.0
+            )
+            stats["avg_return_per_decision"] = (
+                float(np.mean([
+                    float(r["return"]) / max(int(r.get("episode_length", 0)), 1)
+                    for r in rec
+                ])) if rec else 0.0
+            )
             writer.writerow([
                 iteration, total_steps, actual_reward_mode, f"{avg_return:.4f}", f"{red_win:.4f}",
                 f"{blue_win:.4f}", f"{draw:.4f}", f"{timeout:.4f}",
@@ -2302,20 +2513,20 @@ def _run_training_main() -> None:
                 f"{rc_mean.get('red_launch_rate_after_mav_death', 0):.4f}",
                 f"{rc_sum.get('v1_mav_removed_r_adv', 0):.4f}",
                 f"{rc_sum.get('v1_mav_removed_r_end', 0):.4f}",
-                f"{rc_sum.get('effective_team_brma_flight', 0):.4f}",
-                f"{rc_sum.get('effective_team_uav_speed', 0):.4f}",
-                f"{rc_sum.get('effective_team_uav_angle', 0):.4f}",
-                f"{rc_sum.get('effective_team_uav_distance', 0):.4f}",
-                f"{rc_sum.get('effective_team_uav_event', 0):.4f}",
-                f"{rc_sum.get('effective_team_mav_safety', 0):.4f}",
-                f"{rc_sum.get('effective_team_mav_support', 0):.4f}",
-                f"{rc_sum.get('effective_team_mav_event', 0):.4f}",
-                f"{rc_sum.get('effective_team_total', 0):.4f}",
-                f"{rc_sum.get('active_red_count', 0):.4f}",
-                f"{rc_sum.get('effective_component_sum', 0):.4f}",
-                f"{rc_sum.get('effective_total_minus_component_sum', 0):.4f}",
-                f"{_recent_component_mean(rec, 'initial_red_count'):.4f}",
-                f"{rc_sum.get('effective_initial_team_mean_total', 0):.4f}",
+                f"{stats.get('effective_team_brma_flight', 0):.4f}",
+                f"{stats.get('effective_team_uav_speed', 0):.4f}",
+                f"{stats.get('effective_team_uav_angle', 0):.4f}",
+                f"{stats.get('effective_team_uav_distance', 0):.4f}",
+                f"{stats.get('effective_team_uav_event', 0):.4f}",
+                f"{stats.get('effective_team_mav_safety', 0):.4f}",
+                f"{stats.get('effective_team_mav_support', 0):.4f}",
+                f"{stats.get('effective_team_mav_event', 0):.4f}",
+                f"{stats.get('effective_team_total', 0):.4f}",
+                f"{stats.get('active_red_count', 0):.4f}",
+                f"{stats.get('effective_component_sum', 0):.4f}",
+                f"{stats.get('effective_total_minus_component_sum', 0):.4f}",
+                f"{stats.get('initial_red_count', 0):.4f}",
+                f"{stats.get('effective_initial_team_mean_total', 0):.4f}",
                 *[_format_metric(stats.get(field, 0.0)) for field in MARL_DYNAMICS_TRAIN_FIELDS],
                 int(nan_detected),
             ])
@@ -2469,27 +2680,9 @@ def _run_training_main() -> None:
                 )
                 eval_configs_for_this_run = args.eval_configs or DEFAULT_EVAL_CONFIGS
                 if args.policy_arch in {"pure_happo"}:
-                    import yaml
-                    filtered = []
-                    for cfg in eval_configs_for_this_run:
-                        cfg_path = ROOT / cfg if not Path(cfg).is_absolute() else Path(cfg)
-                        with open(cfg_path, encoding="utf-8") as f:
-                            c = yaml.safe_load(f) or {}
-                        eval_num_red = int(c.get("max_num_red", -1))
-                        if eval_num_red == policy.num_agents:
-                            filtered.append(cfg)
-                        else:
-                            print(f"Skipping eval config {cfg}: pure_happo was built for "
-                                  f"{policy.num_agents} red agents but eval has {eval_num_red}.",
-                                  flush=True)
-                    eval_configs_for_this_run = filtered
-                    if not eval_configs_for_this_run:
-                        print("Skipping eval: no eval configs match pure_happo num_agents.",
-                              flush=True)
-                        records = None
-                    else:
-                        records = _run_eval(str(tmp_model), args, tmp_json,
-                                           eval_configs_override=eval_configs_for_this_run)
+                    eval_configs_for_this_run = _resolve_pure_happo_eval_configs(args, policy)
+                    records = _run_eval(str(tmp_model), args, tmp_json,
+                                       eval_configs_override=eval_configs_for_this_run)
                 else:
                     records = _run_eval(str(tmp_model), args, tmp_json)
                 heartbeat.write(

@@ -13,7 +13,7 @@ from scripts.experiment_logging_schema import (
     FILE_SCHEMAS,
     MISSILE_EVENTS_COLUMNS,
     TRAIN_METRICS_COLUMNS,
-    ensure_schema_files,
+    ensure_csv,
 )
 
 
@@ -46,39 +46,51 @@ class RichExperimentLogger:
         self.timeseries_episodes_limit = timeseries_episodes_limit
         self.timeseries_step_stride = max(int(timeseries_step_stride), 1)
         self.start_time = time.time()
-        ensure_schema_files(directory)
+        directory.mkdir(parents=True, exist_ok=True)
         self._train_file = (directory / "train_metrics.csv").open("w", newline="", encoding="utf-8")
         self._train_writer = csv.DictWriter(self._train_file, fieldnames=TRAIN_METRICS_COLUMNS)
         self._train_writer.writeheader()
-        self._missile_file = (directory / "missile_events.csv").open("a", newline="", encoding="utf-8")
-        self._missile_writer = csv.DictWriter(self._missile_file, fieldnames=MISSILE_EVENTS_COLUMNS)
+        self._missile_file = None
+        self._missile_writer = None
         self._reward_file = None
         self._reward_writer = None
         self._aircraft_file = None
         self._aircraft_writer = None
         if self.mode == "full":
+            ensure_csv(directory / "missile_events.csv", MISSILE_EVENTS_COLUMNS)
+            self._missile_file = (directory / "missile_events.csv").open("a", newline="", encoding="utf-8")
+            self._missile_writer = csv.DictWriter(self._missile_file, fieldnames=MISSILE_EVENTS_COLUMNS)
+            ensure_csv(directory / "reward_components.csv", FILE_SCHEMAS["reward_components.csv"])
             self._reward_file = (directory / "reward_components.csv").open("a", newline="", encoding="utf-8")
             self._reward_writer = csv.DictWriter(self._reward_file, fieldnames=FILE_SCHEMAS["reward_components.csv"])
+            ensure_csv(directory / "aircraft_timeseries.csv", FILE_SCHEMAS["aircraft_timeseries.csv"])
             self._aircraft_file = (directory / "aircraft_timeseries.csv").open("a", newline="", encoding="utf-8")
             self._aircraft_writer = csv.DictWriter(self._aircraft_file, fieldnames=FILE_SCHEMAS["aircraft_timeseries.csv"])
+        ensure_csv(directory / "episode_reward_components.csv", FILE_SCHEMAS["episode_reward_components.csv"])
         self._ep_rc_file = (directory / "episode_reward_components.csv").open("a", newline="", encoding="utf-8")
         self._ep_rc_writer = csv.DictWriter(self._ep_rc_file, fieldnames=FILE_SCHEMAS["episode_reward_components.csv"])
-        self._target_diag_file = (directory / "reward_target_diagnostics.csv").open("a", newline="", encoding="utf-8")
-        self._target_diag_writer = csv.DictWriter(
-            self._target_diag_file,
-            fieldnames=FILE_SCHEMAS["reward_target_diagnostics.csv"],
-        )
+        self._target_diag_file = None
+        self._target_diag_writer = None
+        if self.mode == "full":
+            ensure_csv(directory / "reward_target_diagnostics.csv", FILE_SCHEMAS["reward_target_diagnostics.csv"])
+            self._target_diag_file = (directory / "reward_target_diagnostics.csv").open("a", newline="", encoding="utf-8")
+            self._target_diag_writer = csv.DictWriter(
+                self._target_diag_file,
+                fieldnames=FILE_SCHEMAS["reward_target_diagnostics.csv"],
+            )
         self._seen_missile_event_keys: set[tuple] = set()
 
     def close(self) -> None:
         self._train_file.close()
-        self._missile_file.close()
+        if self._missile_file is not None:
+            self._missile_file.close()
         if self._reward_file is not None:
             self._reward_file.close()
         if self._aircraft_file is not None:
             self._aircraft_file.close()
         self._ep_rc_file.close()
-        self._target_diag_file.close()
+        if self._target_diag_file is not None:
+            self._target_diag_file.close()
 
     def write_aircraft_timeseries(self, env, *, scenario: str, episode_id: int | str,
                                    step: int | str, sim_time: float | str = "") -> None:
@@ -222,6 +234,8 @@ class RichExperimentLogger:
         The environment already decides launch and hit/miss outcomes. This
         method only persists those diagnostics to the rich logging schema.
         """
+        if self.mode != "full" or self._missile_writer is None or self._missile_file is None:
+            return
 
         def _emit(record, event_type):
             row = self._missile_row(record, scenario=scenario, episode_id=episode_id,
@@ -309,6 +323,8 @@ class RichExperimentLogger:
         step: int | str,
         sim_time: float | str = "",
     ) -> None:
+        if self.mode != "full" or self._target_diag_writer is None or self._target_diag_file is None:
+            return
         records = info.get("__reward_target_diagnostics__", []) if isinstance(info, dict) else []
         if not records:
             return
@@ -482,8 +498,8 @@ class RichExperimentLogger:
 
 
 def write_not_available_attention(directory: Path, method_name: str, scenario: str) -> None:
-    ensure_schema_files(directory)
     path = directory / "attention_metrics.csv"
+    ensure_csv(path, FILE_SCHEMAS["attention_metrics.csv"])
     with path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=FILE_SCHEMAS["attention_metrics.csv"])
         writer.writerow({

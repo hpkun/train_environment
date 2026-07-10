@@ -39,6 +39,7 @@ class LegacyClampPureHAPPOPolicy(nn.Module):
         self.num_agents = int(num_agents)
 
         initial = float(init_log_std)
+        self.initial_action_log_std = initial
 
         self.actors = nn.ModuleList([
             _mlp(self.actor_obs_dim, self.action_dim)

@@ -77,6 +77,11 @@ def _mean_for_indices(values: list[float], indices: list[int]) -> float:
     return float(np.mean(vals)) if vals else 0.0
 
 
+def _alive_before_team_mean(rewards: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
+    """Per-step team reward using the rollout's pre-action alive mask."""
+    return (rewards * active).sum(dim=-1) / active.sum(dim=-1).clamp(min=1)
+
+
 def _compute_grouped_gae(rewards, values, next_values, dones, env_ids, gamma, lam):
     """GAE grouped by env_id.  next_values[pos] is the bootstrap value
     for transition pos, already stored by the rollout buffer."""
@@ -108,6 +113,8 @@ class PureHAPPOTrainer:
         if int(critic_epochs) < 1:
             raise ValueError("critic_epochs must be >= 1")
         self.policy = policy
+        self.actor_lr = float(actor_lr)
+        self.critic_lr = float(critic_lr)
         self.clip_param = clip_param
         self.entropy_coef = entropy_coef
         self.value_coef = value_coef
@@ -143,7 +150,7 @@ class PureHAPPOTrainer:
             if not torch.isfinite(tensor).all():
                 raise ValueError(f"HAPPO: non-finite {name} in buffer")
 
-        team_reward = (rewards * active).sum(dim=-1) / active.sum(dim=-1).clamp(min=1)
+        team_reward = _alive_before_team_mean(rewards, active)
         team_dones = dones[:, 0].float()
         env_ids = data.get("env_ids", torch.zeros(T, dtype=torch.long, device=rewards.device))
         nv_data = data.get("next_values")
@@ -218,6 +225,8 @@ class PureHAPPOTrainer:
                     actor_before = _param_vector(actor_params)
                 loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(actor_params, self.max_grad_norm)
+                if not torch.isfinite(torch.as_tensor(grad_norm)):
+                    raise ValueError(f"HAPPO: non-finite actor gradient agent {i} epoch {epoch}")
                 self.actor_opts[i].step()
                 with torch.no_grad():
                     actor_after = _param_vector(actor_params)
@@ -273,6 +282,8 @@ class PureHAPPOTrainer:
                 raise ValueError(f"HAPPO: non-finite critic_loss epoch {critic_epoch}")
             critic_loss.backward()
             critic_grad_norm = torch.nn.utils.clip_grad_norm_(critic_params, self.max_grad_norm)
+            if not torch.isfinite(torch.as_tensor(critic_grad_norm)):
+                raise ValueError(f"HAPPO: non-finite critic gradient epoch {critic_epoch}")
             self.critic_opt.step()
             critic_loss_per_epoch.append(float(critic_loss_unscaled.item()))
             critic_grad_norm_per_epoch.append(_safe_float(critic_grad_norm.item()))
@@ -282,9 +293,10 @@ class PureHAPPOTrainer:
             new_values_final = self.policy.value(critic_state)
 
         with torch.no_grad():
-            _, _, _, means_all = self.policy.evaluate_actions(actor_obs, critic_state, actions)
-            mav_sat = float((means_all[:, 0, :].abs() >= 0.999).float().mean()) if N > 0 else 0.0
-            uav_sat = float((means_all[:, 1:, :].abs() >= 0.999).float().mean()) if N > 1 else 0.0
+            self.policy.evaluate_actions(actor_obs, critic_state, actions)
+            action_values = actions
+            mav_sat = float((action_values[:, 0, :].abs() >= 0.999).float().mean()) if N > 0 else 0.0
+            uav_sat = float((action_values[:, 1:, :].abs() >= 0.999).float().mean()) if N > 1 else 0.0
 
         log_std_vals = torch.stack([p.data for p in self.policy.action_log_stds])
         v = metrics["valid_sample_count_per_agent"]
@@ -305,23 +317,23 @@ class PureHAPPOTrainer:
         for role_name, tensor, mask in (
             (
                 "mav",
-                means_all[:, 0:1, :] if N > 0 else means_all[:, 0:0, :],
+                action_values[:, 0:1, :] if N > 0 else action_values[:, 0:0, :],
                 active[:, 0:1] if N > 0 else active[:, 0:0],
             ),
             (
                 "uav",
-                means_all[:, 1:, :] if N > 1 else means_all[:, 0:0, :],
+                action_values[:, 1:, :] if N > 1 else action_values[:, 0:0, :],
                 active[:, 1:] if N > 1 else active[:, 0:0],
             ),
         ):
-            flat = tensor.reshape(-1, means_all.shape[-1]) if tensor.numel() else torch.zeros((0, means_all.shape[-1]), device=means_all.device)
-            flat_mask = mask.reshape(-1) > 0.5 if mask.numel() else torch.zeros((0,), dtype=torch.bool, device=means_all.device)
+            flat = tensor.reshape(-1, action_values.shape[-1]) if tensor.numel() else torch.zeros((0, action_values.shape[-1]), device=action_values.device)
+            flat_mask = mask.reshape(-1) > 0.5 if mask.numel() else torch.zeros((0,), dtype=torch.bool, device=action_values.device)
             for dim, name in enumerate(action_names):
-                if dim >= means_all.shape[-1] or flat.numel() == 0:
-                    vals = torch.zeros(0, device=means_all.device)
+                if dim >= action_values.shape[-1] or flat.numel() == 0:
+                    vals = torch.zeros(0, device=action_values.device)
                 else:
                     vals = flat[:, dim]
-                active_vals = vals[flat_mask] if vals.numel() and flat_mask.numel() else torch.zeros(0, device=means_all.device)
+                active_vals = vals[flat_mask] if vals.numel() and flat_mask.numel() else torch.zeros(0, device=action_values.device)
                 action_stats[f"{role_name}_action_mean_{name}"] = float(vals.mean().item()) if vals.numel() else 0.0
                 action_stats[f"{role_name}_action_std_{name}"] = (
                     float(vals.std(unbiased=False).item()) if vals.numel() > 1 else 0.0)
@@ -332,6 +344,8 @@ class PureHAPPOTrainer:
                     float(active_vals.mean().item()) if active_vals.numel() else 0.0)
                 action_stats[f"{role_name}_action_std_{name}_active"] = (
                     float(active_vals.std(unbiased=False).item()) if active_vals.numel() > 1 else 0.0)
+                action_stats[f"{role_name}_action_mean_abs_{name}_active"] = (
+                    float(active_vals.abs().mean().item()) if active_vals.numel() else 0.0)
                 action_stats[f"{role_name}_action_saturation_{name}_active"] = (
                     float((active_vals.abs() >= 0.999).float().mean().item()) if active_vals.numel() else 0.0)
         critic_loss_mean = float(np.mean(critic_loss_per_epoch)) if critic_loss_per_epoch else 0.0
@@ -440,4 +454,9 @@ class PureHAPPOTrainer:
             "approx_kl_abs_per_agent": metrics["approx_kl_abs_per_agent"],
             "actor_grad_norm_per_agent": metrics["actor_grad_norm_per_agent"],
             "policy_update_norm_per_agent": metrics["policy_update_norm_per_agent"],
+            "reward_nan_count": int((~torch.isfinite(rewards)).sum().item()),
+            "action_nan_count": int((~torch.isfinite(actions)).sum().item()),
+            "value_nan_count": int((~torch.isfinite(values)).sum().item()),
+            "log_prob_nan_count": int((~torch.isfinite(old_log_probs)).sum().item()),
+            "gradient_nonfinite_count": 0,
         }

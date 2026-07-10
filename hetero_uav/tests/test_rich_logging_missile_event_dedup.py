@@ -14,6 +14,7 @@ def _make_logger():
         tmp, run_id="test", method_name="test",
         scenario_name="test", device="cpu",
         num_envs=1, rollout_length_per_env=256, transitions_per_rollout=256,
+        mode="full",
     )
     return logger, tmp
 

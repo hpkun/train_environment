@@ -66,6 +66,68 @@ def _mean_std(values: list[float]) -> tuple[float, float]:
     return float(np.mean(values)), float(np.std(values))
 
 
+def _reward_scale_by_scope(step_rows: list[dict]) -> dict:
+    def number(row, key):
+        try:
+            value = float(row.get(key, 0.0) or 0.0)
+            return value if math.isfinite(value) else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    component_keys = {
+        "mav": (
+            "brma_pitch", "brma_roll", "brma_vel", "mav_dist_weighted",
+            "mav_threat_weighted", "mav_aspect_weighted", "mav_pos_weighted",
+            "mav_aware_weighted", "mav_event_total",
+        ),
+        "attack_uav": (
+            "brma_pitch", "brma_roll", "brma_vel", "tam_speed_weighted",
+            "tam_angle_weighted", "tam_distance_weighted", "uav_event_total",
+        ),
+    }
+
+    def summarize(rows, keys):
+        total_abs_mean = float(np.mean([abs(number(row, "raw_agent_reward")) for row in rows])) if rows else 0.0
+        result = {}
+        for key in keys:
+            values = np.asarray([number(row, key) for row in rows], dtype=np.float64)
+            result[key] = {
+                "mean": float(values.mean()) if values.size else 0.0,
+                "std": float(values.std()) if values.size else 0.0,
+                "min": float(values.min()) if values.size else 0.0,
+                "max": float(values.max()) if values.size else 0.0,
+                "mean_abs": float(np.abs(values).mean()) if values.size else 0.0,
+                "nonzero_ratio": float(np.mean(np.abs(values) > 1e-12)) if values.size else 0.0,
+                "abs_total_contribution_ratio": (
+                    float(np.abs(values).mean()) / max(total_abs_mean, 1e-12) if values.size else 0.0
+                ),
+            }
+        return {"row_count": len(rows), "abs_total_mean": total_abs_mean, "components": result}
+
+    active_rows = [row for row in step_rows if number(row, "alive_before") > 0.5]
+    result = {
+        "mav_active_rows": summarize(
+            [row for row in active_rows if row.get("role") == "mav"], component_keys["mav"]
+        ),
+        "attack_uav_active_rows": summarize(
+            [row for row in active_rows if row.get("role") == "attack_uav"], component_keys["attack_uav"]
+        ),
+    }
+    grouped: defaultdict[tuple, list[dict]] = defaultdict(list)
+    for row in active_rows:
+        grouped[(row.get("episode_id"), row.get("env_step"))].append(row)
+    team_rows = []
+    all_keys = tuple(dict.fromkeys(component_keys["mav"] + component_keys["attack_uav"]))
+    for (episode_id, env_step), rows in grouped.items():
+        team = {"episode_id": episode_id, "env_step": env_step}
+        for key in all_keys:
+            team[key] = float(np.mean([number(row, key) for row in rows]))
+        team["raw_agent_reward"] = float(np.mean([number(row, "raw_agent_reward") for row in rows]))
+        team_rows.append(team)
+    result["trainer_effective_team_rows"] = summarize(team_rows, all_keys)
+    return result
+
+
 def _outcome(red_alive: int, blue_alive: int, timed_out: bool) -> tuple[str, str]:
     if blue_alive == 0 and red_alive > 0:
         return "red", "blue_eliminated"
@@ -87,6 +149,8 @@ def run_audit(args) -> dict:
     episode_rows: list[dict] = []
     env_steps_total = 0
     target_row_warnings: list[str] = []
+    identity_max_error = {"mav": 0.0, "attack_uav": 0.0}
+    identity_failure_count = 0
     try:
         initial_red_count = len(env.red_ids)
         for ep in range(args.episodes):
@@ -142,10 +206,12 @@ def run_audit(args) -> dict:
                     active = _active_values(role, comp)
                     active_sum = float(sum(active.values()))
                     if not math.isclose(active_sum, reward, rel_tol=1e-7, abs_tol=1e-6):
+                        identity_failure_count += 1
                         raise ValueError(
                             f"active total mismatch episode={ep} step={step} agent={rid}: "
                             f"components={active_sum} reward={reward}"
                         )
+                    identity_max_error[role] = max(identity_max_error.get(role, 0.0), abs(active_sum - reward))
                     if not all(_finite_number(v) for v in [reward, *comp.values()]):
                         raise ValueError(f"non-finite reward diagnostic episode={ep} step={step} agent={rid}")
                     diag = diagnostic_by_agent.get(rid, {})
@@ -292,6 +358,9 @@ def run_audit(args) -> dict:
         "agent_step_rows": len(step_rows), "target_diagnostic_rows": len(target_rows),
         "target_diagnostic_warnings": target_row_warnings,
         "reward_contract_revision": 2, "outcome_groups": grouped,
+        "identity_max_error": identity_max_error,
+        "identity_failure_count": identity_failure_count,
+        "reward_scale_by_scope": _reward_scale_by_scope(step_rows),
         "episode_summaries": episode_rows,
         "note": "Fixed zero-action rollout audit only; this is not learned-policy performance.",
     }
