@@ -67,13 +67,15 @@ def _mean_std(values: list[float]) -> tuple[float, float]:
 
 
 def _outcome(red_alive: int, blue_alive: int, timed_out: bool) -> tuple[str, str]:
+    if blue_alive == 0 and red_alive > 0:
+        return "red", "blue_eliminated"
+    if red_alive == 0 and blue_alive > 0:
+        return "blue", "red_eliminated"
+    if red_alive == 0 and blue_alive == 0:
+        return "draw", "mutual_elimination"
     if timed_out:
         return "draw", "timeout"
-    if red_alive > 0 and blue_alive == 0:
-        return "red", "red_elimination"
-    if blue_alive > 0 and red_alive == 0:
-        return "blue", "blue_elimination"
-    return "draw", "mutual_or_non_elimination"
+    return "draw", "ongoing"
 
 
 def run_audit(args) -> dict:

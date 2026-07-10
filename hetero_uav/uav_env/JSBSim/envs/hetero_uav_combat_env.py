@@ -1427,6 +1427,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "all_attack_uav_dead": float(all_attack_dead),
             "steps_after_all_attack_uav_dead": float(getattr(self, "_brma_tam_all_attack_uav_dead_steps", 0)),
             "mav_reward_after_all_attack_uav_dead": float(weighted if all_attack_dead else 0.0),
+            "mav_support_after_all_attack_uav_dead": float(weighted if all_attack_dead else 0.0),
             "mav_center_distance_m": float(mav_center_distance),
             "mav_aware_raw": float(r_aware),
             "mav_aware_raw_sum": float(r_aware),
@@ -1475,14 +1476,21 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
     def _compute_brma_tam_scripted_composite_v1(self, base_rewards: dict, components: dict):
         cfg = self.brma_tam_scripted_composite_v1_config
+        selected_missile_ids = set()
+        for rec in getattr(self, "_evasion_step_records", []) or []:
+            mid = str(rec.get("incoming_missile_id", "") or "")
+            if mid:
+                selected_missile_ids.add(mid)
         alive_missile_ids = {
             str(mid) for mid, missile in getattr(self, "_missiles_in_flight", {}).items()
             if getattr(missile, "is_alive", False)
         }
         self._brma_tam_missile_speed_cache = {
             mid: speed for mid, speed in getattr(self, "_brma_tam_missile_speed_cache", {}).items()
-            if mid in alive_missile_ids
+            if mid in alive_missile_ids and mid in selected_missile_ids
         }
+        _any_evasion_override = 0.0
+        _any_above_altitude_max = 0.0
         for rid in self.red_ids:
             comp = components.setdefault(rid, {})
             sim = self.red_planes.get(rid)
@@ -1552,6 +1560,11 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 vals.update(support_logs)
                 vals.update(event_logs)
                 vals["mav_total"] = float(total)
+                _all_attack_dead = float(support_logs.get("all_attack_uav_dead", 0.0))
+                vals["mav_safety_after_all_attack_uav_dead"] = float(safety if _all_attack_dead > 0.5 else 0.0)
+                vals["mav_flight_after_all_attack_uav_dead"] = float(flight if _all_attack_dead > 0.5 else 0.0)
+                vals["mav_event_after_all_attack_uav_dead"] = float(event if _all_attack_dead > 0.5 else 0.0)
+                vals["mav_total_after_all_attack_uav_dead"] = float(total if _all_attack_dead > 0.5 else 0.0)
             else:
                 target_id, target, _dist = self._brma_tam_closest_alive_blue(sim)
                 if target is None:
@@ -1600,12 +1613,18 @@ class HeteroUavCombatEnv(UavCombatEnv):
                     lock_timer_frames = int(getattr(self, "_lock_timer", {}).get(rid, 0) or 0)
                 track_logs["reward_target_matches_lock"] = float(bool(target_id and lock_target_id == target_id))
                 track_logs["reward_target_matches_launch"] = float(bool(target_id and target_id in launch_target_ids))
-                launch_range_ok = (
-                    1.0 if getattr(self, "MISSILE_LAUNCH_MIN_RANGE", 500.0)
-                    <= float(geom.get("target_distance_m", 0.0))
-                    <= getattr(self, "MISSILE_LAUNCH_RANGE_THRESH", 10000.0)
-                    else 0.0
-                )
+                _eff_min = getattr(self, "_missile_launch_min_range_m_effective",
+                                    getattr(self, "MISSILE_LAUNCH_MIN_RANGE", 500.0))
+                _eff_max = getattr(self, "_missile_launch_range_m_effective",
+                                   getattr(self, "MISSILE_LAUNCH_RANGE_THRESH", 10000.0))
+                _reward_target_valid = 1.0 if target is not None else 0.0
+                _target_dist = float(geom.get("target_distance_m", 0.0))
+                if target is None:
+                    launch_range_ok = 0.0
+                    below_min_launch_range = 0.0
+                else:
+                    launch_range_ok = 1.0 if float(_eff_min) <= _target_dist <= float(_eff_max) else 0.0
+                    below_min_launch_range = 1.0 if _target_dist < float(_eff_min) else 0.0
                 vals.update(geom)
                 vals.update(speed_logs)
                 vals.update(dist_logs)
@@ -1617,9 +1636,12 @@ class HeteroUavCombatEnv(UavCombatEnv):
                     "tam_angle_weighted": angle_w * float(geom["tam_angle_raw"]),
                     "tam_distance_weighted": dist_w * float(dist_logs["tam_distance_raw"]),
                     "launch_range_ok": launch_range_ok,
-                    "below_min_launch_range": 1.0 if float(geom.get("target_distance_m", 0.0)) < getattr(self, "MISSILE_LAUNCH_MIN_RANGE", 500.0) else 0.0,
-                    "reward_target_distance_m": float(geom.get("target_distance_m", 0.0)),
+                    "below_min_launch_range": below_min_launch_range,
+                    "reward_target_distance_m": _target_dist,
                     "reward_target_switch_count": float(switch_count),
+                    "reward_target_valid": _reward_target_valid,
+                    "effective_launch_min_range_m": float(_eff_min),
+                    "effective_launch_max_range_m": float(_eff_max),
                 })
                 total = flight + vals["tam_speed_weighted"] + vals["tam_angle_weighted"] + vals["tam_distance_weighted"] + event
                 vals["uav_total"] = float(total)
@@ -1653,9 +1675,18 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 })
             vals["brma_tam_scripted_composite_total"] = float(total)
             vals["total"] = float(total)
+            vals["evasion_override_agent_steps"] = float(vals.get("evasion_override_active", 0.0))
+            vals["above_altitude_max_agent_steps"] = float(vals.get("above_altitude_max_steps", 0.0))
+            if role != "mav" and float(vals.get("evasion_override_active", 0.0)) > 0.5:
+                _any_evasion_override = 1.0
+            if float(vals.get("above_altitude_max_steps", 0.0)) > 0.5:
+                _any_above_altitude_max = 1.0
             comp.update(vals)
             base_rewards[rid] = float(total)
             components[rid] = comp
+        for rid in self.red_ids:
+            components[rid]["evasion_override_env_steps"] = _any_evasion_override
+            components[rid]["above_altitude_max_env_steps"] = _any_above_altitude_max
         return base_rewards, components
 
     def _compute_tam_brma_paper_aligned_v1(self, base_rewards: dict, components: dict):
