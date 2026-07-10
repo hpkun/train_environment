@@ -581,6 +581,7 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
         self._launch_gate_records = []
+        self._launch_gate_accum = {}
         alive_before = {
             aid: bool((sim := self._get_sim(aid)) is not None and sim.is_alive)
             for aid in self.agent_ids
@@ -624,6 +625,9 @@ class UavCombatEnv(gymnasium.Env):
 
         # 7. Clean up done missiles (after rendering to capture explosion logs)
         self._cleanup_missiles()
+
+        # 7.5 Finalize per-decision launch gate records
+        self._finalize_launch_gate_decision_records(self.current_step)
 
         # 8. Build observations, terminations, truncations
         obs = self._get_obs()
@@ -1240,13 +1244,17 @@ class UavCombatEnv(gymnasium.Env):
         diag: dict,
     ) -> tuple[AircraftSimulator | None, float, dict | None, dict]:
         candidates: list[tuple[AircraftSimulator, dict, dict]] = []
+        _a = _e = _u = _t = _r = _at = _ta = _bo = _g = 0
         for enemy_sim in enemies.values():
             if not enemy_sim.is_alive:
                 continue
+            _a += 1
             diag["alive_enemy_pairs"] += 1
             if enemy_sim.uid in self._engaged_targets:
+                _e += 1
                 diag["engaged_blocked"] += 1
                 continue
+            _u += 1
             diag["unengaged_enemy_pairs"] += 1
 
             # Track gate: must have direct or MAV-shared track
@@ -1254,6 +1262,7 @@ class UavCombatEnv(gymnasium.Env):
             if not has_track:
                 diag["track_unobserved_blocked"] = diag.get("track_unobserved_blocked", 0) + 1
                 continue
+            _t += 1
             if track_source == "mav_shared":
                 diag["mav_shared_track_candidates"] = diag.get("mav_shared_track_candidates", 0) + 1
             else:
@@ -1261,12 +1270,16 @@ class UavCombatEnv(gymnasium.Env):
 
             metrics = self._missile_candidate_metrics(sim, enemy_sim)
             if metrics["range_ok"]:
+                _r += 1
                 diag["range_ok_pairs"] += 1
             if metrics["ao_ok"]:
+                _at += 1
                 diag["ao_ok_pairs"] += 1
             if metrics["ta_ok"]:
+                _ta += 1
                 diag["ta_ok_pairs"] += 1
 
+            _bo += 1 if metrics.get("boresight_ok_3d", False) else 0
             diag["boresight_ok_pairs"] = diag.get("boresight_ok_pairs", 0) + (1 if metrics.get("boresight_ok_3d", False) else 0)
             if self.use_boresight_launch_gate:
                 in_cone = bool(metrics.get("launch_geometry_ok_3d", False))
@@ -1277,6 +1290,7 @@ class UavCombatEnv(gymnasium.Env):
             if not in_cone and self.use_boresight_launch_gate and (metrics["ao_ok"] and metrics["range_ok"] and metrics["ta_ok"]):
                 diag["geometry_3d_blocked"] = diag.get("geometry_3d_blocked", 0) + 1
             if in_cone:
+                _g += 1
                 diag["geometry_ok_pairs"] += 1
                 score = self._score_mav_aware_target(sim, enemy_sim, metrics)
                 candidates.append((enemy_sim, metrics, score))
@@ -1285,8 +1299,21 @@ class UavCombatEnv(gymnasium.Env):
         if aid.startswith("red") and self.red_target_selection_mode == "mav_threat_rank":
             mode = "mav_threat_rank"
 
+        _funnel = {
+            "alive_target_pair_scans": _a,
+            "engaged_blocked_pair_scans": _e,
+            "unengaged_target_pair_scans": _u,
+            "track_pass_pair_scans": _t,
+            "range_pass_pair_scans": _r,
+            "ata_pass_pair_scans": _at,
+            "ta_pass_pair_scans": _ta,
+            "boresight_pass_pair_scans": _bo,
+            "geometry_pass_pair_scans": _g,
+        }
         if not candidates:
-            return None, float("inf"), None, self._target_selection_debug(mode, 0, None)
+            _debug = self._target_selection_debug(mode, 0, None)
+            _debug.update(_funnel)
+            return None, float("inf"), None, _debug
 
         if mode == "mav_threat_rank":
             selected = max(candidates, key=lambda item: (item[2]["score"], -item[2]["range_m"]))
@@ -1294,7 +1321,9 @@ class UavCombatEnv(gymnasium.Env):
             selected = min(candidates, key=lambda item: item[1]["range_m"])
 
         enemy, metrics, score = selected
-        return enemy, float(metrics["range_m"]), score, self._target_selection_debug(mode, len(candidates), score)
+        _debug = self._target_selection_debug(mode, len(candidates), score)
+        _debug.update(_funnel)
+        return enemy, float(metrics["range_m"]), score, _debug
 
     def _check_missile_launch(self):
         """Rule-based missile launch with lock-delay + hot-update deconfliction.
@@ -1418,125 +1447,148 @@ class UavCombatEnv(gymnasium.Env):
                 self._lock_target[aid] = None
                 # Cooldown is set inside _launch_missile
 
-            # --- Read-only launch gate diagnostic (red attack UAV only) ---
-            _launched_this_frame = (best_enemy is not None
-                                    and self._lock_timer.get(aid, 0) >= self.missile_lock_delay_frames
-                                    and self._missile_cooldown.get(aid, 0) == 0
-                                    and aid not in self._agents_deny_kill
-                                    and best_enemy is not None)
+            # --- Per-physics-frame snapshot via real fire-control diag counts ---
             if aid.startswith("red_") and role == "attack_uav":
-                self._record_launch_gate_diag(aid, sim, role)
+                _debug = selection_debug or {}
+                _ammo = int(getattr(sim, "num_left_missiles", 0))
+                _cd = int(getattr(self, "_missile_cooldown", {}).get(aid, 0) or 0)
+                _lf = int(getattr(self, "_lock_timer", {}).get(aid, 0) or 0)
+                _lr = int(getattr(self, "missile_lock_delay_frames", 15))
+                _kc = aid in getattr(self, "_agents_deny_kill", set())
+                if not getattr(sim, "is_alive", False): _fr = "inactive"
+                elif _ammo <= 0: _fr = "no_ammo"
+                elif _debug.get("alive_target_pair_scans", 0) == 0: _fr = "no_alive_target"
+                elif _debug.get("unengaged_target_pair_scans", 0) == 0: _fr = "all_targets_engaged"
+                elif _debug.get("track_pass_pair_scans", 0) == 0: _fr = "no_track"
+                elif _debug.get("range_pass_pair_scans", 0) == 0: _fr = "out_of_range"
+                elif _debug.get("ata_pass_pair_scans", 0) == 0: _fr = "ata_blocked"
+                elif _debug.get("ta_pass_pair_scans", 0) == 0: _fr = "ta_blocked"
+                elif (getattr(self, "use_boresight_launch_gate", False)
+                      and _debug.get("geometry_pass_pair_scans", 0) == 0): _fr = "boresight_blocked"
+                elif _lf < _lr: _fr = "lock_not_mature"
+                elif _cd > 0: _fr = "cooldown"
+                elif _kc: _fr = "kill_cooldown"
+                else: _fr = "unknown"
+                self._launch_gate_accum.setdefault(aid, []).append({
+                    "fr": _fr, "ammo": _ammo, "cd": _cd, "lf": _lf, "lr": _lr,
+                    "lm": 1 if _lf >= _lr else 0,
+                    "alive": _debug.get("alive_target_pair_scans", 0),
+                    "engaged": _debug.get("engaged_blocked_pair_scans", 0),
+                    "unengaged": _debug.get("unengaged_target_pair_scans", 0),
+                    "track": _debug.get("track_pass_pair_scans", 0),
+                    "range": _debug.get("range_pass_pair_scans", 0),
+                    "ata": _debug.get("ata_pass_pair_scans", 0),
+                    "ta": _debug.get("ta_pass_pair_scans", 0),
+                    "boresight": _debug.get("boresight_pass_pair_scans", 0),
+                    "geom": _debug.get("geometry_pass_pair_scans", 0),
+                    "bid": str(getattr(best_enemy, "uid", "") or ""),
+                })
 
-    def _record_launch_gate_diag(self, aid: str, sim, role: str) -> None:
-        """Build a read-only funnel diagnostic for a red attack UAV."""
-        enemies = getattr(self, "blue_planes", {})
-        alive_targets = [e for _, e in enemies.items() if getattr(e, "is_alive", False)]
-        alive_count = len(alive_targets)
-        track_pass = 0; range_pass = 0; ata_pass = 0; ta_pass = 0
-        deconfliction_pass = 0
-        best_geom_target = None; best_geom_range = float("inf")
-        best_geom_ata = 0.0; best_geom_ta = 0.0
-        nearest_target_dist = float("inf")
-        nearest_track_dist = float("inf")
-        lock_target = str(getattr(self, "_lock_target", {}).get(aid, "") or "")
-        for target in alive_targets:
-            d = float(np.linalg.norm(
-                np.asarray(target.get_position(), dtype=np.float64)
-                - np.asarray(sim.get_position(), dtype=np.float64)))
-            if d < nearest_target_dist:
-                nearest_target_dist = d
-            has_track, _ts = self._has_launch_track(aid, target.uid)
-            if not has_track:
+    def _finalize_launch_gate_decision_records(self, decision_step: int) -> None:
+        """Aggregate per-physics-frame snapshots into per-decision records."""
+        accum = getattr(self, "_launch_gate_accum", {})
+        agent_interaction_steps = getattr(self, "agent_interaction_steps", 12)
+        use_bg = bool(getattr(self, "use_boresight_launch_gate", False))
+        for aid, snaps in accum.items():
+            role = getattr(self, "agent_roles", {}).get(aid, "attack_uav")
+            sim = self._get_sim(aid)
+            alive_before = bool(getattr(sim, "is_alive", False)) if sim else False
+            alive_after = alive_before
+            n = len(snaps)
+            if n == 0:
                 continue
-            if d < nearest_track_dist:
-                nearest_track_dist = d
-            track_pass += 1
-            eff_min = getattr(self, "_missile_launch_min_range_m_effective",
-                              getattr(self, "MISSILE_LAUNCH_MIN_RANGE", 500.0))
-            eff_max = getattr(self, "_missile_launch_range_m_effective",
-                              getattr(self, "MISSILE_LAUNCH_RANGE_THRESH", 10000.0))
-            in_range = eff_min < d < eff_max
-            if not in_range:
-                continue
-            range_pass += 1
-            geo = self._build_launch_geometry_3d(sim, target)
-            ata_ok = bool(geo.get("ata_ok_3d", False))
-            ta_ok_3d = bool(geo.get("ta_ok_3d", False))
-            if not ata_ok:
-                continue
-            ata_pass += 1
-            if not ta_ok_3d:
-                continue
-            ta_pass += 1
-            if target.uid not in getattr(self, "_engaged_targets", set()):
-                deconfliction_pass += 1
-            if d < best_geom_range:
-                best_geom_range = d
-                best_geom_target = target.uid
-                best_geom_ata = float(geo.get("ATA_3d_rad", 0.0))
-                best_geom_ta = float(geo.get("TA_3d_rad", 0.0))
-        geo_pass = ta_pass  # last sequential gate
-        lock_frames = int(getattr(self, "_lock_timer", {}).get(aid, 0) or 0)
-        lock_req = int(getattr(self, "missile_lock_delay_frames", 15))
-        lock_mature_flag = lock_frames >= lock_req
-        launched = int(getattr(self, "_missile_launch_counts", {}).get(aid, 0)) > 0
-        launch_target = ""
-        for rec in getattr(self, "_launch_quality_step_records", []) or []:
-            if str(rec.get("shooter_id", "")) == aid:
-                launch_target = str(rec.get("target_id", "") or "")
-                break
-        # primary block reason
-        ammo = int(getattr(sim, "num_left_missiles", 0))
-        cd = int(getattr(self, "_missile_cooldown", {}).get(aid, 0) or 0)
-        if not getattr(sim, "is_alive", False):
-            reason = "inactive"
-        elif alive_count == 0:
-            reason = "no_alive_target"
-        elif track_pass == 0:
-            reason = "no_track"
-        elif range_pass == 0:
-            reason = "out_of_range"
-        elif ata_pass == 0:
-            reason = "ata_blocked"
-        elif ta_pass == 0:
-            reason = "ta_blocked"
-        elif deconfliction_pass == 0:
-            reason = "deconfliction_blocked"
-        elif ammo <= 0:
-            reason = "no_ammo"
-        elif cd > 0:
-            reason = "cooldown"
-        elif not lock_mature_flag:
-            reason = "lock_not_mature"
-        elif launched:
-            reason = "launch"
-        else:
-            reason = "unknown"
-        self._launch_gate_records.append({
-            "agent_id": aid, "alive_before": int(getattr(sim, "is_alive", False)),
-            "alive_after": int(getattr(sim, "is_alive", False)),
-            "ammo_remaining": ammo, "cooldown_remaining": cd,
-            "cooldown_ok": 1 if cd <= 0 else 0,
-            "alive_target_count": alive_count,
-            "track_pass_count": track_pass, "range_pass_count": range_pass,
-            "ata_pass_count": ata_pass, "ta_pass_count": ta_pass,
-            "line_pass_count": ta_pass,
-            "geometry_pass_count": geo_pass,
-            "deconfliction_pass_count": deconfliction_pass,
-            "lock_target_id": lock_target,
-            "lock_candidate_target_id": str(best_geom_target or ""),
-            "lock_timer_frames": lock_frames, "lock_required_frames": lock_req,
-            "lock_mature": 1 if lock_mature_flag else 0,
-            "launch_executed": 1 if launched else 0,
-            "launch_target_id": launch_target,
-            "nearest_alive_target_distance_m": nearest_target_dist if nearest_target_dist < float("inf") else 0.0,
-            "nearest_track_target_distance_m": nearest_track_dist if nearest_track_dist < float("inf") else 0.0,
-            "best_geometry_target_id": str(best_geom_target or ""),
-            "best_geometry_range_m": best_geom_range if best_geom_range < float("inf") else 0.0,
-            "best_geometry_ata_rad": best_geom_ata,
-            "best_geometry_ta_rad": best_geom_ta,
-            "primary_block_reason": reason,
-        })
+            # Sum funnel counts
+            alive_sum = sum(s["alive"] for s in snaps)
+            engaged_sum = sum(s["engaged"] for s in snaps)
+            unengaged_sum = sum(s["unengaged"] for s in snaps)
+            track_sum = sum(s["track"] for s in snaps)
+            range_sum = sum(s["range"] for s in snaps)
+            ata_sum = sum(s["ata"] for s in snaps)
+            ta_sum = sum(s["ta"] for s in snaps)
+            boresight_sum = sum(s["boresight"] for s in snaps)
+            geom_sum = sum(s["geom"] for s in snaps)
+            # Frame reason counts
+            fr_counts = {}
+            for s in snaps:
+                fr = s["fr"]
+                fr_counts[fr] = fr_counts.get(fr, 0) + 1
+            lock_mature_frames = sum(s["lm"] for s in snaps)
+            cooldown_frames = sum(1 for s in snaps if s["cd"] > 0)
+            kill_cd_frames = 0  # not tracked per-frame easily
+            launch_count = sum(1 for s in snaps if s["fr"] == "launch")
+            launch_targets = [s["bid"] for s in snaps if s["fr"] == "launch" and s["bid"]]
+            any_launch = 1 if launch_count > 0 else 0
+            # Primary block reason (decision-level)
+            if launch_count > 0:
+                primary = "launch"
+            else:
+                fr_sorted = sorted(fr_counts.items(), key=lambda x: -x[1])
+                tie_order = ["inactive","no_ammo","no_alive_target","all_targets_engaged",
+                             "no_track","out_of_range","ata_blocked","ta_blocked",
+                             "boresight_blocked","lock_not_mature","cooldown","kill_cooldown","unknown"]
+                best_fr = fr_sorted[0][0] if fr_sorted else "unknown"
+                for t in tie_order:
+                    if fr_counts.get(t, 0) > 0:
+                        best_fr = t
+                        break
+                primary = best_fr
+            self._launch_gate_records.append({
+                "diagnostic_protocol_version": 2,
+                "agent_id": aid, "role": role,
+                "decision_step": decision_step,
+                "physics_frame_scans": n,
+                "agent_interaction_steps": agent_interaction_steps,
+                "alive_before": int(alive_before),
+                "alive_after": int(alive_after),
+                "alive_target_pair_scans": alive_sum,
+                "engaged_blocked_pair_scans": engaged_sum,
+                "unengaged_target_pair_scans": unengaged_sum,
+                "track_pass_pair_scans": track_sum,
+                "track_blocked_pair_scans": unengaged_sum - track_sum,
+                "range_pass_pair_scans": range_sum,
+                "ata_pass_pair_scans": ata_sum,
+                "ta_pass_pair_scans": ta_sum,
+                "boresight_pass_pair_scans": boresight_sum,
+                "geometry_pass_pair_scans": geom_sum,
+                "any_alive_target": 1 if alive_sum > 0 else 0,
+                "any_unengaged_target": 1 if unengaged_sum > 0 else 0,
+                "any_track_pass": 1 if track_sum > 0 else 0,
+                "any_range_pass": 1 if range_sum > 0 else 0,
+                "any_ata_pass": 1 if ata_sum > 0 else 0,
+                "any_ta_pass": 1 if ta_sum > 0 else 0,
+                "any_geometry_pass": 1 if geom_sum > 0 else 0,
+                "any_lock_mature": 1 if lock_mature_frames > 0 else 0,
+                "any_launch": any_launch,
+                "lock_mature_frame_count": lock_mature_frames,
+                "cooldown_blocked_frame_count": cooldown_frames,
+                "kill_cooldown_blocked_frame_count": kill_cd_frames,
+                "launch_count": launch_count,
+                "launch_target_ids": "|".join(launch_targets),
+                "nearest_alive_target_distance_m_min": 0.0,
+                "nearest_track_target_distance_m_min": 0.0,
+                "best_geometry_range_m_min": 0.0,
+                "best_geometry_ata_rad_min": 0.0,
+                "best_geometry_ta_rad_max": 0.0,
+                "ammo_remaining_end": int(getattr(sim, "num_left_missiles", 0)) if sim else 0,
+                "cooldown_remaining_end": int(getattr(self, "_missile_cooldown", {}).get(aid, 0) or 0),
+                "boresight_gate_enabled": 1 if use_bg else 0,
+                "line_gate_is_alias_of_ta": 1,
+                "inactive_frame_count": fr_counts.get("inactive", 0),
+                "no_ammo_frame_count": fr_counts.get("no_ammo", 0),
+                "no_alive_target_frame_count": fr_counts.get("no_alive_target", 0),
+                "all_targets_engaged_frame_count": fr_counts.get("all_targets_engaged", 0),
+                "no_track_frame_count": fr_counts.get("no_track", 0),
+                "out_of_range_frame_count": fr_counts.get("out_of_range", 0),
+                "ata_blocked_frame_count": fr_counts.get("ata_blocked", 0),
+                "ta_blocked_frame_count": fr_counts.get("ta_blocked", 0),
+                "boresight_blocked_frame_count": fr_counts.get("boresight_blocked", 0),
+                "lock_not_mature_frame_count": fr_counts.get("lock_not_mature", 0),
+                "cooldown_frame_count": fr_counts.get("cooldown", 0),
+                "kill_cooldown_frame_count": fr_counts.get("kill_cooldown", 0),
+                "launch_frame_count": fr_counts.get("launch", 0),
+                "unknown_frame_count": fr_counts.get("unknown", 0),
+                "primary_block_reason": primary,
+            })
 
     def _build_launch_quality_record(
         self,

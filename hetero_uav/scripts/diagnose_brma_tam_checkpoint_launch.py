@@ -1,16 +1,8 @@
-"""Deterministic diagnostic eval: 3V2, 5 episodes, brma_rule opponent.
-
-Loads a checkpoint, runs deterministic rollout, records launch gate diagnostics
-and death reasons. Does NOT modify policy, env, reward, or fire-control.
-"""
+"""Corrected diagnostic eval v2: brma_rule opponent, per-decision gate diag, official eval path."""
 from __future__ import annotations
 
-import argparse
-import csv
-import json
-import math
-import sys
-from collections import defaultdict
+import argparse, csv, json, math, sys
+from collections import defaultdict, Counter
 from pathlib import Path
 
 import numpy as np
@@ -20,182 +12,27 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from algorithms.happo import (
-    BRMARecurrentMaskedHAPPOReferencePolicy,
-    BRMARecurrentHAPPOReferencePolicy,
+from scripts.eval_happo_reference import (
+    _load_meta, _build_policy_from_meta, _role_ids, _team_done,
+    _alive_counts, _env_type_override_kwargs,
 )
-from algorithms.pure_happo import PureHAPPOPolicy, PureHAPPOTanhPolicy
-from uav_env.JSBSim.adapters.hetero_entity_set_adapter import HeteroEntitySetAdapter
-from algorithms.happo.rollout_safety import sanitize_policy_inputs, zero_inactive_actions, zero_inactive_hidden
 from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
+from algorithms.happo.rollout_safety import sanitize_policy_inputs, zero_inactive_actions, zero_inactive_hidden
+from algorithms.mappo.opponent_policy import OpponentPolicy
 from uav_env import make_env
-from scripts.experiment_logging_schema import (
-    LAUNCH_GATE_DIAGNOSTICS_COLUMNS,
-    ensure_csv,
-)
-from scripts.rich_logging import RichExperimentLogger
 
 
 def _safe(v, default=0.0):
-    try:
-        x = float(v)
-        return x if math.isfinite(x) else default
-    except (TypeError, ValueError):
-        return default
-
-
-def _load_policy(model_path: Path, meta: dict, device):
-    arch = meta.get("policy_arch", "")
-    entity_dim = int(meta.get("entity_dim", 30))
-    critic_state_dim = int(meta.get("critic_state_dim", 480))
-    action_dim = int(meta.get("action_dim", 3))
-    hidden_dim = int(meta.get("hidden_dim", 128))
-    num_heads = int(meta.get("num_attention_heads", 4))
-    rnn_hidden = int(meta.get("rnn_hidden_size", 128))
-    max_allies = int(meta.get("max_allies", 4))
-    max_enemies = int(meta.get("max_enemies", 4))
-    num_agents = int(meta.get("num_agents", 3))
-    biased_mask = bool(meta.get("biased_mask", False))
-
-    if arch in ("pure_happo",):
-        policy = PureHAPPOPolicy(
-            actor_obs_dim=meta.get("actor_obs_dim", 96),
-            critic_state_dim=critic_state_dim,
-            action_dim=action_dim, num_agents=num_agents,
-        )
-    elif arch == "brma_recurrent_masked":
-        policy = BRMARecurrentMaskedHAPPOReferencePolicy(
-            entity_dim=entity_dim, critic_state_dim=critic_state_dim,
-            action_dim=action_dim, hidden_dim=hidden_dim,
-            num_attention_heads=num_heads, rnn_hidden_size=rnn_hidden,
-            max_allies=max_allies, max_enemies=max_enemies,
-            biased_mask=biased_mask,
-        )
-    elif arch == "brma_recurrent":
-        policy = BRMARecurrentHAPPOReferencePolicy(
-            entity_dim=entity_dim, critic_state_dim=critic_state_dim,
-            action_dim=action_dim, hidden_dim=hidden_dim,
-            num_attention_heads=num_heads, rnn_hidden_size=rnn_hidden,
-            max_allies=max_allies, max_enemies=max_enemies,
-        )
-    else:
-        raise ValueError(f"unsupported arch: {arch}")
-    state = torch.load(model_path, map_location=device, weights_only=True)
-    policy.load_state_dict(state)
-    policy.to(device)
-    policy.eval()
-    return policy
-
-
-def _run_episode(env, policy, adapter, device, seed: int, rnn_hidden=None):
-    obs, _info = env.reset(seed=seed)
-    red_ids = env.red_ids
-    episode_data = {
-        "steps": [], "reward_total": {rid: 0.0 for rid in red_ids},
-        "death_reasons": {},
-        "launch_gate_rows": [],
-        "red_launches": 0, "red_hits": 0,
-        "blue_launches": 0, "blue_hits": 0,
-    }
-    prev_hits = {"red": 0, "blue": 0}
-    for step in range(env.max_steps):
-        adapted = adapter.adapt_all(obs, red_ids=red_ids, blue_ids=env.blue_ids)
-        actor_obs_np = np.stack([adapted["actor_obs"][rid] for rid in red_ids], axis=0)
-        actor_obs_t = torch.as_tensor(actor_obs_np, dtype=torch.float32, device=device).unsqueeze(0)
-        critic_t = torch.as_tensor(adapted["critic_state"], dtype=torch.float32, device=device).unsqueeze(0)
-        with torch.no_grad():
-            result = policy.act(actor_obs_t, critic_state=critic_t, deterministic=True,
-                               rnn_hidden=rnn_hidden)
-        actions_np = result["action"].squeeze(0).cpu().numpy()
-        if rnn_hidden is not None:
-            rnn_hidden = result.get("rnn_hidden")
-        action_dict = {rid: actions_np[i] for i, rid in enumerate(red_ids)}
-        for bid in env.blue_ids:
-            action_dict[bid] = np.zeros(3, dtype=np.float32)
-        obs, rewards, term, trunc, info = env.step(action_dict)
-
-        # Collect reward component sums
-        comps = info.get("reward_components", {})
-        for rid in red_ids:
-            episode_data["reward_total"][rid] += float(rewards.get(rid, 0.0))
-            c = comps.get(rid, {})
-            episode_data["steps"].append({
-                "step": step, "agent_id": rid,
-                "role": env.agent_roles.get(rid, ""),
-                "total": float(rewards.get(rid, 0.0)),
-                **{k: _safe(c.get(k, 0)) for k in (
-                    "brma_pitch", "brma_roll", "brma_vel",
-                    "tam_speed_weighted", "tam_angle_weighted", "tam_distance_weighted",
-                    "uav_event_total", "uav_event_kill", "uav_event_loss",
-                    "mav_dist_weighted", "mav_threat_weighted", "mav_aspect_weighted",
-                    "mav_pos_weighted", "mav_aware_weighted", "mav_event_total",
-                    "mav_total", "uav_total", "total",
-                )},
-            })
-
-        # Launch gate diagnostics
-        gate_recs = info.get("__launch_gate_diagnostics__", []) or []
-        for gr in gate_recs:
-            gr["step"] = step
-            gr["episode_id"] = 0
-            gr["env_idx"] = 0
-            gr["episode_uid"] = "0:0"
-            episode_data["launch_gate_rows"].append(gr)
-
-        # Missile events
-        for rec in info.get("__launch_quality_step__", []) or []:
-            if "red_" in str(rec.get("shooter_id", "")):
-                episode_data["red_launches"] += 1
-            else:
-                episode_data["blue_launches"] += 1
-        mt = info.get("__missile_term__", {}) or {}
-        rh = int(mt.get("red", {}).get("hit", 0) or 0)
-        bh = int(mt.get("blue", {}).get("hit", 0) or 0)
-        episode_data["red_hits"] = rh
-        episode_data["blue_hits"] = bh
-
-        # Death reasons
-        for ev in info.get("death_events", []) or []:
-            if isinstance(ev, dict):
-                episode_data["death_reasons"][ev.get("agent_id", "")] = ev.get("death_reason", "")
-
-        if all(term.values()) or all(trunc.values()):
-            break
-
-    red_alive = sum(1 for rid in red_ids if env.red_planes.get(rid) and env.red_planes[rid].is_alive)
-    blue_alive = sum(1 for bid in env.blue_ids if env.blue_planes.get(bid) and env.blue_planes[bid].is_alive)
-    timed_out = bool(all(trunc.values()) if step >= env.max_steps - 1 else False)
-    if blue_alive == 0 and red_alive > 0:
-        winner, end_reason = "red", "blue_eliminated"
-    elif red_alive == 0 and blue_alive > 0:
-        winner, end_reason = "blue", "red_eliminated"
-    elif red_alive == 0 and blue_alive == 0:
-        winner, end_reason = "draw", "mutual_elimination"
-    elif timed_out:
-        winner, end_reason = "draw", "timeout"
-    else:
-        winner, end_reason = "draw", "ongoing"
-
-    return {
-        "episode_length": step + 1,
-        "winner": winner, "end_reason": end_reason,
-        "red_alive_final": red_alive, "blue_alive_final": blue_alive,
-        "mav_alive_final": int(bool(env.red_planes.get("red_0") and env.red_planes["red_0"].is_alive)),
-        "red_launches": episode_data["red_launches"], "red_hits": episode_data["red_hits"],
-        "blue_launches": episode_data["blue_launches"], "blue_hits": episode_data["blue_hits"],
-        "reward_total": episode_data["reward_total"],
-        "episode_return": sum(episode_data["reward_total"].values()) / max(len(red_ids), 1),
-        "episode_return_per_step": sum(episode_data["reward_total"].values()) / max(step + 1, 1) / max(len(red_ids), 1),
-        "steps": episode_data["steps"],
-        "death_reasons": episode_data["death_reasons"],
-        "launch_gate_rows": episode_data["launch_gate_rows"],
-    }
+    try: x = float(v); return x if math.isfinite(x) else default
+    except: return default
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--config", required=True)
+    parser.add_argument("--opponent-policy", default="brma_rule",
+                        choices=["zero","random","rule_nearest","greedy_fsm","brma_rule","fixed_route"])
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--device", default="cpu")
@@ -204,230 +41,428 @@ def main():
     args = parser.parse_args()
 
     model_path = Path(args.model)
-    if not model_path.exists():
-        print(f"ERROR: model not found: {args.model}")
-        sys.exit(1)
     meta_path = model_path.parent / "meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
-    print(f"Checkpoint meta: {json.dumps({k: meta.get(k) for k in ('policy_arch','biased_mask','entity_dim','num_agents')}, default=str)}")
+    if not meta_path.exists():
+        meta_path = model_path.parent.parent / "meta.json"
+    if not meta_path.exists():
+        print("ERROR: meta.json not found"); sys.exit(1)
+    meta = _load_meta(model_path)
+    print(f"Checkpoint meta: policy_arch={meta.get('policy_arch')} "
+          f"biased_mask={meta.get('biased_mask')} entity_dim={meta.get('entity_dim')} "
+          f"rnn_hidden_size={meta.get('rnn_hidden_size')} "
+          f"max_allies={meta.get('max_allies',meta.get('adapter_max_allies',4))} "
+          f"max_enemies={meta.get('max_enemies',meta.get('adapter_max_enemies',4))}")
 
     device = torch.device(args.device)
-    policy = _load_policy(model_path, meta, device)
+    policy = _build_policy_from_meta(meta, device)
+    policy.load(model_path, map_location=device)
+    policy.eval()
 
+    agent_interaction_steps = 12
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ensure_csv(out_dir / "launch_gate_diagnostics.csv", LAUNCH_GATE_DIAGNOSTICS_COLUMNS)
-    gate_file = (out_dir / "launch_gate_diagnostics.csv").open("a", newline="", encoding="utf-8")
-    gate_writer = csv.DictWriter(gate_file, fieldnames=LAUNCH_GATE_DIAGNOSTICS_COLUMNS)
-    gate_writer.writeheader()
 
-    episodes = []
-    obs_adapter = HeteroObsAdapterV2(max_red=5, max_blue=4, role_dim=4)
-    env = make_env(args.config, max_steps=args.max_steps)
+    env = make_env(args.config, **_env_type_override_kwargs(args.config))
+    if hasattr(env, "agent_interaction_steps"):
+        agent_interaction_steps = env.agent_interaction_steps
+    max_red, max_blue = len(env.red_ids), len(env.blue_ids)
+    # Adapter must match policy training dims: critic_state_dim=700 = 5*140
+    adapter = HeteroObsAdapterV2(max_red=5, max_blue=4, role_dim=4)
+    print(f"Adapter: max_red=5 max_blue=4 "
+          f"flat_actor={adapter.flat_actor_obs_dim} critic={adapter.critic_state_dim}")
+    _rnn_hidden_size = getattr(policy, "rnn_hidden_size", 0)
+
+    print(f"Config={args.config} opponent={args.opponent_policy} "
+          f"seeds={args.seed_start}-{args.seed_start+args.episodes-1} "
+          f"agent_interaction_steps={agent_interaction_steps} "
+          f"max_gate_rows_per_ep={(max_red-1)*args.max_steps}")
+
+    # Output files
+    gate_file = (out_dir / "launch_gate_diagnostics.csv").open("w", newline="", encoding="utf-8")
+    gate_cols = ["run_id","scenario","env_idx","episode_id","episode_uid","diagnostic_protocol_version",
+                 "step","sim_time","agent_id","role","decision_step","physics_frame_scans",
+                 "agent_interaction_steps","alive_before","alive_after",
+                 "alive_target_pair_scans","engaged_blocked_pair_scans","unengaged_target_pair_scans",
+                 "track_pass_pair_scans","track_blocked_pair_scans","range_pass_pair_scans",
+                 "ata_pass_pair_scans","ta_pass_pair_scans","boresight_pass_pair_scans",
+                 "geometry_pass_pair_scans","any_alive_target","any_unengaged_target",
+                 "any_track_pass","any_range_pass","any_ata_pass","any_ta_pass",
+                 "any_geometry_pass","any_lock_mature","any_launch",
+                 "lock_mature_frame_count","cooldown_blocked_frame_count",
+                 "kill_cooldown_blocked_frame_count","launch_count","launch_target_ids",
+                 "nearest_alive_target_distance_m_min","nearest_track_target_distance_m_min",
+                 "best_geometry_range_m_min","best_geometry_ata_rad_min","best_geometry_ta_rad_max",
+                 "ammo_remaining_end","cooldown_remaining_end",
+                 "boresight_gate_enabled","line_gate_is_alias_of_ta",
+                 "inactive_frame_count","no_ammo_frame_count","no_alive_target_frame_count",
+                 "all_targets_engaged_frame_count","no_track_frame_count","out_of_range_frame_count",
+                 "ata_blocked_frame_count","ta_blocked_frame_count","boresight_blocked_frame_count",
+                 "lock_not_mature_frame_count","cooldown_frame_count","kill_cooldown_frame_count",
+                 "launch_frame_count","unknown_frame_count","primary_block_reason"]
+    gate_w = csv.DictWriter(gate_file, fieldnames=gate_cols, extrasaction="ignore")
+    gate_w.writeheader()
+
+    ep_summary_rows = []
+    death_rows = []
+    all_gate_rows = []
+    mav_ts_rows = []
+    opp_act_calls = 0
+    blue_nonzero_decisions = 0
+    blue_abs_sum = 0.0
 
     try:
         for ep_idx in range(args.episodes):
             seed = args.seed_start + ep_idx
             ep_uid = f"0:{ep_idx}"
-            rnn_hidden = None
-            if hasattr(policy, "init_hidden"):
-                rnn_hidden = policy.init_hidden(3, device)  # 3 red agents for 3V2
-            ep = _run_episode(env, policy, obs_adapter, device, seed, rnn_hidden)
-            ep["seed"] = seed
-            ep["episode_uid"] = ep_uid
-            episodes.append(ep)
-            print(f"Ep {ep_uid} seed={seed} len={ep['episode_length']} "
-                  f"outcome={ep['winner']}/{ep['end_reason']} ret={ep['episode_return']:.2f} "
-                  f"R_launch={ep['red_launches']} R_hit={ep['red_hits']} "
-                  f"B_launch={ep['blue_launches']} B_hit={ep['blue_hits']} "
-                  f"MAV_alive={ep['mav_alive_final']} R_alive={ep['red_alive_final']}")
+            opponent = OpponentPolicy(mode=args.opponent_policy, seed=seed + 99)
+            opponent.reset_memory()
+            obs, info = env.reset(seed=seed)
+            roles = _role_ids(env)
+            rnn_hidden = np.zeros((max_red, _rnn_hidden_size), dtype=np.float32) if _rnn_hidden_size > 0 else None
 
-            # Write gate rows
-            for gr in ep["launch_gate_rows"]:
-                gr["episode_id"] = ep_idx
-                gr["episode_uid"] = ep_uid
-                gr["env_idx"] = 0
-                gate_writer.writerow(gr)
+            ep_ret_trainer = 0.0
+            ep_ret_fixed = 0.0
+            ep_len = 0
+            ep_red_launch = ep_red_hit = ep_blue_launch = ep_blue_hit = 0
+            prev_hits = {"red": 0, "blue": 0}
+            ep_death_reasons = {}
+            ep_mav_ts = []
+
+            while True:
+                # --- Red action via official eval path ---
+                adapted = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
+                active = np.zeros(max_red, dtype=np.float32)
+                for i, rid in enumerate(env.red_ids):
+                    agent_info = info.get(rid, {}) if isinstance(info, dict) else {}
+                    if isinstance(agent_info, dict) and "alive" in agent_info:
+                        alive = bool(agent_info["alive"])
+                    else:
+                        sim = env.red_planes.get(rid)
+                        alive = bool(sim is not None and sim.is_alive)
+                    active[i] = 1.0 if alive else 0.0
+                actor_obs = np.stack([
+                    adapted["actor_obs"].get(rid, np.zeros(adapter.flat_actor_obs_dim, dtype=np.float32))
+                    for rid in env.red_ids
+                ])
+                critic = adapted["critic_state"]
+                san = sanitize_policy_inputs(
+                    actor_obs, active, critic_state=critic, rnn_hidden=rnn_hidden,
+                    context={"env_idx": 0, "episode_id": ep_idx, "total_steps": ep_len},
+                )
+                actor_obs = san["actor_obs"]
+                critic = san["critic_state"] if san["critic_state"] is not None else critic
+                rnn_hidden = san["rnn_hidden"] if san["rnn_hidden"] is not None else rnn_hidden
+                alive_before = active > 0.5
+                act_kwargs = {}
+                if rnn_hidden is not None:
+                    act_kwargs["rnn_hidden"] = torch.as_tensor(rnn_hidden, device=device)
+                with torch.no_grad():
+                    out = policy.act(
+                        torch.as_tensor(actor_obs, device=device), roles=roles,
+                        critic_state=torch.as_tensor(critic, device=device),
+                        deterministic=True, **act_kwargs)
+                if rnn_hidden is not None and "rnn_hidden" in out:
+                    rnn_hidden = zero_inactive_hidden(
+                        out["rnn_hidden"].detach().cpu().numpy(), active)
+                actions = zero_inactive_actions(out["action"].detach().cpu().numpy(), active)
+                action_dict = {rid: actions[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
+
+                # --- Blue action via real OpponentPolicy ---
+                opp_act_calls += 1
+                blue_actions = opponent.act(obs, env.blue_ids, env=env)
+                action_dict.update(blue_actions)
+                for bid in env.blue_ids:
+                    ba = blue_actions.get(bid, np.zeros(3))
+                    abs_sum = float(np.sum(np.abs(ba)))
+                    blue_abs_sum += abs_sum
+                    if abs_sum > 1e-6:
+                        blue_nonzero_decisions += 1
+
+                # --- MAV timeseries ---
+                mav = env.red_planes.get("red_0")
+                if mav:
+                    mav_pos_before = np.asarray(mav.get_position(), dtype=np.float64).copy()
+                    mav_rpy_before = np.asarray(mav.get_rpy(), dtype=np.float64).copy()
+                    mav_alive_before = bool(getattr(mav, "is_alive", False))
+                else:
+                    mav_pos_before = np.zeros(3); mav_rpy_before = np.zeros(3)
+                    mav_alive_before = False
+
+                obs, rewards, term, trunc, info = env.step(action_dict)
+
+                if mav:
+                    mav_pos_after = np.asarray(mav.get_position(), dtype=np.float64)
+                    mav_rpy_after = np.asarray(mav.get_rpy(), dtype=np.float64)
+                    mav_alive_after = bool(getattr(mav, "is_alive", False))
+                    ep_mav_ts.append({
+                        "episode_uid": ep_uid, "seed": seed, "decision_step": ep_len,
+                        "alive_before": int(mav_alive_before), "alive_after": int(mav_alive_after),
+                        "altitude_m_before": float(mav_pos_before[2]),
+                        "altitude_m_after": float(mav_pos_after[2]),
+                        "vertical_speed_up_mps_before": float(np.asarray(mav.get_velocity())[2]) if mav_alive_before else 0.0,
+                        "vertical_speed_up_mps_after": float(np.asarray(mav.get_velocity())[2]) if mav_alive_after else 0.0,
+                        "speed_mps_before": float(np.linalg.norm(np.asarray(mav.get_velocity()))) if mav_alive_before else 0.0,
+                        "speed_mps_after": float(np.linalg.norm(np.asarray(mav.get_velocity()))) if mav_alive_after else 0.0,
+                        "roll_deg_before": float(np.rad2deg(mav_rpy_before[0])),
+                        "pitch_deg_before": float(np.rad2deg(mav_rpy_before[1])),
+                        "heading_deg_before": float(np.rad2deg(mav_rpy_before[2])),
+                        "roll_deg_after": float(np.rad2deg(mav_rpy_after[0])),
+                        "pitch_deg_after": float(np.rad2deg(mav_rpy_after[1])),
+                        "heading_deg_after": float(np.rad2deg(mav_rpy_after[2])),
+                        "raw_action_pitch": float(actions[0][0]) if max_red > 0 else 0.0,
+                        "raw_action_heading": float(actions[0][1]) if max_red > 0 else 0.0,
+                        "raw_action_speed": float(actions[0][2]) if max_red > 0 else 0.0,
+                    })
+
+                # --- Gate diag: write per-decision records ---
+                gate_recs = info.get("__launch_gate_diagnostics__", []) or []
+                for gr in gate_recs:
+                    gr["run_id"] = "diag_eval_v2"
+                    gr["scenario"] = "3v2_brma_rule"
+                    gr["env_idx"] = 0
+                    gr["episode_id"] = ep_idx
+                    gr["episode_uid"] = ep_uid
+                    gr["step"] = ep_len
+                    gate_w.writerow(gr)
+                    all_gate_rows.append(dict(gr))
+
+                # --- Missile accounting ---
+                for aid in env.agent_ids:
+                    agent_info = info.get(aid, {}) if isinstance(info, dict) else {}
+                    fired = int(agent_info.get("missiles_fired_this_step", 0)) if isinstance(agent_info, dict) else 0
+                    if aid.startswith("red_"): ep_red_launch += fired
+                    else: ep_blue_launch += fired
+                mt = info.get("__missile_term__", {}) or {}
+                rh = int(mt.get("red", {}).get("hit", 0) or 0)
+                bh = int(mt.get("blue", {}).get("hit", 0) or 0)
+                ep_red_hit = max(ep_red_hit, rh)
+                ep_blue_hit = max(ep_blue_hit, bh)
+
+                # --- Death reasons ---
+                for ev in info.get("death_events", []) or []:
+                    if isinstance(ev, dict):
+                        ep_death_reasons[ev.get("agent_id", "")] = ev.get("death_reason", "")
+
+                # --- Returns ---
+                red_rewards = [float(rewards.get(rid, 0.0)) for rid in env.red_ids]
+                ep_ret_fixed += sum(red_rewards) / max_red
+                alive_red_rewards = [r for i, r in enumerate(red_rewards) if alive_before[i]]
+                ep_ret_trainer += float(np.mean(alive_red_rewards)) if alive_red_rewards else 0.0
+                ep_len += 1
+
+                if _team_done(term, trunc):
+                    break
+
+            ra, ba = _alive_counts(env)
+            winner, end_reason = _outcome(ra, ba, ep_len, env)
+            ep_summary_rows.append({
+                "episode_uid": ep_uid, "seed": seed, "length": ep_len,
+                "winner": winner, "end_reason": end_reason,
+                "red_alive_final": ra, "blue_alive_final": ba,
+                "mav_alive_final": int(bool(env.red_planes.get("red_0") and env.red_planes["red_0"].is_alive)),
+                "red_launch_count": ep_red_launch, "red_hit_count": ep_red_hit,
+                "blue_launch_count": ep_blue_launch, "blue_hit_count": ep_blue_hit,
+                "trainer_effective_episode_return": ep_ret_trainer,
+                "trainer_effective_return_per_decision": ep_ret_trainer / max(ep_len, 1),
+                "fixed_initial_team_episode_return": ep_ret_fixed,
+                "fixed_initial_team_return_per_decision": ep_ret_fixed / max(ep_len, 1),
+            })
+            for aid, reason in ep_death_reasons.items():
+                death_rows.append({"episode_uid": ep_uid, "seed": seed, "agent_id": aid, "death_reason": reason})
+            mav_ts_rows.extend(ep_mav_ts)
+            print(f"Ep {ep_uid} seed={seed} len={ep_len} outcome={winner}/{end_reason} "
+                  f"R_alive={ra} B_alive={ba} MAV={ep_summary_rows[-1]['mav_alive_final']} "
+                  f"R_launch={ep_red_launch} R_hit={ep_red_hit} "
+                  f"B_launch={ep_blue_launch} B_hit={ep_blue_hit} "
+                  f"ret_trainer={ep_ret_trainer:.1f} ret_fixed={ep_ret_fixed:.1f}")
     finally:
         env.close()
         gate_file.close()
 
-    # ---- Summaries ----
-    ep_summary_rows = []
-    death_rows = []
-    for ep in episodes:
-        ep_summary_rows.append({
-            "episode_uid": ep["episode_uid"], "seed": ep["seed"],
-            "length": ep["episode_length"], "winner": ep["winner"],
-            "end_reason": ep["end_reason"],
-            "red_alive_final": ep["red_alive_final"],
-            "blue_alive_final": ep["blue_alive_final"],
-            "mav_alive_final": ep["mav_alive_final"],
-            "red_launch_count": ep["red_launches"], "red_hit_count": ep["red_hits"],
-            "blue_launch_count": ep["blue_launches"], "blue_hit_count": ep["blue_hits"],
-            "episode_return": ep["episode_return"],
-            "episode_return_per_step": ep["episode_return_per_step"],
-        })
-        for aid, reason in ep["death_reasons"].items():
-            death_rows.append({
-                "episode_uid": ep["episode_uid"], "seed": ep["seed"],
-                "agent_id": aid, "death_reason": reason,
-            })
+    # --- Write CSVs ---
+    _write_csv(out_dir / "diagnostic_episode_summary.csv", ep_summary_rows)
+    _write_csv(out_dir / "diagnostic_death_reasons.csv", death_rows)
+    _write_csv(out_dir / "mav_decision_timeseries.csv", mav_ts_rows)
 
-    # Write CSVs
-    with (out_dir / "diagnostic_episode_summary.csv").open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(ep_summary_rows[0].keys()) if ep_summary_rows else [])
-        w.writeheader(); w.writerows(ep_summary_rows)
-    with (out_dir / "diagnostic_death_reasons.csv").open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["episode_uid", "seed", "agent_id", "death_reason"])
-        w.writeheader(); w.writerows(death_rows)
+    # --- Target-pair funnel ---
+    pair_funnel = _compute_pair_funnel(all_gate_rows)
+    decision_funnel = _compute_decision_funnel(all_gate_rows)
 
-    # ---- Gate funnel stats ----
-    all_gate_rows = []
-    for ep in episodes:
-        all_gate_rows.extend(ep["launch_gate_rows"])
-    gate_funnel: dict = {"block_counts": defaultdict(int), "total_steps": 0,
-                          "alive_target_steps": 0, "track_pass_total": 0,
-                          "range_pass_total": 0, "ata_pass_total": 0,
-                          "ta_pass_total": 0, "geometry_pass_total": 0,
-                          "deconfliction_pass_total": 0, "lock_mature_total": 0,
-                          "launch_total": 0}
+    # --- Block reason frame counts ---
+    fr_total = defaultdict(int)
     for gr in all_gate_rows:
-        reason = str(gr.get("primary_block_reason", "unknown"))
-        gate_funnel["block_counts"][reason] += 1
-        gate_funnel["total_steps"] += 1
-        gate_funnel["alive_target_steps"] += 1 if int(gr.get("alive_target_count", 0)) > 0 else 0
-        gate_funnel["track_pass_total"] += int(gr.get("track_pass_count", 0))
-        gate_funnel["range_pass_total"] += int(gr.get("range_pass_count", 0))
-        gate_funnel["ata_pass_total"] += int(gr.get("ata_pass_count", 0))
-        gate_funnel["ta_pass_total"] += int(gr.get("ta_pass_count", 0))
-        gate_funnel["geometry_pass_total"] += int(gr.get("geometry_pass_count", 0))
-        gate_funnel["deconfliction_pass_total"] += int(gr.get("deconfliction_pass_count", 0))
-        gate_funnel["lock_mature_total"] += int(gr.get("lock_mature", 0))
-        gate_funnel["launch_total"] += int(gr.get("launch_executed", 0))
+        for fr in ["inactive","no_ammo","no_alive_target","all_targets_engaged","no_track",
+                    "out_of_range","ata_blocked","ta_blocked","boresight_blocked",
+                    "lock_not_mature","cooldown","kill_cooldown","launch","unknown"]:
+            fr_total[fr] += int(gr.get(f"{fr}_frame_count", 0))
+    decision_reasons = Counter(gr.get("primary_block_reason", "unknown") for gr in all_gate_rows)
 
-    # ---- Reward component summary ----
-    reward_summary = defaultdict(float)
-    for ep in episodes:
-        for s in ep["steps"]:
-            role = s.get("role", "")
-            for k, v in s.items():
-                if k in ("step", "agent_id", "role"):
-                    continue
-                reward_summary[f"{role}_{k}"] += _safe(v)
-                reward_summary[f"all_{k}"] += _safe(v)
+    # --- Consistency checks ---
+    gate_row_launch_sum = sum(int(gr.get("launch_count", 0)) for gr in all_gate_rows)
+    ep_launch_sum = sum(r["red_launch_count"] for r in ep_summary_rows)
+    launch_ok = gate_row_launch_sum == ep_launch_sum
 
-    # ---- Diagnostic report ----
-    lines = [
-        "# BRMA/TAM Scripted Composite v1 — Diagnostic Eval Report",
-        "",
-        f"- Checkpoint: `{args.model}`",
-        f"- Episodes: {args.episodes}, seeds {args.seed_start}–{args.seed_start + args.episodes - 1}",
-        f"- Config: {args.config}",
-        f"- Opponent: brma_rule, deterministic policy",
-        "",
-        "## Episode Results",
-        "",
-        "| ep_uid | seed | len | outcome | R_alive | B_alive | MAV | R_launch | R_hit | B_launch | B_hit | ret | ret/step |",
-        "|--------|------|-----|---------|---------|---------|-----|----------|-------|----------|-------|-----|----------|",
-    ]
-    for ep in episodes:
-        lines.append(
-            f"| {ep['episode_uid']} | {ep['seed']} | {ep['episode_length']} | "
-            f"{ep['winner']}/{ep['end_reason']} | {ep['red_alive_final']} | {ep['blue_alive_final']} | "
-            f"{ep['mav_alive_final']} | {ep['red_launches']} | {ep['red_hits']} | "
-            f"{ep['blue_launches']} | {ep['blue_hits']} | {ep['episode_return']:.1f} | {ep['episode_return_per_step']:.3f} |"
-        )
+    # --- Verdict ---
+    mav_death_reasons = [r["death_reason"] for r in death_rows if "red_0" in str(r.get("agent_id",""))]
+    mav_all_crash = all("Crash" in str(d) or "LowAlt" in str(d) for d in mav_death_reasons)
+    any_range = any(int(gr.get("any_range_pass", 0)) for gr in all_gate_rows)
+    any_launch = any(int(gr.get("any_launch", 0)) for gr in all_gate_rows)
+    gate_rows_ok = len(all_gate_rows) <= (max_red - 1) * args.episodes * args.max_steps + 10
 
-    lines += [
-        "",
-        "## Fire-Control Funnel",
-        "",
-        f"- Total agent-steps recorded: {gate_funnel['total_steps']}",
-        f"- Steps with alive targets: {gate_funnel['alive_target_steps']}",
-        f"- Track Pass: {gate_funnel['track_pass_total']}",
-        f"- Range Pass: {gate_funnel['range_pass_total']}",
-        f"- ATA Pass: {gate_funnel['ata_pass_total']}",
-        f"- TA Pass: {gate_funnel['ta_pass_total']}",
-        f"- Geometry Pass: {gate_funnel['geometry_pass_total']}",
-        f"- Deconfliction Pass: {gate_funnel['deconfliction_pass_total']}",
-        f"- Lock Mature: {gate_funnel['lock_mature_total']}",
-        f"- Launches: {gate_funnel['launch_total']}",
-        "",
-        "### Primary Block Reason Distribution",
-        "",
-        "| Reason | Count | Pct |",
-        "|--------|-------|-----|",
-    ]
-    total = max(gate_funnel["total_steps"], 1)
-    for reason in ["inactive", "no_alive_target", "no_track", "out_of_range",
-                    "ata_blocked", "ta_blocked", "deconfliction_blocked",
-                    "no_ammo", "cooldown", "lock_not_mature", "launch", "unknown"]:
-        c = gate_funnel["block_counts"].get(reason, 0)
-        if c > 0:
-            lines.append(f"| {reason} | {c} | {100.0 * c / total:.1f}% |")
-
-    # Death reasons
-    mav_deaths = [r for r in death_rows if "red_0" in str(r.get("agent_id", ""))]
-    uav_deaths = [r for r in death_rows if "red_0" not in str(r.get("agent_id", ""))]
-    lines += [
-        "",
-        "## Death Reasons",
-        "",
-        "### MAV deaths",
-    ]
-    for d in mav_deaths:
-        lines.append(f"- {d['agent_id']}: {d['death_reason']}")
-    lines.append("")
-    lines.append("### UAV deaths")
-    for d in uav_deaths:
-        lines.append(f"- {d['agent_id']}: {d['death_reason']}")
-
-    # Reward summary
-    lines += [
-        "",
-        "## Reward Component Summary (sum over all agent-steps)",
-    ]
-    for k in sorted(reward_summary.keys()):
-        lines.append(f"- {k}: {reward_summary[k]:.1f}")
-
-    # Verdict
-    red_launch_total = sum(ep["red_launches"] for ep in episodes)
-    most_common_block = max(gate_funnel["block_counts"], key=gate_funnel["block_counts"].get) if gate_funnel["block_counts"] else "unknown"
-
-    if not all_gate_rows:
+    if not launch_ok:
         verdict = "IMPLEMENTATION_ERROR"
-    elif red_launch_total > 0:
+    elif not gate_rows_ok:
+        verdict = "IMPLEMENTATION_ERROR"
+    elif mav_all_crash:
+        verdict = "NEEDS_TRAINING_STABILITY_REVIEW"
+    elif any_launch:
         verdict = "READY_FOR_50K"
-    elif most_common_block in ("no_track", "out_of_range"):
-        verdict = "NEEDS_REWARD_SCALE_REVIEW"
-    elif most_common_block in ("ata_blocked", "ta_blocked", "deconfliction_blocked", "lock_not_mature"):
+    elif any_range:
         verdict = "NEEDS_FIRE_CONTROL_ALIGNMENT_REVIEW"
     else:
-        verdict = "NEEDS_TRAINING_STABILITY_REVIEW"
+        verdict = "NEEDS_REWARD_SCALE_REVIEW"
 
-    lines += [
-        "",
-        f"## Verdict: **{verdict}**",
+    # --- Report ---
+    lines = [
+        "# Diagnostic Eval v2 — Corrected Report",
         f"",
-        f"- Red launches: {red_launch_total}",
-        f"- Most common block: **{most_common_block}** ({gate_funnel['block_counts'].get(most_common_block, 0)} steps)",
+        f"- Checkpoint: `{args.model}`",
+        f"- Config: {args.config}",
+        f"- Opponent: **{args.opponent_policy}** (real OpponentPolicy, NOT zero-action)",
+        f"- Opponent act calls: {opp_act_calls}",
+        f"- Blue action mean abs: {blue_abs_sum / max(opp_act_calls * max_blue, 1):.4f}",
+        f"- Blue nonzero decision fraction: {blue_nonzero_decisions / max(opp_act_calls, 1):.3f}",
+        f"- Episodes: {args.episodes}, seeds {args.seed_start}–{args.seed_start + args.episodes - 1}",
+        f"- agent_interaction_steps: {agent_interaction_steps}",
+        f"- Gate diagnostic rows: {len(all_gate_rows)} (expected ≤ {(max_red-1)*args.episodes*args.max_steps})",
+        f"- Gate rows per episode: ~{len(all_gate_rows)//max(args.episodes,1)}",
+        f"",
+        "## Episode Results",
+        "| ep_uid | seed | len | outcome | R_alive | B_alive | MAV | R_launch | R_hit | B_launch | B_hit | ret(trainer) | ret(fixed) |",
+        "|--------|------|-----|---------|---------|---------|-----|----------|-------|----------|-------|-------------|-----------|",
+    ]
+    for ep in ep_summary_rows:
+        lines.append(f"| {ep['episode_uid']} | {ep['seed']} | {ep['length']} | "
+                     f"{ep['winner']}/{ep['end_reason']} | {ep['red_alive_final']} | "
+                     f"{ep['blue_alive_final']} | {ep['mav_alive_final']} | "
+                     f"{ep['red_launch_count']} | {ep['red_hit_count']} | "
+                     f"{ep['blue_launch_count']} | {ep['blue_hit_count']} | "
+                     f"{ep['trainer_effective_episode_return']:.1f} | {ep['fixed_initial_team_episode_return']:.1f} |")
+
+    lines += ["", "## Target-Pair Sequential Funnel", ""]
+    for k, v in pair_funnel.items():
+        lines.append(f"- **{k}**: {v}")
+
+    lines += ["", "## Decision-Agent Funnel", ""]
+    for k, v in decision_funnel.items():
+        lines.append(f"- **{k}**: {v}")
+
+    lines += ["", "## Frame-Level Block Reason Distribution", ""]
+    for fr in sorted(fr_total.keys()):
+        if fr_total[fr] > 0:
+            lines.append(f"- {fr}: {fr_total[fr]}")
+
+    lines += ["", "## Decision-Level Block Reason Distribution", ""]
+    for reason, count in decision_reasons.most_common():
+        lines.append(f"- {reason}: {count}")
+
+    lines += ["", "## Death Reasons", ""]
+    for d in death_rows:
+        lines.append(f"- {d['agent_id']}: {d['death_reason']}")
+
+    lines += ["", "## Consistency Checks", "",
+              f"- Launch accounting: gate_sum={gate_row_launch_sum} vs ep_sum={ep_launch_sum} → {'OK' if launch_ok else 'FAIL'}",
+              f"- Gate rows: {len(all_gate_rows)} ≤ {(max_red-1)*args.episodes*args.max_steps + 10} → {'OK' if gate_rows_ok else 'FAIL'}"]
+
+    lines += ["", f"## Verdict: **{verdict}**", "",
+              f"- MAV crash deaths: {len(mav_death_reasons)}/{args.episodes}",
+              f"- Any range pass: {any_range}",
+              f"- Any launch: {any_launch}",
+              "",
+              "### Corrected conclusions (invalidating prior report):",
+              "1. Blue opponent now IS brma_rule (not zero-action). Previously all blue actions were zero.",
+              "2. Gate rows are per-decision (~{0}), not per-physics-frame (120000).".format(len(all_gate_rows)),
+              "3. Funnel uses real `_select_missile_target` diag counts, not recomputed geometry.",
+              "4. `line_pass_count` is marked as alias of TA, not independent gate.",
+              "5. `launch_count` is per-decision, not cumulative episode count.",
+              "6. Returns use both trainer-effective and fixed-initial-team mean.",
+              "7. Component means will NOT be divided by physics frames.",
     ]
 
     summary = {
+        "diagnostic_protocol_version": 2,
         "verdict": verdict,
-        "episodes": len(episodes),
-        "total_red_launches": red_launch_total,
-        "gate_funnel": dict(gate_funnel),
-        "most_common_block": most_common_block,
+        "opponent_policy": args.opponent_policy,
+        "opponent_act_calls": opp_act_calls,
+        "blue_action_mean_abs": blue_abs_sum / max(opp_act_calls * max_blue, 1),
+        "blue_nonzero_decisions": blue_nonzero_decisions,
+        "gate_row_count": len(all_gate_rows),
+        "pair_funnel": pair_funnel,
+        "decision_funnel": decision_funnel,
+        "frame_block_reasons": dict(fr_total),
+        "decision_block_reasons": dict(decision_reasons),
+        "launch_accounting_ok": launch_ok,
+        "gate_rows_ok": gate_rows_ok,
+        "mav_death_reasons": mav_death_reasons,
     }
     (out_dir / "diagnostic_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (out_dir / "diagnostic_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
-
     print(f"\n=== Verdict: {verdict} ===")
-    print(f"Red launches: {red_launch_total}")
-    print(f"Most common block: {most_common_block}")
+    print(f"Gate rows: {len(all_gate_rows)}")
     print(f"Output: {out_dir}")
+
+
+def _outcome(ra, ba, ep_len, env):
+    timeout = ep_len >= getattr(env, "max_steps", 1000)
+    if ba == 0 and ra > 0: return "red", "blue_eliminated"
+    if ra == 0 and ba > 0: return "blue", "red_eliminated"
+    if ra == 0 and ba == 0: return "draw", "mutual_elimination"
+    if timeout: return "draw", "timeout"
+    return "draw", "ongoing"
+
+
+def _compute_pair_funnel(gate_rows):
+    a = sum(gr.get("alive_target_pair_scans", 0) for gr in gate_rows)
+    e = sum(gr.get("engaged_blocked_pair_scans", 0) for gr in gate_rows)
+    u = sum(gr.get("unengaged_target_pair_scans", 0) for gr in gate_rows)
+    t = sum(gr.get("track_pass_pair_scans", 0) for gr in gate_rows)
+    r_ = sum(gr.get("range_pass_pair_scans", 0) for gr in gate_rows)
+    at = sum(gr.get("ata_pass_pair_scans", 0) for gr in gate_rows)
+    ta = sum(gr.get("ta_pass_pair_scans", 0) for gr in gate_rows)
+    g = sum(gr.get("geometry_pass_pair_scans", 0) for gr in gate_rows)
+    return {
+        "alive_target_pair_scans": a,
+        "unengaged_rate": f"{u / max(a, 1):.4f}" if a > 0 else "null",
+        "track_rate": f"{t / max(u, 1):.4f}" if u > 0 else "null",
+        "range_rate": f"{r_ / max(t, 1):.4f}" if t > 0 else "null",
+        "ata_rate": f"{at / max(r_, 1):.4f}" if r_ > 0 else "null",
+        "ta_rate": f"{ta / max(at, 1):.4f}" if at > 0 else "null",
+        "geometry_rate": f"{g / max(ta, 1):.4f}" if ta > 0 else "null",
+    }
+
+
+def _compute_decision_funnel(gate_rows):
+    n = max(len(gate_rows), 1)
+    return {
+        "decision_agent_rows": n,
+        "any_alive_target_rate": sum(gr.get("any_alive_target", 0) for gr in gate_rows) / n,
+        "any_unengaged_target_rate": sum(gr.get("any_unengaged_target", 0) for gr in gate_rows) / n,
+        "any_track_pass_rate": sum(gr.get("any_track_pass", 0) for gr in gate_rows) / n,
+        "any_range_pass_rate": sum(gr.get("any_range_pass", 0) for gr in gate_rows) / n,
+        "any_ata_pass_rate": sum(gr.get("any_ata_pass", 0) for gr in gate_rows) / n,
+        "any_ta_pass_rate": sum(gr.get("any_ta_pass", 0) for gr in gate_rows) / n,
+        "any_geometry_pass_rate": sum(gr.get("any_geometry_pass", 0) for gr in gate_rows) / n,
+        "any_lock_mature_rate": sum(gr.get("any_lock_mature", 0) for gr in gate_rows) / n,
+        "any_launch_rate": sum(gr.get("any_launch", 0) for gr in gate_rows) / n,
+    }
+
+
+def _write_csv(path, rows):
+    if not rows: return
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()), extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
 
 
 if __name__ == "__main__":
