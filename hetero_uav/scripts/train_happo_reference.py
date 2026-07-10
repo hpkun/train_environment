@@ -438,6 +438,7 @@ from eval_checkpoint_selection import (
     build_eval_checkpoint_meta,
     compute_eval_scores,
 )
+from scripts.experiment_logging_schema import BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 
 
@@ -1575,6 +1576,11 @@ def _run_training_main() -> None:
             "team_kill_while_mav_alive", "team_kill_after_mav_death",
             "red_launch_rate_before_mav_death", "red_launch_rate_after_mav_death",
             "mav_removed_r_adv_sum", "mav_removed_r_end_sum",
+            "effective_team_brma_flight", "effective_team_uav_speed",
+            "effective_team_uav_angle", "effective_team_uav_distance",
+            "effective_team_uav_event", "effective_team_mav_safety",
+            "effective_team_mav_support", "effective_team_mav_event",
+            "effective_team_total", "active_red_count",
             *MARL_DYNAMICS_TRAIN_FIELDS,
             "nan_detected",
         ])
@@ -1857,6 +1863,7 @@ def _run_training_main() -> None:
                                 or key.startswith("tam_table1_")
                                 or key.startswith("v1_mav_")
                                 or key.startswith("paper_v1_")
+                                or key in BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS
                                 or key in {
                                     "mav_observed_ratio",
                                     "mav_shared_track_ratio",
@@ -1900,6 +1907,57 @@ def _run_training_main() -> None:
                             else:
                                 sum_key = key + "_sum"
                                 agent_acc[sum_key] = agent_acc.get(sum_key, 0.0) + delta
+                    if rc and isinstance(rc, dict):
+                        active_count = 0.0
+                        eff = {
+                            "effective_team_brma_flight": 0.0,
+                            "effective_team_uav_speed": 0.0,
+                            "effective_team_uav_angle": 0.0,
+                            "effective_team_uav_distance": 0.0,
+                            "effective_team_uav_event": 0.0,
+                            "effective_team_mav_safety": 0.0,
+                            "effective_team_mav_support": 0.0,
+                            "effective_team_mav_event": 0.0,
+                            "effective_team_total": 0.0,
+                        }
+                        for ridx, rid in enumerate(rollout_env.red_ids):
+                            try:
+                                mask_value = float(active[ridx])
+                            except (TypeError, ValueError, IndexError):
+                                mask_value = 0.0
+                            if mask_value <= 0.0:
+                                continue
+                            comp = rc.get(rid, {}) if isinstance(rc, dict) else {}
+                            if not isinstance(comp, dict):
+                                continue
+                            active_count += mask_value
+                            eff["effective_team_brma_flight"] += mask_value * sum(
+                                float(comp.get(k, 0.0) or 0.0)
+                                for k in ("brma_pitch", "brma_roll", "brma_vel")
+                            )
+                            eff["effective_team_uav_speed"] += mask_value * float(comp.get("tam_speed_weighted", 0.0) or 0.0)
+                            eff["effective_team_uav_angle"] += mask_value * float(comp.get("tam_angle_weighted", 0.0) or 0.0)
+                            eff["effective_team_uav_distance"] += mask_value * float(comp.get("tam_distance_weighted", 0.0) or 0.0)
+                            eff["effective_team_uav_event"] += mask_value * float(comp.get("uav_event_total", 0.0) or 0.0)
+                            eff["effective_team_mav_safety"] += mask_value * (
+                                float(comp.get("mav_dist_weighted", 0.0) or 0.0)
+                                + float(comp.get("mav_threat_weighted", 0.0) or 0.0)
+                                + float(comp.get("mav_aspect_weighted", 0.0) or 0.0)
+                            )
+                            eff["effective_team_mav_support"] += mask_value * (
+                                float(comp.get("mav_pos_weighted", 0.0) or 0.0)
+                                + float(comp.get("mav_aware_weighted", 0.0) or 0.0)
+                            )
+                            eff["effective_team_mav_event"] += mask_value * float(comp.get("mav_event_total", 0.0) or 0.0)
+                            eff["effective_team_total"] += mask_value * float(comp.get("total", 0.0) or 0.0)
+                        denom = max(active_count, 1.0)
+                        for key, value in eff.items():
+                            current_ep_reward_comp[env_idx][key] = (
+                                current_ep_reward_comp[env_idx].get(key, 0.0) + float(value) / denom
+                            )
+                        current_ep_reward_comp[env_idx]["active_red_count"] = (
+                            current_ep_reward_comp[env_idx].get("active_red_count", 0.0) + active_count
+                        )
                     # Episode-local launch stats
                     for aid in rollout_env.agent_ids:
                         fired = int(next_info.get(aid, {}).get("missiles_fired_this_step", 0))
@@ -1933,6 +1991,13 @@ def _run_training_main() -> None:
                             sim_time=_sim_time(rollout_env),
                         )
                         rich_logger.write_reward_components(
+                            next_info,
+                            scenario=Path(args.config).stem,
+                            episode_id=current_ep_id[env_idx],
+                            step=total_steps,
+                            sim_time=_sim_time(rollout_env),
+                        )
+                        rich_logger.write_reward_target_diagnostics(
                             next_info,
                             scenario=Path(args.config).stem,
                             episode_id=current_ep_id[env_idx],
@@ -2199,6 +2264,16 @@ def _run_training_main() -> None:
                 f"{rc_mean.get('red_launch_rate_after_mav_death', 0):.4f}",
                 f"{rc_sum.get('v1_mav_removed_r_adv', 0):.4f}",
                 f"{rc_sum.get('v1_mav_removed_r_end', 0):.4f}",
+                f"{rc_sum.get('effective_team_brma_flight', 0):.4f}",
+                f"{rc_sum.get('effective_team_uav_speed', 0):.4f}",
+                f"{rc_sum.get('effective_team_uav_angle', 0):.4f}",
+                f"{rc_sum.get('effective_team_uav_distance', 0):.4f}",
+                f"{rc_sum.get('effective_team_uav_event', 0):.4f}",
+                f"{rc_sum.get('effective_team_mav_safety', 0):.4f}",
+                f"{rc_sum.get('effective_team_mav_support', 0):.4f}",
+                f"{rc_sum.get('effective_team_mav_event', 0):.4f}",
+                f"{rc_sum.get('effective_team_total', 0):.4f}",
+                f"{rc_sum.get('active_red_count', 0):.4f}",
                 *[_format_metric(stats.get(field, 0.0)) for field in MARL_DYNAMICS_TRAIN_FIELDS],
                 int(nan_detected),
             ])

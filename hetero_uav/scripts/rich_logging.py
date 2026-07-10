@@ -63,6 +63,11 @@ class RichExperimentLogger:
             self._aircraft_writer = csv.DictWriter(self._aircraft_file, fieldnames=FILE_SCHEMAS["aircraft_timeseries.csv"])
         self._ep_rc_file = (directory / "episode_reward_components.csv").open("a", newline="", encoding="utf-8")
         self._ep_rc_writer = csv.DictWriter(self._ep_rc_file, fieldnames=FILE_SCHEMAS["episode_reward_components.csv"])
+        self._target_diag_file = (directory / "reward_target_diagnostics.csv").open("a", newline="", encoding="utf-8")
+        self._target_diag_writer = csv.DictWriter(
+            self._target_diag_file,
+            fieldnames=FILE_SCHEMAS["reward_target_diagnostics.csv"],
+        )
         self._seen_missile_event_keys: set[tuple] = set()
 
     def close(self) -> None:
@@ -73,6 +78,7 @@ class RichExperimentLogger:
         if self._aircraft_file is not None:
             self._aircraft_file.close()
         self._ep_rc_file.close()
+        self._target_diag_file.close()
 
     def write_aircraft_timeseries(self, env, *, scenario: str, episode_id: int | str,
                                    step: int | str, sim_time: float | str = "") -> None:
@@ -293,6 +299,35 @@ class RichExperimentLogger:
                     payload[key] = value
             self._reward_writer.writerow(payload)
         self._reward_file.flush()
+
+    def write_reward_target_diagnostics(
+        self,
+        info: dict[str, Any],
+        *,
+        scenario: str,
+        episode_id: int | str,
+        step: int | str,
+        sim_time: float | str = "",
+    ) -> None:
+        records = info.get("__reward_target_diagnostics__", []) if isinstance(info, dict) else []
+        if not records:
+            return
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            payload = {col: "" for col in FILE_SCHEMAS["reward_target_diagnostics.csv"]}
+            payload.update({
+                "run_id": self.run_id,
+                "scenario": scenario,
+                "episode_id": episode_id,
+                "step": step,
+                "sim_time": sim_time,
+            })
+            for key, value in record.items():
+                if key in payload:
+                    payload[key] = value
+            self._target_diag_writer.writerow(payload)
+        self._target_diag_file.flush()
 
     def _missile_row(
         self,

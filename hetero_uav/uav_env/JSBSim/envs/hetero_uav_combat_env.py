@@ -135,7 +135,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
-        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8", "tam_brma_paper_aligned_v1", "tam_happo_table1_v1"}:
+        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8", "tam_brma_paper_aligned_v1", "tam_happo_table1_v1", "brma_tam_scripted_composite_v1"}:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
         self._tam_reward_scale = float(kwargs.pop("tam_reward_scale", 0.05))
@@ -181,6 +181,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.tam_happo_table1_v1_config = deepcopy(_tam_table1_cfg)
         if hetero_reward_mode == "tam_happo_table1_v1" and not self.tam_happo_table1_v1_config:
             raise ValueError("tam_happo_table1_v1 mode requires config block")
+        _brma_tam_composite_cfg = kwargs.pop("brma_tam_scripted_composite_v1", None) or {}
+        self.brma_tam_scripted_composite_v1_config = deepcopy(_brma_tam_composite_cfg)
+        if hetero_reward_mode == "brma_tam_scripted_composite_v1" and not self.brma_tam_scripted_composite_v1_config:
+            raise ValueError("brma_tam_scripted_composite_v1 mode requires config block")
         # Cached per-step obs for reward overlay (minimal_v1 / role_v1)
         self._last_step_obs: dict = {}
         # First-death detection for MAV — penalize once per episode
@@ -220,6 +224,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.agent_models: dict[str, str] = {}
         self._refresh_agent_metadata()
         self._extend_hetero_observation_space()
+        self.missile_evasion_mode = str(getattr(self, "missile_evasion_config", {}).get("mode", ""))
+        self.missile_evasion_teams = str(getattr(self, "missile_evasion_config", {}).get("teams", ""))
+        if self.hetero_reward_mode == "brma_tam_scripted_composite_v1":
+            self._validate_brma_tam_scripted_composite_v1_contract()
 
     # -- TAM Paper Reward v6 JSBSim-aligned v3 -------------------------------
 
@@ -250,6 +258,17 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._tam_table1_mav_death_penalized = False
         self._tam_table1_mav_team_credit_used = 0.0
         self._tam_table1_missile_speed_cache: dict[str, float] = {}
+
+    def _brma_tam_scripted_reset_episode_state(self) -> None:
+        self._brma_tam_uav_death_penalized: set[str] = set()
+        self._brma_tam_uav_horizontal_oob_penalized: set[str] = set()
+        self._brma_tam_mav_death_penalized = False
+        self._brma_tam_mav_team_credit_used = 0.0
+        self._brma_tam_alive_before_step: dict[str, bool] = {}
+        self._brma_tam_all_attack_uav_dead_steps = 0
+        self._brma_tam_reward_target_switch_counts: dict[str, int] = {}
+        self._brma_tam_last_reward_target: dict[str, str] = {}
+        self._reward_target_diagnostic_records: list[dict] = []
 
     @staticmethod
     def _brma_homo_td15(distance_m: float) -> float:
@@ -948,6 +967,517 @@ class HeteroUavCombatEnv(UavCombatEnv):
             components[rid] = comp
         if mav_id and mav_id in components:
             components[mav_id]["tam_table1_total"] = float(components[mav_id]["tam_table1_mav_total"])
+        return base_rewards, components
+
+    # -- BRMA/TAM scripted composite reward v1 -------------------------------
+
+    def _validate_brma_tam_scripted_composite_v1_contract(self) -> None:
+        evasion = getattr(self, "missile_evasion_config", {}) or {}
+        mode = str(evasion.get("mode", "")).lower()
+        teams = str(evasion.get("teams", "")).lower()
+        if mode != "brma_scripted" or teams not in {"red_only", "both"}:
+            raise ValueError(
+                "brma_tam_scripted_composite_v1 assumes red evasion is scripted; "
+                "R_DM is diagnostic, not active. Use missile_evasion.mode='brma_scripted' "
+                "and teams in {'red_only', 'both'}."
+            )
+        if self.observation_mode != "mav_shared_geo":
+            raise ValueError("brma_tam_scripted_composite_v1 requires observation_mode='mav_shared_geo'")
+        if getattr(self, "red_target_selection_mode", "closest") != "closest":
+            raise ValueError("brma_tam_scripted_composite_v1 requires red_target_selection_mode='closest'")
+        mav_params = self.aircraft_type_params.get("mav", {})
+        if int(mav_params.get("num_missiles", 0)) != 0:
+            raise ValueError("brma_tam_scripted_composite_v1 requires MAV num_missiles == 0")
+
+    @staticmethod
+    def _brma_tam_safe_vec(sim, getter: str) -> np.ndarray:
+        try:
+            value = getattr(sim, getter)()
+        except Exception:
+            return np.full(3, np.nan, dtype=np.float64)
+        arr = np.asarray(value, dtype=np.float64).reshape(-1)
+        if arr.size < 3:
+            out = np.full(3, np.nan, dtype=np.float64)
+            out[:arr.size] = arr
+            return out
+        return arr[:3]
+
+    @staticmethod
+    def _brma_tam_3d_geometry(red, blue, eps: float = 1e-8) -> dict:
+        red_pos = HeteroUavCombatEnv._brma_tam_safe_vec(red, "get_position")
+        blue_pos = HeteroUavCombatEnv._brma_tam_safe_vec(blue, "get_position")
+        red_vel = HeteroUavCombatEnv._brma_tam_safe_vec(red, "get_velocity")
+        blue_vel = HeteroUavCombatEnv._brma_tam_safe_vec(blue, "get_velocity")
+        d_vec = blue_pos - red_pos
+        distance = float(np.linalg.norm(d_vec))
+        red_speed = float(np.linalg.norm(red_vel))
+        blue_speed = float(np.linalg.norm(blue_vel))
+        out = {
+            "target_distance_m": distance if np.isfinite(distance) else 0.0,
+            "tam_ata_rad": 0.0,
+            "tam_aa_rad": 0.0,
+            "tam_angle_raw": 0.0,
+            "tam_geometry_valid": 0.0,
+        }
+        if (
+            not np.isfinite(distance) or not np.isfinite(red_speed) or not np.isfinite(blue_speed)
+            or distance < eps or red_speed < eps or blue_speed < eps
+        ):
+            return out
+        los = d_vec / distance
+        ata_cos = float(np.clip(np.dot(los, red_vel / red_speed), -1.0, 1.0))
+        aa_cos = float(np.clip(np.dot(los, blue_vel / blue_speed), -1.0, 1.0))
+        ata = float(np.arccos(ata_cos))
+        aa = float(np.arccos(aa_cos))
+        raw = float(1.0 - (ata + aa) / np.pi)
+        if not np.isfinite(raw):
+            raw = 0.0
+        out.update({
+            "tam_ata_rad": ata,
+            "tam_aa_rad": aa,
+            "tam_angle_raw": raw,
+            "tam_geometry_valid": 1.0,
+        })
+        return out
+
+    @staticmethod
+    def _brma_tam_speed_raw(red_speed_mps: float, target_speed_mps: float, eps: float = 1e-8) -> dict:
+        vr = float(red_speed_mps)
+        vb = float(target_speed_mps)
+        if not np.isfinite(vr) or not np.isfinite(vb) or vr < eps:
+            return {
+                "tam_speed_raw": 0.0,
+                "own_speed_mps": vr if np.isfinite(vr) else 0.0,
+                "target_speed_mps": vb if np.isfinite(vb) else 0.0,
+                "speed_ratio": 0.0,
+                "speed_ratio_valid": 0.0,
+            }
+        ratio = vb / vr
+        if vb < 0.5 * vr:
+            raw = 1.0
+        elif vb <= 1.5 * vr:
+            raw = 2.0 - 2.0 * ratio
+        else:
+            raw = -1.0
+        return {
+            "tam_speed_raw": float(raw),
+            "own_speed_mps": vr,
+            "target_speed_mps": vb,
+            "speed_ratio": float(ratio),
+            "speed_ratio_valid": 1.0,
+        }
+
+    @staticmethod
+    def _brma_tam_distance_raw(distance_m: float) -> dict:
+        d = float(distance_m)
+        if not np.isfinite(d):
+            return {"tam_distance_raw": 0.0, "target_distance_m": 0.0, "reward_distance_zone_code": -1.0}
+        km = d / 1000.0
+        if km <= 5.0:
+            raw, zone = 1.0, 0.0
+        elif km < 10.0:
+            raw, zone = float(np.exp(-0.921 * (km - 5.0))), 1.0
+        else:
+            raw, zone = -1.0, 2.0
+        return {"tam_distance_raw": float(raw), "target_distance_m": d, "reward_distance_zone_code": zone}
+
+    def _brma_tam_closest_alive_blue(self, sim):
+        pos = self._brma_tam_safe_vec(sim, "get_position")
+        best = (None, None, float("inf"))
+        for bid in self.blue_ids:
+            blue = self.blue_planes.get(bid)
+            if blue is None or not getattr(blue, "is_alive", False):
+                continue
+            dist = float(np.linalg.norm(self._brma_tam_safe_vec(blue, "get_position") - pos))
+            if np.isfinite(dist) and dist < best[2]:
+                best = (bid, blue, dist)
+        return best
+
+    def _brma_tam_track_logs(self, aid: str, target_id: str | None) -> dict:
+        logs = {
+            "reward_target_observed": 0.0,
+            "reward_target_direct_visible": 0.0,
+            "reward_target_mav_shared_visible": 0.0,
+            "reward_target_unavailable": 1.0,
+            "reward_target_matches_lock": 0.0,
+            "reward_target_matches_launch": 0.0,
+            "reward_target_track_source_direct": 0.0,
+            "reward_target_track_source_mav_shared": 0.0,
+            "reward_target_track_source_direct_and_mav_shared": 0.0,
+            "reward_target_track_source_unknown": 1.0,
+        }
+        if target_id is None:
+            return logs
+        try:
+            idx = self.blue_ids.index(target_id)
+        except ValueError:
+            return logs
+        obs = getattr(self, "_last_step_obs", {}).get(aid, {}) or {}
+        src = np.asarray(obs.get("enemy_track_source", []), dtype=np.float32)
+        direct = shared = 0.0
+        if src.ndim == 2 and idx < src.shape[0]:
+            if src.shape[1] > 0:
+                direct = float(src[idx, 0] > 0.5)
+            if src.shape[1] > 1:
+                shared = float(src[idx, 1] > 0.5)
+        observed = max(direct, shared)
+        logs.update({
+            "reward_target_observed": observed,
+            "reward_target_direct_visible": direct,
+            "reward_target_mav_shared_visible": shared,
+            "reward_target_unavailable": 0.0 if observed else 1.0,
+            "reward_target_track_source_unknown": 0.0 if observed else 1.0,
+        })
+        if direct and shared:
+            logs["reward_target_track_source_direct_and_mav_shared"] = 1.0
+        elif direct:
+            logs["reward_target_track_source_direct"] = 1.0
+        elif shared:
+            logs["reward_target_track_source_mav_shared"] = 1.0
+        if getattr(self, "_lock_target", {}).get(aid) == target_id:
+            logs["reward_target_matches_lock"] = 1.0
+        for rec in getattr(self, "_launch_quality_step_records", []) or []:
+            if rec.get("shooter_id") == aid and rec.get("target_id") == target_id:
+                logs["reward_target_matches_launch"] = 1.0
+                break
+        return logs
+
+    def _brma_tam_dodge_diagnostic(self, aid: str, sim) -> tuple[dict, str]:
+        logs = {
+            "script_selected_missile_numeric": 0.0,
+            "incoming_range_m": 0.0,
+            "incoming_closing_speed_mps": 0.0,
+            "incoming_t_go_sec": 0.0,
+            "tam_dodge_raw_log": 0.0,
+            "tam_dodge_angle_log": 0.0,
+            "tam_dodge_speed_log": 0.0,
+            "evasion_override_active": 0.0,
+        }
+        selected = ""
+        for rec in getattr(self, "_evasion_step_records", []) or []:
+            if rec.get("evasion_agent_id") != aid:
+                continue
+            selected = str(rec.get("incoming_missile_id", "") or "")
+            for key in ("incoming_range_m", "incoming_closing_speed_mps", "incoming_t_go_sec"):
+                try:
+                    logs[key] = float(rec.get(key, 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    logs[key] = 0.0
+            logs["tam_dodge_raw_log"] = 1.0
+            logs["tam_dodge_angle_log"] = 1.0
+            logs["tam_dodge_speed_log"] = 0.0
+            logs["evasion_override_active"] = 1.0
+            logs["script_selected_missile_numeric"] = 1.0 if selected else 0.0
+            return logs, selected
+        return logs, selected
+
+    def _brma_tam_horizontal_oob(self, sim) -> bool:
+        pos = self._brma_tam_safe_vec(sim, "get_position")
+        half = float(getattr(self, "BATTLEFIELD_HALF_SIZE", 40000.0))
+        return bool(np.isfinite(pos[0]) and np.isfinite(pos[1]) and (abs(pos[0]) > half or abs(pos[1]) > half))
+
+    def _brma_tam_death_reason(self, aid: str) -> str:
+        reason = getattr(self, "_death_reasons", {}).get(aid, "") or ""
+        if reason:
+            return str(reason)
+        for ev in getattr(self, "_death_events_step", []) or []:
+            if isinstance(ev, dict) and ev.get("agent_id") == aid:
+                return str(ev.get("death_reason", ""))
+        return ""
+
+    def _brma_tam_uav_event(self, aid: str, sim, cfg: dict) -> tuple[float, dict]:
+        ecfg = cfg.get("uav", {})
+        kills = int(getattr(self, "_step_kill_count", {}).get(aid, 0))
+        kill_reward = float((ecfg.get("kill_enemy", 200.0))) * kills
+        loss = 0.0
+        oob = 0.0
+        alive_before = bool(getattr(self, "_brma_tam_alive_before_step", {}).get(aid, getattr(sim, "is_alive", False)))
+        died_this_step = alive_before and not getattr(sim, "is_alive", False)
+        if died_this_step and aid not in getattr(self, "_brma_tam_uav_death_penalized", set()):
+            loss = float(ecfg.get("death_or_crash", -200.0))
+            self._brma_tam_uav_death_penalized.add(aid)
+        elif self._brma_tam_horizontal_oob(sim) and aid not in getattr(self, "_brma_tam_uav_horizontal_oob_penalized", set()):
+            oob = float(ecfg.get("first_horizontal_out_of_zone", -100.0))
+            self._brma_tam_uav_horizontal_oob_penalized.add(aid)
+        total = kill_reward + loss + oob
+        return total, {
+            "uav_event_kill": float(kill_reward),
+            "uav_event_loss": float(loss),
+            "uav_event_first_horizontal_out_of_zone": float(oob),
+            "uav_event_total": float(total),
+            "above_altitude_max_steps": 1.0 if self._brma_tam_safe_vec(sim, "get_position")[2] > float(getattr(self, "BATTLEFIELD_ALTITUDE_MAX", 10000.0)) else 0.0,
+            "max_altitude_m": float(self._brma_tam_safe_vec(sim, "get_position")[2]),
+            "above_altitude_max_episode_flag": 1.0 if self._brma_tam_safe_vec(sim, "get_position")[2] > float(getattr(self, "BATTLEFIELD_ALTITUDE_MAX", 10000.0)) else 0.0,
+        }
+
+    def _brma_tam_mav_safety(self, mav, cfg: dict) -> tuple[float, dict]:
+        scfg = cfg.get("mav", {}).get("safety", {})
+        d_danger = float(scfg.get("d_danger_m", 8000.0))
+        d_safe = float(scfg.get("d_safe_m", 15000.0))
+        mav_pos = self._brma_tam_safe_vec(mav, "get_position")
+        alive_blues = [self.blue_planes[bid] for bid in self.blue_ids if self.blue_planes.get(bid) is not None and self.blue_planes[bid].is_alive]
+        near_d = 0.0
+        r_dist = 0.0
+        if alive_blues:
+            near_d = min(float(np.linalg.norm(self._brma_tam_safe_vec(b, "get_position") - mav_pos)) for b in alive_blues)
+            if near_d <= d_danger:
+                r_dist = -(1.0 - near_d / max(d_danger, 1e-6))
+            elif near_d < d_safe:
+                r_dist = -0.5 * (1.0 - (near_d - d_danger) / max(d_safe - d_danger, 1e-6))
+            else:
+                r_dist = 0.2
+        incoming = [m for m in getattr(mav, "under_missiles", []) or [] if getattr(m, "is_alive", False)]
+        r_threat = -1.0 if incoming else 0.0
+        r_aspect = 0.0
+        if alive_blues:
+            for blue in alive_blues:
+                vec = mav_pos - self._brma_tam_safe_vec(blue, "get_position")
+                blue_vel = self._brma_tam_safe_vec(blue, "get_velocity")
+                dist = float(np.linalg.norm(vec))
+                spd = float(np.linalg.norm(blue_vel))
+                if dist < 1e-8 or spd < 1e-8 or not np.isfinite(dist) or not np.isfinite(spd):
+                    continue
+                alpha = float(np.arccos(np.clip(np.dot(vec / dist, blue_vel / spd), -1.0, 1.0)))
+                if alpha < np.pi / 4.0:
+                    r_aspect -= float(1.0 - alpha / (np.pi / 4.0))
+        weighted = (
+            float(scfg.get("dist_weight", 0.5)) * r_dist
+            + float(scfg.get("threat_weight", 0.3)) * r_threat
+            + float(scfg.get("aspect_weight", 0.2)) * r_aspect
+        )
+        return weighted, {
+            "mav_dist_raw": float(r_dist),
+            "mav_dist_weighted": float(scfg.get("dist_weight", 0.5)) * float(r_dist),
+            "mav_nearest_blue_distance_m": float(near_d),
+            "mav_threat_raw": float(r_threat),
+            "mav_threat_weighted": float(scfg.get("threat_weight", 0.3)) * float(r_threat),
+            "mav_actual_incoming_missile_count": float(len(incoming)),
+            "mav_prelaunch_geometry_threat_log": 0.0,
+            "mav_aspect_raw_sum": float(r_aspect),
+            "mav_aspect_weighted": float(scfg.get("aspect_weight", 0.2)) * float(r_aspect),
+            "mav_aspect_per_blue_mean": float(r_aspect) / max(float(len(alive_blues)), 1.0),
+            "alive_blue_count": float(len(alive_blues)),
+        }
+
+    def _brma_tam_mav_support(self, mav, cfg: dict) -> tuple[float, dict]:
+        spcfg = cfg.get("mav", {}).get("support", {})
+        alive_blue = [self.blue_planes[bid] for bid in self.blue_ids if self.blue_planes.get(bid) is not None and self.blue_planes[bid].is_alive]
+        alive_uav = [
+            self.red_planes[rid] for rid in self.red_ids
+            if self.agent_roles.get(rid) == "attack_uav"
+            and self.red_planes.get(rid) is not None
+            and self.red_planes[rid].is_alive
+        ]
+        center_valid = 0.0
+        center = np.zeros(2, dtype=np.float64)
+        r_pos = 0.0
+        mav_center_distance = 0.0
+        all_attack_dead = 1.0 if not alive_uav else 0.0
+        if alive_blue and alive_uav:
+            pts = [self._brma_tam_safe_vec(s, "get_position")[:2] for s in alive_blue + alive_uav]
+            center = np.mean(pts, axis=0)
+            mav_xy = self._brma_tam_safe_vec(mav, "get_position")[:2]
+            mav_center_distance = float(np.linalg.norm(mav_xy - center))
+            d_opt = float(spcfg.get("d_opt_m", 8000.0))
+            d_max = float(spcfg.get("d_max_m", 25000.0))
+            if mav_center_distance <= d_opt:
+                r_pos = 1.0
+            elif mav_center_distance < d_max:
+                r_pos = float(1.0 - (mav_center_distance - d_opt) / max(d_max - d_opt, 1e-6))
+            else:
+                r_pos = -1.0
+            center_valid = 1.0
+        r_aware = 0.0
+        observed = 0
+        mav_pos = self._brma_tam_safe_vec(mav, "get_position")
+        mav_vel = self._brma_tam_safe_vec(mav, "get_velocity")
+        mav_speed = float(np.linalg.norm(mav_vel))
+        for blue in alive_blue:
+            d_vec = self._brma_tam_safe_vec(blue, "get_position") - mav_pos
+            dist = float(np.linalg.norm(d_vec))
+            if dist > float(getattr(self, "mav_observation_range_m", 80000.0)) or dist < 1e-8 or mav_speed < 1e-8:
+                continue
+            ao = float(np.arccos(np.clip(np.dot(d_vec / dist, mav_vel / mav_speed), -1.0, 1.0)))
+            if ao < np.pi / 2.0:
+                r_aware += 0.3 * (1.0 - ao / (np.pi / 2.0))
+                observed += 1
+        if all_attack_dead:
+            self._brma_tam_all_attack_uav_dead_steps = getattr(self, "_brma_tam_all_attack_uav_dead_steps", 0) + 1
+        weighted = float(spcfg.get("pos_weight", 0.6)) * r_pos + float(spcfg.get("aware_weight", 0.4)) * r_aware
+        return weighted, {
+            "mav_pos_raw": float(r_pos),
+            "mav_pos_weighted": float(spcfg.get("pos_weight", 0.6)) * float(r_pos),
+            "battlefield_center_x": float(center[0]),
+            "battlefield_center_y": float(center[1]),
+            "battlefield_center_valid": float(center_valid),
+            "attack_uav_alive_count": float(len(alive_uav)),
+            "all_attack_uav_dead": float(all_attack_dead),
+            "steps_after_all_attack_uav_dead": float(getattr(self, "_brma_tam_all_attack_uav_dead_steps", 0)),
+            "mav_reward_after_all_attack_uav_dead": float(weighted if all_attack_dead else 0.0),
+            "mav_center_distance_m": float(mav_center_distance),
+            "mav_aware_raw": float(r_aware),
+            "mav_aware_weighted": float(spcfg.get("aware_weight", 0.4)) * float(r_aware),
+            "mav_observed_blue_count": float(observed),
+            "mav_alive_blue_count": float(len(alive_blue)),
+            "mav_observation_coverage_log": float(observed) / max(float(len(alive_blue)), 1.0),
+            "mav_shared_track_count_log": float(observed),
+        }
+
+    def _brma_tam_mav_event(self, aid: str, mav, cfg: dict) -> tuple[float, dict]:
+        ecfg = cfg.get("mav", {}).get("event", {})
+        alive_before = bool(getattr(self, "_brma_tam_alive_before_step", {}).get(aid, getattr(mav, "is_alive", False)))
+        death = 0.0
+        if alive_before and not getattr(mav, "is_alive", False) and not getattr(self, "_brma_tam_mav_death_penalized", False):
+            death = -float(ecfg.get("death_penalty", 200.0))
+            self._brma_tam_mav_death_penalized = True
+        team_kills = 0
+        if alive_before:
+            team_kills = sum(
+                int(getattr(self, "_step_kill_count", {}).get(rid, 0))
+                for rid in self.red_ids
+                if self.agent_roles.get(rid) == "attack_uav"
+            )
+        if not any(
+            self.agent_roles.get(rid) == "attack_uav" and self.red_planes.get(rid) and self.red_planes[rid].is_alive
+            for rid in self.red_ids
+        ) and not team_kills:
+            team_kills = 0
+        cap = float(ecfg.get("team_credit_cap", 200.0))
+        available = max(0.0, cap - float(getattr(self, "_brma_tam_mav_team_credit_used", 0.0)))
+        credit = min(float(ecfg.get("team_credit_per_kill", 100.0)) * team_kills, available)
+        if not alive_before:
+            credit = 0.0
+        self._brma_tam_mav_team_credit_used = float(getattr(self, "_brma_tam_mav_team_credit_used", 0.0)) + credit
+        total = death + credit
+        return total, {
+            "mav_event_death": float(death),
+            "mav_team_credit_delta": float(credit),
+            "mav_team_credit_used": float(self._brma_tam_mav_team_credit_used),
+            "mav_event_total": float(total),
+        }
+
+    def _compute_brma_tam_scripted_composite_v1(self, base_rewards: dict, components: dict):
+        cfg = self.brma_tam_scripted_composite_v1_config
+        for rid in self.red_ids:
+            comp = components.setdefault(rid, {})
+            sim = self.red_planes.get(rid)
+            role = self.agent_roles.get(rid, "")
+            alive_before = bool(getattr(self, "_brma_tam_alive_before_step", {}).get(rid, getattr(sim, "is_alive", False)))
+            brma_pitch = float(comp.get("r_pitch", 0.0))
+            brma_roll = float(comp.get("r_roll", 0.0))
+            brma_vel = float(comp.get("r_vel", 0.0))
+            vals = {
+                "brma_pitch": brma_pitch,
+                "brma_roll": brma_roll,
+                "brma_vel": brma_vel,
+                "brma_alt_log_only": float(comp.get("r_alt", 0.0)),
+                "brma_bound_log_only": float(comp.get("r_bound", 0.0)),
+                "brma_adv_log_only": float(comp.get("r_adv", 0.0)),
+                "brma_end_log_only": float(comp.get("r_end", 0.0)),
+                "brma_death_log_only": float(comp.get("r_death", 0.0)),
+            }
+            if sim is None or not alive_before:
+                total = 0.0
+                if role == "mav":
+                    vals.update({
+                        "mav_team_credit_delta": 0.0,
+                        "mav_total": 0.0,
+                    })
+                else:
+                    vals.update({
+                        "uav_event_kill": 0.0,
+                        "uav_event_loss": 0.0,
+                        "uav_total": 0.0,
+                    })
+                comp.update(vals)
+                comp["total"] = total
+                base_rewards[rid] = total
+                continue
+
+            flight = brma_pitch + brma_roll + brma_vel
+            if role == "mav":
+                safety, safety_logs = self._brma_tam_mav_safety(sim, cfg)
+                support, support_logs = self._brma_tam_mav_support(sim, cfg)
+                event, event_logs = self._brma_tam_mav_event(rid, sim, cfg)
+                total = flight + safety + support + event
+                vals.update(safety_logs)
+                vals.update(support_logs)
+                vals.update(event_logs)
+                vals["mav_total"] = float(total)
+            else:
+                target_id, target, _dist = self._brma_tam_closest_alive_blue(sim)
+                if target is None:
+                    geom = {
+                        "tam_angle_raw": 0.0,
+                        "tam_ata_rad": 0.0,
+                        "tam_aa_rad": 0.0,
+                        "tam_geometry_valid": 0.0,
+                        "target_distance_m": 0.0,
+                    }
+                    speed_logs = self._brma_tam_speed_raw(0.0, 0.0)
+                    dist_logs = self._brma_tam_distance_raw(float("nan"))
+                else:
+                    geom = self._brma_tam_3d_geometry(sim, target)
+                    red_speed = float(np.linalg.norm(self._brma_tam_safe_vec(sim, "get_velocity")))
+                    target_speed = float(np.linalg.norm(self._brma_tam_safe_vec(target, "get_velocity")))
+                    speed_logs = self._brma_tam_speed_raw(red_speed, target_speed)
+                    dist_logs = self._brma_tam_distance_raw(geom["target_distance_m"])
+                track_logs = self._brma_tam_track_logs(rid, target_id)
+                dodge_logs, missile_id = self._brma_tam_dodge_diagnostic(rid, sim)
+                event, event_logs = self._brma_tam_uav_event(rid, sim, cfg)
+                ucfg = cfg.get("uav", {})
+                speed_w = float(ucfg.get("speed_weight", 10.0))
+                angle_w = float(ucfg.get("angle_weight", 15.0))
+                dist_w = float(ucfg.get("distance_weight", 10.0))
+                switch_count = self._brma_tam_reward_target_switch_counts.get(rid, 0)
+                if target_id and self._brma_tam_last_reward_target.get(rid) not in {"", target_id, None}:
+                    switch_count += 1
+                if target_id:
+                    self._brma_tam_last_reward_target[rid] = target_id
+                self._brma_tam_reward_target_switch_counts[rid] = switch_count
+                launch_range_ok = (
+                    1.0 if getattr(self, "MISSILE_LAUNCH_MIN_RANGE", 500.0)
+                    <= float(geom.get("target_distance_m", 0.0))
+                    <= getattr(self, "MISSILE_LAUNCH_RANGE_THRESH", 10000.0)
+                    else 0.0
+                )
+                vals.update(geom)
+                vals.update(speed_logs)
+                vals.update(dist_logs)
+                vals.update(track_logs)
+                vals.update(dodge_logs)
+                vals.update(event_logs)
+                vals.update({
+                    "tam_speed_weighted": speed_w * float(speed_logs["tam_speed_raw"]),
+                    "tam_angle_weighted": angle_w * float(geom["tam_angle_raw"]),
+                    "tam_distance_weighted": dist_w * float(dist_logs["tam_distance_raw"]),
+                    "launch_range_ok": launch_range_ok,
+                    "below_min_launch_range": 1.0 if float(geom.get("target_distance_m", 0.0)) < getattr(self, "MISSILE_LAUNCH_MIN_RANGE", 500.0) else 0.0,
+                    "reward_target_distance_m": float(geom.get("target_distance_m", 0.0)),
+                    "reward_target_switch_count": float(switch_count),
+                })
+                total = flight + vals["tam_speed_weighted"] + vals["tam_angle_weighted"] + vals["tam_distance_weighted"] + event
+                vals["uav_total"] = float(total)
+                self._reward_target_diagnostic_records.append({
+                    "agent_id": rid,
+                    "reward_target_id": target_id or "",
+                    "lock_target_id": getattr(self, "_lock_target", {}).get(rid, "") or "",
+                    "launch_target_id": "",
+                    "reward_target_track_source": (
+                        "direct_and_mav_shared" if track_logs["reward_target_track_source_direct_and_mav_shared"]
+                        else "mav_shared" if track_logs["reward_target_track_source_mav_shared"]
+                        else "direct" if track_logs["reward_target_track_source_direct"]
+                        else "unknown"
+                    ),
+                    "script_selected_missile_id": missile_id,
+                    "death_reason": self._brma_tam_death_reason(rid),
+                    "action_source": "policy",
+                })
+            vals["brma_tam_scripted_composite_total"] = float(total)
+            vals["total"] = float(total)
+            comp.update(vals)
+            base_rewards[rid] = float(total)
+            components[rid] = comp
         return base_rewards, components
 
     def _compute_tam_brma_paper_aligned_v1(self, base_rewards: dict, components: dict):
@@ -2116,9 +2646,16 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1",
             "brma_role_no_missile_reward_v8", "happo_ref_v1_mav_support",
             "tam_brma_paper_aligned_v1", "tam_happo_table1_v1",
+            "brma_tam_scripted_composite_v1",
         }
 
     def step(self, actions: dict):
+        if self.hetero_reward_mode == "brma_tam_scripted_composite_v1":
+            self._brma_tam_alive_before_step = {
+                aid: bool(getattr((self.red_planes.get(aid) or self.blue_planes.get(aid)), "is_alive", False))
+                for aid in self.agent_ids
+            }
+            self._reward_target_diagnostic_records = []
         trimmed = self._apply_action_trim(actions)
         obs, rewards, terminated, truncated, info = super().step(trimmed)
         if self._needs_last_step_obs_cache():
@@ -2139,6 +2676,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._happo_ref_v1_reset_episode_state()
         self._tam_brma_paper_v1_reset_episode_state()
         self._tam_happo_table1_v1_reset_episode_state()
+        self._brma_tam_scripted_reset_episode_state()
         self._tam_v6v3_reset_episode_state()
         self._tam_v7_reset_episode_state()
         self._tam_brma_scripted_terminal_applied: bool = False
@@ -3968,6 +4506,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 return self._compute_tam_brma_paper_aligned_v1(base_rewards, components)
             if self.hetero_reward_mode == "tam_happo_table1_v1":
                 return self._compute_tam_happo_table1_v1(base_rewards, components)
+            if self.hetero_reward_mode == "brma_tam_scripted_composite_v1":
+                return self._compute_brma_tam_scripted_composite_v1(base_rewards, components)
             return base_rewards, components
 
         mav_id = self.red_ids[0] if self.red_ids else None
@@ -4302,6 +4842,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         }
         info["last_action_trim_applied"] = dict(self._last_action_trim_applied)
         info["last_effective_actions"] = dict(self._last_effective_actions)
+        if self.hetero_reward_mode == "brma_tam_scripted_composite_v1":
+            info["__reward_target_diagnostics__"] = [
+                dict(row) for row in getattr(self, "_reward_target_diagnostic_records", []) or []
+            ]
         info["agent_init_offsets"] = {}
         for aid in self.agent_ids:
             info["agent_init_offsets"][aid] = self._init_offsets_for(aid)

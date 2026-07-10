@@ -200,6 +200,54 @@ REWARD_COMPONENT_COLUMNS = [
     "mav_removed_r_adv_sum", "mav_removed_r_end_sum",
 ]
 
+BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS = [
+    "brma_pitch", "brma_roll", "brma_vel", "brma_alt_log_only",
+    "brma_bound_log_only", "brma_adv_log_only", "brma_end_log_only",
+    "brma_death_log_only", "tam_speed_raw", "tam_speed_weighted",
+    "own_speed_mps", "target_speed_mps", "speed_ratio", "speed_ratio_valid",
+    "tam_angle_raw", "tam_angle_weighted", "tam_ata_rad", "tam_aa_rad",
+    "tam_geometry_valid", "tam_distance_raw", "tam_distance_weighted",
+    "target_distance_m", "reward_target_distance_m", "reward_distance_zone_code",
+    "launch_range_ok", "below_min_launch_range", "tam_dodge_raw_log",
+    "tam_dodge_angle_log", "tam_dodge_speed_log", "evasion_override_active",
+    "script_selected_missile_numeric", "incoming_range_m",
+    "incoming_closing_speed_mps", "incoming_t_go_sec",
+    "reward_target_observed", "reward_target_direct_visible",
+    "reward_target_mav_shared_visible", "reward_target_unavailable",
+    "reward_target_matches_lock", "reward_target_matches_launch",
+    "reward_target_switch_count", "reward_target_track_source_direct",
+    "reward_target_track_source_mav_shared",
+    "reward_target_track_source_direct_and_mav_shared",
+    "reward_target_track_source_unknown",
+    "uav_event_kill", "uav_event_loss", "uav_event_first_horizontal_out_of_zone",
+    "uav_event_total", "uav_total", "above_altitude_max_steps",
+    "max_altitude_m", "above_altitude_max_episode_flag",
+    "mav_dist_raw", "mav_dist_weighted", "mav_nearest_blue_distance_m",
+    "mav_threat_raw", "mav_threat_weighted", "mav_actual_incoming_missile_count",
+    "mav_prelaunch_geometry_threat_log", "mav_aspect_raw_sum",
+    "mav_aspect_weighted", "mav_aspect_per_blue_mean", "alive_blue_count",
+    "mav_pos_raw", "mav_pos_weighted", "battlefield_center_x",
+    "battlefield_center_y", "battlefield_center_valid", "attack_uav_alive_count",
+    "all_attack_uav_dead", "steps_after_all_attack_uav_dead",
+    "mav_reward_after_all_attack_uav_dead", "mav_center_distance_m",
+    "mav_aware_raw", "mav_aware_weighted", "mav_observed_blue_count",
+    "mav_alive_blue_count", "mav_observation_coverage_log",
+    "mav_shared_track_count_log", "mav_event_death", "mav_team_credit_delta",
+    "mav_team_credit_used", "mav_event_total", "mav_total",
+    "brma_tam_scripted_composite_total",
+]
+
+for _col in BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS:
+    if _col not in REWARD_COMPONENT_COLUMNS:
+        REWARD_COMPONENT_COLUMNS.append(_col)
+
+REWARD_TARGET_DIAGNOSTICS_COLUMNS = [
+    "run_id", "scenario", "episode_id", "step", "sim_time",
+    "agent_id", "reward_target_id", "lock_target_id", "launch_target_id",
+    "reward_target_track_source", "script_selected_missile_id",
+    "death_reason", "action_source",
+]
+
 PERTURBATION_EVAL_COLUMNS = [
     "perturbation_level", "altitude_delta", "lon_delta", "lat_delta",
     "heading_delta", "velocity_delta", "episodes", "win_rate",
@@ -326,6 +374,11 @@ EPISODE_REWARD_COMPONENTS_COLUMNS = [
     "outcome", "end_reason",
 ]
 
+for _col in BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS:
+    _sum_col = f"{_col}_sum"
+    if _sum_col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
+        EPISODE_REWARD_COMPONENTS_COLUMNS.append(_sum_col)
+
 FILE_SCHEMAS = {
     "train_metrics.csv": TRAIN_METRICS_COLUMNS,
     "eval_episode_metrics.csv": EVAL_EPISODE_COLUMNS,
@@ -335,6 +388,7 @@ FILE_SCHEMAS = {
     "missile_timeseries.csv": MISSILE_TIMESERIES_COLUMNS,
     "reward_components.csv": REWARD_COMPONENT_COLUMNS,
     "episode_reward_components.csv": EPISODE_REWARD_COMPONENTS_COLUMNS,
+    "reward_target_diagnostics.csv": REWARD_TARGET_DIAGNOSTICS_COLUMNS,
     "perturbation_eval_summary.csv": PERTURBATION_EVAL_COLUMNS,
     "attention_metrics.csv": ATTENTION_METRICS_COLUMNS,
 }
