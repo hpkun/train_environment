@@ -50,7 +50,7 @@ class TestV7MockWriting:
             logger = RichExperimentLogger(d, run_id="test", method_name="test",
                                           scenario_name="test", device="cpu",
                                           num_envs=1, rollout_length_per_env=256,
-                                          transitions_per_rollout=256)
+                                          transitions_per_rollout=256, mode="full")
 
             class MockSim:
                 is_alive = True
@@ -88,7 +88,7 @@ class TestV7MockWriting:
             logger = RichExperimentLogger(d, run_id="test", method_name="test",
                                           scenario_name="test", device="cpu",
                                           num_envs=1, rollout_length_per_env=256,
-                                          transitions_per_rollout=256)
+                                          transitions_per_rollout=256, mode="full")
             info = {"reward_components": {
                 "red_0": {"tam_v7_total": 0.05, "tam_v7_mav_safety": -0.02, "tam_v7_mav_support": 0.07,
                           "tam_v7_uav_situation": 0.0, "tam_v7_uav_first_out_of_zone": 0.0,

@@ -226,7 +226,7 @@ def _experiment_base_v2_meta(
     rich_log_mode: str,
 ) -> dict:
     full_rich = bool(rich_logging_enabled and rich_log_mode == "full")
-    return {
+    meta = {
         "reward_mode": actual_reward_mode,
         "actual_reward_mode": actual_reward_mode,
         "rich_logging_enabled": bool(rich_logging_enabled),
@@ -234,6 +234,9 @@ def _experiment_base_v2_meta(
         "per_step_reward_components": full_rich,
         "aircraft_timeseries": full_rich,
     }
+    if actual_reward_mode == "brma_tam_scripted_composite_v1":
+        meta["reward_contract_revision"] = 2
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -1581,6 +1584,8 @@ def _run_training_main() -> None:
             "effective_team_uav_event", "effective_team_mav_safety",
             "effective_team_mav_support", "effective_team_mav_event",
             "effective_team_total", "active_red_count",
+            "effective_component_sum", "effective_total_minus_component_sum",
+            "initial_red_count", "effective_initial_team_mean_total",
             *MARL_DYNAMICS_TRAIN_FIELDS,
             "nan_detected",
         ])
@@ -1890,7 +1895,13 @@ def _run_training_main() -> None:
                                 delta = float(value)
                             except (TypeError, ValueError):
                                 continue
-                            if key == "tam_v7_mav_team_credit_used":
+                            if key == "max_altitude_m":
+                                agent_acc[key] = max(agent_acc.get(key, delta), delta)
+                            elif key == "above_altitude_max_episode_flag":
+                                agent_acc[key] = max(agent_acc.get(key, 0.0), delta)
+                            elif key == "tam_dodge_missing_reason":
+                                continue
+                            elif key == "tam_v7_mav_team_credit_used":
                                 agent_acc["tam_v7_mav_team_credit_used_max"] = max(
                                     agent_acc.get("tam_v7_mav_team_credit_used_max", delta), delta)
                             elif key in ("tam_v7_blue_loss_frac", "tam_v7_red_loss_weighted"):
@@ -1951,10 +1962,36 @@ def _run_training_main() -> None:
                             eff["effective_team_mav_event"] += mask_value * float(comp.get("mav_event_total", 0.0) or 0.0)
                             eff["effective_team_total"] += mask_value * float(comp.get("total", 0.0) or 0.0)
                         denom = max(active_count, 1.0)
+                        normalized = {}
                         for key, value in eff.items():
+                            normalized[key] = float(value) / denom
                             current_ep_reward_comp[env_idx][key] = (
-                                current_ep_reward_comp[env_idx].get(key, 0.0) + float(value) / denom
+                                current_ep_reward_comp[env_idx].get(key, 0.0) + normalized[key]
                             )
+                        component_sum = sum(
+                            normalized[key] for key in (
+                                "effective_team_brma_flight",
+                                "effective_team_uav_speed",
+                                "effective_team_uav_angle",
+                                "effective_team_uav_distance",
+                                "effective_team_uav_event",
+                                "effective_team_mav_safety",
+                                "effective_team_mav_support",
+                                "effective_team_mav_event",
+                            )
+                        )
+                        current_ep_reward_comp[env_idx]["effective_component_sum"] = (
+                            current_ep_reward_comp[env_idx].get("effective_component_sum", 0.0)
+                            + component_sum
+                        )
+                        current_ep_reward_comp[env_idx]["effective_total_minus_component_sum"] = (
+                            current_ep_reward_comp[env_idx].get("effective_total_minus_component_sum", 0.0)
+                            + normalized["effective_team_total"] - component_sum
+                        )
+                        current_ep_reward_comp[env_idx]["effective_initial_team_mean_total"] = (
+                            current_ep_reward_comp[env_idx].get("effective_initial_team_mean_total", 0.0)
+                            + float(eff["effective_team_total"]) / max(float(len(rollout_env.red_ids)), 1.0)
+                        )
                         current_ep_reward_comp[env_idx]["active_red_count"] = (
                             current_ep_reward_comp[env_idx].get("active_red_count", 0.0) + active_count
                         )
@@ -2019,6 +2056,7 @@ def _run_training_main() -> None:
                         prev_hit_totals[env_idx]["red"] = red_hit_total
                         prev_hit_totals[env_idx]["blue"] = blue_hit_total
                     if done:
+                        current_ep_reward_comp[env_idx]["initial_red_count"] = float(len(rollout_env.red_ids))
                         outcome = _episode_outcome(rollout_env, truncated, current_ep_len[env_idx])
                         ra, ba = _alive_counts(rollout_env)
                         episode_reward_comp = _finalize_happo_v1_episode_reward_components(
@@ -2274,6 +2312,10 @@ def _run_training_main() -> None:
                 f"{rc_sum.get('effective_team_mav_event', 0):.4f}",
                 f"{rc_sum.get('effective_team_total', 0):.4f}",
                 f"{rc_sum.get('active_red_count', 0):.4f}",
+                f"{rc_sum.get('effective_component_sum', 0):.4f}",
+                f"{rc_sum.get('effective_total_minus_component_sum', 0):.4f}",
+                f"{_recent_component_mean(rec, 'initial_red_count'):.4f}",
+                f"{rc_sum.get('effective_initial_team_mean_total', 0):.4f}",
                 *[_format_metric(stats.get(field, 0.0)) for field in MARL_DYNAMICS_TRAIN_FIELDS],
                 int(nan_detected),
             ])

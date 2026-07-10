@@ -1487,6 +1487,12 @@ class UavCombatEnv(gymnasium.Env):
         record["TA_rad"] = geo3d.get("TA_3d_rad", ta)
         record["range_m"] = geo3d.get("range_3d_m", r)
         record.update({
+            "lock_target_id_at_launch": str(
+                getattr(self, "_lock_target", {}).get(shooter.uid, "") or ""
+            ),
+            "lock_timer_frames_at_launch": int(
+                getattr(self, "_lock_timer", {}).get(shooter.uid, 0) or 0
+            ),
             "launch_track_source": track_source,
             "launch_track_ok": track_ok,
             "launch_track_block_reason": "" if track_ok else track_source,

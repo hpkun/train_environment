@@ -268,6 +268,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._brma_tam_all_attack_uav_dead_steps = 0
         self._brma_tam_reward_target_switch_counts: dict[str, int] = {}
         self._brma_tam_last_reward_target: dict[str, str] = {}
+        self._brma_tam_missile_speed_cache: dict[str, float] = {}
         self._reward_target_diagnostic_records: list[dict] = []
 
     @staticmethod
@@ -1093,6 +1094,46 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 best = (bid, blue, dist)
         return best
 
+    def _mav_shared_track_state(self, observer_id: str, target_id: str) -> dict:
+        """Return current-state visibility without changing observation semantics."""
+        observer = self._get_sim(observer_id)
+        target = self._get_sim(target_id)
+        target_alive = bool(target is not None and getattr(target, "is_alive", False))
+        observer_alive = bool(observer is not None and getattr(observer, "is_alive", False))
+        direct = False
+        shared = False
+        if target_alive and observer_alive:
+            if observer_id.startswith("red_") and self.agent_roles.get(observer_id) == "mav":
+                direct = self._distance_m(observer, target) <= float(self.mav_observation_range_m)
+            else:
+                direct = self._distance_m(observer, target) <= float(
+                    getattr(self, "uav_direct_observation_range_m", 10000.0)
+                )
+                if observer_id.startswith("red_"):
+                    mav = self._get_red_mav_sim()
+                    shared = bool(
+                        self.agent_roles.get(observer_id) != "mav"
+                        and mav is not None
+                        and getattr(mav, "is_alive", False)
+                        and self._distance_m(mav, target) <= float(self.mav_observation_range_m)
+                    )
+        observed = bool(direct or shared)
+        if direct and shared:
+            source = "direct_and_mav_shared"
+        elif direct:
+            source = "direct"
+        elif shared:
+            source = "mav_shared"
+        else:
+            source = "unobserved" if target_alive else "target_dead"
+        return {
+            "target_alive": target_alive,
+            "direct_visible": bool(direct),
+            "mav_shared_visible": bool(shared),
+            "observed": observed,
+            "track_source": source,
+        }
+
     def _brma_tam_track_logs(self, aid: str, target_id: str | None) -> dict:
         logs = {
             "reward_target_observed": 0.0,
@@ -1108,19 +1149,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         }
         if target_id is None:
             return logs
-        try:
-            idx = self.blue_ids.index(target_id)
-        except ValueError:
-            return logs
-        obs = getattr(self, "_last_step_obs", {}).get(aid, {}) or {}
-        src = np.asarray(obs.get("enemy_track_source", []), dtype=np.float32)
-        direct = shared = 0.0
-        if src.ndim == 2 and idx < src.shape[0]:
-            if src.shape[1] > 0:
-                direct = float(src[idx, 0] > 0.5)
-            if src.shape[1] > 1:
-                shared = float(src[idx, 1] > 0.5)
-        observed = max(direct, shared)
+        state = self._mav_shared_track_state(aid, target_id)
+        direct = float(state["direct_visible"])
+        shared = float(state["mav_shared_visible"])
+        observed = float(state["observed"])
         logs.update({
             "reward_target_observed": observed,
             "reward_target_direct_visible": direct,
@@ -1134,12 +1166,6 @@ class HeteroUavCombatEnv(UavCombatEnv):
             logs["reward_target_track_source_direct"] = 1.0
         elif shared:
             logs["reward_target_track_source_mav_shared"] = 1.0
-        if getattr(self, "_lock_target", {}).get(aid) == target_id:
-            logs["reward_target_matches_lock"] = 1.0
-        for rec in getattr(self, "_launch_quality_step_records", []) or []:
-            if rec.get("shooter_id") == aid and rec.get("target_id") == target_id:
-                logs["reward_target_matches_launch"] = 1.0
-                break
         return logs
 
     def _brma_tam_dodge_diagnostic(self, aid: str, sim) -> tuple[dict, str]:
@@ -1151,6 +1177,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "tam_dodge_raw_log": 0.0,
             "tam_dodge_angle_log": 0.0,
             "tam_dodge_speed_log": 0.0,
+            "tam_dodge_geometry_valid": 0.0,
+            "tam_dodge_missing_reason": "no_scripted_override",
             "evasion_override_active": 0.0,
         }
         selected = ""
@@ -1158,16 +1186,52 @@ class HeteroUavCombatEnv(UavCombatEnv):
             if rec.get("evasion_agent_id") != aid:
                 continue
             selected = str(rec.get("incoming_missile_id", "") or "")
-            for key in ("incoming_range_m", "incoming_closing_speed_mps", "incoming_t_go_sec"):
-                try:
-                    logs[key] = float(rec.get(key, 0.0) or 0.0)
-                except (TypeError, ValueError):
-                    logs[key] = 0.0
-            logs["tam_dodge_raw_log"] = 1.0
-            logs["tam_dodge_angle_log"] = 1.0
-            logs["tam_dodge_speed_log"] = 0.0
             logs["evasion_override_active"] = 1.0
             logs["script_selected_missile_numeric"] = 1.0 if selected else 0.0
+            if not selected:
+                logs["tam_dodge_missing_reason"] = "missing_missile_id"
+                return logs, selected
+            missile = getattr(self, "_missiles_in_flight", {}).get(selected)
+            if missile is None:
+                logs["tam_dodge_missing_reason"] = "missile_not_found"
+                return logs, selected
+            if not getattr(missile, "is_alive", False):
+                logs["tam_dodge_missing_reason"] = "missile_inactive"
+                return logs, selected
+            aircraft_pos = self._brma_tam_safe_vec(sim, "get_position")
+            aircraft_vel = self._brma_tam_safe_vec(sim, "get_velocity")
+            missile_pos = self._brma_tam_safe_vec(missile, "get_position")
+            missile_vel = self._brma_tam_safe_vec(missile, "get_velocity")
+            los = aircraft_pos - missile_pos
+            los_norm = float(np.linalg.norm(los))
+            missile_speed = float(np.linalg.norm(missile_vel))
+            if not np.isfinite(los_norm) or los_norm < 1e-8:
+                logs["tam_dodge_missing_reason"] = "invalid_los"
+                return logs, selected
+            if not np.isfinite(missile_speed) or missile_speed < 1e-8:
+                logs["tam_dodge_missing_reason"] = "invalid_missile_speed"
+                return logs, selected
+            los_hat = los / los_norm
+            angle_raw = -float(np.clip(np.dot(missile_vel / missile_speed, los_hat), -1.0, 1.0))
+            prev_speed = getattr(self, "_brma_tam_missile_speed_cache", {}).get(selected)
+            norm = float(
+                self.brma_tam_scripted_composite_v1_config.get("uav", {}).get(
+                    "dodge_speed_norm_mps", 1000.0
+                )
+            )
+            speed_raw = 0.0 if prev_speed is None else (float(prev_speed) - missile_speed) / max(norm, 1e-6)
+            self._brma_tam_missile_speed_cache[selected] = missile_speed
+            closing = float(np.dot(missile_vel - aircraft_vel, los_hat))
+            logs.update({
+                "incoming_range_m": los_norm,
+                "incoming_closing_speed_mps": closing if np.isfinite(closing) else 0.0,
+                "incoming_t_go_sec": los_norm / closing if np.isfinite(closing) and closing > 1e-8 else 0.0,
+                "tam_dodge_raw_log": angle_raw + speed_raw,
+                "tam_dodge_angle_log": angle_raw,
+                "tam_dodge_speed_log": speed_raw,
+                "tam_dodge_geometry_valid": 1.0,
+                "tam_dodge_missing_reason": "",
+            })
             return logs, selected
         return logs, selected
 
@@ -1210,6 +1274,28 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "above_altitude_max_episode_flag": 1.0 if self._brma_tam_safe_vec(sim, "get_position")[2] > float(getattr(self, "BATTLEFIELD_ALTITUDE_MAX", 10000.0)) else 0.0,
         }
 
+    @staticmethod
+    def _brma_tam_mav_dist_raw(distance_m: float, d_danger: float, d_safe: float) -> float:
+        d = float(distance_m)
+        if not np.isfinite(d):
+            return 0.0
+        if d < d_danger:
+            return float(-(1.0 - d / max(d_danger, 1e-6)))
+        if d < d_safe:
+            return float(-0.5 * (1.0 - (d - d_danger) / max(d_safe - d_danger, 1e-6)))
+        return 0.2
+
+    @staticmethod
+    def _brma_tam_mav_pos_raw(distance_m: float, d_opt: float, d_max: float) -> float:
+        d = float(distance_m)
+        if not np.isfinite(d):
+            return 0.0
+        if d < d_opt:
+            return float(d / max(d_opt, 1e-6) - 1.0)
+        if d < d_max:
+            return float(1.0 - (d - d_opt) / max(d_max - d_opt, 1e-6))
+        return -0.5
+
     def _brma_tam_mav_safety(self, mav, cfg: dict) -> tuple[float, dict]:
         scfg = cfg.get("mav", {}).get("safety", {})
         d_danger = float(scfg.get("d_danger_m", 8000.0))
@@ -1220,14 +1306,24 @@ class HeteroUavCombatEnv(UavCombatEnv):
         r_dist = 0.0
         if alive_blues:
             near_d = min(float(np.linalg.norm(self._brma_tam_safe_vec(b, "get_position") - mav_pos)) for b in alive_blues)
-            if near_d <= d_danger:
-                r_dist = -(1.0 - near_d / max(d_danger, 1e-6))
-            elif near_d < d_safe:
-                r_dist = -0.5 * (1.0 - (near_d - d_danger) / max(d_safe - d_danger, 1e-6))
-            else:
-                r_dist = 0.2
-        incoming = [m for m in getattr(mav, "under_missiles", []) or [] if getattr(m, "is_alive", False)]
+            r_dist = self._brma_tam_mav_dist_raw(near_d, d_danger, d_safe)
+        incoming = [
+            m for m in getattr(mav, "under_missiles", []) or []
+            if getattr(m, "is_alive", False)
+            and (
+                getattr(m, "target_aircraft", None) is mav
+                or str(getattr(m, "_target_id", "") or "") == str(getattr(mav, "uid", ""))
+            )
+        ]
         r_threat = -1.0 if incoming else 0.0
+        prelaunch_count = 0
+        for blue in alive_blues:
+            try:
+                metrics = self._missile_candidate_metrics(blue, mav)
+            except Exception:
+                continue
+            if bool(metrics.get("launch_geometry_ok_3d", False)):
+                prelaunch_count += 1
         r_aspect = 0.0
         if alive_blues:
             for blue in alive_blues:
@@ -1252,7 +1348,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "mav_threat_raw": float(r_threat),
             "mav_threat_weighted": float(scfg.get("threat_weight", 0.3)) * float(r_threat),
             "mav_actual_incoming_missile_count": float(len(incoming)),
-            "mav_prelaunch_geometry_threat_log": 0.0,
+            "mav_prelaunch_geometry_threat_log": -float(prelaunch_count),
+            "mav_prelaunch_geometry_threat_count_log": float(prelaunch_count),
             "mav_aspect_raw_sum": float(r_aspect),
             "mav_aspect_weighted": float(scfg.get("aspect_weight", 0.2)) * float(r_aspect),
             "mav_aspect_per_blue_mean": float(r_aspect) / max(float(len(alive_blues)), 1.0),
@@ -1280,27 +1377,43 @@ class HeteroUavCombatEnv(UavCombatEnv):
             mav_center_distance = float(np.linalg.norm(mav_xy - center))
             d_opt = float(spcfg.get("d_opt_m", 8000.0))
             d_max = float(spcfg.get("d_max_m", 25000.0))
-            if mav_center_distance <= d_opt:
-                r_pos = 1.0
-            elif mav_center_distance < d_max:
-                r_pos = float(1.0 - (mav_center_distance - d_opt) / max(d_max - d_opt, 1e-6))
-            else:
-                r_pos = -1.0
+            r_pos = self._brma_tam_mav_pos_raw(mav_center_distance, d_opt, d_max)
             center_valid = 1.0
         r_aware = 0.0
-        observed = 0
+        mav_observed = 0
         mav_pos = self._brma_tam_safe_vec(mav, "get_position")
         mav_vel = self._brma_tam_safe_vec(mav, "get_velocity")
         mav_speed = float(np.linalg.norm(mav_vel))
-        for blue in alive_blue:
+        for bid in self.blue_ids:
+            blue = self.blue_planes.get(bid)
+            if blue is None or not getattr(blue, "is_alive", False):
+                continue
+            visibility = self._mav_shared_track_state(getattr(mav, "uid", "red_0"), bid)
+            if not visibility["observed"]:
+                continue
+            mav_observed += 1
             d_vec = self._brma_tam_safe_vec(blue, "get_position") - mav_pos
             dist = float(np.linalg.norm(d_vec))
-            if dist > float(getattr(self, "mav_observation_range_m", 80000.0)) or dist < 1e-8 or mav_speed < 1e-8:
+            if dist < 1e-8 or mav_speed < 1e-8 or not np.isfinite(dist) or not np.isfinite(mav_speed):
                 continue
             ao = float(np.arccos(np.clip(np.dot(d_vec / dist, mav_vel / mav_speed), -1.0, 1.0)))
             if ao < np.pi / 2.0:
                 r_aware += 0.3 * (1.0 - ao / (np.pi / 2.0))
-                observed += 1
+        shared_slots = 0
+        shared_unique: set[str] = set()
+        for rid in self.red_ids:
+            if self.agent_roles.get(rid) != "attack_uav":
+                continue
+            red = self.red_planes.get(rid)
+            if red is None or not getattr(red, "is_alive", False):
+                continue
+            for bid in self.blue_ids:
+                blue = self.blue_planes.get(bid)
+                if blue is None or not getattr(blue, "is_alive", False):
+                    continue
+                if self._mav_shared_track_state(rid, bid)["mav_shared_visible"]:
+                    shared_slots += 1
+                    shared_unique.add(bid)
         if all_attack_dead:
             self._brma_tam_all_attack_uav_dead_steps = getattr(self, "_brma_tam_all_attack_uav_dead_steps", 0) + 1
         weighted = float(spcfg.get("pos_weight", 0.6)) * r_pos + float(spcfg.get("aware_weight", 0.4)) * r_aware
@@ -1316,11 +1429,15 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "mav_reward_after_all_attack_uav_dead": float(weighted if all_attack_dead else 0.0),
             "mav_center_distance_m": float(mav_center_distance),
             "mav_aware_raw": float(r_aware),
+            "mav_aware_raw_sum": float(r_aware),
+            "mav_aware_per_blue_mean": float(r_aware) / max(float(len(alive_blue)), 1.0),
             "mav_aware_weighted": float(spcfg.get("aware_weight", 0.4)) * float(r_aware),
-            "mav_observed_blue_count": float(observed),
+            "mav_observed_blue_count": float(mav_observed),
             "mav_alive_blue_count": float(len(alive_blue)),
-            "mav_observation_coverage_log": float(observed) / max(float(len(alive_blue)), 1.0),
-            "mav_shared_track_count_log": float(observed),
+            "mav_observation_coverage_log": float(mav_observed) / max(float(len(alive_blue)), 1.0),
+            "mav_shared_track_slot_count_log": float(shared_slots),
+            "mav_shared_track_unique_blue_count_log": float(len(shared_unique)),
+            "mav_shared_track_count_log": float(shared_slots),
         }
 
     def _brma_tam_mav_event(self, aid: str, mav, cfg: dict) -> tuple[float, dict]:
@@ -1358,6 +1475,14 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
     def _compute_brma_tam_scripted_composite_v1(self, base_rewards: dict, components: dict):
         cfg = self.brma_tam_scripted_composite_v1_config
+        alive_missile_ids = {
+            str(mid) for mid, missile in getattr(self, "_missiles_in_flight", {}).items()
+            if getattr(missile, "is_alive", False)
+        }
+        self._brma_tam_missile_speed_cache = {
+            mid: speed for mid, speed in getattr(self, "_brma_tam_missile_speed_cache", {}).items()
+            if mid in alive_missile_ids
+        }
         for rid in self.red_ids:
             comp = components.setdefault(rid, {})
             sim = self.red_planes.get(rid)
@@ -1367,6 +1492,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             brma_roll = float(comp.get("r_roll", 0.0))
             brma_vel = float(comp.get("r_vel", 0.0))
             vals = {
+                "reward_contract_revision": 2.0,
                 "brma_pitch": brma_pitch,
                 "brma_roll": brma_roll,
                 "brma_vel": brma_vel,
@@ -1376,15 +1502,37 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 "brma_end_log_only": float(comp.get("r_end", 0.0)),
                 "brma_death_log_only": float(comp.get("r_death", 0.0)),
             }
+            altitude = float(self._brma_tam_safe_vec(sim, "get_position")[2]) if sim is not None else 0.0
+            altitude_finite = bool(np.isfinite(altitude))
+            above_altitude = bool(
+                altitude_finite
+                and altitude > float(getattr(self, "BATTLEFIELD_ALTITUDE_MAX", 10000.0))
+            )
+            vals.update({
+                "above_altitude_max_steps": float(above_altitude),
+                "max_altitude_m": altitude if altitude_finite else 0.0,
+                "above_altitude_max_episode_flag": float(above_altitude),
+            })
             if sim is None or not alive_before:
                 total = 0.0
+                vals.update({"brma_pitch": 0.0, "brma_roll": 0.0, "brma_vel": 0.0})
                 if role == "mav":
                     vals.update({
+                        "mav_dist_weighted": 0.0,
+                        "mav_threat_weighted": 0.0,
+                        "mav_aspect_weighted": 0.0,
+                        "mav_pos_weighted": 0.0,
+                        "mav_aware_weighted": 0.0,
+                        "mav_event_total": 0.0,
                         "mav_team_credit_delta": 0.0,
                         "mav_total": 0.0,
                     })
                 else:
                     vals.update({
+                        "tam_speed_weighted": 0.0,
+                        "tam_angle_weighted": 0.0,
+                        "tam_distance_weighted": 0.0,
+                        "uav_event_total": 0.0,
                         "uav_event_kill": 0.0,
                         "uav_event_loss": 0.0,
                         "uav_total": 0.0,
@@ -1435,6 +1583,23 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 if target_id:
                     self._brma_tam_last_reward_target[rid] = target_id
                 self._brma_tam_reward_target_switch_counts[rid] = switch_count
+                launch_records = [
+                    rec for rec in getattr(self, "_launch_quality_step_records", []) or []
+                    if str(rec.get("shooter_id", "")) == rid
+                ]
+                launch_target_ids = [str(rec.get("target_id", "") or "") for rec in launch_records]
+                launch_target_ids = [tid for tid in launch_target_ids if tid]
+                launch_target_id = launch_target_ids[0] if launch_target_ids else ""
+                lock_target_id = ""
+                lock_timer_frames = 0
+                if launch_records:
+                    lock_target_id = str(launch_records[0].get("lock_target_id_at_launch", "") or "")
+                    lock_timer_frames = int(launch_records[0].get("lock_timer_frames_at_launch", 0) or 0)
+                if not lock_target_id:
+                    lock_target_id = str(getattr(self, "_lock_target", {}).get(rid, "") or "")
+                    lock_timer_frames = int(getattr(self, "_lock_timer", {}).get(rid, 0) or 0)
+                track_logs["reward_target_matches_lock"] = float(bool(target_id and lock_target_id == target_id))
+                track_logs["reward_target_matches_launch"] = float(bool(target_id and target_id in launch_target_ids))
                 launch_range_ok = (
                     1.0 if getattr(self, "MISSILE_LAUNCH_MIN_RANGE", 500.0)
                     <= float(geom.get("target_distance_m", 0.0))
@@ -1458,20 +1623,33 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 })
                 total = flight + vals["tam_speed_weighted"] + vals["tam_angle_weighted"] + vals["tam_distance_weighted"] + event
                 vals["uav_total"] = float(total)
+                visibility = self._mav_shared_track_state(rid, target_id) if target_id else {
+                    "track_source": "unobserved",
+                }
+                action_source = "scripted_evasion" if dodge_logs["evasion_override_active"] > 0.5 else "policy"
                 self._reward_target_diagnostic_records.append({
                     "agent_id": rid,
                     "reward_target_id": target_id or "",
-                    "lock_target_id": getattr(self, "_lock_target", {}).get(rid, "") or "",
-                    "launch_target_id": "",
-                    "reward_target_track_source": (
-                        "direct_and_mav_shared" if track_logs["reward_target_track_source_direct_and_mav_shared"]
-                        else "mav_shared" if track_logs["reward_target_track_source_mav_shared"]
-                        else "direct" if track_logs["reward_target_track_source_direct"]
-                        else "unknown"
-                    ),
+                    "reward_target_distance_m": float(geom.get("target_distance_m", 0.0)),
+                    "reward_target_observed": track_logs["reward_target_observed"],
+                    "reward_target_direct_visible": track_logs["reward_target_direct_visible"],
+                    "reward_target_mav_shared_visible": track_logs["reward_target_mav_shared_visible"],
+                    "reward_target_unavailable": track_logs["reward_target_unavailable"],
+                    "reward_target_track_source": str(visibility["track_source"]),
+                    "lock_target_id": lock_target_id,
+                    "lock_timer_frames": lock_timer_frames,
+                    "launch_target_id": launch_target_id,
+                    "launch_target_ids": "|".join(launch_target_ids),
+                    "launch_count_this_step": len(launch_target_ids),
+                    "reward_target_matches_lock": track_logs["reward_target_matches_lock"],
+                    "reward_target_matches_launch": track_logs["reward_target_matches_launch"],
+                    "reward_target_switch_count": switch_count,
                     "script_selected_missile_id": missile_id,
+                    "tam_dodge_geometry_valid": dodge_logs["tam_dodge_geometry_valid"],
+                    "tam_dodge_missing_reason": dodge_logs["tam_dodge_missing_reason"],
+                    "evasion_override_active": dodge_logs["evasion_override_active"],
                     "death_reason": self._brma_tam_death_reason(rid),
-                    "action_source": "policy",
+                    "action_source": action_source,
                 })
             vals["brma_tam_scripted_composite_total"] = float(total)
             vals["total"] = float(total)
@@ -2850,31 +3028,14 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 ally_alive_mask[i] = 1.0
                 ally_geo_states[i] = self._relative_geo_state(ego_sim, ally_sim)
 
-        mav_sim = self._get_red_mav_sim()
-        ego_is_red = agent_id.startswith("red_")
-        ego_is_mav = self.agent_roles.get(agent_id) == "mav"
-
         for i, enemy_id in enumerate(enemy_ids):
             enemy_sim = self._get_sim(enemy_id)
             if enemy_sim is None or not enemy_sim.is_alive:
                 continue
             enemy_alive_mask[i] = 1.0
-
-            own_direct = (
-                self._distance_m(ego_sim, enemy_sim)
-                <= self.uav_direct_observation_range_m
-            )
-            mav_shared = False
-            if ego_is_red and not ego_is_mav and mav_sim is not None and mav_sim.is_alive:
-                mav_shared = (
-                    self._distance_m(mav_sim, enemy_sim)
-                    <= self.mav_observation_range_m
-                )
-            if ego_is_red and ego_is_mav:
-                own_direct = (
-                    self._distance_m(ego_sim, enemy_sim)
-                    <= self.mav_observation_range_m
-                )
+            visibility = self._mav_shared_track_state(agent_id, enemy_id)
+            own_direct = visibility["direct_visible"]
+            mav_shared = visibility["mav_shared_visible"]
 
             if own_direct or mav_shared:
                 enemy_geo_states[i] = self._relative_geo_state(ego_sim, enemy_sim)

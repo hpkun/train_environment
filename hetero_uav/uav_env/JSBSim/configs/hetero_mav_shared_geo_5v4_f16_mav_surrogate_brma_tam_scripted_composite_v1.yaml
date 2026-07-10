@@ -42,12 +42,14 @@ missile_evasion:
   teams: red_only
 red_target_selection_mode: closest
 brma_tam_scripted_composite_v1:
+  reward_contract_revision: 2
   uav:
     speed_weight: 10.0
     angle_weight: 15.0
     distance_weight: 10.0
     dodge_active: false
     dodge_diagnostic: true
+    dodge_speed_norm_mps: 1000.0
     kill_enemy: 200.0
     death_or_crash: -200.0
     first_horizontal_out_of_zone: -100.0
