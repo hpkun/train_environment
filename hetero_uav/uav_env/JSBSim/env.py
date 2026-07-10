@@ -580,6 +580,7 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_diag_step = make_empty_launch_diag()
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
+        self._launch_gate_records = []
         alive_before = {
             aid: bool((sim := self._get_sim(aid)) is not None and sim.is_alive)
             for aid in self.agent_ids
@@ -1417,6 +1418,126 @@ class UavCombatEnv(gymnasium.Env):
                 self._lock_target[aid] = None
                 # Cooldown is set inside _launch_missile
 
+            # --- Read-only launch gate diagnostic (red attack UAV only) ---
+            _launched_this_frame = (best_enemy is not None
+                                    and self._lock_timer.get(aid, 0) >= self.missile_lock_delay_frames
+                                    and self._missile_cooldown.get(aid, 0) == 0
+                                    and aid not in self._agents_deny_kill
+                                    and best_enemy is not None)
+            if aid.startswith("red_") and role == "attack_uav":
+                self._record_launch_gate_diag(aid, sim, role)
+
+    def _record_launch_gate_diag(self, aid: str, sim, role: str) -> None:
+        """Build a read-only funnel diagnostic for a red attack UAV."""
+        enemies = getattr(self, "blue_planes", {})
+        alive_targets = [e for _, e in enemies.items() if getattr(e, "is_alive", False)]
+        alive_count = len(alive_targets)
+        track_pass = 0; range_pass = 0; ata_pass = 0; ta_pass = 0
+        deconfliction_pass = 0
+        best_geom_target = None; best_geom_range = float("inf")
+        best_geom_ata = 0.0; best_geom_ta = 0.0
+        nearest_target_dist = float("inf")
+        nearest_track_dist = float("inf")
+        lock_target = str(getattr(self, "_lock_target", {}).get(aid, "") or "")
+        for target in alive_targets:
+            d = float(np.linalg.norm(
+                np.asarray(target.get_position(), dtype=np.float64)
+                - np.asarray(sim.get_position(), dtype=np.float64)))
+            if d < nearest_target_dist:
+                nearest_target_dist = d
+            has_track, _ts = self._has_launch_track(aid, target.uid)
+            if not has_track:
+                continue
+            if d < nearest_track_dist:
+                nearest_track_dist = d
+            track_pass += 1
+            eff_min = getattr(self, "_missile_launch_min_range_m_effective",
+                              getattr(self, "MISSILE_LAUNCH_MIN_RANGE", 500.0))
+            eff_max = getattr(self, "_missile_launch_range_m_effective",
+                              getattr(self, "MISSILE_LAUNCH_RANGE_THRESH", 10000.0))
+            in_range = eff_min < d < eff_max
+            if not in_range:
+                continue
+            range_pass += 1
+            geo = self._build_launch_geometry_3d(sim, target)
+            ata_ok = bool(geo.get("ata_ok_3d", False))
+            ta_ok_3d = bool(geo.get("ta_ok_3d", False))
+            if not ata_ok:
+                continue
+            ata_pass += 1
+            if not ta_ok_3d:
+                continue
+            ta_pass += 1
+            if target.uid not in getattr(self, "_engaged_targets", set()):
+                deconfliction_pass += 1
+            if d < best_geom_range:
+                best_geom_range = d
+                best_geom_target = target.uid
+                best_geom_ata = float(geo.get("ATA_3d_rad", 0.0))
+                best_geom_ta = float(geo.get("TA_3d_rad", 0.0))
+        geo_pass = ta_pass  # last sequential gate
+        lock_frames = int(getattr(self, "_lock_timer", {}).get(aid, 0) or 0)
+        lock_req = int(getattr(self, "missile_lock_delay_frames", 15))
+        lock_mature_flag = lock_frames >= lock_req
+        launched = int(getattr(self, "_missile_launch_counts", {}).get(aid, 0)) > 0
+        launch_target = ""
+        for rec in getattr(self, "_launch_quality_step_records", []) or []:
+            if str(rec.get("shooter_id", "")) == aid:
+                launch_target = str(rec.get("target_id", "") or "")
+                break
+        # primary block reason
+        ammo = int(getattr(sim, "num_left_missiles", 0))
+        cd = int(getattr(self, "_missile_cooldown", {}).get(aid, 0) or 0)
+        if not getattr(sim, "is_alive", False):
+            reason = "inactive"
+        elif alive_count == 0:
+            reason = "no_alive_target"
+        elif track_pass == 0:
+            reason = "no_track"
+        elif range_pass == 0:
+            reason = "out_of_range"
+        elif ata_pass == 0:
+            reason = "ata_blocked"
+        elif ta_pass == 0:
+            reason = "ta_blocked"
+        elif deconfliction_pass == 0:
+            reason = "deconfliction_blocked"
+        elif ammo <= 0:
+            reason = "no_ammo"
+        elif cd > 0:
+            reason = "cooldown"
+        elif not lock_mature_flag:
+            reason = "lock_not_mature"
+        elif launched:
+            reason = "launch"
+        else:
+            reason = "unknown"
+        self._launch_gate_records.append({
+            "agent_id": aid, "alive_before": int(getattr(sim, "is_alive", False)),
+            "alive_after": int(getattr(sim, "is_alive", False)),
+            "ammo_remaining": ammo, "cooldown_remaining": cd,
+            "cooldown_ok": 1 if cd <= 0 else 0,
+            "alive_target_count": alive_count,
+            "track_pass_count": track_pass, "range_pass_count": range_pass,
+            "ata_pass_count": ata_pass, "ta_pass_count": ta_pass,
+            "line_pass_count": ta_pass,
+            "geometry_pass_count": geo_pass,
+            "deconfliction_pass_count": deconfliction_pass,
+            "lock_target_id": lock_target,
+            "lock_candidate_target_id": str(best_geom_target or ""),
+            "lock_timer_frames": lock_frames, "lock_required_frames": lock_req,
+            "lock_mature": 1 if lock_mature_flag else 0,
+            "launch_executed": 1 if launched else 0,
+            "launch_target_id": launch_target,
+            "nearest_alive_target_distance_m": nearest_target_dist if nearest_target_dist < float("inf") else 0.0,
+            "nearest_track_target_distance_m": nearest_track_dist if nearest_track_dist < float("inf") else 0.0,
+            "best_geometry_target_id": str(best_geom_target or ""),
+            "best_geometry_range_m": best_geom_range if best_geom_range < float("inf") else 0.0,
+            "best_geometry_ata_rad": best_geom_ata,
+            "best_geometry_ta_rad": best_geom_ta,
+            "primary_block_reason": reason,
+        })
+
     def _build_launch_quality_record(
         self,
         shooter: AircraftSimulator,
@@ -2221,6 +2342,9 @@ class UavCombatEnv(gymnasium.Env):
         ]
         info["__evasion_events__"] = [
             dict(record) for record in getattr(self, "_evasion_step_records", [])
+        ]
+        info["__launch_gate_diagnostics__"] = [
+            dict(record) for record in getattr(self, "_launch_gate_records", [])
         ]
         info["death_events"] = [dict(event) for event in self._death_events_step]
         info["effective_missile_launch_range_m"] = getattr(

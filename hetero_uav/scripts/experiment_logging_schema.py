@@ -240,6 +240,14 @@ BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS = [
     "mav_shared_track_count_log", "mav_event_death", "mav_team_credit_delta",
     "mav_team_credit_used", "mav_event_total", "mav_total",
     "brma_tam_scripted_composite_total",
+    # -- diagnostic additions (revision 2 log-only) --
+    "reward_target_valid", "effective_launch_min_range_m", "effective_launch_max_range_m",
+    "mav_support_after_all_attack_uav_dead", "mav_safety_after_all_attack_uav_dead",
+    "mav_flight_after_all_attack_uav_dead", "mav_event_after_all_attack_uav_dead",
+    "mav_total_after_all_attack_uav_dead",
+    "evasion_override_agent_steps", "evasion_override_env_steps",
+    "above_altitude_max_agent_steps", "above_altitude_max_env_steps",
+    "env_idx", "episode_uid",
 ]
 
 for _col in BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS:
@@ -384,12 +392,37 @@ EPISODE_REWARD_COMPONENTS_COLUMNS = [
     "blue_launch_count", "blue_hit_count",
     "mav_alive_final", "red_alive_final", "blue_alive_final",
     "outcome", "end_reason",
+    "env_idx", "episode_uid",
+]
+
+LAUNCH_GATE_DIAGNOSTICS_COLUMNS = [
+    "run_id", "scenario", "env_idx", "episode_id", "episode_uid",
+    "step", "sim_time", "agent_id", "alive_before", "alive_after",
+    "ammo_remaining", "cooldown_remaining", "cooldown_ok",
+    "alive_target_count",
+    "track_pass_count", "range_pass_count", "ata_pass_count",
+    "ta_pass_count", "line_pass_count", "geometry_pass_count",
+    "deconfliction_pass_count",
+    "lock_target_id", "lock_candidate_target_id",
+    "lock_timer_frames", "lock_required_frames", "lock_mature",
+    "launch_executed", "launch_target_id",
+    "nearest_alive_target_distance_m", "nearest_track_target_distance_m",
+    "best_geometry_target_id", "best_geometry_range_m",
+    "best_geometry_ata_rad", "best_geometry_ta_rad",
+    "primary_block_reason",
 ]
 
 _BRMA_TAM_EPISODE_NON_SUM_FIELDS = {
     "tam_dodge_missing_reason",
     "max_altitude_m",
     "above_altitude_max_episode_flag",
+    "reward_target_valid",
+    "effective_launch_min_range_m",
+    "effective_launch_max_range_m",
+    "evasion_override_env_steps",
+    "above_altitude_max_env_steps",
+    "env_idx",
+    "episode_uid",
 }
 for _col in BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS:
     if _col in _BRMA_TAM_EPISODE_NON_SUM_FIELDS:
@@ -413,6 +446,7 @@ FILE_SCHEMAS = {
     "reward_target_diagnostics.csv": REWARD_TARGET_DIAGNOSTICS_COLUMNS,
     "perturbation_eval_summary.csv": PERTURBATION_EVAL_COLUMNS,
     "attention_metrics.csv": ATTENTION_METRICS_COLUMNS,
+    "launch_gate_diagnostics.csv": LAUNCH_GATE_DIAGNOSTICS_COLUMNS,
 }
 
 FIELD_DESCRIPTIONS = {

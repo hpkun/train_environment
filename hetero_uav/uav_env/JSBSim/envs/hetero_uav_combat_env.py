@@ -1684,9 +1684,12 @@ class HeteroUavCombatEnv(UavCombatEnv):
             comp.update(vals)
             base_rewards[rid] = float(total)
             components[rid] = comp
+        _mav_id = next((rid for rid in self.red_ids if self.agent_roles.get(rid) == "mav"), None)
+        _env_flag_agent = _mav_id if _mav_id is not None else (self.red_ids[0] if self.red_ids else None)
         for rid in self.red_ids:
-            components[rid]["evasion_override_env_steps"] = _any_evasion_override
-            components[rid]["above_altitude_max_env_steps"] = _any_above_altitude_max
+            _is_env_flag_agent = (rid == _env_flag_agent)
+            components[rid]["evasion_override_env_steps"] = _any_evasion_override if _is_env_flag_agent else 0.0
+            components[rid]["above_altitude_max_env_steps"] = _any_above_altitude_max if _is_env_flag_agent else 0.0
         return base_rewards, components
 
     def _compute_tam_brma_paper_aligned_v1(self, base_rewards: dict, components: dict):
