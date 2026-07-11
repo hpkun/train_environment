@@ -264,6 +264,7 @@ def evaluate_config(policy, cfg_path: str, args, adapter, device,
 
     for ep in range(args.episodes):
         obs, info = env.reset(seed=args.seed + ep)
+        opponent.reset_memory()
         ep_ret = 0.0
         ep_len = 0
         terminated = {aid: False for aid in env.agent_ids}

@@ -3393,18 +3393,17 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "brma_role_no_missile_reward_v8", "happo_ref_v1_mav_support",
             "tam_brma_paper_aligned_v1", "tam_happo_table1_v1",
             "brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1",
+            "brma_tam_scale_aligned_v2",
         }
 
     def step(self, actions: dict):
-        if self.hetero_reward_mode in {"brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1"}:
+        if self.hetero_reward_mode in {"brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2"}:
             self._brma_tam_alive_before_step = {
                 aid: bool(getattr((self.red_planes.get(aid) or self.blue_planes.get(aid)), "is_alive", False))
                 for aid in self.agent_ids
             }
             self._reward_target_diagnostic_records = []
-        if self.hetero_reward_mode == "brma_tam_scale_aligned_v1":
-            self._scale_v1_alive_before_step = dict(self._brma_tam_alive_before_step)
-        if self.hetero_reward_mode == "brma_tam_scale_aligned_v2":
+        if self.hetero_reward_mode in {"brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2"}:
             self._scale_v1_alive_before_step = dict(self._brma_tam_alive_before_step)
         trimmed = self._apply_action_trim(actions)
         obs, rewards, terminated, truncated, info = super().step(trimmed)

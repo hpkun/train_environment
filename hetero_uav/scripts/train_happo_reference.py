@@ -2297,10 +2297,22 @@ def _run_training_main() -> None:
                                 )
                                 rollout_scale_event_counts[2] += float(float(comp.get("scale_v1_uav_event_oob", 0.0) or 0.0) < 0.0)
                             if scale_v2:
-                                rollout_scale_v2_flight_raw_sum += float(comp.get("scale_v2_flight_raw_total", 0.0) or 0.0)
+                                _v2_total = float(comp.get("scale_v2_total", 0.0) or 0.0)
+                                _v2_flight_raw = float(comp.get("scale_v2_flight_raw_total", 0.0) or 0.0)
+                                _v2_event = float(comp.get("scale_v2_event", 0.0) or 0.0)
+                                _v2_terminal = float(comp.get("scale_v2_terminal", 0.0) or 0.0)
+                                _v2_dead_before = (
+                                    abs(_v2_total) < 1e-12
+                                    and abs(_v2_flight_raw) < 1e-12
+                                    and abs(_v2_event) < 1e-12
+                                    and abs(_v2_terminal) < 1e-12
+                                )
+                                if _v2_dead_before:
+                                    continue
+                                rollout_scale_v2_flight_raw_sum += _v2_flight_raw
                                 rollout_scale_v2_flight_scaled_sum += float(comp.get("scale_v2_flight_scaled_total", 0.0) or 0.0)
                                 rollout_scale_v2_active_rows += 1
-                                rollout_scale_v2_terminal_sum += float(comp.get("scale_v2_terminal", 0.0) or 0.0)
+                                rollout_scale_v2_terminal_sum += _v2_terminal
                                 rollout_scale_v2_event_counts[0] += max(
                                     float(comp.get("scale_v1_uav_event_kill", 0.0) or 0.0), 0.0
                                 ) / 10.0
@@ -2641,6 +2653,7 @@ def _run_training_main() -> None:
                             truncated=bool(all(truncated.values())) if truncated else False,
                         )
                         next_obs, next_info = rollout_env.reset(seed=args.seed + total_steps + env_idx)
+                        opponents[env_idx].reset_memory()
                         current_ep_id[env_idx] += 1
                         _SINGLE_RUNNER_STATE["episode_id"] = current_ep_id[env_idx]
                         if rnn_hidden is not None:
