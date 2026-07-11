@@ -31,7 +31,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from my_uav_env.alignment.reward_utils import REWARD_VERSION
+from my_uav_env.alignment.reward_utils import (
+    DEFAULT_ALTITUDE_REWARD_CONFIG,
+    REWARD_VERSION,
+)
 
 torch.set_num_threads(1)
 try:
@@ -85,6 +88,10 @@ class Config:
     max_episode_length: int = 1400
     enable_blue_gcas: bool = False
     obs_mode: str = "paper_strict"
+    obs_normalization: str = "paper_fixed_v1"
+    pid_profile: str = "paper"
+    reward_mode: str = "paper_joint"
+    missile_guidance_mode: str = "paper_eq9"
     resume_from_best: bool = False
     action_dim: int = 3
 
@@ -228,14 +235,42 @@ class CentralizedCritic(nn.Module):
 # ==============================================================================
 #  观测展平工具
 # ==============================================================================
+PAPER_EGO_SCALE_V1 = np.array([
+    40000.0, 40000.0, 10000.0, 600.0,
+    np.pi, np.pi, np.pi, np.pi, np.pi, 600.0,
+], dtype=np.float32)
+PAPER_RELATIVE_SCALE_V1 = np.array([
+    40000.0, 40000.0, 10000.0, np.pi, np.pi,
+    600.0, np.pi, np.pi, np.pi, 100000.0,
+], dtype=np.float32)
+
+
+def _normalize_paper_fixed_v1(obs_np: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ego = np.asarray(obs_np["ego_state"], dtype=np.float32) / PAPER_EGO_SCALE_V1
+    allies = (np.asarray(obs_np["ally_states"], dtype=np.float32)
+              / PAPER_RELATIVE_SCALE_V1)
+    enemies = (np.asarray(obs_np["enemy_states"], dtype=np.float32)
+               / PAPER_RELATIVE_SCALE_V1)
+    return ego, allies, enemies
+
+
 def _flatten_obs(obs_np: dict, obs_mode: str = "paper_strict",
-                 include_aux_obs: bool | None = None) -> np.ndarray:
+                 include_aux_obs: bool | None = None,
+                 obs_normalization: str = "paper_fixed_v1") -> np.ndarray:
     """将 Dict 观测展平为一维向量。"""
+    if obs_normalization not in ("paper_fixed_v1", "none"):
+        raise ValueError("obs_normalization must be 'paper_fixed_v1' or 'none'")
+    if obs_mode == "paper_strict" and obs_normalization == "paper_fixed_v1":
+        ego, allies, enemies = _normalize_paper_fixed_v1(obs_np)
+    else:
+        ego = obs_np["ego_state"]
+        allies = obs_np["ally_states"]
+        enemies = obs_np["enemy_states"]
     parts = [
-        obs_np["ego_state"].ravel(),
-        obs_np["ally_states"].ravel(),
-        obs_np["enemy_states"].ravel(),
-        obs_np["death_mask"].astype(np.float32).ravel(),
+        np.asarray(ego, dtype=np.float32).ravel(),
+        np.asarray(allies, dtype=np.float32).ravel(),
+        np.asarray(enemies, dtype=np.float32).ravel(),
+        obs_np.get("alive_mask", obs_np["death_mask"]).astype(np.float32).ravel(),
     ]
     if _include_aux_obs_default(obs_mode, include_aux_obs):
         parts.extend([
@@ -282,6 +317,16 @@ LAUNCH_DIAG_CSV_FIELDS = (
     "RedRangeToGeometryRate",
     "BlueRangeToGeometryRate",
 )
+
+LOCAL_REWARD_COMPONENT_KEYS = (
+    "r_pitch", "r_roll", "r_alt", "r_bound", "r_vel", "r_adv",
+)
+EPISODE_REWARD_COMPONENT_KEYS = (*LOCAL_REWARD_COMPONENT_KEYS, "r_end", "r_death")
+REWARD_COMPONENT_LOG_FIELDS = tuple(
+    field
+    for key in LOCAL_REWARD_COMPONENT_KEYS
+    for field in (f"{key}_team_sum", f"{key}_per_agent_mean")
+) + ("r_end_team",)
 
 LAUNCH_QUALITY_DETAIL_FIELDS = (
     "team",
@@ -347,6 +392,57 @@ ACTION_CLIP_CSV_FIELDS = (
     "RedActionRawClipFracHeading",
     "RedActionRawClipFracVelocity",
 )
+
+CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v1"
+
+
+def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
+    return {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "obs_mode": config.obs_mode,
+        "obs_normalization": config.obs_normalization,
+        "reward_version": REWARD_VERSION,
+        "reward_mode": config.reward_mode,
+        "pid_profile": config.pid_profile,
+        "missile_guidance_mode": config.missile_guidance_mode,
+        "num_red": int(config.num_red),
+        "num_blue": int(config.num_blue),
+        "global_state_dim": int(global_state_dim),
+        "actor_obs_dim": int(obs_dim),
+    }
+
+
+def _save_model_checkpoint(path: str, model: nn.Module, metadata: dict,
+                           model_kind: str) -> None:
+    torch.save({
+        "state_dict": model.state_dict(),
+        "metadata": dict(metadata),
+        "model_kind": model_kind,
+    }, path)
+
+
+def _unpack_and_validate_checkpoint(payload, expected_metadata: dict,
+                                    model_kind: str) -> dict:
+    if not isinstance(payload, dict) or "state_dict" not in payload or "metadata" not in payload:
+        raise ValueError(
+            "checkpoint lacks required environment metadata; legacy raw state_dict "
+            "is incompatible with the paper baseline")
+    if payload.get("model_kind") != model_kind:
+        raise ValueError(
+            f"checkpoint model_kind mismatch: expected {model_kind!r}, "
+            f"got {payload.get('model_kind')!r}")
+    metadata = payload["metadata"]
+    mismatches = {
+        key: (metadata.get(key), expected)
+        for key, expected in expected_metadata.items()
+        if metadata.get(key) != expected
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{key}: checkpoint={actual!r}, current={expected!r}"
+            for key, (actual, expected) in mismatches.items())
+        raise ValueError(f"checkpoint environment metadata mismatch: {details}")
+    return payload["state_dict"]
 
 
 def _empty_launch_diag_totals() -> dict:
@@ -979,12 +1075,27 @@ class RolloutBuffer:
         self.dones = np.zeros((T, E, A), dtype=np.float32)
         self.alive = np.zeros((T, E, A), dtype=bool)
 
+        # Paper joint trajectory: exactly one state/reward/value/done per env-step.
+        self.global_states: list[list[np.ndarray | None]] = [
+            [None for _ in range(E)] for _ in range(T)]
+        self.joint_rewards = np.zeros((T, E), dtype=np.float32)
+        self.team_values = np.zeros((T, E), dtype=np.float32)
+        self.episode_dones = np.zeros((T, E), dtype=np.float32)
+
         # Actor RNN states only (centralized critic has no RNN)
         self.rnn_actor_init = np.zeros((E, A, H), dtype=np.float32)
         self.rnn_actor_final = np.zeros((E, A, H), dtype=np.float32)
 
         # GAE bootstrap values: V(s_T) shared by all agents (centralized critic)
         self.bootstrap_values = np.zeros((E, A), dtype=np.float32)
+        self.bootstrap_value = np.zeros(E, dtype=np.float32)
+
+    def store_team_step(self, step: int, env_idx: int, global_state: np.ndarray,
+                        joint_reward: float, value: float, episode_done: float):
+        self.global_states[step][env_idx] = np.asarray(global_state, dtype=np.float32)
+        self.joint_rewards[step, env_idx] = float(joint_reward)
+        self.team_values[step, env_idx] = float(value)
+        self.episode_dones[step, env_idx] = float(episode_done)
 
     def store_step(self, step: int, env_idx: int, agent_idx: int,
                    obs_np: np.ndarray, action: np.ndarray,
@@ -1013,6 +1124,27 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor,
         advantages[t] = gae
     returns = advantages + values[:T]
     return advantages, returns
+
+
+def _compute_joint_gae_by_env(buffer: RolloutBuffer, gamma: float, lam: float,
+                              device: torch.device):
+    """Compute exactly one joint advantage/return trajectory per environment."""
+    advantages_by_env = []
+    returns_by_env = []
+    for env_idx in range(buffer.joint_rewards.shape[1]):
+        rewards = torch.as_tensor(
+            buffer.joint_rewards[:, env_idx], dtype=torch.float32, device=device)
+        values = torch.as_tensor(
+            np.concatenate([
+                buffer.team_values[:, env_idx],
+                np.array([buffer.bootstrap_value[env_idx]], dtype=np.float32),
+            ]), dtype=torch.float32, device=device)
+        dones = torch.as_tensor(
+            buffer.episode_dones[:, env_idx], dtype=torch.float32, device=device)
+        advantages, returns = compute_gae(rewards, values, dones, gamma, lam)
+        advantages_by_env.append(advantages)
+        returns_by_env.append(returns)
+    return advantages_by_env, returns_by_env
 
 
 # ==============================================================================
@@ -1053,6 +1185,30 @@ def _episode_outcome(red_alive: int, blue_alive: int) -> str:
     if blue_alive > red_alive:
         return "blue"
     return "draw"
+
+
+def _joint_team_reward_once(rewards: dict, team_ids: list[str]) -> float:
+    """Read a replicated team reward once and reject inconsistent values."""
+    values = [float(rewards[aid]) for aid in team_ids if aid in rewards]
+    if not values:
+        return 0.0
+    if not np.allclose(values, values[0], rtol=0.0, atol=1e-6):
+        raise ValueError("team agents received inconsistent joint rewards")
+    return values[0]
+
+
+def _reward_component_log_metrics(
+    team_component_sums: dict[str, float], team_size: int,
+) -> dict[str, float]:
+    """Name team component sums and their fixed-team per-agent means."""
+    denominator = max(int(team_size), 1)
+    metrics = {}
+    for key in LOCAL_REWARD_COMPONENT_KEYS:
+        team_sum = float(team_component_sums.get(key, 0.0))
+        metrics[f"{key}_team_sum"] = team_sum
+        metrics[f"{key}_per_agent_mean"] = team_sum / denominator
+    metrics["r_end_team"] = float(team_component_sums.get("r_end", 0.0))
+    return metrics
 
 
 def _actor_std_stats(actor) -> dict:
@@ -1229,6 +1385,116 @@ def _ppo_update_legacy(actor, critic, actor_opt, critic_opt, buffer, config, dev
 # ==============================================================================
 def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
                total_steps: int = 0):
+    """Paper joint-reward MAPPO update with one team GAE per environment."""
+    num_steps = buffer.num_steps
+    num_envs = buffer.rnn_actor_init.shape[0]
+    num_red = buffer.rnn_actor_init.shape[1]
+    team_advantages, team_returns = _compute_joint_gae_by_env(
+        buffer, config.gamma, config.gae_lambda, device)
+
+    all_adv = torch.cat(team_advantages)
+    adv_std = torch.std(all_adv, correction=0)
+    if not torch.isfinite(adv_std) or adv_std <= 1e-8:
+        adv_std = torch.tensor(1.0, device=device)
+    adv_mean = all_adv.mean()
+    team_advantages = [
+        (adv - adv_mean) / (adv_std + 1e-8) for adv in team_advantages]
+
+    actor_trajectories = []
+    for env_idx in range(num_envs):
+        for agent_idx in range(num_red):
+            alive_steps = np.flatnonzero(buffer.alive[:, env_idx, agent_idx])
+            if alive_steps.size == 0:
+                continue
+            actor_trajectories.append({
+                "env_idx": env_idx,
+                "agent_idx": agent_idx,
+                "alive_steps": alive_steps,
+                "obs": np.stack([
+                    buffer.obs[t][env_idx][agent_idx] for t in alive_steps
+                ]).astype(np.float32),
+                "actions": buffer.actions[alive_steps, env_idx, agent_idx],
+                "old_log_probs": buffer.log_probs[alive_steps, env_idx, agent_idx],
+                "advantages": team_advantages[env_idx][alive_steps].detach(),
+            })
+
+    if not actor_trajectories:
+        return {"actor_loss": 0.0, "critic_loss": 0.0, "entropy": 0.0}
+
+    critic_states = torch.as_tensor(np.stack([
+        buffer.global_states[t][env_idx]
+        for env_idx in range(num_envs)
+        for t in range(num_steps)
+    ]), dtype=torch.float32, device=device)
+    critic_targets = torch.cat(team_returns).detach()
+    entropy_coef = _current_entropy_coef(config, total_steps)
+    actor_loss_log = []
+    critic_loss_log = []
+    entropy_log = []
+
+    for _epoch in range(config.n_update_epochs):
+        order = np.random.permutation(len(actor_trajectories))
+        minibatches = np.array_split(
+            order, max(1, min(config.n_minibatches, len(order))))
+        for mb in minibatches:
+            if len(mb) == 0:
+                continue
+            actor_opt.zero_grad()
+            losses = []
+            entropies = []
+            for traj_idx in mb:
+                traj = actor_trajectories[int(traj_idx)]
+                rnn = torch.as_tensor(
+                    buffer.rnn_actor_init[traj["env_idx"], traj["agent_idx"]],
+                    dtype=torch.float32, device=device).unsqueeze(0)
+                obs = torch.as_tensor(traj["obs"], dtype=torch.float32, device=device)
+                actions = torch.as_tensor(
+                    traj["actions"], dtype=torch.float32, device=device)
+                old_log_probs = torch.as_tensor(
+                    traj["old_log_probs"], dtype=torch.float32, device=device)
+                new_log_probs = []
+                step_entropies = []
+                for t in range(obs.shape[0]):
+                    distribution, rnn = actor(obs[t].unsqueeze(0), rnn)
+                    new_log_probs.append(
+                        distribution.log_prob(actions[t].unsqueeze(0)).sum(dim=-1))
+                    step_entropies.append(distribution.entropy().mean())
+                new_log_probs = torch.cat(new_log_probs)
+                entropy = torch.stack(step_entropies).mean()
+                ratio = torch.exp(new_log_probs - old_log_probs)
+                advantage = traj["advantages"].to(device)
+                surrogate = torch.min(
+                    ratio * advantage,
+                    torch.clamp(ratio, 1.0 - config.clip_epsilon,
+                                1.0 + config.clip_epsilon) * advantage)
+                losses.append(-surrogate.mean() - entropy_coef * entropy)
+                entropies.append(entropy.detach())
+            actor_loss = torch.stack(losses).mean()
+            actor_loss.backward()
+            if not _grad_has_nan(actor):
+                nn.utils.clip_grad_norm_(actor.parameters(), config.max_grad_norm)
+                actor_opt.step()
+                actor_loss_log.append(float(actor_loss.item()))
+                entropy_log.append(float(torch.stack(entropies).mean().item()))
+
+        critic_opt.zero_grad()
+        critic_values = critic(critic_states).squeeze(-1)
+        critic_loss = F.mse_loss(critic_values, critic_targets)
+        critic_loss.backward()
+        if not _grad_has_nan(critic):
+            nn.utils.clip_grad_norm_(critic.parameters(), config.max_grad_norm)
+            critic_opt.step()
+            critic_loss_log.append(float(critic_loss.item()))
+
+    return {
+        "actor_loss": float(np.mean(actor_loss_log)) if actor_loss_log else float("nan"),
+        "critic_loss": float(np.mean(critic_loss_log)) if critic_loss_log else float("nan"),
+        "entropy": float(np.mean(entropy_log)) if entropy_log else 0.0,
+    }
+
+
+def _ppo_update_agent_legacy(actor, critic, actor_opt, critic_opt, buffer, config, device,
+                             total_steps: int = 0):
     """Trajectory-minibatch MAPPO update used by the training loop."""
     num_steps = buffer.num_steps
     num_envs = buffer.rnn_actor_init.shape[0]
@@ -1412,6 +1678,18 @@ def parse_args():
     parser.add_argument("--obs-mode", type=str,
                         choices=("paper_strict", "engineering"),
                         default=defaults.obs_mode)
+    parser.add_argument("--obs-normalization", type=str,
+                        choices=("paper_fixed_v1", "none"),
+                        default=defaults.obs_normalization)
+    parser.add_argument("--pid-profile", type=str,
+                        choices=("paper", "engineering_safe"),
+                        default=defaults.pid_profile)
+    parser.add_argument("--reward-mode", type=str,
+                        choices=("paper_joint", "engineering_local"),
+                        default=defaults.reward_mode)
+    parser.add_argument("--missile-guidance-mode", type=str,
+                        choices=("paper_eq9", "legacy_simplified"),
+                        default=defaults.missile_guidance_mode)
     parser.add_argument("--resume-from-best", action="store_true",
                         default=defaults.resume_from_best)
     parser.add_argument("--log-file", type=str, default=defaults.log_file)
@@ -1431,7 +1709,8 @@ _VANILLA_PRESET_CLI_FLAGS = {
     "num_red", "num_blue", "num_envs", "total_env_steps",
     "max_episode_length", "replay_buffer_size", "n_minibatches",
     "actor_lr", "critic_lr", "entropy_coef",
-    "enable_blue_gcas", "obs_mode", "resume_from_best",
+    "enable_blue_gcas", "obs_mode", "obs_normalization", "pid_profile",
+    "reward_mode", "missile_guidance_mode", "resume_from_best",
     "log_file", "results_file", "launch_quality_file",
     "checkpoint_dir", "device",
 }
@@ -1469,6 +1748,10 @@ def make_config_from_args(args) -> Config:
     config.entropy_coef = args.entropy_coef
     config.enable_blue_gcas = args.enable_blue_gcas
     config.obs_mode = args.obs_mode
+    config.obs_normalization = args.obs_normalization
+    config.pid_profile = args.pid_profile
+    config.reward_mode = args.reward_mode
+    config.missile_guidance_mode = args.missile_guidance_mode
     config.resume_from_best = args.resume_from_best
     config.log_file = args.log_file
     config.results_file = args.results_file
@@ -1538,6 +1821,8 @@ def main():
     obs_dim = _compute_obs_dim(
         config.num_red, config.num_blue, is_red=True,
         obs_mode=config.obs_mode)
+    global_obs_dim = _compute_global_state_dim(config.num_red, config.obs_mode)
+    checkpoint_meta = _checkpoint_metadata(config, obs_dim, global_obs_dim)
 
     # ---- 持久化：创建 checkpoint 目录 ----
     os.makedirs(config.checkpoint_dir, exist_ok=True)
@@ -1556,7 +1841,10 @@ def main():
                           "BlueDeathsMissile", "BlueDeathsCrash",
                           "RedMissileHits", "BlueMissileHits",
                           "RedMissileHitRate", "BlueMissileHitRate",
-                          "KD_Red", "RWR", "RewardVersion",
+                          "KD_Red", "RWR", "RewardVersion", "RewardMode",
+                          "ObsNormalization", "PIDProfile", "MissileGuidanceMode",
+                          "AltitudeRewardConfigVersion",
+                          *REWARD_COMPONENT_LOG_FIELDS,
                           "ActionStdMean", "ActionStdMin", "ActionStdMax",
                           "ActionLogStdMean",
                           *LAUNCH_DIAG_CSV_FIELDS,
@@ -1590,6 +1878,10 @@ def main():
     print(f"  device: {device}")
     print(f"  reward_version: {REWARD_VERSION}")
     print(f"  obs_mode: {config.obs_mode}")
+    print(f"  obs_normalization: {config.obs_normalization}")
+    print(f"  pid_profile: {config.pid_profile}")
+    print(f"  reward_mode: {config.reward_mode}")
+    print(f"  missile_guidance_mode: {config.missile_guidance_mode}")
     print(f"架构: Vanilla MLP + GRU (无注意力, 无掩码)")
     print(f"场景: {config.num_red}v{config.num_blue} (红方 RL, 蓝方规则)")
     print(f"展平 obs 维度: {obs_dim}")
@@ -1607,6 +1899,9 @@ def main():
     env_kwargs = dict(max_num_blue=config.num_blue, max_num_red=config.num_red,
                       max_steps=config.max_episode_length,
                       obs_mode=config.obs_mode,
+                      pid_profile=config.pid_profile,
+                      reward_mode=config.reward_mode,
+                      missile_guidance_mode=config.missile_guidance_mode,
                       enable_gcas_for_blue=config.enable_blue_gcas)
     print(f"正在启动 {config.num_envs} 个 worker 进程...", flush=True)
     vec_env = SubprocVecEnv(config.num_envs, env_kwargs)
@@ -1634,10 +1929,14 @@ def main():
     critic_best_path = os.path.join(config.checkpoint_dir, "centralized_critic_best.pt")
     if (config.resume_from_best and os.path.exists(actor_best_path)
             and os.path.exists(critic_best_path)):
-        actor.load_state_dict(torch.load(actor_best_path, map_location=device,
-                                         weights_only=True))
-        critic.load_state_dict(torch.load(critic_best_path, map_location=device,
-                                          weights_only=True))
+        actor_payload = torch.load(
+            actor_best_path, map_location=device, weights_only=False)
+        critic_payload = torch.load(
+            critic_best_path, map_location=device, weights_only=False)
+        actor.load_state_dict(_unpack_and_validate_checkpoint(
+            actor_payload, checkpoint_meta, "actor"))
+        critic.load_state_dict(_unpack_and_validate_checkpoint(
+            critic_payload, checkpoint_meta, "critic"))
         print(f"[OK] 已加载 best checkpoint 权重 (actor + critic)")
     else:
         print(f"[WARN] best checkpoint 不存在，使用随机初始化权重")
@@ -1671,7 +1970,7 @@ def main():
     # Episodic reward trackers — only fully-completed episodes contribute (Red only)
     recent_ep_rewards_red = deque(maxlen=50)
     # Per-component episodic trackers for red team diagnostics
-    COMP_KEYS = ["r_pitch", "r_roll", "r_alt", "r_bound", "r_vel", "r_adv", "r_end", "r_death"]
+    COMP_KEYS = EPISODE_REWARD_COMPONENT_KEYS
     recent_ep_comps_red: deque[dict] = deque(maxlen=50)
     recent_ep_missiles_red = deque(maxlen=50)
     recent_ep_missiles_blue = deque(maxlen=50)
@@ -1744,7 +2043,9 @@ def main():
                 dead_agent_records = []
                 for i, rid in enumerate(red_ids):
                     obs_np = env_obs[rid]
-                    obs_flat = _flatten_obs(obs_np, obs_mode=config.obs_mode)
+                    obs_flat = _flatten_obs(
+                        obs_np, obs_mode=config.obs_mode,
+                        obs_normalization=config.obs_normalization)
                     red_obs_flat_all.append(obs_flat)
                     alive = not np.allclose(obs_np["ego_state"], 0.0)
                     if alive:
@@ -1800,6 +2101,11 @@ def main():
             actions_list = []
             for env_idx in range(config.num_envs):
                 builder = env_actions_builders[env_idx]
+                v_global = float(v_global_all[env_idx])
+                buffer.global_states[step][env_idx] = np.asarray(
+                    all_global_obs_np[env_idx], dtype=np.float32)
+                buffer.team_values[step, env_idx] = v_global
+
                 if builder.get("dead"):
                     env_actions = {aid: np.zeros(config.action_dim, dtype=np.float32)
                                    for aid in red_ids + blue_ids}
@@ -1807,7 +2113,6 @@ def main():
                     continue
 
                 env_actions = dict(builder["blue_actions"])
-                v_global = float(v_global_all[env_idx])
 
                 # Dead agents: zero actions, store to buffer
                 for agent_idx_i, obs_flat in env_dead_records[env_idx]:
@@ -1840,6 +2145,10 @@ def main():
                 rew = rewards_list[env_idx]
                 don = dones_list[env_idx]
                 info = infos_list[env_idx]
+                red_joint_reward = _joint_team_reward_once(rew, red_ids)
+                buffer.joint_rewards[step, env_idx] = red_joint_reward
+                buffer.episode_dones[step, env_idx] = float(all(don.values()))
+                current_ep_reward_red[env_idx] += red_joint_reward
                 _accumulate_launch_diag_totals(
                     iter_launch_diag, info.get("__launch_diag__", {}))
                 launch_quality_step = info.get("__launch_quality_step__", [])
@@ -1866,11 +2175,21 @@ def main():
                     if don.get(rid, False):
                         rnn_hidden_actor[env_idx, i] = np.zeros(
                             config.rnn_hidden_size, dtype=np.float32)
-                    current_ep_reward_red[env_idx] += rew.get(rid, 0.0)
                     # Accumulate per-component diagnostics
                     rcinfo = info.get(rid, {})
                     for k in COMP_KEYS:
+                        if k == "r_end":
+                            continue
                         current_ep_comp_red[k][env_idx] += rcinfo.get(k, 0.0)
+
+                reward_summary = info.get("__reward_summary__", {})
+                if reward_summary:
+                    current_ep_comp_red["r_end"][env_idx] += float(
+                        reward_summary.get("red_team_terminal_reward", 0.0))
+                else:
+                    current_ep_comp_red["r_end"][env_idx] += sum(
+                        float(info.get(rid, {}).get("r_end", 0.0))
+                        for rid in red_ids)
 
                 inf = infos_list[env_idx]
                 for rid in red_ids:
@@ -1940,7 +2259,9 @@ def main():
             global_obs_parts = []
             for rid in red_ids:
                 if rid in env_obs:
-                    global_obs_parts.append(_flatten_obs(env_obs[rid], obs_mode=config.obs_mode))
+                    global_obs_parts.append(_flatten_obs(
+                        env_obs[rid], obs_mode=config.obs_mode,
+                        obs_normalization=config.obs_normalization))
                 else:
                     global_obs_parts.append(np.zeros(obs_dim, dtype=np.float32))
             bootstrap_global_obs_list.append(_global_state_from_local_obs_flats(
@@ -1950,7 +2271,9 @@ def main():
         with torch.no_grad():
             v_bootstrap_all = critic(bootstrap_obs_batch).squeeze(-1).cpu().numpy()
         for env_idx in range(config.num_envs):
-            v_bootstrap = float(v_bootstrap_all[env_idx])
+            v_bootstrap = (0.0 if buffer.episode_dones[-1, env_idx]
+                           else float(v_bootstrap_all[env_idx]))
+            buffer.bootstrap_value[env_idx] = v_bootstrap
             for i in range(config.num_red):
                 buffer.bootstrap_values[env_idx, i] = v_bootstrap
 
@@ -2003,6 +2326,8 @@ def main():
                          for k in COMP_KEYS}
         else:
             avg_comps = {k: 0.0 for k in COMP_KEYS}
+        component_log_metrics = _reward_component_log_metrics(
+            avg_comps, config.num_red)
 
         # Build breakdown string: [Alt:+12.3 Pitch:-0.5 Roll:0.0 Vel:-0.3 Adv:+0.0 End:-180.0]
         comp_str = " ".join(
@@ -2034,6 +2359,15 @@ def main():
                              f"{kd_red:.6f}",
                              f"{rwr:.6f}",
                              REWARD_VERSION,
+                             config.reward_mode,
+                             config.obs_normalization,
+                             config.pid_profile,
+                             config.missile_guidance_mode,
+                             DEFAULT_ALTITUDE_REWARD_CONFIG.version,
+                             *[
+                                 f"{component_log_metrics[field]:.6f}"
+                                 for field in REWARD_COMPONENT_LOG_FIELDS
+                             ],
                              f"{std_stats['action_std_mean']:.6f}",
                              f"{std_stats['action_std_min']:.6f}",
                              f"{std_stats['action_std_max']:.6f}",
@@ -2080,6 +2414,11 @@ def main():
             "KD_Red":         kd_red,
             "RWR":            rwr,
             "RewardVersion":  REWARD_VERSION,
+            "RewardMode": config.reward_mode,
+            "ObsNormalization": config.obs_normalization,
+            "PIDProfile": config.pid_profile,
+            "MissileGuidanceMode": config.missile_guidance_mode,
+            "AltitudeRewardConfigVersion": DEFAULT_ALTITUDE_REWARD_CONFIG.version,
             "ActionStdMean":  std_stats["action_std_mean"],
             "ActionStdMin":   std_stats["action_std_min"],
             "ActionStdMax":   std_stats["action_std_max"],
@@ -2096,6 +2435,7 @@ def main():
             "r_end":          avg_comps.get("r_end", 0.0),
             "r_death":        avg_comps.get("r_death", 0.0),
         })
+        results_log[-1].update(component_log_metrics)
         results_log[-1].update(launch_diag_metrics)
         results_log[-1].update(launch_quality_metrics)
         results_log[-1].update(action_clip_metrics)
@@ -2151,8 +2491,8 @@ def main():
                 config.checkpoint_dir, f"vanilla_actor_latest_{iteration:06d}.pt")
             critic_path = os.path.join(
                 config.checkpoint_dir, f"centralized_critic_latest_{iteration:06d}.pt")
-            torch.save(actor.state_dict(), actor_path)
-            torch.save(critic.state_dict(), critic_path)
+            _save_model_checkpoint(actor_path, actor, checkpoint_meta, "actor")
+            _save_model_checkpoint(critic_path, critic, checkpoint_meta, "critic")
             # 轮转清理：删除超出保留数量的旧 checkpoint
             _cleanup_rotating_checkpoints(config.checkpoint_dir,
                                           "vanilla_actor_latest", keep=5)
@@ -2168,12 +2508,14 @@ def main():
             if avg_r_red > best_reward_value:
                 best_reward_value = avg_r_red
                 best_reward_win_rate = red_win_rate
-                torch.save(actor.state_dict(),
-                           os.path.join(config.checkpoint_dir,
-                                        "vanilla_actor_best_reward.pt"))
-                torch.save(critic.state_dict(),
-                           os.path.join(config.checkpoint_dir,
-                                        "centralized_critic_best_reward.pt"))
+                _save_model_checkpoint(
+                    os.path.join(config.checkpoint_dir,
+                                 "vanilla_actor_best_reward.pt"),
+                    actor, checkpoint_meta, "actor")
+                _save_model_checkpoint(
+                    os.path.join(config.checkpoint_dir,
+                                 "centralized_critic_best_reward.pt"),
+                    critic, checkpoint_meta, "critic")
                 print(f"  *** New Best Reward Model Saved! "
                       f"(Reward={best_reward_value:+.2f}, "
                       f"RecentWinRate={iter_win_rate:.4f}, "
@@ -2188,19 +2530,23 @@ def main():
             if winrate_is_better:
                 best_winrate_value = iter_win_rate
                 best_winrate_reward = avg_r_red
-                torch.save(actor.state_dict(),
-                           os.path.join(config.checkpoint_dir,
-                                        "vanilla_actor_best_winrate.pt"))
-                torch.save(critic.state_dict(),
-                           os.path.join(config.checkpoint_dir,
-                                        "centralized_critic_best_winrate.pt"))
+                _save_model_checkpoint(
+                    os.path.join(config.checkpoint_dir,
+                                 "vanilla_actor_best_winrate.pt"),
+                    actor, checkpoint_meta, "actor")
+                _save_model_checkpoint(
+                    os.path.join(config.checkpoint_dir,
+                                 "centralized_critic_best_winrate.pt"),
+                    critic, checkpoint_meta, "critic")
                 # legacy compatibility alias
-                torch.save(actor.state_dict(),
-                           os.path.join(config.checkpoint_dir,
-                                        "vanilla_actor_best.pt"))
-                torch.save(critic.state_dict(),
-                           os.path.join(config.checkpoint_dir,
-                                        "centralized_critic_best.pt"))
+                _save_model_checkpoint(
+                    os.path.join(config.checkpoint_dir,
+                                 "vanilla_actor_best.pt"),
+                    actor, checkpoint_meta, "actor")
+                _save_model_checkpoint(
+                    os.path.join(config.checkpoint_dir,
+                                 "centralized_critic_best.pt"),
+                    critic, checkpoint_meta, "critic")
                 print(f"  *** New Best WinRate Model Saved! "
                       f"(RecentWinRate={best_winrate_value:.4f}, "
                       f"Reward={best_winrate_reward:+.2f}, "
@@ -2209,10 +2555,12 @@ def main():
         iteration += 1
 
     # ---- 持久化：最终模型存档 ----
-    torch.save(actor.state_dict(),
-               os.path.join(config.checkpoint_dir, "vanilla_actor_final.pt"))
-    torch.save(critic.state_dict(),
-               os.path.join(config.checkpoint_dir, "centralized_critic_final.pt"))
+    _save_model_checkpoint(
+        os.path.join(config.checkpoint_dir, "vanilla_actor_final.pt"),
+        actor, checkpoint_meta, "actor")
+    _save_model_checkpoint(
+        os.path.join(config.checkpoint_dir, "centralized_critic_final.pt"),
+        critic, checkpoint_meta, "critic")
     print("=" * 70)
     print(f"最终模型已保存至 {config.checkpoint_dir}/")
     print(f"Results 已保存至 {config.results_file} ({len(results_log)} rows)")

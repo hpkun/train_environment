@@ -32,13 +32,15 @@ class PIDLoop:
       - An absolute safety ceiling prevents unbounded growth in edge cases.
     """
 
-    def __init__(self, kp, ki, kd, output_min, output_max, name=""):
+    def __init__(self, kp, ki, kd, output_min, output_max, name="",
+                 integral_error_limit=float("inf")):
         self.kp = kp
         self.ki = ki
         self.kd = kd
         self.output_min = output_min
         self.output_max = output_max
         self.name = name
+        self.integral_error_limit = float(integral_error_limit)
         self.reset()
 
     def reset(self):
@@ -55,7 +57,8 @@ class PIDLoop:
         self._prev_error = error
 
         # Accumulate integral
-        self._integral += self.ki * error * dt
+        if abs(error) <= self.integral_error_limit:
+            self._integral += self.ki * error * dt
 
         # -----------------------------------------------------------------
         #  Back-calculation anti-windup
@@ -102,8 +105,12 @@ class PIDController:
     - Rudder:      0.0 (hard-locked per paper)
     """
 
-    def __init__(self, dt, debug: bool = False):
+    def __init__(self, dt, profile: str = "paper", debug: bool = False,
+                 integral_error_limits: tuple[float, float, float] | None = None):
+        if profile not in ("paper", "engineering_safe"):
+            raise ValueError("profile must be 'paper' or 'engineering_safe'")
         self.dt = dt
+        self.profile = profile
         self._debug = debug
         self._debug_step = 0          # throttled debug counter
         self._prev_target_heading = None   # for low-pass filter (Fix 2)
@@ -114,10 +121,14 @@ class PIDController:
         # M0.8).  External D-gain is kept tiny to prevent derivative kick when
         # the 5 Hz Actor updates the target_heading, causing a step-change in
         # d_I_des → d_B_des → roll_error at the 60 Hz PID rate.
+        if integral_error_limits is None:
+            integral_error_limits = (np.pi / 2.0, np.pi / 2.0, 306.0)
+        self.integral_error_limits = tuple(float(v) for v in integral_error_limits)
+
         self._roll_pid = PIDLoop(
             kp=0.15, ki=0.5, kd=0.05,
             output_min=-1.0, output_max=1.0,
-            name="roll",
+            name="roll", integral_error_limit=self.integral_error_limits[0],
         )
 
         # --- Pitch PID (drives elevator) ---
@@ -129,7 +140,7 @@ class PIDController:
         self._pitch_pid = PIDLoop(
             kp=2.5, ki=0.5, kd=0.1,
             output_min=-1.0, output_max=1.0,
-            name="pitch",
+            name="pitch", integral_error_limit=self.integral_error_limits[1],
         )
 
         # --- Velocity PID ---
@@ -138,7 +149,7 @@ class PIDController:
         self._velocity_pid = PIDLoop(
             kp=0.04, ki=0.01, kd=0.003,
             output_min=0.0, output_max=1.0,
-            name="velocity",
+            name="velocity", integral_error_limit=self.integral_error_limits[2],
         )
 
     def reset(self):
@@ -239,6 +250,33 @@ class PIDController:
         R_IB = np.column_stack([x_ned, y_ned, z_ned])
         return R_IB.T                                          # R_BI = R_IB^T
 
+    @classmethod
+    def paper_direction_errors(cls, current_rpy, target_pitch, target_heading,
+                               r_bi_override: np.ndarray | None = None):
+        """Return literal Eq.12/Eq.13 direction errors and diagnostic vectors.
+
+        The paper writes body z as up. Internally this project uses NED and
+        aerospace body z down, so only the coordinate-equivalent z sign is
+        changed before evaluating the published atan2(y/x) and atan2(z/x).
+        """
+        roll, pitch, yaw = [float(v) for v in current_rpy]
+        c_theta = np.cos(target_pitch)
+        d_des_ned = np.array([
+            c_theta * np.cos(target_heading),
+            c_theta * np.sin(target_heading),
+            -np.sin(target_pitch),
+        ], dtype=np.float64)
+        r_bi = (np.asarray(r_bi_override, dtype=np.float64)
+                if r_bi_override is not None
+                else cls.ned_to_body_matrix(roll, pitch, yaw))
+        d_body_down = r_bi @ d_des_ned
+        d_body_paper = np.array([
+            d_body_down[0], d_body_down[1], -d_body_down[2]
+        ], dtype=np.float64)
+        roll_error = float(np.arctan2(d_body_paper[1], d_body_paper[0]))
+        pitch_error = float(np.arctan2(d_body_paper[2], d_body_paper[0]))
+        return roll_error, pitch_error, d_des_ned, d_body_down, d_body_paper, r_bi
+
     def compute_control(self, current_rpy, current_velocity,
                         target_pitch, target_heading, target_velocity,
                         ned_velocity=None):
@@ -255,6 +293,22 @@ class PIDController:
             (aileron, elevator, rudder, throttle) — all in [−1, 1]
         """
         roll, pitch, yaw = float(current_rpy[0]), float(current_rpy[1]), float(current_rpy[2])
+
+        if not np.all(np.isfinite([
+                roll, pitch, yaw, current_velocity, target_pitch,
+                target_heading, target_velocity])):
+            self.reset()
+            return 0.0, 0.0, 0.0, 0.0
+
+        if self.profile == "paper":
+            roll_error, pitch_error, *_geometry = self.paper_direction_errors(
+                current_rpy, target_pitch, target_heading)
+            aileron = self._roll_pid.step(roll_error, self.dt)
+            # F-16 actuator convention: positive elevator command pitches down.
+            elevator = -self._pitch_pid.step(pitch_error, self.dt)
+            throttle = self._velocity_pid.step(
+                target_velocity - current_velocity, self.dt)
+            return aileron, elevator, 0.0, throttle
 
         # =================================================================
         #  Fix 1 — PITCH GIMBAL PROTECTION

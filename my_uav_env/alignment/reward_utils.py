@@ -7,16 +7,17 @@ function now implements the paper Eq.20 original scale used by the environment.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Callable
 
-REWARD_VERSION = "paper_eq15_eq20_ta_alt_eq17_3dlos_v2"
+REWARD_VERSION = "paper_literal_eq15_eq20_joint_v3"
 """Reward version identifier for logs and evaluation outputs.
 
-``paper_eq15_eq20_ta_alt_eq17_3dlos_v2`` means:
+``paper_literal_eq15_eq20_joint_v3`` means:
 
-1. pitch penalty uses the continuous Eq.15 middle segment;
+1. pitch penalty uses the literal discontinuous Eq.15 ``/ 12`` segment;
 2. situation reward Ta uses the paper Eq.20 original scale, including
-   ``Ta=10`` when ``q_LOS <= 4 deg``;
+   ``Ta=10`` when ``q_LOS < 4 deg`` and the literal lower branch at 4 deg;
 3. altitude reward uses a pairwise eq.17-style curve with the high-altitude
    0.1 tail;
 4. situation reward geometry uses
@@ -25,6 +26,22 @@ REWARD_VERSION = "paper_eq15_eq20_ta_alt_eq17_3dlos_v2"
 ``fixed_ta_alt_eq17_3dlos_v1`` and earlier logs should not be mixed with
 ``paper_eq20_ta_alt_eq17_3dlos_v1`` results.
 """
+
+
+@dataclass(frozen=True)
+class AltitudeRewardConfig:
+    version: str = "eq17_engineering_thresholds_v1"
+    h_min_m: float = 0.0
+    h_att_m: float = 2000.0
+    h_adv_m: float = 5000.0
+    h_max_m: float = 10000.0
+    high_altitude_tail: float = 0.1
+    d_att_max: float | None = None
+    h1: float | None = None
+    h2: float | None = None
+
+
+DEFAULT_ALTITUDE_REWARD_CONFIG = AltitudeRewardConfig()
 
 
 def ta_angle_advantage_current(q_deg: float) -> float:
@@ -45,16 +62,15 @@ def ta_angle_advantage_current(q_deg: float) -> float:
 
 def td_distance_advantage_current(distance_m: float) -> float:
     """Current distance-advantage formula copied from env._situation_reward()."""
-    distance_km = distance_m / 1000.0
-    if distance_km <= 15.0:
+    if distance_m <= 15000.0:
         return 1.0
-    return math.exp(1.0 - distance_km / 15.0)
+    return math.exp(1.0 - distance_m / 15000.0)
 
 
 def ta_angle_advantage_fixed(q_deg: float) -> float:
     """Paper Eq.20 angle-advantage curve using the original reward scale."""
     q = abs(q_deg)
-    if q <= 4.0:
+    if q < 4.0:
         return 10.0
     if q <= 15.0:
         return 1.0 + 2.0 * (15.0 - q) / 15.0
@@ -79,16 +95,12 @@ def pitch_penalty_current(theta_rad: float) -> float:
     if theta > math.pi / 3.0:
         return -1.0
     if theta > math.pi / 4.0:
-        return -12.0 * (theta / math.pi - 0.25)
+        return -(theta / math.pi - 0.25) / 12.0
     return 0.0
 
 
 def pitch_penalty_paper_candidate(theta_rad: float) -> float:
-    """Candidate paper eq.15 pitch penalty.
-
-    NEEDS PAPER TEXT VERIFICATION: this candidate currently mirrors the current
-    implementation because eq.15 slope/scale is not fully verified.
-    """
+    """Compatibility alias for the literal paper Eq.15 pitch penalty."""
     return pitch_penalty_current(theta_rad)
 
 
@@ -136,18 +148,21 @@ def altitude_reward_current(dz_m: float) -> float:
     return max(0.0, min(1.0, reward))
 
 
-def altitude_reward_paper_eq17(dz_m: float) -> float:
+def altitude_reward_paper_eq17(
+    dz_m: float,
+    config: AltitudeRewardConfig = DEFAULT_ALTITUDE_REWARD_CONFIG,
+) -> float:
     """Paper eq.17-style altitude curve with a high-altitude 0.1 tail.
 
     This follows the pass21 reading of paper eq.17 using the current project
     thresholds because exact h1/h2 and altitude constants still need visual
     verification against the paper.
     """
-    h_min = 0.0
-    h_att = 2000.0
-    h_adv = 5000.0
-    h_max = 10000.0
-    tail = 0.1
+    h_min = config.h_min_m
+    h_att = config.h_att_m
+    h_adv = config.h_adv_m
+    h_max = config.h_max_m
+    tail = config.high_altitude_tail
 
     if dz_m <= h_min:
         reward = 0.0
@@ -172,12 +187,13 @@ def altitude_reward_paper_candidate(dz_m: float) -> float:
 def altitude_reward_pairwise_mean_eq17(
     ego_alt_m: float,
     enemy_altitudes_m: list[float],
+    config: AltitudeRewardConfig = DEFAULT_ALTITUDE_REWARD_CONFIG,
 ) -> float:
     """Mean paper eq.17-style altitude reward over pairwise enemy deltas."""
     if not enemy_altitudes_m:
         return 0.0
     values = [
-        altitude_reward_paper_eq17(ego_alt_m - enemy_alt)
+        altitude_reward_paper_eq17(ego_alt_m - enemy_alt, config=config)
         for enemy_alt in enemy_altitudes_m
     ]
     return float(sum(values) / len(values))

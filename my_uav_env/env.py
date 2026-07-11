@@ -16,6 +16,8 @@ from my_uav_env.alignment.launch_quality import (
     nan_float as _nan_float,
 )
 from my_uav_env.alignment.reward_utils import (
+    DEFAULT_ALTITUDE_REWARD_CONFIG,
+    REWARD_VERSION,
     altitude_reward_pairwise_mean_eq17,
     ta_angle_advantage_fixed,
     td_distance_advantage,
@@ -47,6 +49,7 @@ LAUNCH_DIAG_KEYS = (
     "engaged_blocked",
     "launches",
 )
+from my_uav_env.alignment.state_extractor import body_angles_from_neu_vector
 
 
 def make_empty_launch_diag() -> dict:
@@ -133,7 +136,8 @@ class UavCombatEnv(gymnasium.Env):
       - "ego_state"     (entity_dim,)       self state
       - "ally_states"   (max_allies-1, entity_dim)  allied aircraft, excluding self
       - "enemy_states"  (max_enemies, entity_dim)    enemy aircraft
-      - "death_mask"    (max_allies+max_enemies,)  1=alive, 0=dead
+      - "alive_mask"    (max_allies+max_enemies,)  1=alive, 0=dead
+      - "death_mask"    deprecated alias with the same values as alive_mask
     """
 
     # ---- Action scale constants -------------------------------------------------
@@ -201,6 +205,10 @@ class UavCombatEnv(gymnasium.Env):
                  enable_single_kill_per_step_gate: bool = False,
                  missile_detection_half_angle_deg: float = 45.0,
                  missile_min_launch_range_m: float = 500.0,
+                 pid_profile: str = "paper",
+                 reward_mode: str = "paper_joint",
+                 missile_guidance_mode: str = "paper_eq9",
+                 altitude_reward_config=None,
                  obs_mode: str = "paper_strict",
                  suppress_jsbsim_output: bool = True,
                  render_mode=None):
@@ -215,6 +223,20 @@ class UavCombatEnv(gymnasium.Env):
         # not publish the cone half-angle or a minimum launch range.
         self.missile_launch_ao_thresh = np.deg2rad(missile_detection_half_angle_deg)
         self.missile_launch_min_range = float(missile_min_launch_range_m)
+        if pid_profile not in ("paper", "engineering_safe"):
+            raise ValueError("pid_profile must be 'paper' or 'engineering_safe'")
+        self.pid_profile = pid_profile
+        if reward_mode not in ("paper_joint", "engineering_local"):
+            raise ValueError("reward_mode must be 'paper_joint' or 'engineering_local'")
+        self.reward_mode = reward_mode
+        self._reward_summary_step: dict = {}
+        if missile_guidance_mode not in ("paper_eq9", "legacy_simplified"):
+            raise ValueError(
+                "missile_guidance_mode must be 'paper_eq9' or 'legacy_simplified'")
+        self.missile_guidance_mode = missile_guidance_mode
+        self.altitude_reward_config = (
+            DEFAULT_ALTITUDE_REWARD_CONFIG
+            if altitude_reward_config is None else altitude_reward_config)
         self.sim_freq = sim_freq
         self.agent_interaction_steps = agent_interaction_steps
         self.max_steps = max_steps
@@ -254,6 +276,9 @@ class UavCombatEnv(gymnasium.Env):
                 "death_mask": gymnasium.spaces.Box(
                     low=0, high=1,
                     shape=(max_num_blue + max_num_red,), dtype=np.int64),
+                "alive_mask": gymnasium.spaces.Box(
+                    low=0, high=1,
+                    shape=(max_num_blue + max_num_red,), dtype=np.int64),
                 "missile_warning": gymnasium.spaces.Box(
                     low=0, high=1, shape=(1,), dtype=np.float32),
                 "altitude": gymnasium.spaces.Box(
@@ -272,6 +297,9 @@ class UavCombatEnv(gymnasium.Env):
                     low=-np.inf, high=np.inf,
                     shape=(max_num_blue, self.entity_dim), dtype=np.float32),
                 "death_mask": gymnasium.spaces.Box(
+                    low=0, high=1,
+                    shape=(max_num_blue + max_num_red,), dtype=np.int64),
+                "alive_mask": gymnasium.spaces.Box(
                     low=0, high=1,
                     shape=(max_num_blue + max_num_red,), dtype=np.int64),
                 "missile_warning": gymnasium.spaces.Box(
@@ -355,6 +383,7 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_quality_records.clear()
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
+        self._reward_summary_step = {}
         self._missile_acmi_id.clear()
         self._missile_term_reasons = {"red": {}, "blue": {}}
         self._next_missile_acmi_id = 1001
@@ -405,7 +434,8 @@ class UavCombatEnv(gymnasium.Env):
         # Create or reset PID controllers
         if first_reset:
             for aid in self.agent_ids:
-                self.pid_controllers[aid] = PIDController(self.physics_dt)
+                self.pid_controllers[aid] = PIDController(
+                    self.physics_dt, profile=self.pid_profile)
         else:
             for pid in self.pid_controllers.values():
                 pid.reset()
@@ -497,6 +527,7 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_diag_step = make_empty_launch_diag()
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
+        self._reward_summary_step = {}
 
         # 0. Optional legacy anti-burst guard (off for paper_strict baseline).
         #    The paper defines launch interval/deconfliction, not post-hit
@@ -896,7 +927,9 @@ class UavCombatEnv(gymnasium.Env):
         target: AircraftSimulator,
         launch_quality: dict | None = None,
     ):
-        missile = MissileSimulator.create(parent, target, f"m{self._missile_id_counter}")
+        missile = MissileSimulator.create(
+            parent, target, f"m{self._missile_id_counter}",
+            guidance_mode=self.missile_guidance_mode)
         self._missile_id_counter += 1
         self._missiles_in_flight[missile.uid] = missile
         if launch_quality is not None:
@@ -1088,6 +1121,9 @@ class UavCombatEnv(gymnasium.Env):
         Crash penalty:     r_death = −10 injected on the frame of LowAlt / OverG
                            death, so PPO can causally link the fatal action to death.
         """
+        if self.reward_mode == "paper_joint":
+            return self._compute_paper_joint_rewards()
+
         n_blue_alive = sum(1 for s in self.blue_planes.values() if s.is_alive)
         n_red_alive = sum(1 for s in self.red_planes.values() if s.is_alive)
         round_over = (n_blue_alive == 0 or n_red_alive == 0
@@ -1164,6 +1200,80 @@ class UavCombatEnv(gymnasium.Env):
             }
         return rewards, components
 
+    def _compute_paper_joint_rewards(self) -> tuple[dict, dict]:
+        """Return the paper team-joint reward identically to every teammate."""
+        n_blue_alive = sum(1 for s in self.blue_planes.values() if s.is_alive)
+        n_red_alive = sum(1 for s in self.red_planes.values() if s.is_alive)
+        round_over = (n_blue_alive == 0 or n_red_alive == 0
+                      or self.current_step >= self.max_steps)
+
+        terminal_red = 30.0 * (n_red_alive - n_blue_alive) if round_over else 0.0
+        terminal_blue = -terminal_red
+        components: dict[str, dict] = {}
+        local_rewards: dict[str, float] = {}
+
+        for aid in self.agent_ids:
+            sim = self._get_sim(aid)
+            if sim is None or not sim.is_alive:
+                raw_pitch = raw_roll = raw_vel = raw_alt = raw_bound = raw_adv = 0.0
+            else:
+                raw_pitch = self._pitch_penalty(sim)
+                raw_roll = self._roll_penalty(sim)
+                raw_vel = self._speed_penalty(sim)
+                raw_alt = self._altitude_reward(sim)
+                raw_bound = self._boundary_penalty(sim)
+                raw_adv = self._situation_reward(sim)
+
+            weighted = {
+                "r_pitch": 0.01 * raw_pitch,
+                "r_roll": 0.002 * raw_roll,
+                "r_alt": 0.04 * raw_alt,
+                "r_bound": 0.04 * raw_bound,
+                "r_vel": 0.02 * raw_vel,
+                "r_adv": 0.15 * raw_adv,
+            }
+            local_reward = float(sum(weighted.values()))
+            local_rewards[aid] = local_reward
+            components[aid] = {
+                "raw_r_pitch": float(raw_pitch),
+                "raw_r_roll": float(raw_roll),
+                "raw_r_alt": float(raw_alt),
+                "raw_r_bound": float(raw_bound),
+                "raw_r_vel": float(raw_vel),
+                "raw_r_adv": float(raw_adv),
+                **{key: float(value) for key, value in weighted.items()},
+                "local_reward": local_reward,
+                "r_death": 0.0,
+            }
+
+        red_local_sum = float(sum(local_rewards[aid] for aid in self.red_ids))
+        blue_local_sum = float(sum(local_rewards[aid] for aid in self.blue_ids))
+        red_joint = red_local_sum + terminal_red
+        blue_joint = blue_local_sum + terminal_blue
+        rewards = {
+            aid: float(blue_joint if aid.startswith("blue") else red_joint)
+            for aid in self.agent_ids
+        }
+
+        self._reward_summary_step = {
+            "red_local_reward_sum": red_local_sum,
+            "blue_local_reward_sum": blue_local_sum,
+            "red_team_terminal_reward": float(terminal_red),
+            "blue_team_terminal_reward": float(terminal_blue),
+            "red_joint_reward": float(red_joint),
+            "blue_joint_reward": float(blue_joint),
+            "reward_version": REWARD_VERSION,
+            "reward_mode": self.reward_mode,
+        }
+        for aid in self.agent_ids:
+            is_blue = aid.startswith("blue")
+            components[aid].update({
+                "r_end": float(terminal_blue if is_blue else terminal_red),
+                "joint_reward": float(blue_joint if is_blue else red_joint),
+                **self._reward_summary_step,
+            })
+        return rewards, components
+
     # ------------------------------------------------------------------
     #  Flight status penalties (paper formulas)
     # ------------------------------------------------------------------
@@ -1174,7 +1284,7 @@ class UavCombatEnv(gymnasium.Env):
         if theta > np.pi / 3:
             return -1.0
         if theta > np.pi / 4:
-            return -12.0 * (theta / np.pi - 0.25)
+            return -(theta / np.pi - 0.25) / 12.0
         return 0.0
 
     def _roll_penalty(self, sim: AircraftSimulator) -> float:
@@ -1221,13 +1331,15 @@ class UavCombatEnv(gymnasium.Env):
 
             q_ij = compute_body_x_q_los(ego_pos, ego_rpy, enemy_pos)
             q_ji = compute_body_x_q_los(enemy_pos, enemy_rpy, ego_pos)
-            d_3d = compute_3d_range(ego_pos, enemy_pos)
+            d_ij = compute_3d_range(ego_pos, enemy_pos)
+            d_ji = compute_3d_range(enemy_pos, ego_pos)
 
             Ta_ij = ta_angle_advantage_fixed(np.rad2deg(q_ij))
-            Td_ij = td_distance_advantage(d_3d)
+            Td_ij = td_distance_advantage(d_ij)
             Ta_ji = ta_angle_advantage_fixed(np.rad2deg(q_ji))
+            Td_ji = td_distance_advantage(d_ji)
 
-            total += 1.0 * Ta_ij * Td_ij - 0.8 * Ta_ji * Td_ij
+            total += 1.0 * Ta_ij * Td_ij - 0.8 * Ta_ji * Td_ji
 
         return total
 
@@ -1239,7 +1351,8 @@ class UavCombatEnv(gymnasium.Env):
         if not enemy_alts:
             return 0.0
 
-        return altitude_reward_pairwise_mean_eq17(alt_ego, enemy_alts)
+        return altitude_reward_pairwise_mean_eq17(
+            alt_ego, enemy_alts, config=self.altitude_reward_config)
 
     def _boundary_penalty(self, sim: AircraftSimulator) -> float:
         """Horizontal battlefield boundary penalty.
@@ -1393,9 +1506,10 @@ class UavCombatEnv(gymnasium.Env):
                         0.0, 0.0, 0.0, 0.0,                            # attitude masked
                     ], dtype=np.float32)
 
-        # ---- death_mask ----
+        # Canonical mask: 1=alive/valid, 0=dead/invalid.
         all_sims_ordered = blue_sims + red_sims
-        death_mask = np.array([1 if s.is_alive else 0 for s in all_sims_ordered], dtype=np.int64)
+        alive_mask = np.array(
+            [1 if s.is_alive else 0 for s in all_sims_ordered], dtype=np.int64)
 
         # ---- missile_warning ----
         mw = 0.0
@@ -1413,7 +1527,8 @@ class UavCombatEnv(gymnasium.Env):
             "ego_state": ego_state,
             "ally_states": ally_vecs,
             "enemy_states": enemy_vecs,
-            "death_mask": death_mask,
+            "alive_mask": alive_mask,
+            "death_mask": alive_mask.copy(),
             "missile_warning": missile_warning,
             "altitude": altitude,
             "velocity": velocity,
@@ -1462,7 +1577,8 @@ class UavCombatEnv(gymnasium.Env):
                         sim, enemy, radar_detected=radar_detected)
 
         all_sims_ordered = blue_sims + red_sims
-        death_mask = np.array([1 if s.is_alive else 0 for s in all_sims_ordered], dtype=np.int64)
+        alive_mask = np.array(
+            [1 if s.is_alive else 0 for s in all_sims_ordered], dtype=np.int64)
         mw = 1.0 if alive and sim.check_missile_warning() is not None else 0.0
         missile_warning = np.array([mw], dtype=np.float32)
         alt_m = sim.get_geodetic()[2] if alive else 0.0
@@ -1474,7 +1590,8 @@ class UavCombatEnv(gymnasium.Env):
             "ego_state": ego_state.astype(np.float32),
             "ally_states": ally_vecs,
             "enemy_states": enemy_vecs,
-            "death_mask": death_mask,
+            "alive_mask": alive_mask,
+            "death_mask": alive_mask.copy(),
             "missile_warning": missile_warning,
             "altitude": altitude,
             "velocity": velocity,
@@ -1547,6 +1664,14 @@ class UavCombatEnv(gymnasium.Env):
         info["__launch_quality_done__"] = [
             dict(record) for record in self._launch_quality_done_step_records
         ]
+        info["__environment_config__"] = {
+            "obs_mode": self.obs_mode,
+            "pid_profile": self.pid_profile,
+            "reward_mode": self.reward_mode,
+            "missile_guidance_mode": self.missile_guidance_mode,
+            "altitude_reward_config_version": self.altitude_reward_config.version,
+        }
+        info["__reward_summary__"] = dict(self._reward_summary_step)
         return info
 
     # ------------------------------------------------------------------
@@ -1602,15 +1727,9 @@ class UavCombatEnv(gymnasium.Env):
         if R_3d < 1e-6:
             return True
 
-        # Rotate the full 3D LOS into body axes. Environment positions are NEU,
-        # while PIDController's rotation helper uses NED (body z is down).
-        delta_ned = np.array([dn, de, -du], dtype=np.float64)
-        r_bi = PIDController.ned_to_body_matrix(
+        _los_body, el_body, az_body, _q_los = body_angles_from_neu_vector(
+            np.array([dn, de, du], dtype=np.float64),
             float(ego_rpy[0]), float(ego_rpy[1]), float(ego_rpy[2]))
-        los_body = r_bi @ delta_ned
-        horizontal_body = float(np.hypot(los_body[0], los_body[1]))
-        az_body = float(np.arctan2(los_body[1], los_body[0]))
-        el_body = float(np.arctan2(-los_body[2], horizontal_body))
 
         if abs(az_body) > self.RADAR_AZIMUTH_HALF:
             return False

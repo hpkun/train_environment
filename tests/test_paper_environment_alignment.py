@@ -1,5 +1,6 @@
 import math
 import ast
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,11 @@ from my_uav_env import UavCombatEnv
 from my_uav_env.alignment.los_geometry import compute_body_x_q_los
 from my_uav_env.alignment.launch_quality import LAUNCH_QUALITY_FIELDS, make_launch_quality_record
 from my_uav_env.pid_controller import PIDController
-from my_uav_env.simulator import MissileSimulator
+from my_uav_env.simulator import (
+    MissileSimulator,
+    compute_los_angles_and_rates,
+    compute_paper_eq9_overloads,
+)
 from my_uav_env.utils import get2d_heading_AO_TA_R
 from my_uav_env.alignment.reward_utils import (
     REWARD_VERSION,
@@ -17,7 +22,10 @@ from my_uav_env.alignment.reward_utils import (
     ta_angle_advantage_fixed,
     td_distance_advantage,
 )
-from my_uav_env.alignment.state_extractor import extract_relative_state
+from my_uav_env.alignment.state_extractor import (
+    build_strict_paper_entity_observation,
+    extract_relative_state,
+)
 from rule_based_agent import (
     _blue_simple_pursuit_action_impl,
     _ego_roll_pitch_heading,
@@ -30,21 +38,41 @@ from rule_based_agent import (
 from train_vanilla_mappo import (
     Config,
     CentralizedCritic,
+    REWARD_COMPONENT_LOG_FIELDS,
+    RolloutBuffer,
     VanillaActor,
+    _checkpoint_metadata,
     _classify_death_reason,
     _compute_global_state_dim,
+    _compute_joint_gae_by_env,
     _compute_obs_dim,
     _episode_outcome,
     _flatten_obs,
     _global_state_from_local_obs_flats,
+    _joint_team_reward_once,
+    _normalize_paper_fixed_v1,
+    _reward_component_log_metrics,
+    _unpack_and_validate_checkpoint,
+    ppo_update,
 )
 import torch
+
+
+def test_evaluation_csv_header_covers_joint_reward_and_environment_semantics():
+    from evaluate_vanilla_mappo import EVALUATION_FIELDNAMES
+
+    required = {
+        "EpisodeRewardRed", "RewardVersion", "RewardMode",
+        "ObsNormalization", "PIDProfile", "MissileGuidanceMode",
+    }
+    assert required.issubset(EVALUATION_FIELDNAMES)
+    assert len(EVALUATION_FIELDNAMES) == len(set(EVALUATION_FIELDNAMES))
 
 
 def test_ta_uses_paper_eq20_scale():
     samples = {
         0.0: 10.0,
-        4.0: 10.0,
+        4.0: 1.0 + 2.0 * (15.0 - 4.0) / 15.0,
         10.0: 1.0 + 2.0 * (15.0 - 10.0) / 15.0,
         15.0: 1.0,
         35.0: 0.0,
@@ -71,16 +99,27 @@ def test_td_uses_15km_with_meter_inputs():
     )
 
 
-def test_pitch_penalty_eq15_is_continuous_between_45_and_60_degrees():
+def test_pitch_penalty_uses_literal_discontinuous_eq15():
     assert pitch_penalty_current(math.pi / 4.0) == 0.0
-    assert math.isclose(pitch_penalty_current(math.radians(50.0)), -1.0 / 3.0)
+    assert math.isclose(
+        pitch_penalty_current(math.radians(50.0)),
+        -(50.0 / 180.0 - 0.25) / 12.0,
+    )
     assert math.isclose(
         pitch_penalty_current(math.pi / 3.0 - 1e-9),
-        -1.0,
+        -1.0 / 144.0,
         rel_tol=1e-7,
         abs_tol=1e-7,
     )
     assert pitch_penalty_current(math.pi / 3.0 + 1e-9) == -1.0
+
+
+def test_ta_preserves_literal_jump_at_four_degrees():
+    assert ta_angle_advantage_fixed(4.0 - 1e-9) == 10.0
+    assert math.isclose(
+        ta_angle_advantage_fixed(4.0),
+        1.0 + 2.0 * 11.0 / 15.0,
+    )
 
 
 def test_reward_version_names_paper_eq20_default():
@@ -95,6 +134,10 @@ def test_main_training_defaults_match_paper_scale():
     assert cfg.num_blue == 6
     assert cfg.max_episode_length == 1400
     assert cfg.obs_mode == "paper_strict"
+    assert cfg.obs_normalization == "paper_fixed_v1"
+    assert cfg.pid_profile == "paper"
+    assert cfg.reward_mode == "paper_joint"
+    assert cfg.missile_guidance_mode == "paper_eq9"
 
 
 def test_blue_gcas_default_is_disabled():
@@ -458,6 +501,60 @@ def test_pid_channels_rudder_and_reset_match_paper_interface():
     assert pid._prev_target_heading is None
 
 
+def test_paper_pid_eq13_direction_errors_use_x_denominator():
+    zero = np.zeros(3)
+    roll_error, pitch_error, *_ = PIDController.paper_direction_errors(
+        zero, 0.0, 0.0)
+    assert math.isclose(roll_error, 0.0, abs_tol=1e-9)
+    assert math.isclose(pitch_error, 0.0, abs_tol=1e-9)
+
+    roll_error, pitch_error, *_ = PIDController.paper_direction_errors(
+        zero, 0.0, math.radians(30.0))
+    assert math.isclose(roll_error, math.radians(30.0), abs_tol=1e-9)
+    assert math.isclose(pitch_error, 0.0, abs_tol=1e-9)
+
+    roll_error, pitch_error, *_ = PIDController.paper_direction_errors(
+        zero, 0.0, math.radians(-30.0))
+    assert math.isclose(roll_error, math.radians(-30.0), abs_tol=1e-9)
+
+    roll_error, pitch_error, *_ = PIDController.paper_direction_errors(
+        zero, math.radians(10.0), 0.0)
+    assert math.isclose(roll_error, 0.0, abs_tol=1e-9)
+    assert math.isclose(pitch_error, math.radians(10.0), abs_tol=1e-9)
+
+
+def test_paper_pid_rotation_round_trip_and_current_nose_zero_error():
+    rpy = np.array([0.4, -0.3, 1.2])
+    r_ib = PIDController.body_to_ned_matrix(*rpy)
+    r_bi = PIDController.ned_to_body_matrix(*rpy)
+    assert np.allclose(r_bi @ r_ib, np.eye(3), atol=1e-12)
+
+    roll_error, pitch_error, *_ = PIDController.paper_direction_errors(
+        rpy, target_pitch=float(rpy[1]), target_heading=float(rpy[2]))
+    assert math.isclose(roll_error, 0.0, abs_tol=1e-9)
+    assert math.isclose(pitch_error, 0.0, abs_tol=1e-9)
+
+
+def test_pid_profiles_separate_paper_from_engineering_protections():
+    paper = PIDController(1.0 / 60.0, profile="paper")
+    engineering = PIDController(1.0 / 60.0, profile="engineering_safe")
+    args = dict(
+        current_rpy=np.array([0.0, math.radians(86.0), 0.0]),
+        current_velocity=200.0,
+        target_pitch=0.0,
+        target_heading=0.0,
+        target_velocity=250.0,
+        ned_velocity=np.array([20.0, 0.0, -199.0]),
+    )
+    paper_control = paper.compute_control(**args)
+    engineering_control = engineering.compute_control(**args)
+    assert np.isfinite(paper_control).all()
+    assert not np.allclose(paper_control, np.zeros(4))
+    assert np.allclose(engineering_control, np.zeros(4))
+    assert paper._prev_target_heading is None
+    assert paper_control[2] == 0.0
+
+
 def test_critic_global_state_contains_only_red_native_ego_states():
     local_a = np.arange(132, dtype=np.float32)
     local_b = np.arange(132, dtype=np.float32) + 1000.0
@@ -659,11 +756,30 @@ def test_terminal_reward_sums_to_paper_team_scale():
         env.reset()
         env.blue_planes["blue_0"].shotdown()
         env.current_step = env.max_steps
-        _rewards, components = env._compute_rewards()
-        red_total = sum(components[aid].get("r_end", 0.0) for aid in env.red_ids)
-        blue_total = sum(components[aid].get("r_end", 0.0) for aid in env.blue_ids)
-        assert math.isclose(red_total, 30.0)
-        assert math.isclose(blue_total, -30.0)
+        rewards, components = env._compute_rewards()
+        summary = env._reward_summary_step
+        assert math.isclose(summary["red_team_terminal_reward"], 30.0)
+        assert math.isclose(summary["blue_team_terminal_reward"], -30.0)
+        assert len({rewards[aid] for aid in env.red_ids}) == 1
+        assert len({rewards[aid] for aid in env.blue_ids}) == 1
+        assert math.isclose(
+            rewards["red_0"],
+            summary["red_local_reward_sum"] + summary["red_team_terminal_reward"])
+        assert all(components[aid]["r_death"] == 0.0 for aid in env.agent_ids)
+    finally:
+        env.close()
+
+
+def test_paper_joint_crash_has_no_extra_death_penalty():
+    env = UavCombatEnv(max_num_red=1, max_num_blue=1, suppress_jsbsim_output=True)
+    try:
+        env.reset()
+        env.red_planes["red_0"].shotdown()
+        env._crashed_this_step.add("red_0")
+        rewards, components = env._compute_rewards()
+        assert rewards["red_0"] == -30.0
+        assert components["red_0"]["r_death"] == 0.0
+        assert env._reward_summary_step["red_team_terminal_reward"] == -30.0
     finally:
         env.close()
 
@@ -684,3 +800,266 @@ def test_training_evaluation_and_acmi_defaults_use_paper_strict_6v6():
     assert 'num_red: int = 6, num_blue: int = 6, max_steps: int = 1400' in acmi_source
     assert 'obs_mode: str = "paper_strict"' in acmi_source
     assert '"vanilla_6v6_paper_main"' in preset_source
+
+
+def test_table2_angles_use_up_positive_right_positive_convention():
+    observer = _FakeSim([0.0, 0.0, 0.0], [200.0, 0.0, 0.0])
+    above_right = _FakeSim([1000.0, 200.0, 300.0], [200.0, 20.0, 30.0])
+    below_left = _FakeSim([1000.0, -200.0, -300.0], [200.0, -20.0, -30.0])
+
+    upper = extract_relative_state(observer, above_right)
+    lower = extract_relative_state(observer, below_left)
+    assert upper[2] < 0.0 and upper[6] > 0.0 and upper[7] > 0.0
+    assert upper[3] > 0.0 and upper[4] > 0.0
+    assert lower[2] > 0.0 and lower[6] < 0.0 and lower[7] < 0.0
+    assert lower[3] < 0.0 and lower[4] < 0.0
+    assert 0.0 <= upper[8] <= math.pi
+    assert 0.0 <= lower[8] <= math.pi
+
+
+def test_alive_mask_alias_and_entity_mask_have_explicit_opposite_semantics():
+    env = UavCombatEnv(max_num_red=1, max_num_blue=1, suppress_jsbsim_output=True)
+    try:
+        env.reset()
+        env.blue_planes["blue_0"].shotdown()
+        obs = env._get_obs()["red_0"]
+        _entities, entity_mask, _meta = build_strict_paper_entity_observation(
+            env, "red_0")
+        assert np.array_equal(obs["alive_mask"], obs["death_mask"])
+        assert obs["alive_mask"].tolist() == [0, 1]
+        alive_in_entity_order = obs["alive_mask"][[1, 0]]  # ego red, enemy blue
+        assert np.array_equal(entity_mask, 1 - alive_in_entity_order)
+        assert np.all(obs["enemy_states"][0] == 0.0)
+    finally:
+        env.close()
+
+
+def test_paper_fixed_v1_normalization_uses_declared_physical_scales():
+    obs = {
+        "ego_state": np.array([
+            40000.0, -40000.0, 10000.0, 600.0,
+            math.pi, -math.pi, math.pi, 0.5 * math.pi, -0.5 * math.pi, -600.0,
+        ], dtype=np.float32),
+        "ally_states": np.array([[
+            40000.0, -40000.0, 10000.0, math.pi, -math.pi,
+            600.0, math.pi, -math.pi, math.pi, 100000.0,
+        ]], dtype=np.float32),
+        "enemy_states": np.zeros((0, 10), dtype=np.float32),
+    }
+    ego, allies, enemies = _normalize_paper_fixed_v1(obs)
+    assert np.allclose(ego, [1, -1, 1, 1, 1, -1, 1, 0.5, -0.5, -1])
+    assert np.allclose(allies[0], [1, -1, 1, 1, -1, 1, 1, -1, 1, 1])
+    assert enemies.shape == (0, 10)
+
+
+def test_joint_reward_is_read_once_and_rejects_agent_disagreement():
+    rewards = {"red_0": 12.5, "red_1": 12.5}
+    assert _joint_team_reward_once(rewards, ["red_0", "red_1"]) == 12.5
+    with np.testing.assert_raises(ValueError):
+        _joint_team_reward_once(
+            {"red_0": 12.5, "red_1": 13.0}, ["red_0", "red_1"])
+
+
+def test_reward_component_logs_distinguish_team_sum_and_per_agent_mean():
+    metrics = _reward_component_log_metrics(
+        {"r_pitch": -6.0, "r_adv": 12.0, "r_end": 30.0}, team_size=6)
+    assert metrics["r_pitch_team_sum"] == -6.0
+    assert metrics["r_pitch_per_agent_mean"] == -1.0
+    assert metrics["r_adv_team_sum"] == 12.0
+    assert metrics["r_adv_per_agent_mean"] == 2.0
+    assert metrics["r_end_team"] == 30.0
+    assert set(metrics) == set(REWARD_COMPONENT_LOG_FIELDS)
+
+
+def test_joint_gae_is_one_trajectory_per_env_and_terminal_bootstrap_is_zeroed():
+    buffer = RolloutBuffer(
+        num_steps=3, num_envs=1, num_red=2, action_dim=3, rnn_hidden_size=4)
+    buffer.joint_rewards[:, 0] = [1.0, 2.0, 3.0]
+    buffer.team_values[:, 0] = [0.0, 0.0, 0.0]
+    buffer.episode_dones[:, 0] = [0.0, 0.0, 1.0]
+    buffer.bootstrap_value[0] = 0.0
+
+    advantages, returns = _compute_joint_gae_by_env(
+        buffer, gamma=1.0, lam=1.0, device=torch.device("cpu"))
+    assert len(advantages) == 1 and len(returns) == 1
+    assert torch.allclose(advantages[0], torch.tensor([6.0, 5.0, 3.0]))
+    assert torch.allclose(returns[0], torch.tensor([6.0, 5.0, 3.0]))
+
+
+def test_missile_eq10_eq11_and_eq9_match_direct_geometry():
+    beta, epsilon, beta_dot, epsilon_dot = compute_los_angles_and_rates(
+        [1000.0, 0.0, 0.0], [0.0, 100.0, 0.0])
+    assert beta == 0.0 and epsilon == 0.0
+    assert math.isclose(beta_dot, 0.1)
+    assert epsilon_dot == 0.0
+
+    n_mc, n_mh = compute_paper_eq9_overloads(
+        [1000.0, 0.0, 0.0], [0.0, 100.0, 0.0], [300.0, 0.0, 0.0],
+        navigation_constant=3.0, gravity=9.81)
+    assert math.isclose(n_mc, 3.0 * 300.0 / 9.81 * 0.1)
+    assert n_mh == 0.0
+
+
+def test_missile_eq9_vertical_and_general_3d_match_literal_formula():
+    for relative_position, relative_velocity, missile_velocity in (
+        ([1000.0, 0.0, 100.0], [0.0, 0.0, 10.0], [300.0, 0.0, 0.0]),
+        ([1000.0, 400.0, 200.0], [-20.0, 80.0, 30.0], [280.0, 40.0, 25.0]),
+    ):
+        beta, epsilon, beta_dot, epsilon_dot = compute_los_angles_and_rates(
+            relative_position, relative_velocity)
+        speed = float(np.linalg.norm(missile_velocity))
+        gamma = math.asin(missile_velocity[2] / speed)
+        expected_n_mc = (
+            3.0 * speed * math.cos(gamma) / 9.81
+            * (beta_dot + math.tan(epsilon)
+               * math.tan(epsilon + beta) * epsilon_dot)
+        )
+        expected_n_mh = (
+            speed / 9.81 * 3.0 / math.cos(epsilon + beta) * epsilon_dot
+        )
+        actual_n_mc, actual_n_mh = compute_paper_eq9_overloads(
+            relative_position, relative_velocity, missile_velocity)
+        assert math.isclose(actual_n_mc, expected_n_mc, rel_tol=1e-12)
+        assert math.isclose(actual_n_mh, expected_n_mh, rel_tol=1e-12)
+
+
+def test_missile_eq9_vertical_and_singular_geometries_are_finite_and_clipped():
+    direct = compute_paper_eq9_overloads(
+        [1000.0, 0.0, 100.0], [0.0, 0.0, 10.0], [300.0, 0.0, 0.0])
+    singular = compute_paper_eq9_overloads(
+        [0.0, 0.0, 1000.0], [1.0, 2.0, 3.0], [0.0, 0.0, 300.0])
+    assert np.isfinite(direct).all()
+    assert np.isfinite(singular).all()
+
+    missile = MissileSimulator(dt=1.0 / 60.0, guidance_mode="paper_eq9")
+    missile._position[:] = 0.0
+    missile._velocity[:] = [300.0, 0.0, 0.0]
+    missile.target_aircraft = _FakeSim(
+        [1000.0, 0.0, 100.0], [0.0, 100000.0, 100000.0])
+    overload, _distance = missile._guidance()
+    assert np.isfinite(overload).all()
+    assert np.max(np.abs(overload)) <= 30.0
+
+
+def test_missile_probability_failure_terminates_with_raw_reason():
+    missile = MissileSimulator(dt=1.0 / 60.0)
+    missile.target_aircraft = _FakeSim(
+        [100.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    missile._status = MissileSimulator.LAUNCHED
+    missile._t = 0.0
+    missile._distance_pre = math.inf
+    missile._distance_increment = deque(maxlen=5)
+    missile._t_arm = 0.0
+    missile._guidance = lambda: (np.zeros(2, dtype=np.float64), 1.0)
+    missile._roll_hit_probability = lambda: False
+
+    missile.run()
+
+    assert missile.is_done
+    assert not missile.is_success
+    assert missile._termination_reason == "p_hit_fail"
+
+
+def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
+    cfg = Config()
+    obs_dim = _compute_obs_dim(6, 6, is_red=True, obs_mode="paper_strict")
+    global_dim = _compute_global_state_dim(6, "paper_strict")
+    metadata = _checkpoint_metadata(cfg, obs_dim, global_dim)
+    state = VanillaActor(obs_dim, hidden=16, rnn_hidden=8).state_dict()
+
+    with np.testing.assert_raises(ValueError):
+        _unpack_and_validate_checkpoint(state, metadata, "actor")
+    payload = {"state_dict": state, "metadata": dict(metadata), "model_kind": "actor"}
+    payload["metadata"]["obs_normalization"] = "none"
+    with np.testing.assert_raises(ValueError):
+        _unpack_and_validate_checkpoint(payload, metadata, "actor")
+
+
+def test_joint_mappo_short_buffer_forward_and_backward_is_finite():
+    cfg = Config()
+    cfg.n_update_epochs = 1
+    cfg.n_minibatches = 1
+    cfg.num_red = 2
+    cfg.num_blue = 1
+    cfg.obs_mode = "paper_strict"
+    obs_dim = _compute_obs_dim(2, 1, is_red=True, obs_mode="paper_strict")
+    global_dim = _compute_global_state_dim(2, "paper_strict")
+    actor = VanillaActor(obs_dim, hidden=16, rnn_hidden=8)
+    critic = CentralizedCritic(global_dim, hidden=16)
+    actor_opt = torch.optim.Adam(actor.parameters(), lr=1e-3)
+    critic_opt = torch.optim.Adam(critic.parameters(), lr=1e-3)
+    buffer = RolloutBuffer(3, 1, 2, 3, 8)
+
+    for t in range(3):
+        buffer.global_states[t][0] = np.zeros(global_dim, dtype=np.float32)
+        buffer.joint_rewards[t, 0] = float(t + 1)
+        buffer.team_values[t, 0] = 0.0
+        for agent_idx in range(2):
+            alive = not (agent_idx == 1 and t > 0)
+            buffer.obs[t][0][agent_idx] = np.zeros(obs_dim, dtype=np.float32)
+            buffer.actions[t, 0, agent_idx] = 0.0
+            buffer.log_probs[t, 0, agent_idx] = 0.0
+            buffer.alive[t, 0, agent_idx] = alive
+    buffer.episode_dones[-1, 0] = 1.0
+    buffer.bootstrap_value[0] = 0.0
+
+    stats = ppo_update(
+        actor, critic, actor_opt, critic_opt, buffer, cfg, torch.device("cpu"))
+    assert np.isfinite(stats["actor_loss"])
+    assert np.isfinite(stats["critic_loss"])
+    assert np.isfinite(stats["entropy"])
+
+
+def test_short_jsbsim_paper_pid_steps_reduce_heading_pitch_and_speed_error():
+    def run_case(kind, frames):
+        env = UavCombatEnv(
+            max_num_red=1, max_num_blue=1, pid_profile="paper",
+            suppress_jsbsim_output=True)
+        try:
+            env.reset()
+            sim = env.red_planes["red_0"]
+            pid = env.pid_controllers["red_0"]
+            initial_rpy = sim.get_rpy().copy()
+            initial_speed = float(np.linalg.norm(sim.get_velocity()))
+            target_pitch = float(initial_rpy[1])
+            target_heading = float(initial_rpy[2])
+            target_speed = initial_speed
+            if kind == "heading":
+                target_heading += math.radians(5.0)
+            elif kind == "pitch":
+                target_pitch += math.radians(2.0)
+            else:
+                target_speed += 10.0
+
+            def error():
+                if kind == "heading":
+                    return abs((target_heading - sim.get_rpy()[2] + math.pi)
+                               % (2 * math.pi) - math.pi)
+                if kind == "pitch":
+                    return abs(target_pitch - sim.get_rpy()[1])
+                return abs(target_speed - np.linalg.norm(sim.get_velocity()))
+
+            initial_error = float(error())
+            controls = []
+            for _ in range(frames):
+                velocity = sim.get_velocity()
+                control = pid.compute_control(
+                    sim.get_rpy(), float(np.linalg.norm(velocity)),
+                    target_pitch, target_heading, target_speed,
+                    np.array([velocity[0], velocity[1], -velocity[2]]))
+                controls.append(control)
+                for prop, value in zip((
+                        "fcs/aileron-cmd-norm", "fcs/elevator-cmd-norm",
+                        "fcs/rudder-cmd-norm", "fcs/throttle-cmd-norm"), control):
+                    sim.set_property_value(prop, value)
+                sim.run()
+            controls = np.asarray(controls)
+            assert np.isfinite(controls).all()
+            assert np.max(np.abs(controls)) <= 1.0
+            assert float(error()) < initial_error
+        finally:
+            env.close()
+
+    run_case("heading", 180)
+    run_case("pitch", 180)
+    run_case("speed", 600)

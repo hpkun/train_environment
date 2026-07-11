@@ -51,13 +51,17 @@ except Exception:
     pass
 
 from rule_based_agent import blue_coordinated_actions
+from my_uav_env.alignment.reward_utils import REWARD_VERSION
 from train_vanilla_mappo import (
+    CHECKPOINT_SCHEMA_VERSION,
     VanillaActor,
     _classify_death_reason,
+    _compute_global_state_dim,
     _compute_obs_dim,
     _episode_outcome,
     _flatten_obs,
     _safe_div,
+    _unpack_and_validate_checkpoint,
 )
 
 # Diagnostic marker 4
@@ -170,7 +174,11 @@ class VisualMissileTracker:
 def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
              num_red: int = 6, num_blue: int = 6, max_steps: int = 1400,
              draw_boundary: bool = False, boundary_half_size: float = 40000.0,
-             obs_mode: str = "paper_strict"):
+             obs_mode: str = "paper_strict",
+             obs_normalization: str = "paper_fixed_v1",
+             pid_profile: str = "paper",
+             reward_mode: str = "paper_joint",
+             missile_guidance_mode: str = "paper_eq9"):
     """Load a model, run one episode with TacView recording, save .acmi."""
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -182,6 +190,9 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
         env = UavCombatEnv(max_num_blue=num_blue, max_num_red=num_red,
                            max_steps=max_steps,
                            obs_mode=obs_mode,
+                           pid_profile=pid_profile,
+                           reward_mode=reward_mode,
+                           missile_guidance_mode=missile_guidance_mode,
                            enable_gcas_for_blue=False,
                            suppress_jsbsim_output=True)
     except Exception:
@@ -194,7 +205,25 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
     if checkpoint_path is not None:
         print(f"加载模型: {checkpoint_path} ...", flush=True)
         try:
-            state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            payload = torch.load(
+                checkpoint_path, map_location=device, weights_only=False)
+            obs_dim = _compute_obs_dim(
+                num_red, num_blue, is_red=True, obs_mode=obs_mode)
+            expected_metadata = {
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "obs_mode": obs_mode,
+                "obs_normalization": obs_normalization,
+                "reward_version": REWARD_VERSION,
+                "reward_mode": reward_mode,
+                "pid_profile": pid_profile,
+                "missile_guidance_mode": missile_guidance_mode,
+                "num_red": num_red,
+                "num_blue": num_blue,
+                "global_state_dim": _compute_global_state_dim(num_red, obs_mode),
+                "actor_obs_dim": obs_dim,
+            }
+            state = _unpack_and_validate_checkpoint(
+                payload, expected_metadata, "actor")
 
             # Auto-infer model architecture from checkpoint weights, so the eval
             # script works with any training config (different hidden sizes, etc.)
@@ -214,9 +243,6 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                 print("ERROR: 无法从 checkpoint 推断 obs_dim", flush=True)
                 env.close()
                 return
-
-            obs_dim = _compute_obs_dim(
-                num_red, num_blue, is_red=True, obs_mode=obs_mode)
 
             if ckpt_obs_dim != obs_dim:
                 if obs_mode == "paper_strict":
@@ -323,7 +349,9 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                     obs_np = obs[rid]
                     alive = not np.allclose(obs_np["ego_state"], 0.0)
                     if alive:
-                        obs_batch.append(_flatten_obs(obs_np, obs_mode=obs_mode))
+                        obs_batch.append(_flatten_obs(
+                            obs_np, obs_mode=obs_mode,
+                            obs_normalization=obs_normalization))
                         alive_indices.append(i)
                     else:
                         actions[rid] = np.zeros(3, dtype=np.float32)
@@ -523,6 +551,16 @@ if __name__ == "__main__":
         parser.add_argument("--obs-mode", type=str,
                             choices=("paper_strict", "engineering"),
                             default="paper_strict")
+        parser.add_argument("--obs-normalization",
+                            choices=("paper_fixed_v1", "none"),
+                            default="paper_fixed_v1")
+        parser.add_argument("--pid-profile", choices=("paper", "engineering_safe"),
+                            default="paper")
+        parser.add_argument("--reward-mode", choices=("paper_joint", "engineering_local"),
+                            default="paper_joint")
+        parser.add_argument("--missile-guidance-mode",
+                            choices=("paper_eq9", "legacy_simplified"),
+                            default="paper_eq9")
         parser.add_argument("--draw-boundary", action="store_true", default=False,
                             help="Draw battlefield boundary in ACMI for debugging.")
         parser.add_argument("--boundary-half-size", type=float, default=40000.0,
@@ -553,7 +591,11 @@ if __name__ == "__main__":
                  max_steps=args.max_steps,
                  draw_boundary=args.draw_boundary,
                  boundary_half_size=args.boundary_half_size,
-                 obs_mode=args.obs_mode)
+                 obs_mode=args.obs_mode,
+                 obs_normalization=args.obs_normalization,
+                 pid_profile=args.pid_profile,
+                 reward_mode=args.reward_mode,
+                 missile_guidance_mode=args.missile_guidance_mode)
     except Exception:
         print("FATAL: 未捕获的异常:", flush=True)
         traceback.print_exc()

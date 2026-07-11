@@ -17,13 +17,29 @@ from my_uav_env import UavCombatEnv
 from my_uav_env.alignment.reward_utils import REWARD_VERSION
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
+    CHECKPOINT_SCHEMA_VERSION,
     VanillaActor,
     _classify_death_reason,
+    _compute_global_state_dim,
     _compute_obs_dim,
     _episode_outcome,
     _flatten_obs,
     _safe_div,
+    _unpack_and_validate_checkpoint,
 )
+
+
+EVALUATION_FIELDNAMES = [
+    "Episode", "Outcome", "RedWin", "BlueWin", "Draw", "Steps",
+    "EpisodeRewardRed", "RedAlive", "BlueAlive",
+    "RedMissilesFired", "BlueMissilesFired",
+    "RedMissileHits", "BlueMissileHits",
+    "RedMissileHitRate", "BlueMissileHitRate",
+    "RedDeathsMissile", "RedDeathsCrash",
+    "BlueDeathsMissile", "BlueDeathsCrash",
+    "KD_Red", "RewardVersion", "RewardMode", "ObsNormalization",
+    "PIDProfile", "MissileGuidanceMode",
+]
 
 
 def parse_args():
@@ -42,6 +58,16 @@ def parse_args():
     parser.add_argument("--obs-mode", type=str,
                         choices=("paper_strict", "engineering"),
                         default="paper_strict")
+    parser.add_argument("--obs-normalization", type=str,
+                        choices=("paper_fixed_v1", "none"),
+                        default="paper_fixed_v1")
+    parser.add_argument("--pid-profile", choices=("paper", "engineering_safe"),
+                        default="paper")
+    parser.add_argument("--reward-mode", choices=("paper_joint", "engineering_local"),
+                        default="paper_joint")
+    parser.add_argument("--missile-guidance-mode",
+                        choices=("paper_eq9", "legacy_simplified"),
+                        default="paper_eq9")
     parser.add_argument("--output", type=str,
                         default="results/eval_vanilla_mappo.csv")
     return parser.parse_args()
@@ -106,10 +132,28 @@ def _load_actor(args, device: torch.device):
               flush=True)
         return None, 128, None
 
-    state = torch.load(checkpoint, map_location=device, weights_only=False)
-    ckpt_obs_dim, hidden, rnn_hidden = _infer_actor_shapes(state)
+    payload = torch.load(checkpoint, map_location=device, weights_only=False)
     obs_dim = _compute_obs_dim(
         args.num_red, args.num_blue, is_red=True, obs_mode=args.obs_mode)
+    expected_metadata = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "obs_mode": args.obs_mode,
+        "obs_normalization": args.obs_normalization,
+        "reward_version": REWARD_VERSION,
+        "reward_mode": args.reward_mode,
+        "pid_profile": args.pid_profile,
+        "missile_guidance_mode": args.missile_guidance_mode,
+        "num_red": args.num_red,
+        "num_blue": args.num_blue,
+        "global_state_dim": _compute_global_state_dim(args.num_red, args.obs_mode),
+        "actor_obs_dim": obs_dim,
+    }
+    try:
+        state = _unpack_and_validate_checkpoint(
+            payload, expected_metadata, "actor")
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
+    ckpt_obs_dim, hidden, rnn_hidden = _infer_actor_shapes(state)
     if ckpt_obs_dim != obs_dim:
         raise SystemExit(
             "ERROR: checkpoint obs_dim does not match current evaluation scale.\n"
@@ -140,12 +184,19 @@ def _death_counts(death_reasons: dict[str, str], ids: list[str]) -> Counter:
 
 def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                     max_steps: int, device: torch.device, episode_idx: int,
-                    enable_blue_gcas: bool, obs_mode: str):
+                    enable_blue_gcas: bool, obs_mode: str,
+                    obs_normalization: str = "paper_fixed_v1",
+                    pid_profile: str = "paper",
+                    reward_mode: str = "paper_joint",
+                    missile_guidance_mode: str = "paper_eq9"):
     env = UavCombatEnv(
         max_num_blue=num_blue,
         max_num_red=num_red,
         max_steps=max_steps,
         obs_mode=obs_mode,
+        pid_profile=pid_profile,
+        reward_mode=reward_mode,
+        missile_guidance_mode=missile_guidance_mode,
         enable_gcas_for_blue=enable_blue_gcas,
         suppress_jsbsim_output=True,
     )
@@ -159,6 +210,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         blue_missiles_fired = 0.0
         info = {}
         steps = 0
+        red_episode_joint_reward = 0.0
 
         done = False
         while not done:
@@ -187,7 +239,9 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                     obs_np = obs[rid]
                     alive = not np.allclose(obs_np["ego_state"], 0.0)
                     if alive:
-                        obs_batch.append(_flatten_obs(obs_np, obs_mode=obs_mode))
+                        obs_batch.append(_flatten_obs(
+                            obs_np, obs_mode=obs_mode,
+                            obs_normalization=obs_normalization))
                         alive_indices.append(i)
                     else:
                         actions[rid] = np.zeros(3, dtype=np.float32)
@@ -209,6 +263,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
 
             obs, _rewards, terminated, truncated, info = env.step(actions)
             steps += 1
+            red_episode_joint_reward += float(_rewards.get(red_ids[0], 0.0))
 
             for rid in red_ids:
                 red_missiles_fired += info.get(rid, {}).get(
@@ -251,6 +306,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "BlueWin": 1 if outcome == "blue" else 0,
             "Draw": 1 if outcome == "draw" else 0,
             "Steps": steps,
+            "EpisodeRewardRed": red_episode_joint_reward,
             "RedAlive": red_alive,
             "BlueAlive": blue_alive,
             "RedMissilesFired": red_missiles_fired,
@@ -268,6 +324,10 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                 red_deaths_missile + red_deaths_crash,
             ),
             "RewardVersion": REWARD_VERSION,
+            "RewardMode": reward_mode,
+            "ObsNormalization": obs_normalization,
+            "PIDProfile": pid_profile,
+            "MissileGuidanceMode": missile_guidance_mode,
         }
     finally:
         env.close()
@@ -308,20 +368,9 @@ def main():
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    fieldnames = [
-        "Episode", "Outcome", "RedWin", "BlueWin", "Draw", "Steps",
-        "RedAlive", "BlueAlive",
-        "RedMissilesFired", "BlueMissilesFired",
-        "RedMissileHits", "BlueMissileHits",
-        "RedMissileHitRate", "BlueMissileHitRate",
-        "RedDeathsMissile", "RedDeathsCrash",
-        "BlueDeathsMissile", "BlueDeathsCrash",
-        "KD_Red", "RewardVersion",
-    ]
-
     rows = []
     with open(args.output, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=EVALUATION_FIELDNAMES)
         writer.writeheader()
         f.flush()
         for ep in range(1, args.episodes + 1):
@@ -335,6 +384,10 @@ def main():
                 episode_idx=ep,
                 enable_blue_gcas=args.enable_blue_gcas,
                 obs_mode=args.obs_mode,
+                obs_normalization=args.obs_normalization,
+                pid_profile=args.pid_profile,
+                reward_mode=args.reward_mode,
+                missile_guidance_mode=args.missile_guidance_mode,
             )
             rows.append(row)
             writer.writerow(row)

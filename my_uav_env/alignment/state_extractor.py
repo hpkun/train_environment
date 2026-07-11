@@ -15,7 +15,10 @@ __all__ = [
     "_ordered_team_sims",
     "_read_jsbsim_angle_property",
     "_rotation_inertial_to_body",
+    "body_angles_from_neu_vector",
+    "body_vector_to_inertial_neu",
     "build_strict_paper_entity_observation",
+    "compute_body_x_q_los_from_body",
     "compute_q_los_placeholder",
     "describe_paper_entities",
     "extract_relative_state",
@@ -54,6 +57,23 @@ def _rotation_inertial_to_body(roll, pitch, heading) -> np.ndarray:
     body_to_ned = r_z @ r_y @ r_x
     neu_to_ned = np.diag([1.0, 1.0, -1.0])
     return (body_to_ned.T @ neu_to_ned).astype(np.float64)
+
+
+def body_vector_to_inertial_neu(vector_body, roll, pitch, heading) -> np.ndarray:
+    """Convert aerospace body vector (x forward, y right, z down) to NEU."""
+    r_bi = _rotation_inertial_to_body(roll, pitch, heading)
+    return r_bi.T @ np.asarray(vector_body, dtype=np.float64)
+
+
+def body_angles_from_neu_vector(vector_neu, roll, pitch, heading):
+    """Return body vector, up-positive elevation, right-positive azimuth, qLOS."""
+    r_bi = _rotation_inertial_to_body(roll, pitch, heading)
+    body = r_bi @ np.asarray(vector_neu, dtype=np.float64)
+    horizontal = float(np.hypot(body[0], body[1]))
+    elevation = float(np.arctan2(-body[2], horizontal))
+    azimuth = float(np.arctan2(body[1], body[0]))
+    q_los = compute_body_x_q_los_from_body(body)
+    return body, elevation, azimuth, q_los
 
 
 def _get_alpha_beta_with_source(sim) -> tuple[float, float, str, str]:
@@ -164,29 +184,23 @@ def extract_relative_state(observer_sim, target_sim,
     [x_body, y_body, z_body, theta_v_body, psi_v_body, V_target,
      theta_LOS_body, psi_LOS_body, q_LOS, d]
 
-    ``q_LOS`` is currently a placeholder line-of-sight angle defined as
-    arccos(clamp(x_body / d, -1, 1)).  This needs review against the paper's
-    exact geometric definition before training use.
+    ``q_LOS`` uses the project's explicit interpretation of the paper: the
+    three-dimensional angle between observer body-x and observer-to-target LOS.
     """
     obs_pos = np.asarray(observer_sim.get_position(), dtype=np.float64)
     tgt_pos = np.asarray(target_sim.get_position(), dtype=np.float64)
     obs_vel = np.asarray(observer_sim.get_velocity(), dtype=np.float64)
     tgt_vel = np.asarray(target_sim.get_velocity(), dtype=np.float64)
     roll, pitch, heading = np.asarray(observer_sim.get_rpy(), dtype=np.float64)
-    r_bi = _rotation_inertial_to_body(roll, pitch, heading)
-
-    rel_pos_body = r_bi @ (tgt_pos - obs_pos)
+    rel_pos_body, theta_los_body, psi_los_body, q_los = \
+        body_angles_from_neu_vector(
+            tgt_pos - obs_pos, roll, pitch, heading)
     x_body, y_body, z_body = [float(v) for v in rel_pos_body]
     d = float(np.linalg.norm(rel_pos_body))
-    horizontal = float(np.linalg.norm(rel_pos_body[:2]))
-    theta_los_body = float(np.arctan2(z_body, horizontal))
-    psi_los_body = float(np.arctan2(y_body, x_body))
-    q_los = compute_q_los_placeholder(rel_pos_body)
 
-    rel_vel_body = r_bi @ (tgt_vel - obs_vel)
-    rel_vel_horizontal = float(np.linalg.norm(rel_vel_body[:2]))
-    theta_v_body = float(np.arctan2(rel_vel_body[2], rel_vel_horizontal))
-    psi_v_body = float(np.arctan2(rel_vel_body[1], rel_vel_body[0]))
+    rel_vel_body, theta_v_body, psi_v_body, _ = \
+        body_angles_from_neu_vector(
+            tgt_vel - obs_vel, roll, pitch, heading)
     target_speed = float(np.linalg.norm(tgt_vel))
 
     if not radar_detected:
@@ -208,21 +222,18 @@ def extract_relative_state(observer_sim, target_sim,
     ], dtype=np.float32)
 
 
-def compute_q_los_placeholder(rel_pos_body: np.ndarray) -> float:
-    """Placeholder LOS angle against the body x-axis.
-
-    This returns arccos(clamp(x_body / d, -1, 1)), where d is relative distance.
-    It represents the angle between line-of-sight and the observer aircraft's
-    forward body x-axis, so it describes observer-to-target LOS deviation.  It
-    is not yet equivalent to the target-tail / 3-9-line angle used by the
-    environment's TA/AO and missile logic.  The definition must be reviewed
-    before using it for reward terms, masking, or ranking.
-    """
+def compute_body_x_q_los_from_body(rel_pos_body: np.ndarray) -> float:
+    """Return the body-x to observer-to-target LOS angle in ``[0, pi]``."""
     rel_pos_body = np.asarray(rel_pos_body, dtype=np.float64)
     distance = float(np.linalg.norm(rel_pos_body))
     if distance <= 1e-8:
         return 0.0
     return float(np.arccos(np.clip(float(rel_pos_body[0]) / distance, -1.0, 1.0)))
+
+
+def compute_q_los_placeholder(rel_pos_body: np.ndarray) -> float:
+    """Deprecated compatibility alias for ``compute_body_x_q_los_from_body``."""
+    return compute_body_x_q_los_from_body(rel_pos_body)
 
 
 def _ordered_team_sims(env, agent_id: str):
@@ -246,7 +257,7 @@ def _is_valid_sim(sim) -> bool:
 
 
 def build_strict_paper_entity_observation(env, agent_id: str):
-    """Build prototype paper Table 1/Table 2 entity observation from env state.
+    """Build the paper Table 1/Table 2 entity observation from env state.
 
     Returns:
         entities: shape (N_entities, 10)
@@ -289,12 +300,12 @@ def build_strict_paper_entity_observation(env, agent_id: str):
     entity_mask = np.asarray(mask, dtype=np.int64)
     meta = {
         "entity_dim": 10,
-        "schema": "paper_table1_table2_prototype",
+        "schema": "paper_table1_table2_v1",
         "alpha_beta": {
             "alpha_source": self_meta["alpha_source"],
             "beta_source": self_meta["beta_source"],
         },
-        "q_los": "observer_body_x_axis_angle_placeholder_not_target_tail_angle",
+        "q_los": "observer_body_x_to_target_los_3d_angle_interpretation",
         "radar_detected": radar_mode,
         "layout": {
             "n_ego": 1,

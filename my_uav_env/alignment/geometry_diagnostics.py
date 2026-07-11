@@ -16,7 +16,7 @@ from my_uav_env.alignment.los_geometry import (
 from my_uav_env.alignment.reward_utils import ta_angle_advantage_fixed, td_distance_advantage
 from my_uav_env.alignment.state_extractor import (
     _rotation_inertial_to_body,
-    compute_q_los_placeholder,
+    compute_body_x_q_los_from_body,
 )
 from my_uav_env.utils import get2d_AO_TA_R
 
@@ -129,7 +129,7 @@ def compute_body_los_angles(
     horizontal = float(np.linalg.norm(rel_pos_body[:2]))
     theta_los = float(np.arctan2(z_body, horizontal))
     psi_los = float(np.arctan2(y_body, x_body))
-    q_los = compute_q_los_placeholder(rel_pos_body)
+    q_los = compute_body_x_q_los_from_body(rel_pos_body)
     return {
         "x_body": x_body,
         "y_body": y_body,

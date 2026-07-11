@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from my_uav_env.alignment.state_extractor import body_vector_to_inertial_neu
+
 # ==============================================================================
 #  Per-agent hysteresis state (module-level — survives across env steps)
 # ==============================================================================
@@ -48,7 +50,7 @@ BLUE_POLICY_DEBUG = False
 # ---- Hard Deck: never fight below 4500 m ----
 HARD_DECK        = 4500.0   # < this → force climb, full throttle, no combat
 SAFE_COMBAT_ALT  = 6000.0   # below this → graduated dive restriction + full throttle
-DOOMED_ALT       = 3000.0   # deprecated: env death_mask handles target validity
+DOOMED_ALT       = 3000.0   # deprecated: env alive_mask handles target validity
 
 # ---- Descent-rate safety ----
 MAX_DESCENT_RATE = 40.0     # m/s — if descending faster than this below 5500 m, force climb
@@ -311,15 +313,9 @@ def _simple_body_vector_to_world_bearing(
         heading = float(own_heading) if own_heading is not None else float(ego[6])
         if not np.all(np.isfinite([x, y, z, roll, pitch, heading])):
             return None
-        cr, sr = np.cos(roll), np.sin(roll)
-        cp, sp = np.cos(pitch), np.sin(pitch)
-        cy, sy = np.cos(heading), np.sin(heading)
-        body_to_inertial = np.array([
-            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-            [-sp, cp * sr, cp * cr],
-        ], dtype=np.float64)
-        inertial = body_to_inertial @ np.array([x, y, z], dtype=np.float64)
+        inertial = body_vector_to_inertial_neu(
+            np.array([x, y, z], dtype=np.float64),
+            roll, pitch, heading)
         if not np.all(np.isfinite(inertial[:2])) or np.linalg.norm(inertial[:2]) < 1e-9:
             return None
         return _wrap_pi(float(np.arctan2(inertial[1], inertial[0])))
@@ -418,7 +414,9 @@ def _simple_valid_targets(
     excluded: set[int] | None = None,
 ) -> list[tuple[float, int, np.ndarray]]:
     enemy_states = np.asarray(obs.get("enemy_states", []), dtype=np.float32)
-    death_mask = np.asarray(obs.get("death_mask", []), dtype=np.float32).reshape(-1)
+    alive_mask = np.asarray(
+        obs.get("alive_mask", obs.get("death_mask", [])),
+        dtype=np.float32).reshape(-1)
     if enemy_states.ndim != 2 or enemy_states.shape[0] == 0:
         return []
     excluded = excluded or set()
@@ -426,7 +424,7 @@ def _simple_valid_targets(
     for red_idx in range(min(num_red, enemy_states.shape[0])):
         if red_idx in excluded:
             continue
-        if death_mask.size > num_blue + red_idx and death_mask[num_blue + red_idx] <= 0.5:
+        if alive_mask.size > num_blue + red_idx and alive_mask[num_blue + red_idx] <= 0.5:
             continue
         state = np.asarray(enemy_states[red_idx], dtype=np.float32)
         if state.size < 6 or np.allclose(state, 0.0):
@@ -669,11 +667,11 @@ def blue_coordinated_actions(
         }
 
     # ---- Build score matrix: score[b][r] for alive reds ----
-    # Pre-filter alive reds (same across all blues since death_mask is shared)
+    # Pre-filter alive reds (same across all blues since alive_mask is shared)
     # We read from the first blue's obs (all blues share the same red state).
     first_obs = blue_obs[blue_ids[0]]
-    death_mask = first_obs["death_mask"]
-    alive_reds_all = [i for i in range(num_red) if death_mask[num_blue + i] > 0.5]
+    alive_mask = first_obs.get("alive_mask", first_obs["death_mask"])
+    alive_reds_all = [i for i in range(num_red) if alive_mask[num_blue + i] > 0.5]
 
     if not alive_reds_all:
         actions = {}
@@ -875,14 +873,14 @@ def _blue_pursuit_action_impl(
     #  COMBAT — Lead Pursuit with graduated dive restriction
     # =========================================================================
     enemy_states = obs["enemy_states"]
-    death_mask   = obs["death_mask"]
+    alive_mask = obs.get("alive_mask", obs["death_mask"])
 
     # --- Alive target list ---
     alive_reds_raw = [i for i in range(num_red)
-                      if death_mask[num_blue + i] > 0.5]
+                      if alive_mask[num_blue + i] > 0.5]
     # enemy_states[idx][2] is a body-frame / pseudo-up component, not reliable
     # world altitude. True death / low-altitude status is represented by the
-    # environment death_mask, so Blue must not discard alive Reds using body z.
+    # environment alive_mask, so Blue must not discard alive Reds using body z.
     alive_reds = alive_reds_raw
 
     # --- Target selection (radar tracks and AWACS coarse tracks) ---

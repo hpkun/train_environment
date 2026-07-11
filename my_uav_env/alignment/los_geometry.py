@@ -10,7 +10,7 @@ import numpy as np
 
 from my_uav_env.alignment.state_extractor import (
     _rotation_inertial_to_body,
-    compute_q_los_placeholder,
+    compute_body_x_q_los_from_body,
 )
 
 
@@ -44,8 +44,7 @@ def compute_body_x_q_los(
 
     Rotates ``target_pos - observer_pos`` into the observer's body frame
     using the same rotation-matrix convention as ``state_extractor``, then
-    returns ``compute_q_los_placeholder`` — the angle between the LOS
-    vector and the body x-axis.  Range: [0, pi].
+    returns the angle between the LOS vector and body x-axis. Range: [0, pi].
     """
     roll, pitch, heading = (float(observer_rpy[0]),
                             float(observer_rpy[1]),
@@ -53,7 +52,7 @@ def compute_body_x_q_los(
     r_bi = _rotation_inertial_to_body(roll, pitch, heading)
     rel_pos_body = r_bi @ (np.asarray(target_pos, dtype=np.float64)
                            - np.asarray(observer_pos, dtype=np.float64))
-    return compute_q_los_placeholder(rel_pos_body)
+    return compute_body_x_q_los_from_body(rel_pos_body)
 
 
 def compute_velocity_q_los(

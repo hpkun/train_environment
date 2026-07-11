@@ -9,9 +9,14 @@ fixed maneuver set: level hold, climb, descend, normal/hard left and right
 turns, accelerate, decelerate, pursue current target, and left/right break.
 The minimum safety set adds explicit return-to-center and hard-deck recovery
 candidates.
-The selected maneuver maximizes a normalized immediate score combining target
-approach (0.30), angle alignment (0.30), speed suitability (0.10), altitude
-safety (0.10), boundary safety (0.10), and missile-warning evasion (0.35).
+The selected maneuver maximizes a one-decision (0.2 s) proxy for the published
+TAM-HAPPO UAV reward categories. The normalized weights preserve Table 1's
+ratio `height:speed:angle:distance:avoidance = 10:10:15:10:30`, giving
+`0.1333:0.1333:0.2:0.1333:0.4`. Height and speed use each candidate's predicted
+next-step altitude and speed; angle and distance use candidate heading and
+projected closure; avoidance is zero without a real missile warning and favors
+break maneuvers when warning is active. No JSBSim branch or multi-step search is
+run during scoring.
 
 Targets come only from the blue aircraft's current visible observation. Dead
 and unobserved slots are excluded. Assignment is nearest-first with deterministic
@@ -28,7 +33,9 @@ Training metadata records `tam_rule_protocol_version`,
 `tam_rule_claim=paper_aligned_not_exact_reproduction`. The existing
 `brma_rule` behavior is unchanged and remains a separate baseline.
 
-Unlike `brma_rule`, this protocol does not use lead-point pursuit, layered
+`tam_greedy_rule` is the TAM-HAPPO paper-aligned baseline opponent. Unlike
+`brma_rule`, it does not use lead-point pursuit, layered
 energy logic, G compensation, or a long-lived tactical state machine. Formal
 heterogeneous Pure HAPPO/TAM experiments may select `tam_greedy_rule`; BRMA
-alignment and robustness evaluations retain `brma_rule`.
+alignment, pressure testing, and robustness evaluations retain the stronger
+engineering-oriented `brma_rule`.

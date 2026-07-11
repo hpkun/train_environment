@@ -11,6 +11,55 @@ from collections import deque
 from abc import ABC, abstractmethod
 from typing import List, Union
 
+
+def compute_los_angles_and_rates(relative_position, relative_velocity,
+                                 epsilon: float = 1e-8):
+    """Paper Eq.10/Eq.11 LOS angles and rates for missile-to-target vectors."""
+    r = np.asarray(relative_position, dtype=np.float64)
+    r_dot = np.asarray(relative_velocity, dtype=np.float64)
+    rx, ry, rz = r
+    rdx, rdy, rdz = r_dot
+    horizontal_sq = float(rx * rx + ry * ry)
+    horizontal = float(np.sqrt(horizontal_sq))
+    range_sq = float(np.dot(r, r))
+    beta = float(np.arctan2(ry, rx))
+    epsilon_angle = float(np.arctan2(rz, horizontal))
+    beta_dot = float((rdy * rx - ry * rdx) / max(horizontal_sq, epsilon))
+    epsilon_dot = float(
+        (horizontal_sq * rdz - rz * (rdx * rx + rdy * ry))
+        / max(range_sq * horizontal, epsilon)
+    )
+    values = np.nan_to_num(
+        [beta, epsilon_angle, beta_dot, epsilon_dot],
+        nan=0.0, posinf=0.0, neginf=0.0)
+    return tuple(float(value) for value in values)
+
+
+def compute_paper_eq9_overloads(relative_position, relative_velocity,
+                                missile_velocity, navigation_constant=3.0,
+                                gravity=9.81, epsilon: float = 1e-8):
+    """Return literal paper Eq.9 lateral and pitch overload commands."""
+    beta, los_epsilon, beta_dot, epsilon_dot = compute_los_angles_and_rates(
+        relative_position, relative_velocity, epsilon=epsilon)
+    velocity = np.asarray(missile_velocity, dtype=np.float64)
+    speed = float(np.linalg.norm(velocity))
+    if speed <= epsilon:
+        return 0.0, 0.0
+    gamma_m = float(np.arcsin(np.clip(velocity[2] / speed, -1.0, 1.0)))
+    cos_sum = float(np.cos(los_epsilon + beta))
+    if abs(cos_sum) < epsilon:
+        cos_sum = epsilon if cos_sum >= 0.0 else -epsilon
+    n_mc = (
+        navigation_constant * speed * np.cos(gamma_m) / gravity
+        * (beta_dot
+           + np.tan(los_epsilon) * np.tan(los_epsilon + beta) * epsilon_dot)
+    )
+    n_mh = (
+        speed / gravity * navigation_constant / cos_sum * epsilon_dot
+    )
+    values = np.nan_to_num([n_mc, n_mh], nan=0.0, posinf=0.0, neginf=0.0)
+    return float(values[0]), float(values[1])
+
 # jsbsim is imported at module level.  JSBSim's C++ startup banner is printed
 # to stdout during ``FGFDMExec()`` construction.  The ``SuppressOutput`` context
 # manager (below) can temporarily silence it; use ``suppress_jsbsim_output=True``
@@ -509,15 +558,23 @@ class MissileSimulator(BaseSimulator):
 
     @classmethod
     def create(cls, parent: AircraftSimulator, target: AircraftSimulator,
-               uid: str, missile_model: str = "AIM-9L"):
+               uid: str, missile_model: str = "AIM-9L",
+               guidance_mode: str = "paper_eq9"):
         assert parent.dt == target.dt
-        missile = MissileSimulator(uid, parent.color, missile_model, parent.dt)
+        missile = MissileSimulator(
+            uid, parent.color, missile_model, parent.dt,
+            guidance_mode=guidance_mode)
         missile.launch(parent)
         missile.target(target)
         return missile
 
-    def __init__(self, uid="A0101", color="Red", model="AIM-9L", dt=1 / 12):
+    def __init__(self, uid="A0101", color="Red", model="AIM-9L", dt=1 / 12,
+                 guidance_mode: str = "paper_eq9"):
         super().__init__(uid, color, dt)
+        if guidance_mode not in ("paper_eq9", "legacy_simplified"):
+            raise ValueError(
+                "guidance_mode must be 'paper_eq9' or 'legacy_simplified'")
+        self.guidance_mode = guidance_mode
         self._status = MissileSimulator.INACTIVE
         self.model = model
         self.parent_aircraft = None
@@ -686,11 +743,18 @@ class MissileSimulator(BaseSimulator):
         Rxy = np.linalg.norm([x_m - x_t, y_m - y_t])
         Rxyz = max(np.linalg.norm([x_m - x_t, y_m - y_t, z_t - z_m]), 1e-8)
 
-        dbeta = ((dy_t - dy_m) * (x_t - x_m) - (dx_t - dx_m) * (y_t - y_m)) / (Rxy ** 2 + 1e-8)
-        deps = ((dz_t - dz_m) * Rxy ** 2 - (z_t - z_m) * (
-            (x_t - x_m) * (dx_t - dx_m) + (y_t - y_m) * (dy_t - dy_m))) / (Rxyz ** 2 * Rxy + 1e-8)
-        ny = self.K * v_m / self._g * np.cos(theta_m) * dbeta
-        nz = self.K * v_m / self._g * deps + np.cos(theta_m)
+        if self.guidance_mode == "paper_eq9":
+            relative_position = np.array([x_t - x_m, y_t - y_m, z_t - z_m])
+            relative_velocity = np.array([dx_t - dx_m, dy_t - dy_m, dz_t - dz_m])
+            ny, nz = compute_paper_eq9_overloads(
+                relative_position, relative_velocity, self.get_velocity(),
+                navigation_constant=self.K, gravity=self._g)
+        else:
+            dbeta = ((dy_t - dy_m) * (x_t - x_m) - (dx_t - dx_m) * (y_t - y_m)) / (Rxy ** 2 + 1e-8)
+            deps = ((dz_t - dz_m) * Rxy ** 2 - (z_t - z_m) * (
+                (x_t - x_m) * (dx_t - dx_m) + (y_t - y_m) * (dy_t - dy_m))) / (Rxyz ** 2 * Rxy + 1e-8)
+            ny = self.K * v_m / self._g * np.cos(theta_m) * dbeta
+            nz = self.K * v_m / self._g * deps + np.cos(theta_m)
         return np.clip([ny, nz], -self._nyz_max, self._nyz_max), Rxyz
 
     def _state_trans(self, action):
