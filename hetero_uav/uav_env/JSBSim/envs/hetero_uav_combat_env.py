@@ -135,7 +135,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
-        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8", "tam_brma_paper_aligned_v1", "tam_happo_table1_v1", "brma_tam_scripted_composite_v1"}:
+        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8", "tam_brma_paper_aligned_v1", "tam_happo_table1_v1", "brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1"}:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
         self._tam_reward_scale = float(kwargs.pop("tam_reward_scale", 0.05))
@@ -185,6 +185,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.brma_tam_scripted_composite_v1_config = deepcopy(_brma_tam_composite_cfg)
         if hetero_reward_mode == "brma_tam_scripted_composite_v1" and not self.brma_tam_scripted_composite_v1_config:
             raise ValueError("brma_tam_scripted_composite_v1 mode requires config block")
+        _scale_v1_cfg = kwargs.pop("brma_tam_scale_aligned_v1", None) or {}
+        self.brma_tam_scale_aligned_v1_config = deepcopy(_scale_v1_cfg)
+        if hetero_reward_mode == "brma_tam_scale_aligned_v1" and not self.brma_tam_scale_aligned_v1_config:
+            raise ValueError("brma_tam_scale_aligned_v1 mode requires config block")
         # Cached per-step obs for reward overlay (minimal_v1 / role_v1)
         self._last_step_obs: dict = {}
         # First-death detection for MAV — penalize once per episode
@@ -228,6 +232,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.missile_evasion_teams = str(getattr(self, "missile_evasion_config", {}).get("teams", ""))
         if self.hetero_reward_mode == "brma_tam_scripted_composite_v1":
             self._validate_brma_tam_scripted_composite_v1_contract()
+        if self.hetero_reward_mode == "brma_tam_scale_aligned_v1":
+            self._validate_brma_tam_scale_aligned_v1_contract()
 
     # -- TAM Paper Reward v6 JSBSim-aligned v3 -------------------------------
 
@@ -270,6 +276,16 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._brma_tam_last_reward_target: dict[str, str] = {}
         self._brma_tam_missile_speed_cache: dict[str, float] = {}
         self._reward_target_diagnostic_records: list[dict] = []
+
+    def _brma_tam_scale_v1_reset_episode_state(self) -> None:
+        self._scale_v1_uav_death_penalized: set[str] = set()
+        self._scale_v1_uav_horizontal_oob_penalized: set[str] = set()
+        self._scale_v1_mav_death_penalized = False
+        self._scale_v1_mav_team_credit_used = 0.0
+        self._scale_v1_terminal_applied = False
+        self._scale_v1_progress_cache: dict[str, dict] = {}
+        self._scale_v1_reward_target_switch_counts: dict[str, int] = {}
+        self._scale_v1_alive_before_step: dict[str, bool] = {}
 
     @staticmethod
     def _brma_homo_td15(distance_m: float) -> float:
@@ -968,6 +984,357 @@ class HeteroUavCombatEnv(UavCombatEnv):
             components[rid] = comp
         if mav_id and mav_id in components:
             components[mav_id]["tam_table1_total"] = float(components[mav_id]["tam_table1_mav_total"])
+        return base_rewards, components
+
+    # -- BRMA/TAM scale-aligned reward v1 ------------------------------------
+
+    def _validate_brma_tam_scale_aligned_v1_contract(self) -> None:
+        cfg = self.brma_tam_scale_aligned_v1_config
+        required = (
+            ("reward_contract_revision",),
+            ("uav", "progress", "distance_weight"),
+            ("uav", "progress", "angle_weight"),
+            ("uav", "progress", "speed_weight"),
+            ("uav", "progress", "clip_min"),
+            ("uav", "progress", "clip_max"),
+            ("uav", "progress", "distance_optimal_km"),
+            ("uav", "progress", "distance_decay_km"),
+            ("uav", "event", "kill_enemy"),
+            ("uav", "event", "death_or_crash"),
+            ("uav", "event", "first_horizontal_out_of_zone"),
+            ("mav", "role_scale"),
+            ("mav", "safety", "dist_weight"),
+            ("mav", "safety", "threat_weight"),
+            ("mav", "safety", "aspect_weight"),
+            ("mav", "safety", "d_danger_m"),
+            ("mav", "safety", "d_safe_m"),
+            ("mav", "support", "pos_weight"),
+            ("mav", "support", "aware_weight"),
+            ("mav", "support", "d_opt_m"),
+            ("mav", "support", "d_max_m"),
+            ("mav", "event", "death_penalty"),
+            ("mav", "event", "full_enemy_team_credit"),
+            ("terminal", "coefficient"),
+            ("terminal", "mav_loss_weight_mode"),
+            ("logging", "log_raw_potentials"),
+            ("logging", "log_progress_reset_reason"),
+            ("logging", "log_scale_diagnostics"),
+        )
+        for path in required:
+            value = cfg
+            for key in path:
+                if not isinstance(value, dict) or key not in value:
+                    raise ValueError(
+                        "brma_tam_scale_aligned_v1 requires explicit config key "
+                        + ".".join(path)
+                    )
+                value = value[key]
+        if int(cfg["reward_contract_revision"]) != 3:
+            raise ValueError("brma_tam_scale_aligned_v1 requires reward_contract_revision=3")
+        if cfg["terminal"]["mav_loss_weight_mode"] != "match_initial_attack_uav_count":
+            raise ValueError("unsupported scale-aligned MAV terminal weighting")
+        if self.observation_mode != "mav_shared_geo":
+            raise ValueError("brma_tam_scale_aligned_v1 requires observation_mode='mav_shared_geo'")
+        if getattr(self, "red_target_selection_mode", "closest") != "closest":
+            raise ValueError("brma_tam_scale_aligned_v1 requires red_target_selection_mode='closest'")
+        if int(self.aircraft_type_params.get("mav", {}).get("num_missiles", 0)) != 0:
+            raise ValueError("brma_tam_scale_aligned_v1 requires MAV num_missiles == 0")
+
+    @staticmethod
+    def _scale_v1_distance_potential(distance_m: float, optimal_km: float = 5.0,
+                                     decay_km: float = 10.0) -> float:
+        d_km = float(distance_m) / 1000.0
+        if not np.isfinite(d_km):
+            return 0.0
+        return float(np.exp(-max(d_km - float(optimal_km), 0.0) / max(float(decay_km), 1e-6)))
+
+    @staticmethod
+    def _scale_v1_angle_potential(angle_raw: float) -> float:
+        return float(np.clip((float(angle_raw) + 1.0) / 2.0, 0.0, 1.0))
+
+    @staticmethod
+    def _scale_v1_speed_potential(speed_raw: float) -> float:
+        return float(np.clip((float(speed_raw) + 1.0) / 2.0, 0.0, 1.0))
+
+    def _scale_v1_uav_progress(self, aid: str, target_id: str | None,
+                               geom: dict, speed_logs: dict) -> dict:
+        pcfg = self.brma_tam_scale_aligned_v1_config["uav"]["progress"]
+        cache = self._scale_v1_progress_cache.get(aid)
+        target = self.blue_planes.get(target_id) if target_id else None
+        reason = "none"
+        valid = bool(target is not None and getattr(target, "is_alive", False))
+        if not valid:
+            reason = "no_alive_target" if target_id is None else "target_dead"
+        elif float(geom.get("tam_geometry_valid", 0.0)) <= 0.5:
+            reason = "invalid_geometry"
+            valid = False
+        elif float(speed_logs.get("speed_ratio_valid", 0.0)) <= 0.5:
+            reason = "invalid_speed"
+            valid = False
+
+        if not valid:
+            self._scale_v1_progress_cache.pop(aid, None)
+            return {
+                "scale_v1_phi_distance": 0.0, "scale_v1_phi_angle": 0.0,
+                "scale_v1_phi_speed": 0.0, "scale_v1_delta_distance": 0.0,
+                "scale_v1_delta_angle": 0.0, "scale_v1_delta_speed": 0.0,
+                "scale_v1_progress_raw": 0.0, "scale_v1_progress_clipped": 0.0,
+                "scale_v1_progress_reset_flag": 1.0,
+                "scale_v1_progress_reset_reason": reason,
+            }
+
+        phi_d = self._scale_v1_distance_potential(
+            geom["target_distance_m"], pcfg["distance_optimal_km"], pcfg["distance_decay_km"]
+        )
+        phi_a = self._scale_v1_angle_potential(geom["tam_angle_raw"])
+        phi_v = self._scale_v1_speed_potential(speed_logs["tam_speed_raw"])
+        reset = False
+        if cache is None:
+            reason, reset = "episode_start", True
+        elif cache.get("target_id") != target_id:
+            previous = self.blue_planes.get(cache.get("target_id"))
+            reason = "target_dead" if previous is None or not getattr(previous, "is_alive", False) else "target_switch"
+            reset = True
+            self._scale_v1_reward_target_switch_counts[aid] = (
+                self._scale_v1_reward_target_switch_counts.get(aid, 0) + 1
+            )
+        if reset:
+            delta_d = delta_a = delta_v = raw = clipped = 0.0
+        else:
+            delta_d = phi_d - float(cache["phi_distance"])
+            delta_a = phi_a - float(cache["phi_angle"])
+            delta_v = phi_v - float(cache["phi_speed"])
+            raw = (
+                float(pcfg["distance_weight"]) * delta_d
+                + float(pcfg["angle_weight"]) * delta_a
+                + float(pcfg["speed_weight"]) * delta_v
+            )
+            clipped = float(np.clip(raw, float(pcfg["clip_min"]), float(pcfg["clip_max"])))
+        self._scale_v1_progress_cache[aid] = {
+            "target_id": target_id, "phi_distance": phi_d,
+            "phi_angle": phi_a, "phi_speed": phi_v,
+        }
+        return {
+            "scale_v1_phi_distance": phi_d, "scale_v1_phi_angle": phi_a,
+            "scale_v1_phi_speed": phi_v, "scale_v1_delta_distance": delta_d,
+            "scale_v1_delta_angle": delta_a, "scale_v1_delta_speed": delta_v,
+            "scale_v1_progress_raw": raw, "scale_v1_progress_clipped": clipped,
+            "scale_v1_progress_reset_flag": float(reset),
+            "scale_v1_progress_reset_reason": reason,
+        }
+
+    def _scale_v1_uav_event(self, aid: str, sim) -> tuple[float, dict]:
+        cfg = self.brma_tam_scale_aligned_v1_config["uav"]["event"]
+        kills = int(getattr(self, "_step_kill_count", {}).get(aid, 0))
+        kill = float(cfg["kill_enemy"]) * kills
+        death = oob = 0.0
+        alive_before = bool(self._scale_v1_alive_before_step.get(aid, getattr(sim, "is_alive", False)))
+        if alive_before and not getattr(sim, "is_alive", False) and aid not in self._scale_v1_uav_death_penalized:
+            death = float(cfg["death_or_crash"])
+            self._scale_v1_uav_death_penalized.add(aid)
+        elif self._brma_tam_horizontal_oob(sim) and aid not in self._scale_v1_uav_horizontal_oob_penalized:
+            oob = float(cfg["first_horizontal_out_of_zone"])
+            self._scale_v1_uav_horizontal_oob_penalized.add(aid)
+        total = kill + death + oob
+        return total, {
+            "scale_v1_uav_event_kill": kill, "scale_v1_uav_event_death": death,
+            "scale_v1_uav_event_oob": oob, "scale_v1_uav_event_total": total,
+        }
+
+    def _scale_v1_mav_role(self, mav) -> tuple[float, dict]:
+        cfg = self.brma_tam_scale_aligned_v1_config["mav"]
+        _unused, safety = self._brma_tam_mav_safety(mav, {"mav": {"safety": cfg["safety"]}})
+        alive_blue = [
+            self.blue_planes[bid] for bid in self.blue_ids
+            if self.blue_planes.get(bid) is not None and self.blue_planes[bid].is_alive
+        ]
+        alive_uav = [
+            self.red_planes[rid] for rid in self.red_ids
+            if self.agent_roles.get(rid) == "attack_uav"
+            and self.red_planes.get(rid) is not None and self.red_planes[rid].is_alive
+        ]
+        spcfg = cfg["support"]
+        r_pos = center_distance = 0.0
+        if alive_blue and alive_uav:
+            center = np.mean([
+                self._brma_tam_safe_vec(sim, "get_position")[:2]
+                for sim in alive_blue + alive_uav
+            ], axis=0)
+            center_distance = float(np.linalg.norm(
+                self._brma_tam_safe_vec(mav, "get_position")[:2] - center
+            ))
+            r_pos = self._brma_tam_mav_pos_raw(center_distance, spcfg["d_opt_m"], spcfg["d_max_m"])
+        aware_sum = 0.0
+        mav_pos = self._brma_tam_safe_vec(mav, "get_position")
+        mav_vel = self._brma_tam_safe_vec(mav, "get_velocity")
+        mav_speed = float(np.linalg.norm(mav_vel))
+        mav_id = str(getattr(mav, "uid", "red_0"))
+        for bid in self.blue_ids:
+            blue = self.blue_planes.get(bid)
+            if blue is None or not blue.is_alive or not self._mav_shared_track_state(mav_id, bid)["observed"]:
+                continue
+            los = self._brma_tam_safe_vec(blue, "get_position") - mav_pos
+            distance = float(np.linalg.norm(los))
+            if distance > 1e-8 and mav_speed > 1e-8 and np.isfinite(distance):
+                ao = float(np.arccos(np.clip(np.dot(los / distance, mav_vel / mav_speed), -1.0, 1.0)))
+                if ao < np.pi / 2.0:
+                    aware_sum += 0.3 * (1.0 - ao / (np.pi / 2.0))
+        blue_count = len(alive_blue)
+        aspect_sum = float(safety["mav_aspect_raw_sum"])
+        aspect_mean = aspect_sum / max(float(blue_count), 1.0)
+        aware_mean = aware_sum / max(float(blue_count), 1.0)
+        raw = (
+            float(cfg["safety"]["dist_weight"]) * float(safety["mav_dist_raw"])
+            + float(cfg["safety"]["threat_weight"]) * float(safety["mav_threat_raw"])
+            + float(cfg["safety"]["aspect_weight"]) * aspect_mean
+            + float(spcfg["pos_weight"]) * r_pos
+            + float(spcfg["aware_weight"]) * aware_mean
+        )
+        role = float(cfg["role_scale"]) * raw
+        return role, {
+            "scale_v1_mav_dist_raw": float(safety["mav_dist_raw"]),
+            "scale_v1_mav_threat_raw": float(safety["mav_threat_raw"]),
+            "scale_v1_mav_aspect_raw_sum": aspect_sum,
+            "scale_v1_mav_aspect_mean": aspect_mean,
+            "scale_v1_mav_pos_raw": r_pos,
+            "scale_v1_mav_aware_raw_sum": aware_sum,
+            "scale_v1_mav_aware_mean": aware_mean,
+            "scale_v1_mav_center_distance_m": center_distance,
+            "scale_v1_mav_alive_blue_count": float(blue_count),
+            "scale_v1_mav_role_raw": raw, "scale_v1_mav_role": role,
+        }
+
+    def _scale_v1_mav_event(self, aid: str, mav) -> tuple[float, dict]:
+        cfg = self.brma_tam_scale_aligned_v1_config["mav"]["event"]
+        alive_before = bool(self._scale_v1_alive_before_step.get(aid, getattr(mav, "is_alive", False)))
+        death = 0.0
+        if alive_before and not getattr(mav, "is_alive", False) and not self._scale_v1_mav_death_penalized:
+            death = float(cfg["death_penalty"])
+            self._scale_v1_mav_death_penalized = True
+        new_kills = sum(
+            int(getattr(self, "_step_kill_count", {}).get(rid, 0))
+            for rid in self.red_ids if self.agent_roles.get(rid) == "attack_uav"
+        ) if alive_before else 0
+        full_credit = float(cfg["full_enemy_team_credit"])
+        per_kill = full_credit / max(float(len(self.blue_ids)), 1.0)
+        available = max(0.0, full_credit - self._scale_v1_mav_team_credit_used)
+        credit = min(per_kill * new_kills, available) if alive_before else 0.0
+        self._scale_v1_mav_team_credit_used += credit
+        total = death + credit
+        return total, {
+            "scale_v1_mav_event_death": death,
+            "scale_v1_mav_team_credit_delta": credit,
+            "scale_v1_mav_team_credit_used": self._scale_v1_mav_team_credit_used,
+            "scale_v1_mav_event_total": total,
+        }
+
+    def _scale_v1_terminal_value(self) -> tuple[float, float, float]:
+        initial_blue = max(len(self.blue_ids), 1)
+        alive_blue = sum(1 for bid in self.blue_ids if self.blue_planes.get(bid) and self.blue_planes[bid].is_alive)
+        attack_ids = [rid for rid in self.red_ids if self.agent_roles.get(rid) == "attack_uav"]
+        initial_attack = len(attack_ids)
+        alive_attack = sum(1 for rid in attack_ids if self.red_planes.get(rid) and self.red_planes[rid].is_alive)
+        mav_id = next((rid for rid in self.red_ids if self.agent_roles.get(rid) == "mav"), None)
+        mav_dead = float(bool(mav_id and (not self.red_planes.get(mav_id) or not self.red_planes[mav_id].is_alive)))
+        blue_loss = (initial_blue - alive_blue) / float(initial_blue)
+        mav_weight = float(initial_attack)
+        red_loss = (mav_weight * mav_dead + (initial_attack - alive_attack)) / max(mav_weight + initial_attack, 1.0)
+        coefficient = float(self.brma_tam_scale_aligned_v1_config["terminal"]["coefficient"])
+        terminal = float(np.clip(coefficient * (blue_loss - red_loss), -coefficient, coefficient))
+        return terminal, float(blue_loss), float(red_loss)
+
+    def _compute_brma_tam_scale_aligned_v1(self, base_rewards: dict, components: dict):
+        n_blue_alive = sum(1 for sim in self.blue_planes.values() if sim.is_alive)
+        n_red_alive = sum(1 for sim in self.red_planes.values() if sim.is_alive)
+        round_over = n_blue_alive == 0 or n_red_alive == 0 or self.current_step >= self.max_steps
+        terminal = blue_loss = red_loss = terminal_applied = 0.0
+        if round_over and not self._scale_v1_terminal_applied:
+            terminal, blue_loss, red_loss = self._scale_v1_terminal_value()
+            self._scale_v1_terminal_applied = True
+            terminal_applied = 1.0
+        for rid in self.red_ids:
+            sim = self.red_planes.get(rid)
+            comp = components.setdefault(rid, {})
+            role = self.agent_roles.get(rid, "")
+            alive_before = bool(self._scale_v1_alive_before_step.get(rid, getattr(sim, "is_alive", False)))
+            vals = {
+                "reward_contract_revision": 3.0,
+                "scale_v1_flight_pitch": float(comp.get("r_pitch", 0.0)),
+                "scale_v1_flight_roll": float(comp.get("r_roll", 0.0)),
+                "scale_v1_flight_altitude": float(comp.get("r_alt", 0.0)),
+                "scale_v1_flight_boundary": float(comp.get("r_bound", 0.0)),
+                "scale_v1_flight_velocity": float(comp.get("r_vel", 0.0)),
+                "scale_v1_brma_adv_log_only": float(comp.get("r_adv", 0.0)),
+                "scale_v1_brma_end_log_only": float(comp.get("r_end", 0.0)),
+                "scale_v1_brma_death_log_only": float(comp.get("r_death", 0.0)),
+                "scale_v1_terminal": terminal if alive_before else 0.0,
+                "scale_v1_blue_loss_fraction": blue_loss,
+                "scale_v1_red_loss_fraction": red_loss,
+                "scale_v1_terminal_applied": terminal_applied,
+            }
+            if not alive_before or sim is None:
+                for key in tuple(vals):
+                    if key.startswith("scale_v1_flight_") or key == "scale_v1_terminal":
+                        vals[key] = 0.0
+                total = 0.0
+                vals.update({
+                    "scale_v1_flight_total": 0.0, "scale_v1_total": 0.0,
+                    "scale_v1_identity_error": 0.0,
+                    "scale_v1_uav_total": 0.0, "scale_v1_mav_total": 0.0,
+                })
+            else:
+                flight = sum(vals[key] for key in (
+                    "scale_v1_flight_pitch", "scale_v1_flight_roll",
+                    "scale_v1_flight_altitude", "scale_v1_flight_boundary",
+                    "scale_v1_flight_velocity",
+                ))
+                vals["scale_v1_flight_total"] = flight
+                if role == "mav":
+                    role_reward, role_logs = self._scale_v1_mav_role(sim)
+                    event, event_logs = self._scale_v1_mav_event(rid, sim)
+                    vals.update(role_logs)
+                    vals.update(event_logs)
+                    total = flight + role_reward + event + vals["scale_v1_terminal"]
+                    vals["scale_v1_mav_total"] = total
+                    vals["scale_v1_uav_total"] = 0.0
+                else:
+                    target_id, target, _distance = self._brma_tam_closest_alive_blue(sim)
+                    if target is None:
+                        geom = {"target_distance_m": 0.0, "tam_angle_raw": 0.0, "tam_geometry_valid": 0.0}
+                        speed_logs = self._brma_tam_speed_raw(0.0, 0.0)
+                    else:
+                        geom = self._brma_tam_3d_geometry(sim, target)
+                        speed_logs = self._brma_tam_speed_raw(
+                            float(np.linalg.norm(self._brma_tam_safe_vec(sim, "get_velocity"))),
+                            float(np.linalg.norm(self._brma_tam_safe_vec(target, "get_velocity"))),
+                        )
+                    progress = self._scale_v1_uav_progress(rid, target_id, geom, speed_logs)
+                    event, event_logs = self._scale_v1_uav_event(rid, sim)
+                    vals.update(progress)
+                    vals.update(event_logs)
+                    vals.update({
+                        "scale_v1_reward_target_id": target_id or "",
+                        "scale_v1_reward_target_distance_m": float(geom["target_distance_m"]),
+                        "scale_v1_reward_target_valid": float(target is not None),
+                        "scale_v1_geometry_valid": float(geom.get("tam_geometry_valid", 0.0)),
+                        "scale_v1_reward_target_switch_count": float(self._scale_v1_reward_target_switch_counts.get(rid, 0)),
+                    })
+                    total = flight + progress["scale_v1_progress_clipped"] + event + vals["scale_v1_terminal"]
+                    vals["scale_v1_uav_total"] = total
+                    vals["scale_v1_mav_total"] = 0.0
+                vals["scale_v1_total"] = total
+                expected = (
+                    flight
+                    + (vals.get("scale_v1_mav_role", 0.0) if role == "mav" else vals.get("scale_v1_progress_clipped", 0.0))
+                    + (vals.get("scale_v1_mav_event_total", 0.0) if role == "mav" else vals.get("scale_v1_uav_event_total", 0.0))
+                    + vals["scale_v1_terminal"]
+                )
+                vals["scale_v1_identity_error"] = float(total - expected)
+                if abs(vals["scale_v1_identity_error"]) > 1e-6:
+                    raise ValueError(f"scale-aligned reward identity failure agent={rid}")
+            comp.update(vals)
+            comp["total"] = float(total)
+            base_rewards[rid] = float(total)
         return base_rewards, components
 
     # -- BRMA/TAM scripted composite reward v1 -------------------------------
@@ -2858,16 +3225,18 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1",
             "brma_role_no_missile_reward_v8", "happo_ref_v1_mav_support",
             "tam_brma_paper_aligned_v1", "tam_happo_table1_v1",
-            "brma_tam_scripted_composite_v1",
+            "brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1",
         }
 
     def step(self, actions: dict):
-        if self.hetero_reward_mode == "brma_tam_scripted_composite_v1":
+        if self.hetero_reward_mode in {"brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1"}:
             self._brma_tam_alive_before_step = {
                 aid: bool(getattr((self.red_planes.get(aid) or self.blue_planes.get(aid)), "is_alive", False))
                 for aid in self.agent_ids
             }
             self._reward_target_diagnostic_records = []
+        if self.hetero_reward_mode == "brma_tam_scale_aligned_v1":
+            self._scale_v1_alive_before_step = dict(self._brma_tam_alive_before_step)
         trimmed = self._apply_action_trim(actions)
         obs, rewards, terminated, truncated, info = super().step(trimmed)
         if self._needs_last_step_obs_cache():
@@ -2889,6 +3258,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._tam_brma_paper_v1_reset_episode_state()
         self._tam_happo_table1_v1_reset_episode_state()
         self._brma_tam_scripted_reset_episode_state()
+        self._brma_tam_scale_v1_reset_episode_state()
         self._tam_v6v3_reset_episode_state()
         self._tam_v7_reset_episode_state()
         self._tam_brma_scripted_terminal_applied: bool = False
@@ -4703,6 +5073,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 return self._compute_tam_happo_table1_v1(base_rewards, components)
             if self.hetero_reward_mode == "brma_tam_scripted_composite_v1":
                 return self._compute_brma_tam_scripted_composite_v1(base_rewards, components)
+            if self.hetero_reward_mode == "brma_tam_scale_aligned_v1":
+                return self._compute_brma_tam_scale_aligned_v1(base_rewards, components)
             return base_rewards, components
 
         mav_id = self.red_ids[0] if self.red_ids else None

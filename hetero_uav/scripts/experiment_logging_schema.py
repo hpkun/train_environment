@@ -254,6 +254,33 @@ for _col in BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS:
     if _col not in REWARD_COMPONENT_COLUMNS:
         REWARD_COMPONENT_COLUMNS.append(_col)
 
+BRMA_TAM_SCALE_V1_COMPONENT_COLUMNS = [
+    "scale_v1_flight_pitch", "scale_v1_flight_roll", "scale_v1_flight_altitude",
+    "scale_v1_flight_boundary", "scale_v1_flight_velocity", "scale_v1_flight_total",
+    "scale_v1_brma_adv_log_only", "scale_v1_brma_end_log_only",
+    "scale_v1_brma_death_log_only", "scale_v1_phi_distance", "scale_v1_phi_angle",
+    "scale_v1_phi_speed", "scale_v1_delta_distance", "scale_v1_delta_angle",
+    "scale_v1_delta_speed", "scale_v1_progress_raw", "scale_v1_progress_clipped",
+    "scale_v1_progress_reset_flag", "scale_v1_progress_reset_reason",
+    "scale_v1_reward_target_id", "scale_v1_reward_target_distance_m",
+    "scale_v1_reward_target_valid", "scale_v1_geometry_valid",
+    "scale_v1_reward_target_switch_count", "scale_v1_uav_event_kill",
+    "scale_v1_uav_event_death", "scale_v1_uav_event_oob",
+    "scale_v1_uav_event_total", "scale_v1_uav_total", "scale_v1_mav_dist_raw",
+    "scale_v1_mav_threat_raw", "scale_v1_mav_aspect_raw_sum",
+    "scale_v1_mav_aspect_mean", "scale_v1_mav_pos_raw",
+    "scale_v1_mav_aware_raw_sum", "scale_v1_mav_aware_mean",
+    "scale_v1_mav_center_distance_m", "scale_v1_mav_alive_blue_count",
+    "scale_v1_mav_role_raw", "scale_v1_mav_role", "scale_v1_mav_event_death",
+    "scale_v1_mav_team_credit_delta", "scale_v1_mav_team_credit_used",
+    "scale_v1_mav_event_total", "scale_v1_mav_total", "scale_v1_blue_loss_fraction",
+    "scale_v1_red_loss_fraction", "scale_v1_terminal", "scale_v1_terminal_applied",
+    "scale_v1_total", "scale_v1_identity_error",
+]
+for _col in BRMA_TAM_SCALE_V1_COMPONENT_COLUMNS:
+    if _col not in REWARD_COMPONENT_COLUMNS:
+        REWARD_COMPONENT_COLUMNS.append(_col)
+
 REWARD_TARGET_DIAGNOSTICS_COLUMNS = [
     "run_id", "scenario", "episode_id", "step", "sim_time",
     "agent_id", "reward_target_id", "reward_target_distance_m",
@@ -433,6 +460,18 @@ for _col in BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS:
 for _col in ("max_altitude_m", "above_altitude_max_episode_flag"):
     if _col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
         EPISODE_REWARD_COMPONENTS_COLUMNS.append(_col)
+
+_SCALE_V1_EPISODE_LAST_FIELDS = {
+    "scale_v1_progress_reset_reason", "scale_v1_reward_target_id",
+    "scale_v1_reward_target_distance_m", "scale_v1_reward_target_valid",
+    "scale_v1_geometry_valid", "scale_v1_reward_target_switch_count",
+    "scale_v1_mav_team_credit_used", "scale_v1_blue_loss_fraction",
+    "scale_v1_red_loss_fraction", "scale_v1_terminal_applied",
+}
+for _col in BRMA_TAM_SCALE_V1_COMPONENT_COLUMNS:
+    _episode_col = f"{_col}_last" if _col in _SCALE_V1_EPISODE_LAST_FIELDS else f"{_col}_sum"
+    if _episode_col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
+        EPISODE_REWARD_COMPONENTS_COLUMNS.append(_episode_col)
 
 FILE_SCHEMAS = {
     "train_metrics.csv": TRAIN_METRICS_COLUMNS,
