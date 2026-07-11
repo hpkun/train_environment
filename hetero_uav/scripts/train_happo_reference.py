@@ -219,6 +219,52 @@ def _rollout_distribution_stats(buffer) -> dict:
     }
 
 
+def _aggregate_scale_v2_step(red_ids, roles, active_before, reward_components) -> dict:
+    """Return alive-before team means for one v2 decision step."""
+    sums = defaultdict(float)
+    active_count = 0.0
+    for index, rid in enumerate(red_ids):
+        weight = float(active_before[index]) if index < len(active_before) else 0.0
+        if weight <= 0.0:
+            continue
+        comp = reward_components.get(rid, {}) if isinstance(reward_components, dict) else {}
+        if not isinstance(comp, dict):
+            continue
+        active_count += weight
+        role = roles.get(rid, "")
+        prefix = "mav" if role == "mav" else "uav"
+        sums[f"effective_scale_v2_{prefix}_flight_raw"] += weight * float(comp.get("scale_v2_flight_raw_total", 0.0) or 0.0)
+        sums[f"effective_scale_v2_{prefix}_flight_scaled"] += weight * float(comp.get("scale_v2_flight_scaled_total", 0.0) or 0.0)
+        if role == "mav":
+            sums["effective_scale_v2_mav_role"] += weight * float(comp.get("scale_v2_mav_role", 0.0) or 0.0)
+            sums["effective_scale_v2_mav_event"] += weight * float(comp.get("scale_v2_event", 0.0) or 0.0)
+        else:
+            sums["effective_scale_v2_uav_progress"] += weight * float(comp.get("scale_v2_progress", 0.0) or 0.0)
+            sums["effective_scale_v2_uav_event"] += weight * float(comp.get("scale_v2_event", 0.0) or 0.0)
+        sums["effective_scale_v2_terminal"] += weight * float(comp.get("scale_v2_terminal", 0.0) or 0.0)
+        sums["effective_scale_v2_total"] += weight * float(comp.get("total", 0.0) or 0.0)
+    denom = max(active_count, 1.0)
+    keys = (
+        "effective_scale_v2_uav_flight_raw", "effective_scale_v2_uav_flight_scaled",
+        "effective_scale_v2_uav_progress", "effective_scale_v2_uav_event",
+        "effective_scale_v2_mav_flight_raw", "effective_scale_v2_mav_flight_scaled",
+        "effective_scale_v2_mav_role", "effective_scale_v2_mav_event",
+        "effective_scale_v2_terminal", "effective_scale_v2_total",
+    )
+    result = {key: sums[key] / denom for key in keys}
+    result["effective_scale_v2_component_sum"] = sum(result[key] for key in (
+        "effective_scale_v2_uav_flight_scaled", "effective_scale_v2_uav_progress",
+        "effective_scale_v2_uav_event", "effective_scale_v2_mav_flight_scaled",
+        "effective_scale_v2_mav_role", "effective_scale_v2_mav_event",
+        "effective_scale_v2_terminal",
+    ))
+    result["effective_scale_v2_identity_error"] = (
+        result["effective_scale_v2_total"] - result["effective_scale_v2_component_sum"]
+    )
+    result["scale_v2_active_red_count"] = active_count
+    return result
+
+
 def _experiment_base_v2_meta(
     *,
     actual_reward_mode: str,
@@ -474,6 +520,12 @@ from algorithms.happo.rollout_safety import (
     zero_inactive_hidden,
 )
 from algorithms.mappo.opponent_policy import OpponentPolicy
+from algorithms.mappo.tam_greedy_rule import (
+    CANDIDATE_MANEUVERS as TAM_CANDIDATE_MANEUVERS,
+    PROTOCOL_VERSION as TAM_RULE_PROTOCOL_VERSION,
+    RULE_CLAIM as TAM_RULE_CLAIM,
+    SCORE_WEIGHTS as TAM_SCORE_WEIGHTS,
+)
 from eval_checkpoint_selection import (
     best_metric_name,
     build_eval_checkpoint_meta,
@@ -485,6 +537,17 @@ from scripts.experiment_logging_schema import (
     _SCALE_V1_EPISODE_LAST_FIELDS,
 )
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
+
+
+def _opponent_protocol_meta(opponent_policy: str) -> dict:
+    if opponent_policy != "tam_greedy_rule":
+        return {}
+    return {
+        "tam_rule_protocol_version": TAM_RULE_PROTOCOL_VERSION,
+        "tam_candidate_maneuvers": list(TAM_CANDIDATE_MANEUVERS),
+        "tam_score_weights": dict(TAM_SCORE_WEIGHTS),
+        "tam_rule_claim": TAM_RULE_CLAIM,
+    }
 
 
 DEFAULT_CONFIG = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_happo_ref_v0_f22_pid.yaml"
@@ -1431,7 +1494,7 @@ def _run_training_main() -> None:
                         help="Non-self entity drop probability for BRMA random scale mask.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--opponent-policy", default="brma_rule",
-                        choices=["zero", "random", "rule_nearest", "greedy_fsm", "brma_rule", "fixed_route"])
+                        choices=sorted(OpponentPolicy.MODES))
     parser.add_argument(
         "--reward-mode",
         default=None,
@@ -1540,6 +1603,7 @@ def _run_training_main() -> None:
         rich_log_mode=args.rich_log_mode,
         config_path=args.config,
     )
+    base_v2_meta.update(_opponent_protocol_meta(args.opponent_policy))
     print(
         "[experiment] "
         f"config={args.config} policy_arch={args.policy_arch} "
@@ -1816,6 +1880,13 @@ def _run_training_main() -> None:
             rollout_scale_mav_rows = 0
             rollout_scale_terminal_sum = 0.0
             rollout_scale_event_counts = [0.0, 0.0, 0.0]
+            rollout_scale_v2_progress_counts = [0, 0, 0, 0]
+            rollout_scale_v2_target_switch_count = 0.0
+            rollout_scale_v2_terminal_sum = 0.0
+            rollout_scale_v2_event_counts = [0.0, 0.0, 0.0]
+            rollout_scale_v2_flight_raw_sum = 0.0
+            rollout_scale_v2_flight_scaled_sum = 0.0
+            rollout_scale_v2_active_rows = 0
             rollout_uav_oob_count = 0
             rollout_mav_low_altitude_death_count = 0
             rollout_identity_max = {"mav": 0.0, "uav": 0.0}
@@ -2225,6 +2296,35 @@ def _run_training_main() -> None:
                                     or float(comp.get("scale_v1_mav_event_death", 0.0) or 0.0) < 0.0
                                 )
                                 rollout_scale_event_counts[2] += float(float(comp.get("scale_v1_uav_event_oob", 0.0) or 0.0) < 0.0)
+                            if scale_v2:
+                                rollout_scale_v2_flight_raw_sum += float(comp.get("scale_v2_flight_raw_total", 0.0) or 0.0)
+                                rollout_scale_v2_flight_scaled_sum += float(comp.get("scale_v2_flight_scaled_total", 0.0) or 0.0)
+                                rollout_scale_v2_active_rows += 1
+                                rollout_scale_v2_terminal_sum += float(comp.get("scale_v2_terminal", 0.0) or 0.0)
+                                rollout_scale_v2_event_counts[0] += max(
+                                    float(comp.get("scale_v1_uav_event_kill", 0.0) or 0.0), 0.0
+                                ) / 10.0
+                                rollout_scale_v2_event_counts[1] += float(
+                                    float(comp.get("scale_v1_uav_event_death", 0.0) or 0.0) < 0.0
+                                    or float(comp.get("scale_v1_mav_event_death", 0.0) or 0.0) < 0.0
+                                )
+                                rollout_scale_v2_event_counts[2] += float(
+                                    float(comp.get("scale_v1_uav_event_oob", 0.0) or 0.0) < 0.0
+                                )
+                                if role != "mav":
+                                    progress = float(comp.get("scale_v2_progress", 0.0) or 0.0)
+                                    raw_progress = float(comp.get("scale_v1_progress_raw", progress) or 0.0)
+                                    if progress > 1e-12:
+                                        rollout_scale_v2_progress_counts[0] += 1
+                                    elif progress < -1e-12:
+                                        rollout_scale_v2_progress_counts[1] += 1
+                                    else:
+                                        rollout_scale_v2_progress_counts[2] += 1
+                                    if abs(progress - raw_progress) > 1e-12:
+                                        rollout_scale_v2_progress_counts[3] += 1
+                                    rollout_scale_v2_target_switch_count += float(
+                                        comp.get("scale_v1_progress_reset_reason") == "target_switch"
+                                    )
                             if role != "mav" and float(comp.get("uav_event_first_horizontal_out_of_zone", 0.0) or 0.0) != 0.0:
                                 rollout_uav_oob_count += 1
                             if role == "mav" and float(comp.get("mav_event_death", 0.0) or 0.0) < 0.0:
@@ -2324,6 +2424,10 @@ def _run_training_main() -> None:
                             current_ep_reward_comp[env_idx][key] = (
                                 current_ep_reward_comp[env_idx].get(key, 0.0) + normalized[key]
                             )
+                        if scale_v2:
+                            normalized.update(_aggregate_scale_v2_step(
+                                rollout_env.red_ids, rollout_env.agent_roles, active, rc
+                            ))
                         component_sum = sum(
                             normalized[key] for key in (
                                 "effective_team_brma_flight",
@@ -2582,6 +2686,20 @@ def _run_training_main() -> None:
                     uav_imitation_coef=args.uav_imitation_coef if imitation_active else 0.0,
                 )
             stats.update(_rollout_distribution_stats(buffer))
+            m_means = np.asarray(stats.get("m_mean_after_each_agent", []), dtype=np.float64)
+            m_stds = np.asarray(stats.get("m_std_after_each_agent", []), dtype=np.float64)
+            m_abs_means = np.asarray(stats.get("m_abs_mean_after_each_agent", []), dtype=np.float64)
+            m_abs_maxes = np.asarray(stats.get("m_abs_max_after_each_agent", []), dtype=np.float64)
+            stats.update({
+                "advantage_raw_abs_max": max(
+                    abs(float(stats.get("advantage_raw_min", 0.0))),
+                    abs(float(stats.get("advantage_raw_max", 0.0))),
+                ),
+                "correction_M_mean": float(m_means[-1]) if m_means.size else 0.0,
+                "correction_M_std": float(m_stds[-1]) if m_stds.size else 0.0,
+                "correction_M_mean_abs": float(m_abs_means[-1]) if m_abs_means.size else 0.0,
+                "correction_M_max_abs": float(m_abs_maxes[-1]) if m_abs_maxes.size else 0.0,
+            })
             reward_step_denom = max(rollout_reward_steps, 1)
             for key in (
                 "effective_team_brma_flight", "effective_team_uav_speed",
@@ -2596,6 +2714,12 @@ def _run_training_main() -> None:
                 "effective_scale_v1_mav_role", "effective_scale_v1_mav_event",
                 "effective_scale_v1_terminal", "effective_scale_v1_total",
                 "effective_scale_v1_component_sum", "effective_scale_v1_identity_error",
+                "effective_scale_v2_uav_flight_raw", "effective_scale_v2_uav_flight_scaled",
+                "effective_scale_v2_uav_progress", "effective_scale_v2_uav_event",
+                "effective_scale_v2_mav_flight_raw", "effective_scale_v2_mav_flight_scaled",
+                "effective_scale_v2_mav_role", "effective_scale_v2_mav_event",
+                "effective_scale_v2_terminal", "effective_scale_v2_total",
+                "effective_scale_v2_component_sum", "effective_scale_v2_identity_error",
             ):
                 stats[key] = rollout_reward_sums[key] / reward_step_denom
             stats.update({
@@ -2628,6 +2752,17 @@ def _run_training_main() -> None:
                 "scale_v1_kill_count": rollout_scale_event_counts[0],
                 "scale_v1_death_count": rollout_scale_event_counts[1],
                 "scale_v1_oob_count": rollout_scale_event_counts[2],
+                "scale_v2_progress_positive_ratio": rollout_scale_v2_progress_counts[0] / max(sum(rollout_scale_v2_progress_counts[:3]), 1),
+                "scale_v2_progress_negative_ratio": rollout_scale_v2_progress_counts[1] / max(sum(rollout_scale_v2_progress_counts[:3]), 1),
+                "scale_v2_progress_zero_ratio": rollout_scale_v2_progress_counts[2] / max(sum(rollout_scale_v2_progress_counts[:3]), 1),
+                "scale_v2_progress_clip_ratio": rollout_scale_v2_progress_counts[3] / max(sum(rollout_scale_v2_progress_counts[:3]), 1),
+                "scale_v2_target_switch_count": rollout_scale_v2_target_switch_count,
+                "scale_v2_terminal_mean": rollout_scale_v2_terminal_sum / max(rollout_scale_v2_active_rows, 1),
+                "scale_v2_kill_count": rollout_scale_v2_event_counts[0],
+                "scale_v2_death_count": rollout_scale_v2_event_counts[1],
+                "scale_v2_oob_count": rollout_scale_v2_event_counts[2],
+                "scale_v2_flight_raw_mean": rollout_scale_v2_flight_raw_sum / max(rollout_scale_v2_active_rows, 1),
+                "scale_v2_flight_scaled_mean": rollout_scale_v2_flight_scaled_sum / max(rollout_scale_v2_active_rows, 1),
             })
             stats.update({
                 "rollout_transitions": rollout_transitions,
@@ -2823,10 +2958,28 @@ def _run_training_main() -> None:
                     "scale_v1_progress_positive_ratio": stats.get("scale_v1_progress_positive_ratio", 0.0),
                     "scale_v1_progress_clip_ratio": stats.get("scale_v1_progress_clip_ratio", 0.0),
                     "effective_scale_v2_total": stats.get("effective_scale_v2_total", 0.0),
+                    "effective_scale_v2_uav_flight_raw": stats.get("effective_scale_v2_uav_flight_raw", 0.0),
+                    "effective_scale_v2_uav_flight_scaled": stats.get("effective_scale_v2_uav_flight_scaled", 0.0),
+                    "effective_scale_v2_uav_progress": stats.get("effective_scale_v2_uav_progress", 0.0),
+                    "effective_scale_v2_uav_event": stats.get("effective_scale_v2_uav_event", 0.0),
+                    "effective_scale_v2_mav_flight_raw": stats.get("effective_scale_v2_mav_flight_raw", 0.0),
+                    "effective_scale_v2_mav_flight_scaled": stats.get("effective_scale_v2_mav_flight_scaled", 0.0),
+                    "effective_scale_v2_mav_role": stats.get("effective_scale_v2_mav_role", 0.0),
+                    "effective_scale_v2_mav_event": stats.get("effective_scale_v2_mav_event", 0.0),
+                    "effective_scale_v2_terminal": stats.get("effective_scale_v2_terminal", 0.0),
+                    "effective_scale_v2_component_sum": stats.get("effective_scale_v2_component_sum", 0.0),
                     "effective_scale_v2_identity_error": stats.get("effective_scale_v2_identity_error", 0.0),
                     "scale_v2_progress_positive_ratio": stats.get("scale_v2_progress_positive_ratio", 0.0),
+                    "scale_v2_progress_negative_ratio": stats.get("scale_v2_progress_negative_ratio", 0.0),
+                    "scale_v2_progress_zero_ratio": stats.get("scale_v2_progress_zero_ratio", 0.0),
                     "scale_v2_progress_clip_ratio": stats.get("scale_v2_progress_clip_ratio", 0.0),
+                    "scale_v2_target_switch_count": stats.get("scale_v2_target_switch_count", 0.0),
+                    "scale_v2_terminal_mean": stats.get("scale_v2_terminal_mean", 0.0),
                     "scale_v2_kill_count": stats.get("scale_v2_kill_count", 0.0),
+                    "scale_v2_death_count": stats.get("scale_v2_death_count", 0.0),
+                    "scale_v2_oob_count": stats.get("scale_v2_oob_count", 0.0),
+                    "scale_v2_flight_raw_mean": stats.get("scale_v2_flight_raw_mean", 0.0),
+                    "scale_v2_flight_scaled_mean": stats.get("scale_v2_flight_scaled_mean", 0.0),
                     "final_approx_kl_mav": stats.get("final_approx_kl_mav", 0.0),
                     "final_approx_kl_uav": stats.get("final_approx_kl_uav", 0.0),
                     "final_approx_kl_abs_mav": stats.get("final_approx_kl_abs_mav", 0.0),
@@ -2835,8 +2988,32 @@ def _run_training_main() -> None:
                     "final_clip_fraction_uav": stats.get("final_clip_fraction_uav", 0.0),
                     "final_ratio_mean_mav": stats.get("final_ratio_mean_mav", 0.0),
                     "final_ratio_mean_uav": stats.get("final_ratio_mean_uav", 0.0),
+                    "final_ratio_std_mav": stats.get("final_ratio_std_mav", 0.0),
+                    "final_ratio_std_uav": stats.get("final_ratio_std_uav", 0.0),
+                    "final_ratio_p95_mav": stats.get("final_ratio_p95_mav", 0.0),
+                    "final_ratio_p95_uav": stats.get("final_ratio_p95_uav", 0.0),
+                    "final_ratio_p99_mav": stats.get("final_ratio_p99_mav", 0.0),
+                    "final_ratio_p99_uav": stats.get("final_ratio_p99_uav", 0.0),
                     "final_actor_parameter_delta_mav": stats.get("final_actor_parameter_delta_mav", 0.0),
                     "final_actor_parameter_delta_uav": stats.get("final_actor_parameter_delta_uav", 0.0),
+                    **{
+                        key: stats.get(key, 0.0)
+                        for key in (
+                            "actor_loss_mav", "actor_loss_uav",
+                            "critic_loss_scaled", "critic_loss_unscaled",
+                            "value_explained_variance_old", "value_explained_variance_new",
+                            "return_mean", "return_std", "value_pred_old_mean",
+                            "value_pred_old_std", "value_pred_new_mean", "value_pred_new_std",
+                            "advantage_raw_mean", "advantage_raw_std", "advantage_raw_abs_max",
+                            "actor_grad_norm_mav", "actor_grad_norm_uav", "critic_grad_norm",
+                            "policy_update_norm_mav", "policy_update_norm_uav", "critic_update_norm",
+                            "entropy_mav", "entropy_uav", "action_log_std_mav_mean",
+                            "action_log_std_uav_mean", "correction_M_mean", "correction_M_std",
+                            "correction_M_mean_abs", "correction_M_max_abs", "reward_nan_count",
+                            "action_nan_count", "value_nan_count", "log_prob_nan_count",
+                            "gradient_nonfinite_count",
+                        )
+                    },
                     "nan_detected": int(nan_detected),
                 })
             if not f.closed:

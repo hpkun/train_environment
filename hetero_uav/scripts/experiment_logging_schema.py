@@ -55,6 +55,22 @@ FINAL_PURE_HAPPO_COLUMNS = [
     "final_ratio_p99_mav", "final_ratio_p99_uav",
     "final_actor_parameter_delta_mav", "final_actor_parameter_delta_uav",
 ]
+PURE_HAPPO_LEARNABILITY_COLUMNS = [
+    "actor_loss_mav", "actor_loss_uav",
+    "critic_loss_scaled", "critic_loss_unscaled",
+    "value_explained_variance_old", "value_explained_variance_new",
+    "return_mean", "return_std",
+    "value_pred_old_mean", "value_pred_old_std",
+    "value_pred_new_mean", "value_pred_new_std",
+    "advantage_raw_mean", "advantage_raw_std", "advantage_raw_abs_max",
+    "actor_grad_norm_mav", "actor_grad_norm_uav", "critic_grad_norm",
+    "policy_update_norm_mav", "policy_update_norm_uav", "critic_update_norm",
+    "entropy_mav", "entropy_uav",
+    "action_log_std_mav_mean", "action_log_std_uav_mean",
+    "correction_M_mean", "correction_M_std", "correction_M_mean_abs",
+    "correction_M_max_abs", "reward_nan_count", "action_nan_count",
+    "value_nan_count", "log_prob_nan_count", "gradient_nonfinite_count",
+]
 for _col in SCALE_V1_TRAIN_METRIC_COLUMNS:
     if _col not in TRAIN_METRICS_COLUMNS:
         TRAIN_METRICS_COLUMNS.append(_col)
@@ -62,6 +78,9 @@ for _col in SCALE_V2_TRAIN_METRIC_COLUMNS:
     if _col not in TRAIN_METRICS_COLUMNS:
         TRAIN_METRICS_COLUMNS.append(_col)
 for _col in FINAL_PURE_HAPPO_COLUMNS:
+    if _col not in TRAIN_METRICS_COLUMNS:
+        TRAIN_METRICS_COLUMNS.append(_col)
+for _col in PURE_HAPPO_LEARNABILITY_COLUMNS:
     if _col not in TRAIN_METRICS_COLUMNS:
         TRAIN_METRICS_COLUMNS.append(_col)
 

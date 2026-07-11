@@ -11,6 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .tam_greedy_rule import TamGreedyRule
+
 
 def _wrap_heading_norm(value: float) -> float:
     """Wrap normalized heading to [-1, 1] where +/-1 are the same direction."""
@@ -34,6 +36,8 @@ class OpponentPolicy:
       BRMA-MAPPO paper-aligned blue opponent for all formal experiments.
     - ``fixed_route``: diagnostic-only fixed level-flight blue route; it does
       not track red agents, evade, or call ``rule_based_agent``.
+    - ``tam_greedy_rule``: deterministic TAM-style candidate-maneuver greedy
+      opponent; paper-aligned protocol, not an exact paper reproduction.
 
     ``zero`` / ``random`` / ``rule_nearest`` / ``greedy_fsm`` /
     ``fixed_route`` are retained for internal debugging only and are NOT part
@@ -47,6 +51,7 @@ class OpponentPolicy:
         "greedy_fsm",
         "brma_rule",
         "fixed_route",
+        "tam_greedy_rule",
     }
 
     def __init__(self, mode: str = "zero", seed: int | None = None):
@@ -62,6 +67,7 @@ class OpponentPolicy:
         self.used_env_refresh_engaged_targets = False
         self.used_env_own_kinematics = False
         self.used_env_own_positions = False
+        self.tam_greedy_rule = TamGreedyRule()
 
     def reset_memory(self) -> None:
         """Clear per-agent target persistence and state history."""
@@ -73,6 +79,7 @@ class OpponentPolicy:
         self.used_env_refresh_engaged_targets = False
         self.used_env_own_kinematics = False
         self.used_env_own_positions = False
+        self.tam_greedy_rule.reset()
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
             from rule_based_agent import reset_rule_memory
@@ -85,6 +92,8 @@ class OpponentPolicy:
         del deterministic
         if self.mode == "fixed_route":
             return self._fixed_route_actions(blue_ids, env)
+        if self.mode == "tam_greedy_rule":
+            return self._tam_greedy_rule_actions(obs_dict, blue_ids, env)
 
         self.last_states = {}
         self.last_assigned_targets: dict[str, int] = {}
@@ -142,6 +151,32 @@ class OpponentPolicy:
         speed_action = 2.0 * (230.0 - velocity_min) / max(velocity_max - velocity_min, 1e-6) - 1.0
         action = self._clip_action([0.0, 0.0, speed_action])
         return {bid: action.copy().astype(np.float32) for bid in blue_ids}
+
+    def _tam_greedy_rule_actions(self, obs_dict, blue_ids, env) -> dict[str, np.ndarray]:
+        engaged = self._env_engaged_target_slots(env)
+        own_kinematics = self._env_blue_own_kinematics(env)
+        own_positions = self._env_blue_own_positions(env)
+        ownship = {
+            bid: self._ownship_context(bid, own_kinematics, own_positions)
+            for bid in blue_ids
+        }
+        assignments = self.tam_greedy_rule.assign_targets(obs_dict, blue_ids, engaged)
+        velocity_min = float(getattr(env, "VELOCITY_MIN", 102.0)) if env is not None else 102.0
+        velocity_max = float(getattr(env, "VELOCITY_MAX", 408.0)) if env is not None else 408.0
+        actions = {}
+        self.last_states = {}
+        self.last_assigned_targets = {}
+        for bid in blue_ids:
+            target_slot = assignments.get(bid)
+            action, maneuver = self.tam_greedy_rule.action(
+                bid, obs_dict.get(bid, {}), ownship.get(bid, {}), target_slot,
+                velocity_min, velocity_max,
+            )
+            actions[bid] = action
+            self.last_states[bid] = maneuver
+            if target_slot is not None:
+                self.last_assigned_targets[bid] = target_slot
+        return actions
 
     def _brma_rule_actions(self, obs_dict, blue_ids, env,
                            pursuit_mode: str = "delta10") -> dict[str, np.ndarray]:
