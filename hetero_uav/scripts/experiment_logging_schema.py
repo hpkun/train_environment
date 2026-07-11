@@ -32,7 +32,36 @@ SCALE_V1_TRAIN_METRIC_COLUMNS = [
     "effective_scale_v1_total", "effective_scale_v1_identity_error",
     "scale_v1_progress_positive_ratio", "scale_v1_progress_clip_ratio",
 ]
+SCALE_V2_TRAIN_METRIC_COLUMNS = [
+    "effective_scale_v2_uav_flight_raw", "effective_scale_v2_uav_flight_scaled",
+    "effective_scale_v2_uav_progress", "effective_scale_v2_uav_event",
+    "effective_scale_v2_mav_flight_raw", "effective_scale_v2_mav_flight_scaled",
+    "effective_scale_v2_mav_role", "effective_scale_v2_mav_event",
+    "effective_scale_v2_terminal", "effective_scale_v2_total",
+    "effective_scale_v2_component_sum", "effective_scale_v2_identity_error",
+    "scale_v2_progress_positive_ratio", "scale_v2_progress_negative_ratio",
+    "scale_v2_progress_zero_ratio", "scale_v2_progress_clip_ratio",
+    "scale_v2_target_switch_count", "scale_v2_terminal_mean",
+    "scale_v2_kill_count", "scale_v2_death_count", "scale_v2_oob_count",
+    "scale_v2_flight_raw_mean", "scale_v2_flight_scaled_mean",
+]
+FINAL_PURE_HAPPO_COLUMNS = [
+    "final_approx_kl_mav", "final_approx_kl_uav",
+    "final_approx_kl_abs_mav", "final_approx_kl_abs_uav",
+    "final_clip_fraction_mav", "final_clip_fraction_uav",
+    "final_ratio_mean_mav", "final_ratio_mean_uav",
+    "final_ratio_std_mav", "final_ratio_std_uav",
+    "final_ratio_p95_mav", "final_ratio_p95_uav",
+    "final_ratio_p99_mav", "final_ratio_p99_uav",
+    "final_actor_parameter_delta_mav", "final_actor_parameter_delta_uav",
+]
 for _col in SCALE_V1_TRAIN_METRIC_COLUMNS:
+    if _col not in TRAIN_METRICS_COLUMNS:
+        TRAIN_METRICS_COLUMNS.append(_col)
+for _col in SCALE_V2_TRAIN_METRIC_COLUMNS:
+    if _col not in TRAIN_METRICS_COLUMNS:
+        TRAIN_METRICS_COLUMNS.append(_col)
+for _col in FINAL_PURE_HAPPO_COLUMNS:
     if _col not in TRAIN_METRICS_COLUMNS:
         TRAIN_METRICS_COLUMNS.append(_col)
 

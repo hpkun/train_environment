@@ -569,6 +569,17 @@ MARL_DYNAMICS_TRAIN_FIELDS = [
     "scale_v1_mav_aspect_mean", "scale_v1_mav_awareness_raw_sum_mean",
     "scale_v1_mav_awareness_mean", "scale_v1_terminal_mean",
     "scale_v1_kill_count", "scale_v1_death_count", "scale_v1_oob_count",
+    "effective_scale_v2_uav_flight_raw", "effective_scale_v2_uav_flight_scaled",
+    "effective_scale_v2_uav_progress", "effective_scale_v2_uav_event",
+    "effective_scale_v2_mav_flight_raw", "effective_scale_v2_mav_flight_scaled",
+    "effective_scale_v2_mav_role", "effective_scale_v2_mav_event",
+    "effective_scale_v2_terminal", "effective_scale_v2_total",
+    "effective_scale_v2_component_sum", "effective_scale_v2_identity_error",
+    "scale_v2_progress_positive_ratio", "scale_v2_progress_negative_ratio",
+    "scale_v2_progress_zero_ratio", "scale_v2_progress_clip_ratio",
+    "scale_v2_target_switch_count", "scale_v2_terminal_mean",
+    "scale_v2_kill_count", "scale_v2_death_count", "scale_v2_oob_count",
+    "scale_v2_flight_raw_mean", "scale_v2_flight_scaled_mean",
 ]
 
 UPDATE_DIAGNOSTIC_ARRAY_FIELDS = [
@@ -2120,6 +2131,7 @@ def _run_training_main() -> None:
                                 continue
                             role = rollout_env.agent_roles.get(rid, "")
                             scale_v1 = actual_reward_mode == "brma_tam_scale_aligned_v1"
+                            scale_v2 = actual_reward_mode == "brma_tam_scale_aligned_v2"
                             if scale_v1 and role == "mav":
                                 identity_keys = (
                                     "scale_v1_flight_total", "scale_v1_mav_role",
@@ -2130,6 +2142,18 @@ def _run_training_main() -> None:
                                 identity_keys = (
                                     "scale_v1_flight_total", "scale_v1_progress_clipped",
                                     "scale_v1_uav_event_total", "scale_v1_terminal",
+                                )
+                                identity_role = "uav"
+                            elif scale_v2 and role == "mav":
+                                identity_keys = (
+                                    "scale_v2_flight_scaled_total", "scale_v2_mav_role",
+                                    "scale_v2_event", "scale_v2_terminal",
+                                )
+                                identity_role = "mav"
+                            elif scale_v2:
+                                identity_keys = (
+                                    "scale_v2_flight_scaled_total", "scale_v2_progress",
+                                    "scale_v2_event", "scale_v2_terminal",
                                 )
                                 identity_role = "uav"
                             elif role == "mav":
@@ -2226,6 +2250,16 @@ def _run_training_main() -> None:
                             "effective_scale_v1_mav_event": 0.0,
                             "effective_scale_v1_terminal": 0.0,
                             "effective_scale_v1_total": 0.0,
+                            "effective_scale_v2_uav_flight_raw": 0.0,
+                            "effective_scale_v2_uav_flight_scaled": 0.0,
+                            "effective_scale_v2_uav_progress": 0.0,
+                            "effective_scale_v2_uav_event": 0.0,
+                            "effective_scale_v2_mav_flight_raw": 0.0,
+                            "effective_scale_v2_mav_flight_scaled": 0.0,
+                            "effective_scale_v2_mav_role": 0.0,
+                            "effective_scale_v2_mav_event": 0.0,
+                            "effective_scale_v2_terminal": 0.0,
+                            "effective_scale_v2_total": 0.0,
                         }
                         for ridx, rid in enumerate(rollout_env.red_ids):
                             try:
@@ -2268,6 +2302,21 @@ def _run_training_main() -> None:
                                     eff["effective_scale_v1_uav_event"] += mask_value * float(comp.get("scale_v1_uav_event_total", 0.0) or 0.0)
                                 eff["effective_scale_v1_terminal"] += mask_value * float(comp.get("scale_v1_terminal", 0.0) or 0.0)
                                 eff["effective_scale_v1_total"] += mask_value * float(comp.get("total", 0.0) or 0.0)
+                            if scale_v2:
+                                f_raw = float(comp.get("scale_v2_flight_raw_total", 0.0) or 0.0)
+                                f_scaled = float(comp.get("scale_v2_flight_scaled_total", 0.0) or 0.0)
+                                if rollout_env.agent_roles.get(rid, "") == "mav":
+                                    eff["effective_scale_v2_mav_flight_raw"] += mask_value * f_raw
+                                    eff["effective_scale_v2_mav_flight_scaled"] += mask_value * f_scaled
+                                    eff["effective_scale_v2_mav_role"] += mask_value * float(comp.get("scale_v2_mav_role", 0.0) or 0.0)
+                                    eff["effective_scale_v2_mav_event"] += mask_value * float(comp.get("scale_v2_event", 0.0) or 0.0)
+                                else:
+                                    eff["effective_scale_v2_uav_flight_raw"] += mask_value * f_raw
+                                    eff["effective_scale_v2_uav_flight_scaled"] += mask_value * f_scaled
+                                    eff["effective_scale_v2_uav_progress"] += mask_value * float(comp.get("scale_v2_progress", 0.0) or 0.0)
+                                    eff["effective_scale_v2_uav_event"] += mask_value * float(comp.get("scale_v2_event", 0.0) or 0.0)
+                                eff["effective_scale_v2_terminal"] += mask_value * float(comp.get("scale_v2_terminal", 0.0) or 0.0)
+                                eff["effective_scale_v2_total"] += mask_value * float(comp.get("total", 0.0) or 0.0)
                         denom = max(active_count, 1.0)
                         normalized = {}
                         for key, value in eff.items():
@@ -2297,6 +2346,17 @@ def _run_training_main() -> None:
                         normalized["effective_scale_v1_identity_error"] = (
                             normalized["effective_scale_v1_total"] - scale_component_sum
                         )
+                        scale_v2_component_sum = sum(normalized[key] for key in (
+                            "effective_scale_v2_uav_flight_scaled", "effective_scale_v2_uav_progress",
+                            "effective_scale_v2_uav_event", "effective_scale_v2_mav_flight_scaled",
+                            "effective_scale_v2_mav_role", "effective_scale_v2_mav_event",
+                            "effective_scale_v2_terminal",
+                        )) if scale_v2 else 0.0
+                        if scale_v2:
+                            normalized["effective_scale_v2_component_sum"] = scale_v2_component_sum
+                            normalized["effective_scale_v2_identity_error"] = (
+                                normalized["effective_scale_v2_total"] - scale_v2_component_sum
+                            )
                         current_ep_reward_comp[env_idx]["effective_scale_v1_component_sum"] = (
                             current_ep_reward_comp[env_idx].get("effective_scale_v1_component_sum", 0.0)
                             + scale_component_sum
@@ -2762,6 +2822,21 @@ def _run_training_main() -> None:
                     "effective_scale_v1_identity_error": stats.get("effective_scale_v1_identity_error", 0.0),
                     "scale_v1_progress_positive_ratio": stats.get("scale_v1_progress_positive_ratio", 0.0),
                     "scale_v1_progress_clip_ratio": stats.get("scale_v1_progress_clip_ratio", 0.0),
+                    "effective_scale_v2_total": stats.get("effective_scale_v2_total", 0.0),
+                    "effective_scale_v2_identity_error": stats.get("effective_scale_v2_identity_error", 0.0),
+                    "scale_v2_progress_positive_ratio": stats.get("scale_v2_progress_positive_ratio", 0.0),
+                    "scale_v2_progress_clip_ratio": stats.get("scale_v2_progress_clip_ratio", 0.0),
+                    "scale_v2_kill_count": stats.get("scale_v2_kill_count", 0.0),
+                    "final_approx_kl_mav": stats.get("final_approx_kl_mav", 0.0),
+                    "final_approx_kl_uav": stats.get("final_approx_kl_uav", 0.0),
+                    "final_approx_kl_abs_mav": stats.get("final_approx_kl_abs_mav", 0.0),
+                    "final_approx_kl_abs_uav": stats.get("final_approx_kl_abs_uav", 0.0),
+                    "final_clip_fraction_mav": stats.get("final_clip_fraction_mav", 0.0),
+                    "final_clip_fraction_uav": stats.get("final_clip_fraction_uav", 0.0),
+                    "final_ratio_mean_mav": stats.get("final_ratio_mean_mav", 0.0),
+                    "final_ratio_mean_uav": stats.get("final_ratio_mean_uav", 0.0),
+                    "final_actor_parameter_delta_mav": stats.get("final_actor_parameter_delta_mav", 0.0),
+                    "final_actor_parameter_delta_uav": stats.get("final_actor_parameter_delta_uav", 0.0),
                     "nan_detected": int(nan_detected),
                 })
             if not f.closed:
