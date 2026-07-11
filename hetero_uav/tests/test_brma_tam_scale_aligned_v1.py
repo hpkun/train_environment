@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import math
+import shutil
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +20,12 @@ from scripts.train_happo_reference import (
 from scripts.experiment_logging_schema import (
     REWARD_COMPONENT_COLUMNS, EPISODE_REWARD_COMPONENTS_COLUMNS,
 )
+from scripts.audit_brma_tam_scale_aligned_v1 import (
+    _episode, _hold_action, _path_row, _progress_audits, _red_actions,
+    _objective_ordering,
+)
+from algorithms.mappo.opponent_policy import OpponentPolicy
+from scripts.rich_logging import RichExperimentLogger
 from uav_env import make_env
 from uav_env.JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
 
@@ -185,16 +194,36 @@ def test_mav_credit_normalized_5v4():
     assert value == 2.5
 
 
+def test_mav_credit_full_elimination_is_ten_at_both_scales():
+    for scale in ("3v2", "5v4"):
+        env = _env(scale)
+        total = 0.0
+        for index in range(len(env.blue_ids)):
+            env._step_kill_count = {aid: 0 for aid in env.agent_ids}
+            env._step_kill_count[env.red_ids[1]] = 1
+            value, _ = env._scale_v1_mav_event("red_0", env.red_planes["red_0"])
+            total += value
+        assert total == pytest.approx(10.0)
+
+
 def test_mav_aspect_scale_invariant():
-    env3 = _env(); _, a = env3._scale_v1_mav_role(env3.red_planes["red_0"])
-    env5 = _env("5v4"); _, b = env5._scale_v1_mav_role(env5.red_planes["red_0"])
-    assert abs(a["scale_v1_mav_aspect_mean"]) <= 1 and abs(b["scale_v1_mav_aspect_mean"]) <= 1
+    env3 = _env(); env5 = _env("5v4")
+    for env in (env3, env5):
+        for blue in env.blue_planes.values():
+            blue._pos[:] = (12000, 0, 6500); blue._vel[:] = (250, 0, 0)
+    _, a = env3._scale_v1_mav_role(env3.red_planes["red_0"])
+    _, b = env5._scale_v1_mav_role(env5.red_planes["red_0"])
+    assert a["scale_v1_mav_aspect_mean"] == pytest.approx(b["scale_v1_mav_aspect_mean"])
 
 
 def test_mav_awareness_scale_invariant():
-    env3 = _env(); _, a = env3._scale_v1_mav_role(env3.red_planes["red_0"])
-    env5 = _env("5v4"); _, b = env5._scale_v1_mav_role(env5.red_planes["red_0"])
-    assert 0 <= a["scale_v1_mav_aware_mean"] <= .3 and 0 <= b["scale_v1_mav_aware_mean"] <= .3
+    env3 = _env(); env5 = _env("5v4")
+    for env in (env3, env5):
+        for blue in env.blue_planes.values():
+            blue._pos[:] = (12000, 0, 6500); blue._vel[:] = (250, 0, 0)
+    _, a = env3._scale_v1_mav_role(env3.red_planes["red_0"])
+    _, b = env5._scale_v1_mav_role(env5.red_planes["red_0"])
+    assert a["scale_v1_mav_aware_mean"] == pytest.approx(b["scale_v1_mav_aware_mean"])
 
 
 @pytest.mark.parametrize("blue_alive,attack_alive,mav_alive,expected", [(0,2,True,30),(0,1,True,22.5),(0,2,False,15),(2,2,True,0),(2,2,False,-15),(2,0,False,-30)])
@@ -260,8 +289,18 @@ def test_static_far_episode_no_large_negative_return():
 
 
 def test_canonical_outcome_ordering():
-    values = [30, 22.5, 15, 0, -15, -30]
-    assert all(a > b for a, b in zip(values, values[1:]))
+    rows = _objective_ordering(0.0)
+    values = {r["case"]: r["total_return"] for r in rows if r["audit_layer"] == "same_dense_same_length"}
+    assert values["no_loss_full_win"] > values["one_uav_loss_full_win"]
+    assert values["one_uav_loss_full_win"] > values["one_blue_kill_timeout"]
+    assert values["one_blue_kill_timeout"] > values["no_loss_timeout"]
+    assert values["no_loss_timeout"] > values["mav_loss_no_kill"] > values["full_red_loss"]
+
+
+def test_negative_dense_episode_length_can_expose_early_failure_risk():
+    rows = _objective_ordering(-0.08176148163734638)
+    values = {(r["case"], r["episode_length"]): r["total_return"] for r in rows if r["audit_layer"] == "episode_length_sensitivity"}
+    assert values[("full_red_loss", 100)] > values[("no_loss_timeout", 1000)]
 
 
 def test_short_environment_rollout_finite():
@@ -305,3 +344,100 @@ def test_new_3v2_and_5v4_configs_load():
         env = make_env(str(ROOT / path), max_steps=1)
         try: assert (len(env.red_ids), len(env.blue_ids)) == counts
         finally: env.close()
+
+
+def test_stepwise_clipped_path_and_cycle_are_audited():
+    summary, _ = _path_row("coarse", [22.3, 15, 10, 5])
+    assert summary["stepwise_raw_sum"] == pytest.approx(summary["endpoint_unclipped_potential_difference"])
+    assert summary["stepwise_clipped_active_sum"] != pytest.approx(summary["stepwise_raw_sum"])
+    paths, _, cycles, _ = _progress_audits(.99)
+    assert cycles[0]["potential_form"] == "Phi(s_next)-Phi(s)"
+    assert math.isfinite(cycles[0]["discounted_active_cycle_return_gamma_0_99"])
+    assert len(paths) == 4
+
+
+def test_forward_reverse_discretization_uses_active_clip():
+    _, _, _, rows = _progress_audits(.99)
+    assert {r["segments"] for r in rows} == {2, 4, 8, 16, 32}
+    assert all(abs(r["round_trip_active_return"]) < 1e-9 for r in rows)
+    assert len({round(r["forward_active_return"], 8) for r in rows}) > 1
+
+
+def test_real_env_step_updates_each_attack_uav_once(monkeypatch):
+    calls = []
+    original = HeteroUavCombatEnv._scale_v1_uav_progress
+    def counted(self, aid, *args, **kwargs):
+        calls.append(aid)
+        return original(self, aid, *args, **kwargs)
+    monkeypatch.setattr(HeteroUavCombatEnv, "_scale_v1_uav_progress", counted)
+    env = make_env(str(ROOT / CFG3), max_steps=2)
+    try:
+        env.reset(seed=9)
+        env.step({aid: np.zeros(3, np.float32) for aid in env.agent_ids})
+        assert Counter(calls) == Counter({"red_1": 1, "red_2": 1})
+        assert env.agent_interaction_steps == 12
+    finally: env.close()
+
+
+def test_hold_current_kinematics_differs_from_zero():
+    env = _env()
+    action = _hold_action(env, "red_0")
+    assert action.shape == (3,) and not np.allclose(action, np.zeros(3))
+
+
+def test_random_full_range_uses_full_action_support():
+    env = _env(); rng = np.random.default_rng(123)
+    values = np.concatenate([np.concatenate(list(_red_actions(env, "random_full_range", rng).values())) for _ in range(500)])
+    assert values.min() < -.9 and values.max() > .9
+
+
+def test_environment_audit_calls_formal_opponent(monkeypatch):
+    calls = []
+    def fake_act(self, obs, blue_ids, deterministic=True, env=None):
+        calls.append((self.mode, tuple(blue_ids)))
+        return {bid: np.zeros(3, np.float32) for bid in blue_ids}
+    monkeypatch.setattr(OpponentPolicy, "act", fake_act)
+    row = _episode(str(ROOT / CFG3), "zero_absolute", "brma_rule", 44, 1)
+    assert calls == [("brma_rule", ("blue_0", "blue_1"))]
+    assert row["opponent_act_called"] is True
+
+
+def test_scripted_evasion_contract_validation():
+    env = _env(); env.missile_evasion_config = {"mode": "brma_scripted", "teams": "red_only"}
+    env.observation_mode = "mav_shared_geo"; env.red_target_selection_mode = "closest"
+    env.aircraft_type_params = {"mav": {"num_missiles": 0}}
+    env._validate_brma_tam_scale_aligned_v1_contract()
+    env.missile_evasion_config["mode"] = "none"
+    with pytest.raises(ValueError, match="mode='brma_scripted'"):
+        env._validate_brma_tam_scale_aligned_v1_contract()
+    env.missile_evasion_config = {"mode": "brma_scripted", "teams": "blue_only"}
+    with pytest.raises(ValueError, match="teams"):
+        env._validate_brma_tam_scale_aligned_v1_contract()
+
+
+def test_old_reward_fixed_state_regression():
+    env = make_env(str(ROOT / OLD3), max_steps=2)
+    try:
+        env.reset(seed=7)
+        _, rewards, _, _, info = env.step({aid: np.zeros(3, np.float32) for aid in env.agent_ids})
+        assert rewards["red_0"] == pytest.approx(0.3711751859735316)
+        assert rewards["red_1"] == pytest.approx(-9.982199365451624)
+        assert info["reward_components"]["red_2"]["tam_distance_weighted"] == -10.0
+        assert info["reward_components"]["red_0"]["reward_contract_revision"] == 2
+    finally:
+        env.close()
+
+
+def test_minimal_real_csv_write_flow(tmp_path):
+    logger = RichExperimentLogger(tmp_path, "run", "pure_happo", "3v2", "cpu", 1, 256, 256, mode="summary")
+    logger.write_train_metrics({
+        "total_env_steps_actual": 256, "effective_scale_v1_total": .25,
+        "effective_scale_v1_identity_error": 0.0,
+        "scale_v1_progress_positive_ratio": .4, "scale_v1_progress_clip_ratio": .1,
+    })
+    logger.close()
+    row = next(csv.DictReader((tmp_path / "train_metrics.csv").open(encoding="utf-8")))
+    assert row["effective_scale_v1_total"] == "0.25"
+    assert row["effective_scale_v1_identity_error"] == "0.0"
+    assert "scale_v1_uav_total_sum" in EPISODE_REWARD_COMPONENTS_COLUMNS
+    assert "scale_v1_mav_total_sum" in EPISODE_REWARD_COMPONENTS_COLUMNS

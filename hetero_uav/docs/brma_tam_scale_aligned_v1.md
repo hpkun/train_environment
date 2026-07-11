@@ -35,9 +35,11 @@ R_progress = clip(R_progress_raw, -0.5, 0.5)
 ```
 
 This replaces a persistent far-range penalty with a potential difference. A
-stationary trajectory has zero cumulative progress; approach and retreat are
-approximately antisymmetric. The progress baseline is isolated by episode and
-agent. It resets without reward on episode start, target switch/death, no
+stationary trajectory has zero cumulative progress. Before clipping, approach
+and retreat telescope to opposite endpoint differences. After per-decision
+clipping, active return depends on path discretization; opposite paths are only
+exactly antisymmetric when they use the same intermediate states. The progress
+baseline is isolated by episode and agent. It resets without reward on episode start, target switch/death, no
 target, invalid geometry/speed, and dead-before state. It updates once per
 policy decision, not per JSBSim physics frame.
 
@@ -87,3 +89,20 @@ wrapper is used. Missile dynamics/guidance/hit model, launch gate, scripted
 launch/evasion, blue rule, PID, JSBSim/XML, action/observation spaces, initial
 geometry, termination, GAE, HAPPO sequential correction, and policy network
 are unchanged.
+
+## Audit limitations and observed risk
+
+The implemented shaping is `Phi(s_next) - Phi(s)`, not
+`gamma * Phi(s_next) - Phi(s)`. A fine 22.3 km to 5 km and back cycle has zero
+undiscounted active return but a nonzero discounted return at `gamma=0.99`.
+Per-step clipping also makes the one-way active return depend on the number of
+intermediate decisions.
+
+The strict 1000-decision audit with the formal `brma_rule` opponent found that
+`zero_absolute` reaches timeout with all aircraft alive but accumulates about
+`-81.76` trainer-effective return. Flight contributes about `-77.72`, exceeding
+the terminal scale of 30 in absolute value. Under the same measured dense-rate
+sensitivity model, a 100-decision full red loss is about `-51.51`, which is
+higher than continuing to the safe timeout. This is an
+`OBJECTIVE_ORDERING_RISK`; it is evidence for later reward-design review, not a
+license to change this frozen reward contract during the audit.

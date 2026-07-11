@@ -990,6 +990,17 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
     def _validate_brma_tam_scale_aligned_v1_contract(self) -> None:
         cfg = self.brma_tam_scale_aligned_v1_config
+        evasion = getattr(self, "missile_evasion_config", {}) or {}
+        mode = str(evasion.get("mode", "")).lower()
+        teams = str(evasion.get("teams", "")).lower()
+        if mode != "brma_scripted":
+            raise ValueError(
+                "brma_tam_scale_aligned_v1 requires missile_evasion.mode='brma_scripted'"
+            )
+        if teams not in {"red_only", "both"}:
+            raise ValueError(
+                "brma_tam_scale_aligned_v1 requires missile_evasion.teams in {'red_only', 'both'}"
+            )
         required = (
             ("reward_contract_revision",),
             ("uav", "progress", "distance_weight"),

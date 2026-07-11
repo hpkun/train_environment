@@ -28,6 +28,14 @@ TRAIN_METRICS_COLUMNS = [
     "nan_detected",
 ]
 
+SCALE_V1_TRAIN_METRIC_COLUMNS = [
+    "effective_scale_v1_total", "effective_scale_v1_identity_error",
+    "scale_v1_progress_positive_ratio", "scale_v1_progress_clip_ratio",
+]
+for _col in SCALE_V1_TRAIN_METRIC_COLUMNS:
+    if _col not in TRAIN_METRICS_COLUMNS:
+        TRAIN_METRICS_COLUMNS.append(_col)
+
 EVAL_EPISODE_COLUMNS = [
     "run_id", "checkpoint_name", "eval_scenario", "episode_id", "seed",
     "outcome", "episode_return", "team_reward", "mav_reward",

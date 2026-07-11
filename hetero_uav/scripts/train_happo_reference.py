@@ -2739,6 +2739,10 @@ def _run_training_main() -> None:
                     "mask_keep_ratio": stats.get("mask_keep_ratio", 1.0),
                     "mask_entropy": stats.get("mask_entropy", 0.0),
                     "masked_entity_count": stats.get("masked_entity_count", 0.0),
+                    "effective_scale_v1_total": stats.get("effective_scale_v1_total", 0.0),
+                    "effective_scale_v1_identity_error": stats.get("effective_scale_v1_identity_error", 0.0),
+                    "scale_v1_progress_positive_ratio": stats.get("scale_v1_progress_positive_ratio", 0.0),
+                    "scale_v1_progress_clip_ratio": stats.get("scale_v1_progress_clip_ratio", 0.0),
                     "nan_detected": int(nan_detected),
                 })
             if not f.closed:
