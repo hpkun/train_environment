@@ -69,6 +69,34 @@ def get2d_AO_TA_R(ego_feature, enm_feature, return_side=False):
     return ego_AO, ego_TA, R
 
 
+def get2d_heading_AO_TA_R(ego_position, ego_heading,
+                          target_position, target_heading):
+    """Return horizontal AO/TA/range using aircraft body headings.
+
+    ``AO`` compares the shooter's forward heading with shooter-to-target LOS.
+    ``TA`` compares the target's forward heading with target-to-shooter LOS,
+    so ``TA > pi/2`` means the shooter is in the target's rear hemisphere.
+    Positions use the environment's north/east/up metre convention; altitude
+    does not participate in this horizontal 3-9-line geometry.
+    """
+    ego = np.asarray(ego_position, dtype=np.float64)
+    target = np.asarray(target_position, dtype=np.float64)
+    delta = target[:2] - ego[:2]
+    distance = float(np.linalg.norm(delta))
+    if distance <= 1e-8:
+        return 0.0, 0.0, 0.0
+
+    los_from_ego = float(np.arctan2(delta[1], delta[0]))
+    los_from_target = float(np.arctan2(-delta[1], -delta[0]))
+
+    def unsigned_angle(a, b):
+        return float(abs(in_range_rad(a - b)))
+
+    ao = unsigned_angle(los_from_ego, float(ego_heading))
+    ta = unsigned_angle(los_from_target, float(target_heading))
+    return ao, ta, distance
+
+
 def in_range_rad(angle):
     """Normalize an angle in radians to (-pi, pi]."""
     angle = angle % (2 * np.pi)

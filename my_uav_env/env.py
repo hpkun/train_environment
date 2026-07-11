@@ -23,7 +23,7 @@ from my_uav_env.alignment.reward_utils import (
 
 from .simulator import AircraftSimulator, MissileSimulator
 from .pid_controller import PIDController
-from .utils import get2d_AO_TA_R
+from .utils import get2d_AO_TA_R, get2d_heading_AO_TA_R
 from .render_tacview import TacviewLogger
 
 logger = logging.getLogger(__name__)
@@ -199,6 +199,8 @@ class UavCombatEnv(gymnasium.Env):
                  enable_gcas_for_blue: bool = False,
                  enable_kill_cooldown_gate: bool = False,
                  enable_single_kill_per_step_gate: bool = False,
+                 missile_detection_half_angle_deg: float = 45.0,
+                 missile_min_launch_range_m: float = 500.0,
                  obs_mode: str = "paper_strict",
                  suppress_jsbsim_output: bool = True,
                  render_mode=None):
@@ -209,6 +211,10 @@ class UavCombatEnv(gymnasium.Env):
         self.enable_gcas_for_blue = enable_gcas_for_blue
         self.enable_kill_cooldown_gate = enable_kill_cooldown_gate
         self.enable_single_kill_per_step_gate = enable_single_kill_per_step_gate
+        # The paper requires a detection cone and 10 km maximum range but does
+        # not publish the cone half-angle or a minimum launch range.
+        self.missile_launch_ao_thresh = np.deg2rad(missile_detection_half_angle_deg)
+        self.missile_launch_min_range = float(missile_min_launch_range_m)
         self.sim_freq = sim_freq
         self.agent_interaction_steps = agent_interaction_steps
         self.max_steps = max_steps
@@ -727,6 +733,10 @@ class UavCombatEnv(gymnasium.Env):
                 self._lock_timer[aid] = 0
                 self._lock_target[aid] = None
                 continue
+            if sim.num_left_missiles <= 0:
+                self._lock_timer[aid] = 0
+                self._lock_target[aid] = None
+                continue
             diag["alive_shooters"] += 1
             # Decrement cooldown every physics frame
             if self._missile_cooldown[aid] > 0:
@@ -754,17 +764,13 @@ class UavCombatEnv(gymnasium.Env):
                 diag["unengaged_enemy_pairs"] += 1
 
                 ego_pos = sim.get_position()
-                ego_vel = sim.get_velocity()
                 enm_pos = enemy_sim.get_position()
-                enm_vel = enemy_sim.get_velocity()
-
-                ego_feat = np.array([ego_pos[0], ego_pos[1], -ego_pos[2],
-                                     ego_vel[0], ego_vel[1], -ego_vel[2]])
-                enm_feat = np.array([enm_pos[0], enm_pos[1], -enm_pos[2],
-                                     enm_vel[0], enm_vel[1], -enm_vel[2]])
-                AO, TA, R = get2d_AO_TA_R(ego_feat, enm_feat)
-                range_ok = self.MISSILE_LAUNCH_MIN_RANGE < R < self.MISSILE_LAUNCH_RANGE_THRESH
-                ao_ok = AO < self.MISSILE_LAUNCH_AO_THRESH
+                AO = compute_body_x_q_los(ego_pos, sim.get_rpy(), enm_pos)
+                _, TA, _ = get2d_heading_AO_TA_R(
+                    ego_pos, sim.get_rpy()[2], enm_pos, enemy_sim.get_rpy()[2])
+                R = compute_3d_range(ego_pos, enm_pos)
+                range_ok = self.missile_launch_min_range < R < self.MISSILE_LAUNCH_RANGE_THRESH
+                ao_ok = AO < self.missile_launch_ao_thresh
                 ta_ok = TA > self.MISSILE_LAUNCH_TA_THRESH
                 if range_ok:
                     diag["range_ok_pairs"] += 1
@@ -848,14 +854,15 @@ class UavCombatEnv(gymnasium.Env):
         team = "red" if shooter.uid.startswith("red") else "blue"
         try:
             shooter_pos = shooter.get_position()
-            shooter_vel = shooter.get_velocity()
             target_pos = target.get_position()
+            shooter_vel = shooter.get_velocity()
             target_vel = target.get_velocity()
-            shooter_feat = np.array([shooter_pos[0], shooter_pos[1], -shooter_pos[2],
-                                     shooter_vel[0], shooter_vel[1], -shooter_vel[2]])
-            target_feat = np.array([target_pos[0], target_pos[1], -target_pos[2],
-                                    target_vel[0], target_vel[1], -target_vel[2]])
-            ao, ta, r = get2d_AO_TA_R(shooter_feat, target_feat)
+            ao = compute_body_x_q_los(
+                shooter_pos, shooter.get_rpy(), target_pos)
+            _, ta, _ = get2d_heading_AO_TA_R(
+                shooter_pos, shooter.get_rpy()[2],
+                target_pos, target.get_rpy()[2])
+            r = compute_3d_range(shooter_pos, target_pos)
         except Exception:
             shooter_pos = np.array([np.nan, np.nan, np.nan], dtype=np.float64)
             shooter_vel = np.array([np.nan, np.nan, np.nan], dtype=np.float64)
@@ -1167,7 +1174,7 @@ class UavCombatEnv(gymnasium.Env):
         if theta > np.pi / 3:
             return -1.0
         if theta > np.pi / 4:
-            return -(theta / np.pi - 0.25) / 12.0
+            return -12.0 * (theta / np.pi - 0.25)
         return 0.0
 
     def _roll_penalty(self, sim: AircraftSimulator) -> float:
@@ -1575,8 +1582,7 @@ class UavCombatEnv(gymnasium.Env):
 
         Radar FOV (paper):
           - Azimuth: ±60°  (120° forward sector)
-          - Elevation: [-10°, +32°]  (body-frame, approx world-frame since
-            F-16 pitch is moderate in GCAS-protected flight)
+          - Elevation: [-10°, +32°] in the aircraft body frame
 
         Detection range is RCS-dependent (see ``_compute_radar_max_range``).
 
@@ -1596,28 +1602,24 @@ class UavCombatEnv(gymnasium.Env):
         if R_3d < 1e-6:
             return True
 
-        # ---- azimuth check (horizontal plane) ----
-        los_az = np.arctan2(de, dn)
-        ego_yaw = ego_rpy[2]
-        az_error = (los_az - ego_yaw + np.pi) % (2.0 * np.pi) - np.pi  # → [-π, π]
-        if abs(az_error) > self.RADAR_AZIMUTH_HALF:
-            return False
+        # Rotate the full 3D LOS into body axes. Environment positions are NEU,
+        # while PIDController's rotation helper uses NED (body z is down).
+        delta_ned = np.array([dn, de, -du], dtype=np.float64)
+        r_bi = PIDController.ned_to_body_matrix(
+            float(ego_rpy[0]), float(ego_rpy[1]), float(ego_rpy[2]))
+        los_body = r_bi @ delta_ned
+        horizontal_body = float(np.hypot(los_body[0], los_body[1]))
+        az_body = float(np.arctan2(los_body[1], los_body[0]))
+        el_body = float(np.arctan2(-los_body[2], horizontal_body))
 
-        # ---- elevation check ----
-        los_el = np.arctan2(du, R_h)
-        ego_pitch = ego_rpy[1]
-        el_relative = los_el - ego_pitch
-        if el_relative < self.RADAR_ELEVATION_MIN or el_relative > self.RADAR_ELEVATION_MAX:
+        if abs(az_body) > self.RADAR_AZIMUTH_HALF:
+            return False
+        if el_body < self.RADAR_ELEVATION_MIN or el_body > self.RADAR_ELEVATION_MAX:
             return False
 
         # ---- RCS-dependent range check ----
-        ego_vel = ego_sim.get_velocity()
-        enm_vel = enemy_sim.get_velocity()
-        ego_feat = np.array([ego_pos[0], ego_pos[1], -ego_pos[2],
-                             ego_vel[0], ego_vel[1], -ego_vel[2]], dtype=np.float64)
-        enm_feat = np.array([enm_pos[0], enm_pos[1], -enm_pos[2],
-                             enm_vel[0], enm_vel[1], -enm_vel[2]], dtype=np.float64)
-        _, TA, _ = get2d_AO_TA_R(ego_feat, enm_feat)
+        _, TA, _ = get2d_heading_AO_TA_R(
+            ego_pos, ego_rpy[2], enm_pos, enemy_sim.get_rpy()[2])
 
         R_max = self._compute_radar_max_range(TA)
         return R_3d <= R_max

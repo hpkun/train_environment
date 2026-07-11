@@ -9,16 +9,17 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-REWARD_VERSION = "paper_eq20_ta_alt_eq17_3dlos_v1"
+REWARD_VERSION = "paper_eq15_eq20_ta_alt_eq17_3dlos_v2"
 """Reward version identifier for logs and evaluation outputs.
 
-``paper_eq20_ta_alt_eq17_3dlos_v1`` means:
+``paper_eq15_eq20_ta_alt_eq17_3dlos_v2`` means:
 
-1. situation reward Ta uses the paper Eq.20 original scale, including
+1. pitch penalty uses the continuous Eq.15 middle segment;
+2. situation reward Ta uses the paper Eq.20 original scale, including
    ``Ta=10`` when ``q_LOS <= 4 deg``;
-2. altitude reward uses a pairwise eq.17-style curve with the high-altitude
+3. altitude reward uses a pairwise eq.17-style curve with the high-altitude
    0.1 tail;
-3. situation reward geometry has switched from 2D horizontal AO/TA to
+4. situation reward geometry uses
    3D body-x q_LOS and 3D Euclidean distance.
 
 ``fixed_ta_alt_eq17_3dlos_v1`` and earlier logs should not be mixed with
@@ -78,7 +79,7 @@ def pitch_penalty_current(theta_rad: float) -> float:
     if theta > math.pi / 3.0:
         return -1.0
     if theta > math.pi / 4.0:
-        return -(theta / math.pi - 0.25) / 12.0
+        return -12.0 * (theta / math.pi - 0.25)
     return 0.0
 
 

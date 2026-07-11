@@ -25,13 +25,11 @@ __all__ = [
 
 
 def _rotation_inertial_to_body(roll, pitch, heading) -> np.ndarray:
-    """Return a 3x3 NEU-inertial to body-frame rotation matrix.
+    """Return a 3x3 NEU-inertial to aerospace body-frame rotation.
 
-    Assumption: the project uses an inertial NEU frame, where x is north, y is
-    east, and z is up.  ``roll``, ``pitch``, and ``heading`` are radians from
-    ``AircraftSimulator.get_rpy()``.  This prototype uses a conventional
-    yaw-pitch-roll composition and returns the transpose of body-to-inertial.
-    The sign convention should be validated against JSBSim before training use.
+    Environment vectors are NEU (z up), while the aircraft body frame follows
+    the aerospace convention x forward, y right, z down. The Euler rotation is
+    therefore formed in NED and preceded by the NEU-to-NED sign conversion.
     """
     cr, sr = np.cos(roll), np.sin(roll)
     cp, sp = np.cos(pitch), np.sin(pitch)
@@ -53,8 +51,9 @@ def _rotation_inertial_to_body(roll, pitch, heading) -> np.ndarray:
         [0.0, 0.0, 1.0],
     ], dtype=np.float64)
 
-    body_to_inertial = r_z @ r_y @ r_x
-    return body_to_inertial.T.astype(np.float64)
+    body_to_ned = r_z @ r_y @ r_x
+    neu_to_ned = np.diag([1.0, 1.0, -1.0])
+    return (body_to_ned.T @ neu_to_ned).astype(np.float64)
 
 
 def _get_alpha_beta_with_source(sim) -> tuple[float, float, str, str]:

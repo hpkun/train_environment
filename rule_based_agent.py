@@ -291,7 +291,7 @@ def _simple_body_vector_to_world_bearing(
     """Convert current body-frame relative position to world horizontal bearing.
 
     The observation's ``state[0:3]`` is the current target relative position in
-    body frame: x=forward, y=right, z=up after normalization.  The environment
+    body frame: x=forward, y=right, z=down.  The environment
     action contract expects an absolute world target heading.  This is only a
     coordinate conversion of the current relative position; it is not lead
     pursuit, does not use target velocity, and does not predict future target
@@ -630,20 +630,27 @@ def blue_coordinated_actions(
       2. Blues are sorted by their best score (most promising engagement first).
       3. Greedy assignment: best blue → best red, next blue → best UNTAKEN red, ...
 
-    The optional ``engaged_targets`` set (red UIDs like ``"red_0"``) is both
-    consumed and mutated in-place.  Reds already in the set are excluded from
-    scoring (they already have a friendly missile in flight or were assigned
-    to another blue earlier in the same allocation).  When a blue is assigned
-    to a red, that red's UID is immediately added to ``engaged_targets`` so
-    subsequent blues in the same call skip it — flight-level "no-ganging-up".
+    The optional ``engaged_targets`` set (red UIDs like ``"red_0"``) represents
+    targets that already have an in-flight missile. Those targets are excluded
+    from allocation. Per-call assignments use a separate local set so pursuit
+    allocation never pollutes the environment's missile-engagement state.
 
     If ``engaged_targets`` is None, the function works as before (backward
     compatible for training loops that don't have env-level access).
     """
     blue_ids = [f"blue_{i}" for i in range(num_blue)]
 
+    engaged_red_indices: set[int] = set()
+    if engaged_targets:
+        for uid in engaged_targets:
+            if uid.startswith("red_"):
+                try:
+                    engaged_red_indices.add(int(uid.split("_")[1]))
+                except (ValueError, IndexError):
+                    pass
+
     if pursuit_mode == "safe_pursuit":
-        taken: set[int] = set()
+        taken: set[int] = set(engaged_red_indices)
         assignments: dict[int, int | None] = {}
         for b_idx, bid in enumerate(blue_ids):
             obs = blue_obs.get(bid, {})
@@ -660,16 +667,6 @@ def blue_coordinated_actions(
                 own_heading=own_headings.get(bid) if own_headings else None)
             for b_idx, bid in enumerate(blue_ids)
         }
-
-    # ---- Convert engaged UIDs to red indices ----
-    engaged_red_indices: set[int] = set()
-    if engaged_targets:
-        for uid in engaged_targets:
-            if uid.startswith("red_"):
-                try:
-                    engaged_red_indices.add(int(uid.split("_")[1]))
-                except (ValueError, IndexError):
-                    pass
 
     # ---- Build score matrix: score[b][r] for alive reds ----
     # Pre-filter alive reds (same across all blues since death_mask is shared)
@@ -724,12 +721,8 @@ def blue_coordinated_actions(
         if best_r is not None:
             taken_reds.add(best_r)
             assignments[b_idx] = best_r
-            # ---- Hot-update: immediately mark red as engaged ----
-            # Subsequent blues in this same allocation will skip this red,
-            # preventing flight-level "ganging up" on a single target.
+            # Subsequent blues in this allocation skip the local assignment.
             engaged_red_indices.add(best_r)
-            if engaged_targets is not None:
-                engaged_targets.add(f"red_{best_r}")
         else:
             assignments[b_idx] = None  # all reds taken — fall back to free selection
 

@@ -148,6 +148,24 @@ def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool,
     return dim
 
 
+def _compute_global_state_dim(num_red: int, obs_mode: str = "paper_strict") -> int:
+    """Paper CTDE state: native ego state of every red UAV."""
+    entity_dim = 10 if obs_mode == "paper_strict" else 11
+    return num_red * entity_dim
+
+
+def _global_state_from_local_obs_flats(
+    local_obs_flats: list[np.ndarray],
+    obs_mode: str = "paper_strict",
+) -> np.ndarray:
+    """Extract and concatenate each red agent's leading ego-state entity."""
+    entity_dim = 10 if obs_mode == "paper_strict" else 11
+    return np.concatenate([
+        np.asarray(obs, dtype=np.float32).reshape(-1)[:entity_dim]
+        for obs in local_obs_flats
+    ]).astype(np.float32)
+
+
 class VanillaActor(nn.Module):
     """纯 MLP 策略网络：展平 obs → GRU → MLP → Gaussian(mu, learnable sigma)."""
 
@@ -186,11 +204,10 @@ class VanillaActor(nn.Module):
 
 
 class CentralizedCritic(nn.Module):
-    """MAPPO centralized critic: global state (all red agents' obs concat) → V(s).
+    """MAPPO centralized critic: all red native ego states → V(s).
 
-    Paper §3.4: the critic sees the joint global state so it can learn a
-    value function with full battlefield awareness.  No RNN — the global
-    state already contains all information needed for credit assignment.
+    Paper §3.4 describes the global state as the native states of all friendly
+    UAVs. It therefore excludes repeated enemy portions of local observations.
     """
 
     def __init__(self, global_obs_dim: int, hidden: int = 256):
@@ -1031,9 +1048,9 @@ def _classify_death_reason(reason: str | None) -> str:
 
 
 def _episode_outcome(red_alive: int, blue_alive: int) -> str:
-    if blue_alive == 0 and red_alive > 0:
+    if red_alive > blue_alive:
         return "red"
-    if red_alive == 0 and blue_alive > 0:
+    if blue_alive > red_alive:
         return "blue"
     return "draw"
 
@@ -1055,7 +1072,7 @@ def _actor_std_stats(actor) -> dict:
 
 def _ppo_update_legacy(actor, critic, actor_opt, critic_opt, buffer, config, device,
                        total_steps: int = 0):
-    """MAPPO CTDE update: centralized critic sees global state (all red obs concat).
+    """MAPPO CTDE update: critic sees all red native ego states.
 
     The critic outputs a single V(s_global) shared by all agents.  GAE uses
     per-agent rewards + the shared value to compute per-agent advantages.
@@ -1074,11 +1091,12 @@ def _ppo_update_legacy(actor, critic, actor_opt, critic_opt, buffer, config, dev
     critic_opt.zero_grad()
 
     for env_idx in range(num_envs):
-        # ---- Build global obs per timestep (all red agents' obs concat) ----
+        # ---- Build paper CTDE state (all red native ego states) ----
         global_obs_seq = []
         for t in range(num_steps):
             parts = [buffer.obs[t][env_idx][i] for i in range(num_red)]
-            global_obs_seq.append(np.concatenate(parts))
+            global_obs_seq.append(_global_state_from_local_obs_flats(
+                parts, obs_mode=config.obs_mode))
 
         # ---- Centralized critic: batch forward all timesteps → V(s_global_t) ----
         gobs_batch = torch.as_tensor(np.stack(global_obs_seq), dtype=torch.float32,
@@ -1223,7 +1241,8 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
         global_obs_seq = []
         for t in range(num_steps):
             parts = [buffer.obs[t][env_idx][i] for i in range(num_red)]
-            global_obs_seq.append(np.concatenate(parts))
+            global_obs_seq.append(_global_state_from_local_obs_flats(
+                parts, obs_mode=config.obs_mode))
         global_obs_by_env.append(np.stack(global_obs_seq).astype(np.float32))
 
         for agent_idx in range(num_red):
@@ -1599,7 +1618,7 @@ def main():
     actor = VanillaActor(obs_dim=obs_dim, action_dim=config.action_dim,
                          hidden=config.mlp_hidden,
                          rnn_hidden=config.rnn_hidden_size).to(device)
-    global_obs_dim = obs_dim * config.num_red
+    global_obs_dim = _compute_global_state_dim(config.num_red, config.obs_mode)
     critic = CentralizedCritic(global_obs_dim=global_obs_dim,
                                 hidden=config.mlp_hidden).to(device)
 
@@ -1736,7 +1755,8 @@ def main():
                     else:
                         dead_agent_records.append((i, obs_flat))
 
-                all_global_obs_np.append(np.concatenate(red_obs_flat_all))
+                all_global_obs_np.append(_global_state_from_local_obs_flats(
+                    red_obs_flat_all, obs_mode=config.obs_mode))
                 env_actions_builders.append({
                     "dead": False,
                     "blue_actions": blue_actions,
@@ -1923,7 +1943,8 @@ def main():
                     global_obs_parts.append(_flatten_obs(env_obs[rid], obs_mode=config.obs_mode))
                 else:
                     global_obs_parts.append(np.zeros(obs_dim, dtype=np.float32))
-            bootstrap_global_obs_list.append(np.concatenate(global_obs_parts))
+            bootstrap_global_obs_list.append(_global_state_from_local_obs_flats(
+                global_obs_parts, obs_mode=config.obs_mode))
         bootstrap_obs_batch = torch.as_tensor(
             np.stack(bootstrap_global_obs_list), dtype=torch.float32, device=device)
         with torch.no_grad():
