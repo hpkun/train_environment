@@ -307,6 +307,7 @@ def _experiment_base_v2_meta(
             path = ROOT / path
         data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else {}
         reward_cfg = dict((data or {}).get("brma_tam_scale_aligned_v2", {}) or {})
+        missile_protocol = dict((data or {}).get("missile_protocol", {}) or {})
         meta.update({
             "reward_contract_revision": 4,
             "flight_scale": float(reward_cfg.get("flight_scale", 0.1)),
@@ -319,6 +320,7 @@ def _experiment_base_v2_meta(
             "max_steps": int(data.get("max_steps", 1000)),
             "initial_red_count": int(data.get("max_num_red", len(data.get("red_agent_types", [])))),
             "initial_blue_count": int(data.get("max_num_blue", len(data.get("blue_agent_types", [])))),
+            **missile_protocol,
         })
     return meta
 

@@ -30,6 +30,67 @@ def _safe(v, default=0.0):
     except: return default
 
 
+def _alive_attack_distances(env) -> list[float]:
+    attack = [
+        sim for rid, sim in env.red_planes.items()
+        if env.agent_roles.get(rid) == "attack_uav" and sim is not None and sim.is_alive
+    ]
+    blue = [sim for sim in env.blue_planes.values() if sim is not None and sim.is_alive]
+    if not attack or not blue:
+        return []
+    nearest = []
+    for red in attack:
+        nearest.append(min(
+            float(np.linalg.norm(np.asarray(red.get_position()) - np.asarray(target.get_position())))
+            for target in blue
+        ))
+    return nearest
+
+
+def _event_key(record: dict, fallback_step: int) -> tuple:
+    missile_id = record.get("missile_id")
+    if missile_id not in (None, ""):
+        return ("missile", str(record.get("shooter_id", "")), str(missile_id))
+    return (
+        "fallback", int(fallback_step), str(record.get("shooter_id", "")),
+        str(record.get("target_id", "")), str(record.get("event_type", "")),
+    )
+
+
+def _gate_flags(info: dict) -> tuple[bool, bool, bool, bool]:
+    records = info.get("__launch_gate_diagnostics__", []) if isinstance(info, dict) else []
+    attack_records = [
+        row for row in records
+        if isinstance(row, dict) and row.get("role") == "attack_uav"
+        and str(row.get("agent_id", "")).startswith("red_")
+    ]
+    return (
+        any(int(row.get("any_range_pass", 0) or 0) > 0 for row in attack_records),
+        any(int(row.get("any_ata_pass", 0) or 0) > 0 for row in attack_records),
+        any(int(row.get("any_ta_pass", 0) or 0) > 0 for row in attack_records),
+        any(int(row.get("any_geometry_pass", 0) or 0) > 0 for row in attack_records),
+    )
+
+
+def _blue_death_record(event: dict, done_records: list[dict]) -> dict:
+    aid = str(event.get("agent_id", ""))
+    missile = next((
+        row for row in done_records
+        if str(row.get("target_id", "")) == aid
+        and str(row.get("termination_reason", row.get("raw_termination_reason", ""))) == "hit"
+    ), None)
+    shooter = str((missile or {}).get("shooter_id", event.get("missile_owner", "")) or "")
+    reason = str(event.get("death_reason", "") or "")
+    return {
+        "step": int(event.get("step", -1) or -1),
+        "blue_agent_id": aid,
+        "death_reason": reason,
+        "killer_id": shooter,
+        "shooter_id": shooter,
+        "missile_id": str((missile or {}).get("missile_id", "") or ""),
+    }
+
+
 def _evaluate_model(policy, env, config, args, adapter, device, model_label, rich_logger=None):
     """Run deterministic episodes and collect per-episode metrics."""
     episodes = []
@@ -37,8 +98,13 @@ def _evaluate_model(policy, env, config, args, adapter, device, model_label, ric
     roles = _role_ids(env)
     _rnn_hidden_size = getattr(policy, "rnn_hidden_size", 0)
 
-    for ep_idx in range(args.episodes):
-        seed = args.seed_start + ep_idx
+    episode_seeds = list(args.seeds) if getattr(args, "seeds", None) else [
+        args.seed_start + ep_idx for ep_idx in range(args.episodes)
+    ]
+    for seed in episode_seeds:
+        # Missile hit sampling uses NumPy's module-level RNG. Reset it for each
+        # paired episode so model evaluation order cannot change the seed result.
+        np.random.seed(int(seed))
         obs, info = env.reset(seed=seed)
         opponent.reset_memory()
 
@@ -51,9 +117,13 @@ def _evaluate_model(policy, env, config, args, adapter, device, model_label, ric
             "range_gate_decisions": 0, "ao_gate_decisions": 0,
             "ta_gate_decisions": 0, "full_window_decisions": 0,
             "first_window_step": -1, "first_launch_step": -1,
+            "first_hit_step": -1, "valid_decisions": 0,
             "min_distances": [], "nearest_distances": [],
             "red_launches": 0, "red_hits": 0,
             "blue_launches": 0, "blue_hits": 0,
+            "launch_keys": set(), "hit_keys": set(),
+            "blue_launch_keys": set(), "blue_hit_keys": set(),
+            "blue_death_records": [],
         }
         terminated = {aid: False for aid in env.agent_ids}
         truncated = {aid: False for aid in env.agent_ids}
@@ -86,60 +156,56 @@ def _evaluate_model(policy, env, config, args, adapter, device, model_label, ric
             action_dict = {rid: actions_np[i].astype(np.float32) for i, rid in enumerate(env.red_ids)}
             action_dict.update(opponent.act(obs, env.blue_ids, env=env))
 
+            nearest_distances = _alive_attack_distances(env)
+            valid_decision = bool(nearest_distances)
+            if valid_decision:
+                gate_stats["valid_decisions"] += 1
+                gate_stats["nearest_distances"].extend(nearest_distances)
+                gate_stats["min_distances"].append(min(nearest_distances))
+
             obs, rewards, terminated, truncated, info = env.step(action_dict)
             _update_missile_stats(mstats, info, env, prev_hits)
 
-            # Gate occupancy from launch diag or reward components
-            rc = info.get("reward_components", {}) if isinstance(info, dict) else {}
-            launch_diag = info.get("__launch_diag__", {}) if isinstance(info, dict) else {}
-            red_diag = launch_diag.get("red", {}) if isinstance(launch_diag, dict) else {}
-
-            # Per-step: check if any attack UAV has launch geometry
-            any_range_ok = any(
-                float(rc.get(rid, {}).get("launch_range_ok", 0) or 0) > 0.5
-                for rid in env.red_ids if env.agent_roles.get(rid) == "attack_uav"
-            )
-            # AO/ATA gate: use env MISSILE_LAUNCH_AO_THRESH check via candidate metrics
-            # TA gate: use env MISSILE_LAUNCH_TA_THRESH check
-            any_ao_ok = any(
-                float(rc.get(rid, {}).get("tam_ata_rad", 999) or 999) < 0.7854  # < 45 deg
-                and float(rc.get(rid, {}).get("tam_geometry_valid", 0) or 0) > 0.5
-                for rid in env.red_ids if env.agent_roles.get(rid) == "attack_uav"
-            )
-            # For TA: check if any UAV has TA > pi/2 (90 deg) - rear hemisphere
-            any_ta_ok = any(
-                float(rc.get(rid, {}).get("launch_range_ok", 0) or 0) > 0.5
-                and float(rc.get(rid, {}).get("tam_aa_rad", 0) or 0) > 1.5708
-                for rid in env.red_ids if env.agent_roles.get(rid) == "attack_uav"
-            )
-
-            if any_range_ok:
+            any_range_ok, any_ao_ok, any_ta_ok, full_window = _gate_flags(info)
+            if valid_decision and any_range_ok:
                 gate_stats["range_gate_decisions"] += 1
-            if any_ao_ok:
+            if valid_decision and any_ao_ok:
                 gate_stats["ao_gate_decisions"] += 1
-            if any_ta_ok:
+            if valid_decision and any_ta_ok:
                 gate_stats["ta_gate_decisions"] += 1
-            full_window = any_range_ok and any_ao_ok and any_ta_ok
-            if full_window:
+            if valid_decision and full_window:
                 gate_stats["full_window_decisions"] += 1
                 if gate_stats["first_window_step"] < 0:
                     gate_stats["first_window_step"] = ep_len
 
-            # Nearest target distances
-            for rid in env.red_ids:
-                if env.agent_roles.get(rid) == "attack_uav":
-                    d = float(rc.get(rid, {}).get("reward_target_distance_m", 0) or 0)
-                    if d > 0:
-                        gate_stats["nearest_distances"].append(d)
-                        gate_stats["min_distances"].append(d)
-
-            # Launch check
-            for aid in env.agent_ids:
-                agent_info = info.get(aid, {}) if isinstance(info, dict) else {}
-                fired = int(agent_info.get("missiles_fired_this_step", 0)) if isinstance(agent_info, dict) else 0
-                if aid.startswith("red_"):
-                    if fired > 0 and gate_stats["first_launch_step"] < 0:
+            launch_records = info.get("__launch_quality_step__", []) if isinstance(info, dict) else []
+            done_records = info.get("__launch_quality_done__", []) if isinstance(info, dict) else []
+            for record in launch_records:
+                if not isinstance(record, dict):
+                    continue
+                key = _event_key(record, ep_len)
+                if str(record.get("shooter_id", "")).startswith("red_"):
+                    gate_stats["launch_keys"].add(key)
+                    if gate_stats["first_launch_step"] < 0:
                         gate_stats["first_launch_step"] = ep_len
+                else:
+                    gate_stats["blue_launch_keys"].add(key)
+            for record in done_records:
+                if not isinstance(record, dict):
+                    continue
+                reason = str(record.get("termination_reason", record.get("raw_termination_reason", "")))
+                if reason != "hit":
+                    continue
+                key = _event_key(record, ep_len)
+                if str(record.get("shooter_id", "")).startswith("red_"):
+                    gate_stats["hit_keys"].add(key)
+                    if gate_stats["first_hit_step"] < 0:
+                        gate_stats["first_hit_step"] = ep_len
+                else:
+                    gate_stats["blue_hit_keys"].add(key)
+            for event in info.get("death_events", []) if isinstance(info, dict) else []:
+                if isinstance(event, dict) and str(event.get("agent_id", "")).startswith("blue_"):
+                    gate_stats["blue_death_records"].append(_blue_death_record(event, done_records))
 
             ep_ret += sum(float(rewards.get(rid, 0.0)) for rid in env.red_ids)
             ep_len += 1
@@ -164,9 +230,12 @@ def _evaluate_model(policy, env, config, args, adapter, device, model_label, ric
         red_dead = num_red - ra
         blue_dead = num_blue - ba
 
-        min_dist = float(np.min(gate_stats["min_distances"])) if gate_stats["min_distances"] else 0.0
-        mean_nearest = float(np.mean(gate_stats["nearest_distances"])) if gate_stats["nearest_distances"] else 0.0
-        gate_denom = max(ep_len, 1)
+        min_dist = float(np.min(gate_stats["min_distances"])) if gate_stats["min_distances"] else float("nan")
+        mean_nearest = float(np.mean(gate_stats["nearest_distances"])) if gate_stats["nearest_distances"] else float("nan")
+        gate_denom = max(gate_stats["valid_decisions"], 1)
+        blue_missile_deaths = sum(record["death_reason"] == "missile_hit" for record in gate_stats["blue_death_records"])
+        blue_crash_deaths = sum("crash" in record["death_reason"].lower() for record in gate_stats["blue_death_records"])
+        blue_other_deaths = len(gate_stats["blue_death_records"]) - blue_missile_deaths - blue_crash_deaths
         episodes.append({
             "model_label": model_label, "episode_seed": seed,
             "episode_return": ep_ret, "episode_length": ep_len,
@@ -175,22 +244,28 @@ def _evaluate_model(policy, env, config, args, adapter, device, model_label, ric
             "mav_alive_final": int(bool(env.red_planes.get("red_0") and env.red_planes["red_0"].is_alive)),
             "red_loss_fraction": red_dead / max(num_red, 1),
             "blue_loss_fraction": blue_dead / max(num_blue, 1),
-            "red_launch_count": gate_stats["red_launches"],
-            "red_hit_count": gate_stats["red_hits"],
-            "blue_launch_count": mstats["blue_fired"],
-            "blue_hit_count": mstats["blue_hits"],
+            "red_launch_count": len(gate_stats["launch_keys"]),
+            "red_hit_count": len(gate_stats["hit_keys"]),
+            "blue_launch_count": len(gate_stats["blue_launch_keys"]),
+            "blue_hit_count": len(gate_stats["blue_hit_keys"]),
             "minimum_red_to_blue_distance_m": min_dist,
             "mean_nearest_target_distance_m": mean_nearest,
             "range_gate_valid_decisions": gate_stats["range_gate_decisions"],
             "ao_gate_valid_decisions": gate_stats["ao_gate_decisions"],
             "ta_gate_valid_decisions": gate_stats["ta_gate_decisions"],
             "full_launch_window_decisions": gate_stats["full_window_decisions"],
+            "launch_gate_valid_decisions": gate_stats["valid_decisions"],
             "range_gate_occupancy": gate_stats["range_gate_decisions"] / gate_denom,
             "ao_gate_occupancy": gate_stats["ao_gate_decisions"] / gate_denom,
             "ta_gate_occupancy": gate_stats["ta_gate_decisions"] / gate_denom,
             "full_launch_window_occupancy": gate_stats["full_window_decisions"] / gate_denom,
             "first_full_launch_window_step": gate_stats["first_window_step"],
             "first_red_launch_step": gate_stats["first_launch_step"],
+            "first_red_hit_step": gate_stats["first_hit_step"],
+            "blue_death_count_missile_hit": blue_missile_deaths,
+            "blue_death_count_crash": blue_crash_deaths,
+            "blue_death_count_other": blue_other_deaths,
+            "blue_death_records": json.dumps(gate_stats["blue_death_records"], sort_keys=True),
         })
 
     return episodes
@@ -205,7 +280,9 @@ def _aggregate(episodes, label):
     mav = [e["mav_alive_final"] for e in episodes]
     rl = [e["red_launch_count"] for e in episodes]
     rh = [e["red_hit_count"] for e in episodes]
-    min_d = [e["minimum_red_to_blue_distance_m"] for e in episodes if e["minimum_red_to_blue_distance_m"] > 0]
+    bl = [e["blue_launch_count"] for e in episodes]
+    bh = [e["blue_hit_count"] for e in episodes]
+    min_d = [e["minimum_red_to_blue_distance_m"] for e in episodes if np.isfinite(e["minimum_red_to_blue_distance_m"])]
     range_o = [e["range_gate_occupancy"] for e in episodes]
     ao_o = [e["ao_gate_occupancy"] for e in episodes]
     ta_o = [e["ta_gate_occupancy"] for e in episodes]
@@ -219,7 +296,11 @@ def _aggregate(episodes, label):
         "red_loss_fraction_mean": float(np.mean(rlf)), "blue_loss_fraction_mean": float(np.mean(blf)),
         "mav_survival_rate": float(np.mean(mav)),
         "red_launches_mean": float(np.mean(rl)), "red_hits_mean": float(np.mean(rh)),
-        "minimum_distance_mean": float(np.mean(min_d)) if min_d else 0.0,
+        "blue_launches_mean": float(np.mean(bl)), "blue_hits_mean": float(np.mean(bh)),
+        "blue_death_count_missile_hit": int(sum(e["blue_death_count_missile_hit"] for e in episodes)),
+        "blue_death_count_crash": int(sum(e["blue_death_count_crash"] for e in episodes)),
+        "blue_death_count_other": int(sum(e["blue_death_count_other"] for e in episodes)),
+        "minimum_distance_mean": float(np.mean(min_d)) if min_d else float("nan"),
         "range_gate_occupancy_mean": float(np.mean(range_o)),
         "ao_gate_occupancy_mean": float(np.mean(ao_o)),
         "ta_gate_occupancy_mean": float(np.mean(ta_o)),
@@ -270,6 +351,7 @@ def main():
     parser.add_argument("--opponent-policy", default="brma_rule")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed-start", type=int, default=1001)
+    parser.add_argument("--seeds", type=int, nargs="+", default=None)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()

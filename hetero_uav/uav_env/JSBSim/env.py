@@ -234,6 +234,7 @@ class UavCombatEnv(gymnasium.Env):
                  missile_launch_min_range_m: float | None = None,
                  missile_attack_interval_sec: float | None = None,
                  missile_guidance: dict | None = None,
+                 missile_protocol: dict | None = None,
                  missile_evasion: dict | None = None,
                  use_boresight_launch_gate: bool = False,
                  render_mode=None):
@@ -280,6 +281,7 @@ class UavCombatEnv(gymnasium.Env):
         self.pid_profile_by_role = dict(pid_profile_by_role or {})
         self.pid_profile_config = dict(pid_profile_config or {})
         self.missile_guidance_config = dict(missile_guidance or {"mode": "legacy"})
+        self.missile_protocol_meta = dict(missile_protocol or {})
         self.missile_evasion_config = dict(missile_evasion or {"mode": "brma_scripted", "teams": "red_only"})
         self.physics_dt = 1.0 / sim_freq
         self.env_dt = agent_interaction_steps * self.physics_dt
@@ -2409,6 +2411,7 @@ class UavCombatEnv(gymnasium.Env):
             self, "_missile_launch_min_range_m_effective", self.MISSILE_LAUNCH_MIN_RANGE)
         info["effective_missile_attack_interval_sec"] = getattr(
             self, "_missile_attack_interval_sec_effective", 0.5)
+        info["missile_protocol"] = dict(getattr(self, "missile_protocol_meta", {}) or {})
         info["red_uav_track_policy"] = getattr(
             self, "red_uav_track_policy", "direct_or_mav_shared")
         info["use_boresight_launch_gate"] = bool(getattr(

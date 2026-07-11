@@ -11,7 +11,7 @@ import math
 import numpy as np
 
 
-PROTOCOL_VERSION = "tam_greedy_rule_v1"
+PROTOCOL_VERSION = "tam_greedy_rule_v2_paper_weighted"
 RULE_CLAIM = "paper_aligned_not_exact_reproduction"
 CANDIDATE_MANEUVERS = (
     "level_hold", "climb", "descend", "turn_left", "turn_right",
@@ -20,12 +20,11 @@ CANDIDATE_MANEUVERS = (
     "return_center", "hard_deck_recovery",
 )
 SCORE_WEIGHTS = {
-    "distance": 0.30,
-    "angle": 0.30,
-    "speed": 0.10,
-    "altitude": 0.10,
-    "boundary": 0.10,
-    "warning": 0.35,
+    "height": 10.0 / 75.0,
+    "speed": 10.0 / 75.0,
+    "angle": 15.0 / 75.0,
+    "distance": 10.0 / 75.0,
+    "avoidance": 30.0 / 75.0,
 }
 
 
@@ -52,6 +51,7 @@ class TamGreedyRule:
         self.warning_break_count = 0
         self.boundary_safety_count = 0
         self.hard_deck_recovery_count = 0
+        self.last_candidate_scores: dict[str, dict[str, dict[str, float]]] = {}
 
     def reset(self) -> None:
         self.targets.clear()
@@ -61,6 +61,7 @@ class TamGreedyRule:
         self.warning_break_count = 0
         self.boundary_safety_count = 0
         self.hard_deck_recovery_count = 0
+        self.last_candidate_scores.clear()
 
     @staticmethod
     def _visible_targets(obs: dict) -> list[tuple[int, float, float, float]]:
@@ -133,6 +134,7 @@ class TamGreedyRule:
         ego = np.asarray(obs.get("ego_geo_state", []), dtype=np.float32).reshape(-1)
         current_heading = float(ego[5]) if ego.size >= 6 and np.isfinite(ego[5]) else float(ownship.get("heading_norm", 0.0))
         altitude_norm = float(ego[2]) if ego.size >= 3 and np.isfinite(ego[2]) else 0.6
+        current_speed_mps = float(ego[3] * 600.0) if ego.size >= 4 and np.isfinite(ego[3]) else 270.0
         warning = float(np.asarray(obs.get("missile_warning", 0.0)).reshape(-1)[0]) if np.asarray(obs.get("missile_warning", 0.0)).size else 0.0
         target_heading = current_heading
         target_elevation = 0.0
@@ -149,6 +151,7 @@ class TamGreedyRule:
 
         best = None
         best_score = -float("inf")
+        candidate_scores: dict[str, dict[str, float]] = {}
         candidates = self._candidates(current_heading, target_heading, target_elevation)
         if boundary_pressure > 0.8:
             candidates.append(Candidate(
@@ -161,27 +164,38 @@ class TamGreedyRule:
             if candidate.name == "pursue_current_target":
                 heading = wrap_heading(target_heading)
             angle_error = abs(wrap_heading(target_heading - heading))
-            distance_term = (
-                float(np.clip(math.cos(math.pi * angle_error) * candidate.speed_mps / 330.0, -1.0, 1.0))
-                if target_slot is not None else 0.0
-            )
-            angle_term = 1.0 - min(angle_error, 1.0)
-            speed_term = 1.0 - min(abs(candidate.speed_mps - 285.0) / 120.0, 1.0)
-            altitude_term = 1.0 if 0.3 <= altitude_norm <= 0.9 else -1.0
-            boundary_term = (1.0 - min(abs(wrap_heading(center_heading - heading)), 1.0)) if boundary_pressure > 0.8 else 0.0
-            warning_term = 1.0 if warning > 0.5 and candidate.name.startswith("break_") else 0.0
+            pitch_rad = float(candidate.pitch) * math.pi / 2.0
+            predicted_altitude_m = altitude_norm * 10000.0 + current_speed_mps * math.sin(pitch_rad) * 0.2
+            lower_margin = (predicted_altitude_m - 2500.0) / 3500.0
+            upper_margin = (10000.0 - predicted_altitude_m) / 4000.0
+            height_term = float(np.clip(min(lower_margin, upper_margin), -1.0, 1.0))
+            predicted_speed_mps = current_speed_mps + 0.25 * (candidate.speed_mps - current_speed_mps)
+            speed_term = float(np.clip(1.0 - abs(predicted_speed_mps - 275.0) / 125.0, -1.0, 1.0))
+            angle_term = (1.0 - min(angle_error, 1.0)) if target_slot is not None else float(candidate.name == "level_hold")
+            if target_slot is not None:
+                range_m = distance_norm * 40000.0
+                closure_m = predicted_speed_mps * math.cos(math.pi * angle_error) * 0.2
+                distance_sign = -1.0 if range_m < 3000.0 else 1.0
+                distance_term = float(np.clip(distance_sign * closure_m / 70.0, -1.0, 1.0))
+            else:
+                distance_term = 0.0
+            avoidance_term = 1.0 if warning > 0.5 and candidate.name.startswith("break_") else 0.0
             score = (
-                SCORE_WEIGHTS["distance"] * distance_term
-                + SCORE_WEIGHTS["angle"] * angle_term
+                SCORE_WEIGHTS["height"] * height_term
                 + SCORE_WEIGHTS["speed"] * speed_term
-                + SCORE_WEIGHTS["altitude"] * altitude_term
-                + SCORE_WEIGHTS["boundary"] * boundary_term
-                + SCORE_WEIGHTS["warning"] * warning_term
+                + SCORE_WEIGHTS["angle"] * angle_term
+                + SCORE_WEIGHTS["distance"] * distance_term
+                + SCORE_WEIGHTS["avoidance"] * avoidance_term
             )
             if altitude_norm < 0.28 and candidate.pitch <= 0.05:
                 score = -1e6
             if boundary_pressure > 0.95 and abs(wrap_heading(center_heading - heading)) > 0.25:
                 score = -1e6
+            candidate_scores[candidate.name] = {
+                "height": height_term, "speed": speed_term,
+                "angle": angle_term, "distance": distance_term,
+                "avoidance": avoidance_term, "total": float(score),
+            }
             if best is None or score > best_score:
                 best, best_score = candidate, score
         assert best is not None
@@ -193,6 +207,7 @@ class TamGreedyRule:
         if warning > 0.5 and best.name.startswith("break_"):
             self.warning_break_count += 1
         self.selected_counts[best.name] = self.selected_counts.get(best.name, 0) + 1
+        self.last_candidate_scores[bid] = candidate_scores
         speed = 2.0 * (best.speed_mps - velocity_min) / max(velocity_max - velocity_min, 1e-6) - 1.0
         action = np.clip(np.asarray([best.pitch, heading, speed], dtype=np.float32), -1.0, 1.0)
         return action.astype(np.float32), best.name

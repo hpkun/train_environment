@@ -3,7 +3,9 @@ from __future__ import annotations
 import numpy as np
 
 from algorithms.mappo.opponent_policy import OpponentPolicy
-from algorithms.mappo.tam_greedy_rule import CANDIDATE_MANEUVERS, TamGreedyRule, wrap_heading
+from algorithms.mappo.tam_greedy_rule import (
+    CANDIDATE_MANEUVERS, PROTOCOL_VERSION, SCORE_WEIGHTS, TamGreedyRule,
+)
 from scripts.experiment_logging_schema import FINAL_PURE_HAPPO_COLUMNS, SCALE_V2_TRAIN_METRIC_COLUMNS
 from scripts.train_happo_reference import _aggregate_scale_v2_step
 
@@ -81,6 +83,19 @@ def test_safety_scoring_blocks_descent_and_prefers_warning_break():
     warning_action, warning_name = rule.action("blue_0", _obs(warning=1.0), {}, 0, 102, 408)
     assert warning_name in {"break_left", "break_right"}
     assert np.isfinite(warning_action).all()
+
+
+def test_paper_weight_ratio_and_candidate_dependent_components():
+    assert PROTOCOL_VERSION == "tam_greedy_rule_v2_paper_weighted"
+    ratio = np.array([SCORE_WEIGHTS[k] for k in ("height", "speed", "angle", "distance", "avoidance")])
+    assert np.allclose(ratio / ratio[0], [1.0, 1.0, 1.5, 1.0, 3.0])
+    rule = TamGreedyRule()
+    rule.action("blue_0", _obs(bearing=.3, elevation=.1, distance=.4), {}, 0, 102, 408)
+    scores = rule.last_candidate_scores["blue_0"]
+    assert len({round(v["height"], 8) for v in scores.values()}) > 1
+    assert len({round(v["speed"], 8) for v in scores.values()}) > 1
+    assert len({round(v["angle"], 8) for v in scores.values()}) > 1
+    assert len({round(v["distance"], 8) for v in scores.values()}) > 1
 
 
 def test_boundary_pressure_selects_explicit_return_center():
