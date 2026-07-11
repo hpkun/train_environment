@@ -1059,16 +1059,49 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
     def _validate_brma_tam_scale_aligned_v2_contract(self) -> None:
         cfg = self.brma_tam_scale_aligned_v2_config
-        if int(cfg.get("reward_contract_revision", 0)) != 4:
-            raise ValueError("brma_tam_scale_aligned_v2 requires reward_contract_revision=4")
-        if float(cfg.get("flight_scale", 1.0)) != 0.1:
-            raise ValueError("brma_tam_scale_aligned_v2 requires flight_scale=0.1")
+        evasion = getattr(self, "missile_evasion_config", {}) or {}
+        mode = str(evasion.get("mode", "")).lower()
+        teams = str(evasion.get("teams", "")).lower()
+        if mode != "brma_scripted":
+            raise ValueError("brma_tam_scale_aligned_v2 requires missile_evasion.mode='brma_scripted'")
+        if teams not in {"red_only", "both"}:
+            raise ValueError("brma_tam_scale_aligned_v2 requires missile_evasion.teams in {'red_only', 'both'}")
         if self.observation_mode != "mav_shared_geo":
             raise ValueError("brma_tam_scale_aligned_v2 requires observation_mode='mav_shared_geo'")
         if getattr(self, "red_target_selection_mode", "closest") != "closest":
             raise ValueError("brma_tam_scale_aligned_v2 requires red_target_selection_mode='closest'")
         if int(self.aircraft_type_params.get("mav", {}).get("num_missiles", 0)) != 0:
             raise ValueError("brma_tam_scale_aligned_v2 requires MAV num_missiles == 0")
+        if int(cfg.get("reward_contract_revision", 0)) != 4:
+            raise ValueError("brma_tam_scale_aligned_v2 requires reward_contract_revision=4")
+        if float(cfg.get("flight_scale", 1.0)) != 0.1:
+            raise ValueError("brma_tam_scale_aligned_v2 requires flight_scale=0.1")
+        if str(cfg.get("terminal", {}).get("mav_loss_weight_mode", "")) != "match_initial_attack_uav_count":
+            raise ValueError("brma_tam_scale_aligned_v2 requires terminal.mav_loss_weight_mode='match_initial_attack_uav_count'")
+        required = (
+            ("uav", "progress", "distance_weight"), ("uav", "progress", "angle_weight"),
+            ("uav", "progress", "speed_weight"), ("uav", "progress", "clip_min"),
+            ("uav", "progress", "clip_max"), ("uav", "progress", "distance_optimal_km"),
+            ("uav", "progress", "distance_decay_km"),
+            ("uav", "event", "kill_enemy"), ("uav", "event", "death_or_crash"),
+            ("uav", "event", "first_horizontal_out_of_zone"),
+            ("mav", "role_scale"),
+            ("mav", "safety", "dist_weight"), ("mav", "safety", "threat_weight"),
+            ("mav", "safety", "aspect_weight"), ("mav", "safety", "d_danger_m"),
+            ("mav", "safety", "d_safe_m"),
+            ("mav", "support", "pos_weight"), ("mav", "support", "aware_weight"),
+            ("mav", "support", "d_opt_m"), ("mav", "support", "d_max_m"),
+            ("mav", "event", "death_penalty"), ("mav", "event", "full_enemy_team_credit"),
+            ("terminal", "coefficient"), ("terminal", "mav_loss_weight_mode"),
+            ("logging", "log_raw_potentials"), ("logging", "log_progress_reset_reason"),
+            ("logging", "log_scale_diagnostics"),
+        )
+        for path in required:
+            value = cfg
+            for key in path:
+                if not isinstance(value, dict) or key not in value:
+                    raise ValueError("brma_tam_scale_aligned_v2 missing config key: " + ".".join(path))
+                value = value[key]
 
     @staticmethod
     def _scale_v1_distance_potential(distance_m: float, optimal_km: float = 5.0,
@@ -1454,15 +1487,16 @@ class HeteroUavCombatEnv(UavCombatEnv):
                         "scale_v2_reward_target_distance_m": float(geom["target_distance_m"]),
                         "scale_v2_reward_target_valid": float(target is not None),
                     })
-                total = flight_scaled + progress_val + (vals.get("scale_v2_mav_role", 0.0) if role == "mav" else progress_val) + vals.get("scale_v2_event", 0.0) + vals["scale_v2_terminal"]
-                # Fix: recompute correctly
                 if role == "mav":
                     total = flight_scaled + vals["scale_v2_mav_role"] + vals["scale_v2_event"] + vals["scale_v2_terminal"]
+                    expected = flight_scaled + vals["scale_v2_mav_role"] + vals["scale_v2_event"] + vals["scale_v2_terminal"]
                 else:
                     total = flight_scaled + vals["scale_v2_progress"] + vals["scale_v2_event"] + vals["scale_v2_terminal"]
+                    expected = flight_scaled + vals["scale_v2_progress"] + vals["scale_v2_event"] + vals["scale_v2_terminal"]
                 vals["scale_v2_total"] = total
-                expected = total
-                vals["scale_v2_identity_error"] = 0.0
+                vals["scale_v2_identity_error"] = float(total - expected)
+                if abs(vals["scale_v2_identity_error"]) > 1e-6:
+                    raise ValueError(f"scale-aligned v2 reward identity failure agent={rid} error={vals['scale_v2_identity_error']}")
             comp.update(vals)
             comp["total"] = float(total)
             base_rewards[rid] = float(total)

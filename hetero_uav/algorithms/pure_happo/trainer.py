@@ -190,6 +190,12 @@ class PureHAPPOTrainer:
                 int((active[:, i] > 0.5).sum().item()) for i in range(N)],
         }
 
+        # Save initial actor params for post-update delta computation
+        initial_actor_params = []
+        for i in range(N):
+            params_i = list(self.policy.actors[i].parameters()) + [self.policy.action_log_stds[i]]
+            initial_actor_params.append(_param_vector(params_i))
+
         for epoch in range(self.ppo_epochs):
             order = list(self.rng.permutation(N))
             metrics["last_update_order"] = order
@@ -291,6 +297,38 @@ class PureHAPPOTrainer:
             critic_after = _param_vector(critic_params)
             critic_update_norm = float(torch.linalg.vector_norm(critic_after - critic_before).item())
             new_values_final = self.policy.value(critic_state)
+
+        # ---- Post-update final metrics (full policy on same rollout) ----
+        final_ratio_mean = [0.0] * N
+        final_ratio_std = [0.0] * N
+        final_ratio_p95 = [0.0] * N
+        final_ratio_p99 = [0.0] * N
+        final_clip_fraction = [0.0] * N
+        final_approx_kl = [0.0] * N
+        final_approx_kl_abs = [0.0] * N
+        final_actor_delta = [0.0] * N
+        with torch.no_grad():
+            final_lp, final_ent, _, _ = self.policy.evaluate_actions(actor_obs, critic_state, actions)
+            for i in range(N):
+                valid_i = active[:, i] > 0.5
+                nv = int(valid_i.sum().item())
+                if nv < 1:
+                    continue
+                old_lp_i = old_log_probs[:, i]
+                new_lp_i = final_lp[:, i]
+                ratio_i = (new_lp_i - old_lp_i).exp()
+                ratio_i_valid = ratio_i[valid_i]
+                final_ratio_mean[i] = float(ratio_i_valid.mean().item())
+                final_ratio_std[i] = float(ratio_i_valid.std(unbiased=False).item()) if nv > 1 else 0.0
+                final_ratio_p95[i] = float(torch.quantile(ratio_i_valid, 0.95).item()) if nv > 0 else 0.0
+                final_ratio_p99[i] = float(torch.quantile(ratio_i_valid, 0.99).item()) if nv > 0 else 0.0
+                final_clip_fraction[i] = float(
+                    ((ratio_i_valid < 1 - self.clip_param) | (ratio_i_valid > 1 + self.clip_param)).float().mean().item())
+                final_approx_kl[i] = float(((old_lp_i[valid_i] - new_lp_i[valid_i]).float().mean().item()))
+                final_approx_kl_abs[i] = float(((old_lp_i[valid_i] - new_lp_i[valid_i]).abs().float().mean().item()))
+                params_i = list(self.policy.actors[i].parameters()) + [self.policy.action_log_stds[i]]
+                final_actor_delta[i] = float(
+                    torch.linalg.vector_norm(_param_vector(params_i) - initial_actor_params[i]).item())
 
         with torch.no_grad():
             self.policy.evaluate_actions(actor_obs, critic_state, actions)
@@ -444,6 +482,30 @@ class PureHAPPOTrainer:
             "m_abs_max_after_each_agent": metrics["m_abs_max_after_each_agent"],
             "valid_sample_count_per_agent": v,
             "active_sample_ratio_per_agent": active_sample_ratio,
+            "final_ratio_mean_per_agent": final_ratio_mean,
+            "final_ratio_std_per_agent": final_ratio_std,
+            "final_ratio_p95_per_agent": final_ratio_p95,
+            "final_ratio_p99_per_agent": final_ratio_p99,
+            "final_clip_fraction_per_agent": final_clip_fraction,
+            "final_approx_kl_per_agent": final_approx_kl,
+            "final_approx_kl_abs_per_agent": final_approx_kl_abs,
+            "final_actor_parameter_delta_per_agent": final_actor_delta,
+            "final_ratio_mean_mav": final_ratio_mean[0] if N > 0 else 0.0,
+            "final_ratio_mean_uav": _mean_for_indices(final_ratio_mean, uav_indices),
+            "final_ratio_std_mav": final_ratio_std[0] if N > 0 else 0.0,
+            "final_ratio_std_uav": _mean_for_indices(final_ratio_std, uav_indices),
+            "final_ratio_p95_mav": final_ratio_p95[0] if N > 0 else 0.0,
+            "final_ratio_p95_uav": _mean_for_indices(final_ratio_p95, uav_indices),
+            "final_ratio_p99_mav": final_ratio_p99[0] if N > 0 else 0.0,
+            "final_ratio_p99_uav": _mean_for_indices(final_ratio_p99, uav_indices),
+            "final_clip_fraction_mav": final_clip_fraction[0] if N > 0 else 0.0,
+            "final_clip_fraction_uav": _mean_for_indices(final_clip_fraction, uav_indices),
+            "final_approx_kl_mav": final_approx_kl[0] if N > 0 else 0.0,
+            "final_approx_kl_uav": _mean_for_indices(final_approx_kl, uav_indices),
+            "final_approx_kl_abs_mav": final_approx_kl_abs[0] if N > 0 else 0.0,
+            "final_approx_kl_abs_uav": _mean_for_indices(final_approx_kl_abs, uav_indices),
+            "final_actor_parameter_delta_mav": final_actor_delta[0] if N > 0 else 0.0,
+            "final_actor_parameter_delta_uav": _mean_for_indices(final_actor_delta, uav_indices),
             "ratio_mean_per_agent": metrics["ratio_mean_per_agent"],
             "ratio_std_per_agent": metrics["ratio_std_per_agent"],
             "ratio_min_per_agent": metrics["ratio_min_per_agent"],

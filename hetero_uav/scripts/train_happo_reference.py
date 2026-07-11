@@ -255,6 +255,25 @@ def _experiment_base_v2_meta(
             "initial_red_count": int(data.get("max_num_red", len(data.get("red_agent_types", [])))),
             "initial_blue_count": int(data.get("max_num_blue", len(data.get("blue_agent_types", [])))),
         })
+    if actual_reward_mode == "brma_tam_scale_aligned_v2":
+        path = Path(config_path or "")
+        if path and not path.is_absolute():
+            path = ROOT / path
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        reward_cfg = dict((data or {}).get("brma_tam_scale_aligned_v2", {}) or {})
+        meta.update({
+            "reward_contract_revision": 4,
+            "flight_scale": float(reward_cfg.get("flight_scale", 0.1)),
+            "reward_config": reward_cfg,
+            "progress_formula_version": "potential_difference_exp_distance_tam_angle_speed_v1",
+            "terminal_formula_version": "loss_fraction_mav_weighted_v1",
+            "mav_normalization": "aspect_and_awareness_divide_by_alive_blue_count",
+            "decision_frequency_hz": float(data.get("sim_freq", 60)) / max(float(data.get("agent_interaction_steps", 12)), 1.0),
+            "agent_interaction_steps": int(data.get("agent_interaction_steps", 12)),
+            "max_steps": int(data.get("max_steps", 1000)),
+            "initial_red_count": int(data.get("max_num_red", len(data.get("red_agent_types", [])))),
+            "initial_blue_count": int(data.get("max_num_blue", len(data.get("blue_agent_types", [])))),
+        })
     return meta
 
 
