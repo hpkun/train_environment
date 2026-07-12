@@ -542,10 +542,13 @@ class AircraftSimulator(BaseSimulator):
             raise ValueError(f"Unhandled property type: {type(prop)} ({prop})")
 
     def check_missile_warning(self):
-        for missile in self.under_missiles:
-            if missile.is_alive:
-                return missile
-        return None
+        from my_uav_env.sensors import select_most_dangerous_missile
+        missile, _diag = select_most_dangerous_missile(self, self.under_missiles)
+        return missile
+
+    def get_missile_warning_diagnostic(self):
+        from my_uav_env.sensors import select_most_dangerous_missile
+        return select_most_dangerous_missile(self, self.under_missiles)
 
 
 class MissileSimulator(BaseSimulator):
@@ -559,24 +562,27 @@ class MissileSimulator(BaseSimulator):
     @classmethod
     def create(cls, parent: AircraftSimulator, target: AircraftSimulator,
                uid: str, missile_model: str = "AIM-9L",
-               guidance_mode: str = "paper_eq9"):
+               guidance_mode: str = "paper_eq9", config=None, rng=None):
         assert parent.dt == target.dt
         missile = MissileSimulator(
             uid, parent.color, missile_model, parent.dt,
-            guidance_mode=guidance_mode)
+            guidance_mode=guidance_mode, config=config, rng=rng)
         missile.launch(parent)
         missile.target(target)
         return missile
 
     def __init__(self, uid="A0101", color="Red", model="AIM-9L", dt=1 / 12,
-                 guidance_mode: str = "paper_eq9"):
+                 guidance_mode: str = "paper_eq9", config=None, rng=None):
         super().__init__(uid, color, dt)
         if guidance_mode not in ("paper_eq9", "legacy_simplified"):
             raise ValueError(
                 "guidance_mode must be 'paper_eq9' or 'legacy_simplified'")
         self.guidance_mode = guidance_mode
         self._status = MissileSimulator.INACTIVE
-        self.model = model
+        from configs.brma_mappo_paper_spec import MissileConfig
+        self.config = config or MissileConfig()
+        self.rng = rng if rng is not None else np.random.default_rng(0)
+        self.model = self.config.model.value if config is not None else model
         self.parent_aircraft = None
         self.target_aircraft = None
         self.render_explosion = False
@@ -589,19 +595,19 @@ class MissileSimulator(BaseSimulator):
         # Isp=240 → Δv ≈ 568 m/s (rocket equation), peak speed ≈ 850–900 m/s (M2.5+)
         # cD=0.22 → energy retention over 10 km tail-chase, still lethal at 60 s
         self._g = 9.81
-        self._t_max = 60
-        self._t_thrust = 3
-        self._Isp = 240
-        self._Length = 2.87
-        self._Diameter = 0.127
-        self._cD = 0.22
-        self._m0 = 84
-        self._dm = 6
-        self._K = 3
-        self._nyz_max = 30
-        self._Rc = 300
-        self._v_min = 150
-        self._t_arm = 0.15  # warhead safety-arming delay (s) — prevents same-frame detonation at launch
+        self._t_max = float(self.config.maximum_flight_time_s.value)
+        self._t_thrust = float(self.config.thrust_time_s.value)
+        self._Isp = float(self.config.specific_impulse_s.value)
+        self._Length = float(self.config.length_m.value)
+        self._Diameter = float(self.config.diameter_m.value)
+        self._cD = float(self.config.drag_coefficient.value)
+        self._m0 = float(self.config.initial_mass_kg.value)
+        self._dm = float(self.config.mass_flow_kg_s.value)
+        self._K = float(self.config.navigation_constant.value)
+        self._nyz_max = float(self.config.maximum_overload_g.value)
+        self._Rc = float(self.config.hit_radius_m.value)
+        self._v_min = float(self.config.minimum_speed_mps.value)
+        self._t_arm = float(self.config.arming_time_s.value)
 
     @property
     def is_alive(self):
@@ -713,7 +719,16 @@ class MissileSimulator(BaseSimulator):
             directional_match = max(0.0, directional_match)
 
         P_hit = 0.05 + 0.95 * directional_match
-        return np.random.random() < P_hit
+        return float(self.rng.random()) < P_hit
+
+    def detach_references(self):
+        """Remove this missile from aircraft-owned lists after termination."""
+        if self.parent_aircraft is not None:
+            self.parent_aircraft.launch_missiles = [
+                m for m in self.parent_aircraft.launch_missiles if m is not self]
+        if self.target_aircraft is not None:
+            self.target_aircraft.under_missiles = [
+                m for m in self.target_aircraft.under_missiles if m is not self]
 
     def log(self):
         if self.is_alive:

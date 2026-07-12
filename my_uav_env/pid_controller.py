@@ -96,7 +96,9 @@ class PIDController:
 
     def __init__(self, dt, profile: str = "paper", debug: bool = False,
                  integral_error_limits: tuple[float, float, float] | None = None,
-                 throttle_base: float = 0.0):
+                 throttle_base: float = 0.0, config=None):
+        from configs.brma_mappo_paper_spec import PIDConfig
+        self.config = config or PIDConfig()
         if profile not in ("paper", "engineering_safe"):
             raise ValueError("profile must be 'paper' or 'engineering_safe'")
         self.dt = dt
@@ -115,11 +117,12 @@ class PIDController:
         # the 5 Hz Actor updates the target_heading, causing a step-change in
         # d_I_des → d_B_des → roll_error at the 60 Hz PID rate.
         if integral_error_limits is None:
-            integral_error_limits = (np.pi / 2.0, np.pi / 2.0, 306.0)
+            integral_error_limits = self.config.integral_error_limits.value
         self.integral_error_limits = tuple(float(v) for v in integral_error_limits)
 
+        roll_kp, roll_ki, roll_kd = self.config.roll_gains.value
         self._roll_pid = PIDLoop(
-            kp=0.15, ki=0.5, kd=0.05,
+            kp=roll_kp, ki=roll_ki, kd=roll_kd,
             output_min=-1.0, output_max=1.0,
             name="roll", integral_error_limit=self.integral_error_limits[0],
         )
@@ -130,8 +133,9 @@ class PIDController:
         # kd kept low (0.1): the dual-frequency system (Actor 5 Hz / PID 60 Hz)
         # means target_pitch step-changes every 0.2 s; a large D-gain would
         # spike the elevator on every update frame.
+        pitch_kp, pitch_ki, pitch_kd = self.config.pitch_gains.value
         self._pitch_pid = PIDLoop(
-            kp=2.5, ki=0.5, kd=0.1,
+            kp=pitch_kp, ki=pitch_ki, kd=pitch_kd,
             output_min=-1.0, output_max=1.0,
             name="pitch", integral_error_limit=self.integral_error_limits[1],
         )
@@ -139,8 +143,9 @@ class PIDController:
         # --- Velocity PID ---
         # fcs/throttle-cmd-norm: throttle-pos-norm = cmd-norm × 2.
         # Afterburner engages at throttle-pos-norm > 0.77 → cmd-norm > 0.385.
+        speed_kp, speed_ki, speed_kd = self.config.speed_gains.value
         self._velocity_pid = PIDLoop(
-            kp=0.04, ki=0.01, kd=0.003,
+            kp=speed_kp, ki=speed_ki, kd=speed_kd,
             output_min=-self.throttle_base,
             output_max=1.0 - self.throttle_base,
             name="velocity", integral_error_limit=self.integral_error_limits[2],

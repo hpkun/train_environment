@@ -37,6 +37,10 @@ from my_uav_env.alignment.reward_utils import (
     DEFAULT_ALTITUDE_REWARD_CONFIG,
     REWARD_VERSION,
 )
+from configs.brma_mappo_paper_spec import (
+    DEFAULT_PAPER_ENVIRONMENT_CONFIG,
+    environment_config_snapshot,
+)
 
 torch.set_num_threads(1)
 try:
@@ -435,6 +439,10 @@ ACTION_DISTRIBUTION_VERSION = "tanh_squashed_normal_v1"
 
 
 def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
+    environment_snapshot = environment_config_snapshot(
+        DEFAULT_PAPER_ENVIRONMENT_CONFIG,
+        num_red=config.num_red, num_blue=config.num_blue,
+        sim_freq=60, agent_interaction_steps=12, seed=config.seed)
     return {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": config.obs_mode,
@@ -454,6 +462,9 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "num_blue": int(config.num_blue),
         "global_state_dim": int(global_state_dim),
         "actor_obs_dim": int(obs_dim),
+        "environment_config": environment_snapshot,
+        "environment_config_fingerprint": environment_snapshot[
+            "environment_config_fingerprint"],
     }
 
 
@@ -743,7 +754,7 @@ def _worker(remote: mp.connection.Connection,
                     gc.collect()
                 remote.send((obs, rewards, dones, info))
             elif cmd == "reset":
-                obs, info = env.reset()
+                obs, info = env.reset(seed=data)
                 import gc
                 gc.collect()
                 remote.send(obs)
@@ -768,10 +779,12 @@ def _worker(remote: mp.connection.Connection,
 
 class SubprocVecEnv:
     def __init__(self, num_envs: int, env_kwargs: dict, startup_delay: float = 0.5,
-                 ready_timeout: float = 600.0):
+                 ready_timeout: float = 600.0, base_seed: int | None = None):
         self.n_envs = num_envs
         self._dead_workers: set[int] = set()
         self._env_kwargs = env_kwargs  # stored for worker restart
+        self._base_seed = base_seed
+        self._has_reset = False
         ctx = mp.get_context("spawn")
         remotes_tup, work_remotes_tup = zip(*[ctx.Pipe() for _ in range(num_envs)])
         self.remotes = list(remotes_tup)
@@ -824,7 +837,9 @@ class SubprocVecEnv:
                 continue
             # Send reset command
             try:
-                remote.send(("reset", None))
+                seed = (None if self._has_reset or self._base_seed is None
+                        else int(self._base_seed) + i)
+                remote.send(("reset", seed))
             except (BrokenPipeError, OSError):
                 self._dead_workers.add(i)
                 results[i] = {}
@@ -924,6 +939,7 @@ class SubprocVecEnv:
                 raise RuntimeError(
                     f"Worker {i} could not be restarted after 3 attempts. "
                     f"Training cannot continue with a dead environment.")
+        self._has_reset = True
         return results
 
     def step(self, actions_list: list[dict], timeout: float = 60.0) -> tuple:
@@ -2008,7 +2024,7 @@ def main():
                       altitude_reward_config=config.altitude_reward_config,
                       enable_gcas_for_blue=config.enable_blue_gcas)
     print(f"正在启动 {config.num_envs} 个 worker 进程...", flush=True)
-    vec_env = SubprocVecEnv(config.num_envs, env_kwargs)
+    vec_env = SubprocVecEnv(config.num_envs, env_kwargs, base_seed=config.seed)
 
     red_ids = [f"red_{i}" for i in range(config.num_red)]
     blue_ids = [f"blue_{i}" for i in range(config.num_blue)]

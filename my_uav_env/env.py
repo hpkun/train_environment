@@ -9,7 +9,14 @@ import logging
 import numpy as np
 import gymnasium
 
-from configs.brma_mappo_paper_spec import paper_value
+from configs.brma_mappo_paper_spec import (
+    DEFAULT_PAPER_ENVIRONMENT_CONFIG,
+    PaperEnvironmentConfig,
+    environment_config_snapshot,
+    paper_value,
+)
+from my_uav_env.sensors import SensorTrack, radar_diagnostic
+from my_uav_env.fire_control import FireControlState
 
 from my_uav_env.alignment.los_geometry import (
     compute_3d_range,
@@ -225,18 +232,29 @@ class UavCombatEnv(gymnasium.Env):
                  altitude_reward_config=None,
                  obs_mode: str = "paper_strict",
                  suppress_jsbsim_output: bool = True,
+                 environment_config: PaperEnvironmentConfig | None = None,
                  render_mode=None):
         super().__init__()
+        self.environment_config = environment_config or DEFAULT_PAPER_ENVIRONMENT_CONFIG
+        scenario_cfg = self.environment_config.scenario
+        self.scenario_config = scenario_cfg
+        self.arena_half_width_m = float(scenario_cfg.arena_half_width_m.value)
+        self.arena_altitude_min_m = float(scenario_cfg.arena_altitude_min_m.value)
+        self.arena_altitude_max_m = float(scenario_cfg.arena_altitude_max_m.value)
+        self.reward_boundary_half_width_m = float(
+            scenario_cfg.reward_boundary_half_width_m.value)
         self.max_num_blue = max_num_blue
         self.max_num_red = max_num_red
-        self.num_missiles_per_plane = num_missiles_per_plane
+        self.num_missiles_per_plane = int(num_missiles_per_plane)
         self.enable_gcas_for_blue = enable_gcas_for_blue
         self.enable_kill_cooldown_gate = enable_kill_cooldown_gate
         self.enable_single_kill_per_step_gate = enable_single_kill_per_step_gate
         # The paper requires a detection cone and 10 km maximum range but does
         # not publish the cone half-angle or a minimum launch range.
-        self.missile_launch_ao_thresh = np.deg2rad(missile_detection_half_angle_deg)
-        self.missile_launch_min_range = float(missile_min_launch_range_m)
+        self.missile_launch_ao_thresh = float(
+            self.environment_config.electro_optical.half_angle_rad.value)
+        self.missile_launch_min_range = float(
+            self.environment_config.electro_optical.minimum_launch_range_m.value)
         if pid_profile not in ("paper", "engineering_safe"):
             raise ValueError("pid_profile must be 'paper' or 'engineering_safe'")
         self.pid_profile = pid_profile
@@ -264,8 +282,13 @@ class UavCombatEnv(gymnasium.Env):
         self.entity_dim = 10 if obs_mode == "paper_strict" else 11
         self.physics_dt = 1.0 / sim_freq
         self.env_dt = agent_interaction_steps * self.physics_dt
-        self.missile_cooldown_frames = int(round(0.5 * self.sim_freq))
-        self.missile_lock_delay_frames = int(round(0.25 * self.sim_freq))
+        self.missile_cooldown_frames = int(round(
+            self.environment_config.fire_control.launch_interval_s.value * self.sim_freq))
+        self.missile_lock_delay_frames = int(round(
+            self.environment_config.fire_control.lock_time_s.value * self.sim_freq))
+        self.np_random = np.random.default_rng()
+        self._seed: int | None = None
+        self._environment_config_snapshot: dict = {}
 
         # Agent ID lists (fixed order for observation construction)
         self.blue_ids = [f"blue_{i}" for i in range(max_num_blue)]
@@ -341,9 +364,14 @@ class UavCombatEnv(gymnasium.Env):
         # Lock-delay: paper requires 0.25s continuous sensor track before launch
         self._lock_timer: dict[str, int] = {}     # physics frames continuously locked
         self._lock_target: dict[str, str | None] = {}  # uid of currently tracked enemy
+        self._fire_control_states: dict[str, FireControlState] = {}
 
         # Overload tracking
         self._overload_timers: dict[str, float] = {}
+        self._aircraft_diagnostics: dict[str, dict] = {}
+        self._sensor_tracks: dict[tuple[str, str], SensorTrack] = {}
+        self._sensor_diagnostics_step: list[dict] = []
+        self._episode_stats: dict = {}
 
         # Missile launch counters (per-episode, for debugging)
         self._missile_launch_counts: dict[str, int] = {}
@@ -392,6 +420,17 @@ class UavCombatEnv(gymnasium.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        if seed is not None:
+            self._seed = int(seed)
+            self.np_random = np.random.default_rng(self._seed)
+        elif self._seed is None:
+            # Gymnasium created a generator above; retain an explicit traceable seed.
+            self._seed = int(self.np_random.integers(0, 2**32 - 1))
+            self.np_random = np.random.default_rng(self._seed)
+        self._environment_config_snapshot = environment_config_snapshot(
+            self.environment_config, num_red=self.max_num_red,
+            num_blue=self.max_num_blue, sim_freq=self.sim_freq,
+            agent_interaction_steps=self.agent_interaction_steps, seed=self._seed)
         self.current_step = 0
         self._physics_frame = 0
         self._sim_time = 0.0
@@ -403,6 +442,14 @@ class UavCombatEnv(gymnasium.Env):
         self._reward_summary_step = {}
         self._missile_acmi_id.clear()
         self._missile_term_reasons = {"red": {}, "blue": {}}
+        self._sensor_tracks = {}
+        self._sensor_diagnostics_step = []
+        self._episode_stats = {
+            "EpisodeRedJointReturn": 0.0, "EpisodeBlueJointReturn": 0.0,
+            "EpisodeRedLocalRewardSum": 0.0, "EpisodeBlueLocalRewardSum": 0.0,
+            "EpisodeRedTerminalReward": 0.0, "EpisodeBlueTerminalReward": 0.0,
+            "EpisodeLength": 0,
+        }
         self._next_missile_acmi_id = 1001
         if self._tacview_recorder is not None:
             self._tacview_recorder.reset()
@@ -414,7 +461,7 @@ class UavCombatEnv(gymnasium.Env):
             init_state = self._make_init_state("Blue", i)
             if first_reset:
                 sim = AircraftSimulator(
-                    uid=aid, color="Blue", model="f16",
+                    uid=aid, color="Blue", model=self.scenario_config.aircraft_model.value,
                     sim_freq=self.sim_freq, num_missiles=self.num_missiles_per_plane,
                     init_state=init_state,
                     suppress_jsbsim_output=self.suppress_jsbsim_output,
@@ -429,7 +476,7 @@ class UavCombatEnv(gymnasium.Env):
             init_state = self._make_init_state("Red", i)
             if first_reset:
                 sim = AircraftSimulator(
-                    uid=aid, color="Red", model="f16",
+                    uid=aid, color="Red", model=self.scenario_config.aircraft_model.value,
                     sim_freq=self.sim_freq, num_missiles=self.num_missiles_per_plane,
                     init_state=init_state,
                     suppress_jsbsim_output=self.suppress_jsbsim_output,
@@ -453,7 +500,8 @@ class UavCombatEnv(gymnasium.Env):
             for aid in self.agent_ids:
                 self.pid_controllers[aid] = PIDController(
                     self.physics_dt, profile=self.pid_profile,
-                    throttle_base=self.pid_throttle_base)
+                    throttle_base=self.pid_throttle_base,
+                    config=self.environment_config.pid)
         else:
             for pid in self.pid_controllers.values():
                 pid.reset()
@@ -464,9 +512,19 @@ class UavCombatEnv(gymnasium.Env):
         # Reset lock-delay timers
         self._lock_timer = {aid: 0 for aid in self.agent_ids}
         self._lock_target = {aid: None for aid in self.agent_ids}
+        self._fire_control_states = {
+            aid: FireControlState() for aid in self.agent_ids}
+        self._evasion_diagnostics = {
+            aid: {"activations": 0, "active_frames": 0, "active": False}
+            for aid in self.agent_ids}
 
         # Reset overload timers
         self._overload_timers = {aid: 0.0 for aid in self.agent_ids}
+        self._aircraft_diagnostics = {
+            aid: {"maximum_speed_mps_seen": 0.0, "overspeed_frames": 0,
+                  "maximum_load_g_seen": 0.0, "over_g_frames": 0,
+                  "load_limiter_activations": 0}
+            for aid in self.agent_ids}
 
         # Reset missile launch counters
         self._missile_launch_counts = {aid: 0 for aid in self.agent_ids}
@@ -546,6 +604,8 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
         self._reward_summary_step = {}
+        self._sensor_diagnostics_step = []
+        self.refresh_engaged_targets()
 
         # 0. Optional legacy anti-burst guard (off for paper_strict baseline).
         #    The paper defines launch interval/deconfliction, not post-hit
@@ -569,6 +629,7 @@ class UavCombatEnv(gymnasium.Env):
             self._check_missile_launch()
             self._update_missiles()
             self._update_overload_timers()
+            self._cleanup_missiles()
 
         # 3. Check terminations
         self._check_crash_terminations()
@@ -633,6 +694,11 @@ class UavCombatEnv(gymnasium.Env):
             # =================================================================
             incoming = sim.check_missile_warning()
             if incoming is not None:
+                evasion = self._evasion_diagnostics[aid]
+                if not evasion["active"]:
+                    evasion["activations"] += 1
+                evasion["active"] = True
+                evasion["active_frames"] += 1
                 alt_m = sim.get_geodetic()[2]
 
                 # Determine turn direction from missile bearing (+right, −left)
@@ -665,6 +731,7 @@ class UavCombatEnv(gymnasium.Env):
 
                 targets[aid] = (target_pitch, target_heading, self.VELOCITY_MAX)
                 continue
+            self._evasion_diagnostics[aid]["active"] = False
 
             # =================================================================
             #  Layer 2 — GCAS Safety Net (BLUE ONLY)
@@ -741,6 +808,32 @@ class UavCombatEnv(gymnasium.Env):
                 ned_velocity=vel_ned,  # true NED (z=down)
             )
 
+            diag = self._aircraft_diagnostics[aid]
+            max_speed = float(self.environment_config.aircraft.maximum_speed_mps.value)
+            if current_speed > max_speed:
+                throttle = min(throttle, float(
+                    self.environment_config.aircraft.overspeed_throttle_limit.value))
+                diag["overspeed_frames"] += 1
+            diag["maximum_speed_mps_seen"] = max(
+                diag["maximum_speed_mps_seen"], current_speed)
+            try:
+                g_load = float(np.linalg.norm([
+                    sim.get_property_value("accelerations/n-pilot-x-norm"),
+                    sim.get_property_value("accelerations/n-pilot-y-norm"),
+                    sim.get_property_value("accelerations/n-pilot-z-norm")]))
+            except Exception:
+                g_load = 0.0
+            if g_load > 100.0:
+                sim.crash()
+                self._death_reasons.setdefault(aid, "Crash_NumericalLoad")
+                self._crashed_this_step.add(aid)
+                continue
+            g_limit = float(self.environment_config.aircraft.maximum_load_g.value)
+            if self.pid_profile == "paper" and g_load >= 0.95 * g_limit:
+                aileron = 0.0
+                elevator = 0.0
+                diag["load_limiter_activations"] += 1
+
             sim.set_property_value("fcs/aileron-cmd-norm", aileron)
             sim.set_property_value("fcs/elevator-cmd-norm", elevator)
             sim.set_property_value("fcs/rudder-cmd-norm", rudder)
@@ -752,9 +845,35 @@ class UavCombatEnv(gymnasium.Env):
 
     def _run_one_physics_frame(self):
         """Advance every alive aircraft by one JSBSim frame."""
-        for sim in self._all_sims():
+        for aid, sim in self._all_sims_with_ids():
             if sim.is_alive:
                 sim.run()
+                self._enforce_aircraft_constraints(aid, sim)
+
+    def _enforce_aircraft_constraints(self, aid: str, sim: AircraftSimulator):
+        """Project speed onto the paper envelope and reject non-finite state."""
+        velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
+        position = np.asarray(sim.get_position(), dtype=np.float64)
+        rpy = np.asarray(sim.get_rpy(), dtype=np.float64)
+        if not np.all(np.isfinite(np.concatenate([velocity, position, rpy]))):
+            sim.crash()
+            self._death_reasons.setdefault(aid, "Crash_NonFinite")
+            self._crashed_this_step.add(aid)
+            return
+        speed = float(np.linalg.norm(velocity))
+        maximum = float(self.environment_config.aircraft.maximum_speed_mps.value)
+        if speed <= maximum or speed <= 1e-9:
+            return
+        if speed > 10.0 * maximum:
+            sim.crash()
+            self._death_reasons.setdefault(aid, "Crash_NumericalEnvelope")
+            self._crashed_this_step.add(aid)
+            return
+        scale = maximum / speed
+        for prop in ("velocities/u-fps", "velocities/v-fps", "velocities/w-fps"):
+            sim.set_property_value(prop, sim.get_property_value(prop) * scale)
+        sim.set_property_value("fcs/throttle-cmd-norm", 0.0)
+        sim._update_properties()
 
     def _check_missile_launch(self):
         """Rule-based missile launch with lock-delay + hot-update deconfliction.
@@ -818,9 +937,10 @@ class UavCombatEnv(gymnasium.Env):
                 _, TA, _ = get2d_heading_AO_TA_R(
                     ego_pos, sim.get_rpy()[2], enm_pos, enemy_sim.get_rpy()[2])
                 R = compute_3d_range(ego_pos, enm_pos)
-                range_ok = self.missile_launch_min_range < R < self.MISSILE_LAUNCH_RANGE_THRESH
+                range_ok = (self.missile_launch_min_range < R
+                            < self.environment_config.electro_optical.maximum_range_m.value)
                 ao_ok = AO < self.missile_launch_ao_thresh
-                ta_ok = TA > self.MISSILE_LAUNCH_TA_THRESH
+                ta_ok = TA > self.environment_config.fire_control.rear_hemisphere_ta_rad.value
                 if range_ok:
                     diag["range_ok_pairs"] += 1
                 if ao_ok:
@@ -892,6 +1012,21 @@ class UavCombatEnv(gymnasium.Env):
                 self._lock_target[aid] = None
                 # Cooldown is set inside _launch_missile
 
+            state = self._fire_control_states.setdefault(aid, FireControlState())
+            state.current_target_id = self._lock_target.get(aid)
+            state.continuous_detection_frames = int(self._lock_timer.get(aid, 0))
+            state.lock_mature = bool(lock_mature)
+            state.cooldown_frames_remaining = int(self._missile_cooldown.get(aid, 0))
+            if state.current_target_id is None and not lock_mature:
+                state.detection_state = "no_target"
+            elif lock_mature and state.cooldown_frames_remaining > 0:
+                state.detection_state = "cooldown"
+                state.blocked_reason = "cooldown"
+            elif lock_mature:
+                state.detection_state = "ready_to_launch"
+            else:
+                state.detection_state = "tracking"
+
     def _build_launch_quality_record(
         self,
         shooter: AircraftSimulator,
@@ -947,7 +1082,9 @@ class UavCombatEnv(gymnasium.Env):
     ):
         missile = MissileSimulator.create(
             parent, target, f"m{self._missile_id_counter}",
-            guidance_mode=self.missile_guidance_mode)
+            guidance_mode=self.missile_guidance_mode,
+            config=self.environment_config.missile,
+            rng=self.np_random)
         self._missile_id_counter += 1
         self._missiles_in_flight[missile.uid] = missile
         if launch_quality is not None:
@@ -957,6 +1094,10 @@ class UavCombatEnv(gymnasium.Env):
         self._missile_acmi_id[missile.uid] = self._next_missile_acmi_id
         self._next_missile_acmi_id += 1
         self._missile_cooldown[parent.uid] = self.missile_cooldown_frames
+        state = self._fire_control_states.setdefault(parent.uid, FireControlState())
+        state.detection_state = "launched"
+        state.last_launch_frame = int(self._physics_frame)
+        state.transition_reason = "automatic_launch"
         parent.num_left_missiles = max(0, parent.num_left_missiles - 1)  # fire-for-effect tracking (capacity 999)
         self._missile_launch_counts[parent.uid] += 1
 
@@ -1063,8 +1204,11 @@ class UavCombatEnv(gymnasium.Env):
 
             if g_load > self.OVERLOAD_G_LIMIT:
                 self._overload_timers[aid] += self.physics_dt
+                self._aircraft_diagnostics[aid]["over_g_frames"] += 1
             else:
                 self._overload_timers[aid] = max(0.0, self._overload_timers[aid] - self.physics_dt)
+            self._aircraft_diagnostics[aid]["maximum_load_g_seen"] = max(
+                self._aircraft_diagnostics[aid]["maximum_load_g_seen"], float(g_load))
 
     # ------------------------------------------------------------------
     #  Termination checks
@@ -1079,12 +1223,22 @@ class UavCombatEnv(gymnasium.Env):
             crashed = False
             reason = None
 
-            alt = sim.get_geodetic()[2]
-            if alt < self.BATTLEFIELD_ALTITUDE_MIN:
+            alt = float(sim.get_geodetic()[2])
+            pos = np.asarray(sim.get_position(), dtype=np.float64)
+            if alt < self.arena_altitude_min_m:
                 sim.crash()
                 crashed = True
                 reason = "Crash_LowAlt"
-            elif self._overload_timers[aid] > self.OVERLOAD_TIME_LIMIT:
+            elif alt > self.arena_altitude_max_m:
+                sim.crash()
+                crashed = True
+                reason = "Crash_HighAlt"
+            elif abs(pos[0]) > self.arena_half_width_m or abs(pos[1]) > self.arena_half_width_m:
+                sim.crash()
+                crashed = True
+                reason = "Crash_BattleVolume"
+            elif (self.pid_profile != "paper"
+                  and self._overload_timers[aid] > self.OVERLOAD_TIME_LIMIT):
                 sim.crash()
                 crashed = True
                 reason = "Crash_OverG"
@@ -1225,7 +1379,10 @@ class UavCombatEnv(gymnasium.Env):
         round_over = (n_blue_alive == 0 or n_red_alive == 0
                       or self.current_step >= self.max_steps)
 
-        terminal_red = 30.0 * (n_red_alive - n_blue_alive) if round_over else 0.0
+        terminal_coefficient = float(
+            self.environment_config.reward.terminal_coefficient.value)
+        terminal_red = terminal_coefficient * (
+            n_red_alive - n_blue_alive) if round_over else 0.0
         terminal_blue = -terminal_red
         components: dict[str, dict] = {}
         local_rewards: dict[str, float] = {}
@@ -1242,13 +1399,14 @@ class UavCombatEnv(gymnasium.Env):
                 raw_bound = self._boundary_penalty(sim)
                 raw_adv = self._situation_reward(sim)
 
+            weights = self.environment_config.reward.weights.value
             weighted = {
-                "r_pitch": 0.01 * raw_pitch,
-                "r_roll": 0.002 * raw_roll,
-                "r_alt": 0.04 * raw_alt,
-                "r_bound": 0.04 * raw_bound,
-                "r_vel": 0.02 * raw_vel,
-                "r_adv": 0.15 * raw_adv,
+                "r_pitch": weights["pitch"] * raw_pitch,
+                "r_roll": weights["roll"] * raw_roll,
+                "r_alt": weights["altitude"] * raw_alt,
+                "r_bound": weights["boundary"] * raw_bound,
+                "r_vel": weights["speed"] * raw_vel,
+                "r_adv": weights["advantage"] * raw_adv,
             }
             local_reward = float(sum(weighted.values()))
             local_rewards[aid] = local_reward
@@ -1283,6 +1441,13 @@ class UavCombatEnv(gymnasium.Env):
             "reward_version": REWARD_VERSION,
             "reward_mode": self.reward_mode,
         }
+        self._episode_stats["EpisodeRedJointReturn"] += red_joint
+        self._episode_stats["EpisodeBlueJointReturn"] += blue_joint
+        self._episode_stats["EpisodeRedLocalRewardSum"] += red_local_sum
+        self._episode_stats["EpisodeBlueLocalRewardSum"] += blue_local_sum
+        self._episode_stats["EpisodeRedTerminalReward"] += terminal_red
+        self._episode_stats["EpisodeBlueTerminalReward"] += terminal_blue
+        self._episode_stats["EpisodeLength"] = int(self.current_step)
         for aid in self.agent_ids:
             is_blue = aid.startswith("blue")
             components[aid].update({
@@ -1317,7 +1482,7 @@ class UavCombatEnv(gymnasium.Env):
     def _speed_penalty(self, sim: AircraftSimulator) -> float:
         """r_V: paper eq (19) — penalty for low speed (Mach < 0.3)."""
         v = np.linalg.norm(sim.get_velocity())
-        mach = v / 340.0
+        mach = v / float(self.environment_config.reward.mach_reference_mps.value)
         if mach < 0.2:
             return -1.0
         if mach < 0.3:
@@ -1378,7 +1543,8 @@ class UavCombatEnv(gymnasium.Env):
         """
         pos = sim.get_position()
         x, y = pos[0], pos[1]
-        if abs(x) > self.BATTLEFIELD_HALF_SIZE or abs(y) > self.BATTLEFIELD_HALF_SIZE:
+        if (abs(x) > self.reward_boundary_half_width_m
+                or abs(y) > self.reward_boundary_half_width_m):
             return -10.0
         return 0.0
 
@@ -1567,9 +1733,11 @@ class UavCombatEnv(gymnasium.Env):
                         sim, ally, radar_detected=True)
             for j, enemy in enumerate(enemy_sims):
                 if enemy.is_alive:
-                    radar_detected = self._is_detected_by_radar(sim, enemy)
+                    track = self._get_sensor_track(sim, enemy)
                     enemy_vecs[j] = extract_relative_state(
-                        sim, enemy, radar_detected=radar_detected)
+                        sim, enemy,
+                        radar_detected=(track.source == "radar_full"),
+                        target_position_override=track.position_estimate)
 
         alive_mask = slot_aligned_alive_mask(self, agent_id)
         mw = 1.0 if alive and sim.check_missile_warning() is not None else 0.0
@@ -1640,7 +1808,13 @@ class UavCombatEnv(gymnasium.Env):
                 "missiles_fired_this_step": delta,
                 "missiles_left": sim.num_left_missiles if sim is not None else 0,
                 "death_reason": self._death_reasons.get(aid, None),
+                **dict(self._aircraft_diagnostics.get(aid, {})),
+                "fire_control": self._fire_control_states[aid].snapshot(),
+                "evasion": dict(self._evasion_diagnostics.get(aid, {})),
             }
+            if sim is not None and sim.is_alive:
+                _missile, mws_diag = sim.get_missile_warning_diagnostic()
+                info[aid]["mws_threat"] = mws_diag
             # Merge weighted reward-component breakdown for diagnostics
             if reward_components and aid in reward_components:
                 info[aid].update(reward_components[aid])
@@ -1657,24 +1831,37 @@ class UavCombatEnv(gymnasium.Env):
         info["__launch_quality_done__"] = [
             dict(record) for record in self._launch_quality_done_step_records
         ]
-        info["__environment_config__"] = {
-            "obs_mode": self.obs_mode,
-            "pid_profile": self.pid_profile,
-            "pid_throttle_base": self.pid_throttle_base,
-            "reward_mode": self.reward_mode,
-            "missile_guidance_mode": self.missile_guidance_mode,
-            "altitude_reward_config_version": self.altitude_reward_config.version,
-            "altitude_reward_config": {
-                "version": self.altitude_reward_config.version,
-                "h_min_m": self.altitude_reward_config.h_min_m,
-                "h_att_m": self.altitude_reward_config.h_att_m,
-                "h_adv_m": self.altitude_reward_config.h_adv_m,
-                "h_max_m": self.altitude_reward_config.h_max_m,
-                "d_att_max_m": self.altitude_reward_config.d_att_max_m,
-                "high_altitude_tail": self.altitude_reward_config.high_altitude_tail,
-            },
-        }
+        info["__environment_config__"] = dict(self._environment_config_snapshot)
+        info["__sensor_diagnostics__"] = [
+            dict(row) for row in self._sensor_diagnostics_step]
         info["__reward_summary__"] = dict(self._reward_summary_step)
+        n_red_alive = sum(int(s.is_alive) for s in self.red_planes.values())
+        n_blue_alive = sum(int(s.is_alive) for s in self.blue_planes.values())
+        timeout = self.current_step >= self.max_steps
+        ended = timeout or n_red_alive == 0 or n_blue_alive == 0
+        winner = ("red" if n_red_alive > n_blue_alive else
+                  "blue" if n_blue_alive > n_red_alive else "draw")
+        if not ended:
+            winner = ""
+        end_reason = ("timeout" if timeout else "red_eliminated" if n_red_alive == 0
+                      else "blue_eliminated" if n_blue_alive == 0 else "")
+        info["__episode__"] = {
+            **dict(self._episode_stats),
+            "PerStepRedJointRewardMean": (
+                self._episode_stats.get("EpisodeRedJointReturn", 0.0)
+                / max(self.current_step, 1)),
+            "PerStepBlueJointRewardMean": (
+                self._episode_stats.get("EpisodeBlueJointReturn", 0.0)
+                / max(self.current_step, 1)),
+            "episode_end_reason": end_reason,
+            "winner": winner,
+            "red_alive": n_red_alive,
+            "blue_alive": n_blue_alive,
+            "timeout": bool(timeout),
+            "battle_volume_violation": any(
+                reason in ("Crash_BattleVolume", "Crash_HighAlt", "Crash_LowAlt")
+                for reason in self._death_reasons.values()),
+        }
         return info
 
     # ------------------------------------------------------------------
@@ -1682,27 +1869,14 @@ class UavCombatEnv(gymnasium.Env):
     # ------------------------------------------------------------------
 
     def _compute_radar_max_range(self, TA: float) -> float:
-        """RCS-based radar range using paper Rmax = K * RCS^(1/4).
-
-        The paper uses z-axis/y-axis angular RCS table interpolation, but the
-        table values are not provided. This environment keeps the existing
-        front-low-RCS / side-high-RCS approximation and only aligns the Rmax
-        relation to the fourth root of RCS.
-        """
-        ta_abs_deg = np.rad2deg(TA)
-
-        if ta_abs_deg <= 30.0:
-            rcs = self.RCS_FRONTAL                              # 0.1 — front deadzone
-        elif ta_abs_deg <= 90.0:
-            frac = (ta_abs_deg - 30.0) / 60.0                   # 0.0 → 1.0
-            rcs = self.RCS_FRONTAL + (self.RCS_SIDE - self.RCS_FRONTAL) * frac
-        elif ta_abs_deg <= 150.0:
-            frac = (150.0 - ta_abs_deg) / 60.0                  # 1.0 → 0.0
-            rcs = self.RCS_FRONTAL + (self.RCS_SIDE - self.RCS_FRONTAL) * frac
-        else:
-            rcs = self.RCS_FRONTAL                              # 0.1 — rear deadzone
-
-        return self.RADAR_K * np.power(rcs, 0.25)
+        """Compatibility helper for the paper fourth-root range equation."""
+        from my_uav_env.sensors import bilinear_rcs_m2
+        rcs = bilinear_rcs_m2(
+            float(TA), 0.0, self.environment_config.rcs.azimuth_grid_deg.value,
+            self.environment_config.rcs.elevation_grid_deg.value,
+            self.environment_config.rcs.table_m2.value)
+        return float(self.environment_config.rcs.range_constant.value
+                     * np.power(max(rcs, 0.0), 0.25))
 
     def _is_detected_by_radar(self, ego_sim: AircraftSimulator,
                               enemy_sim: AircraftSimulator) -> bool:
@@ -1716,35 +1890,58 @@ class UavCombatEnv(gymnasium.Env):
 
         Radar CANNOT detect missiles — only aircraft.
         """
-        ego_pos = ego_sim.get_position()
-        ego_rpy = ego_sim.get_rpy()
-        enm_pos = enemy_sim.get_position()
-
-        # ---- vector ego → target (NEU) ----
-        dn = enm_pos[0] - ego_pos[0]
-        de = enm_pos[1] - ego_pos[1]
-        du = enm_pos[2] - ego_pos[2]
-
-        R_h = np.hypot(dn, de)
-        R_3d = np.sqrt(R_h * R_h + du * du)
-        if R_3d < 1e-6:
-            return True
-
-        _los_body, el_body, az_body, _q_los = body_angles_from_neu_vector(
-            np.array([dn, de, du], dtype=np.float64),
-            float(ego_rpy[0]), float(ego_rpy[1]), float(ego_rpy[2]))
-
-        if abs(az_body) > self.RADAR_AZIMUTH_HALF:
+        if isinstance(enemy_sim, MissileSimulator):
             return False
-        if el_body < self.RADAR_ELEVATION_MIN or el_body > self.RADAR_ELEVATION_MAX:
-            return False
+        diag = radar_diagnostic(
+            ego_sim, enemy_sim, self.environment_config.radar,
+            self.environment_config.rcs)
+        self._sensor_diagnostics_step.append({
+            "observer_id": ego_sim.uid, "target_id": enemy_sim.uid, **diag})
+        return bool(diag["radar_detected"])
 
-        # ---- RCS-dependent range check ----
-        _, TA, _ = get2d_heading_AO_TA_R(
-            ego_pos, ego_rpy[2], enm_pos, enemy_sim.get_rpy()[2])
-
-        R_max = self._compute_radar_max_range(TA)
-        return R_3d <= R_max
+    def _get_sensor_track(self, observer_sim, target_sim) -> SensorTrack:
+        """Return radar-full or seeded AWACS-coarse track for Table 2."""
+        now = self._physics_frame * self.physics_dt
+        if self._is_detected_by_radar(observer_sim, target_sim):
+            return SensorTrack("radar_full", target_sim.uid,
+                               np.asarray(target_sim.get_position(), dtype=np.float64),
+                               now, 0.0, 1.0, True, True, True)
+        key = (observer_sim.uid, target_sim.uid)
+        previous = self._sensor_tracks.get(key)
+        rws_detected = self._is_detected_by_radar(target_sim, observer_sim)
+        period = float(self.environment_config.awacs.update_period_s.value)
+        hold = float(self.environment_config.awacs.track_hold_s.value)
+        if previous is None or now - previous.timestamp >= period:
+            true_pos = np.asarray(target_sim.get_position(), dtype=np.float64)
+            error = np.array([
+                self.np_random.normal(0.0, self.environment_config.awacs.horizontal_error_std_m.value),
+                self.np_random.normal(0.0, self.environment_config.awacs.horizontal_error_std_m.value),
+                self.np_random.normal(0.0, self.environment_config.awacs.vertical_error_std_m.value),
+            ])
+            estimate = true_pos + error
+            source = "awacs_coarse"
+            confidence = 0.5
+            if rws_detected:
+                relative = estimate - np.asarray(observer_sim.get_position())
+                horizontal_range = float(np.hypot(relative[0], relative[1]))
+                bearing = float(np.arctan2(relative[1], relative[0]))
+                bearing += float(self.np_random.normal(
+                    0.0, self.environment_config.rws.bearing_error_std_rad.value))
+                estimate[0] = observer_sim.get_position()[0] + horizontal_range * np.cos(bearing)
+                estimate[1] = observer_sim.get_position()[1] + horizontal_range * np.sin(bearing)
+                source = "rws_awacs_fused"
+                confidence = 0.65
+            previous = SensorTrack(source, target_sim.uid,
+                                   estimate, now, 0.0, confidence,
+                                   False, False, True)
+            self._sensor_tracks[key] = previous
+        age = now - previous.timestamp
+        if age > hold:
+            return SensorTrack("no_track", target_sim.uid, None,
+                               previous.timestamp, age, 0.0, False, False, False)
+        return SensorTrack(previous.source, previous.target_id,
+                           previous.position_estimate.copy(), previous.timestamp,
+                           age, previous.confidence, False, False, True)
 
     # ------------------------------------------------------------------
     #  Helpers
@@ -1810,12 +2007,17 @@ class UavCombatEnv(gymnasium.Env):
         paper specification so the RL agent learns from a reproducible initial
         condition distribution.
         """
+        cfg = self.scenario_config
         N = self.max_num_red if color == "Red" else self.max_num_blue
-        lon_centre = 120.0
-        lat_centre = 60.0
-        formation_spacing_m = 500.0
-        half_distance_km = 5.0                              # ½ of 10 km
-        half_distance_deg_lon = half_distance_km / 55.66    # ≈ 0.0898°
+        lon_centre = float(cfg.reference_longitude_deg.value)
+        lat_centre = float(cfg.reference_latitude_deg.value)
+        formation_spacing_m = float(cfg.formation_spacing_m.value)
+        half_distance_m = float(cfg.initial_head_on_range_m.value) / 2.0
+        lat_rad = np.deg2rad(lat_centre)
+        prime_vertical_radius = 6_378_137.0 / np.sqrt(
+            1.0 - 0.00669437999014 * np.sin(lat_rad) ** 2)
+        metres_per_lon_degree = prime_vertical_radius * np.cos(lat_rad) * np.pi / 180.0
+        half_distance_deg_lon = half_distance_m / metres_per_lon_degree
 
         lat_offset_deg = (index - (N - 1) / 2.0) * formation_spacing_m / 111320.0
 
@@ -1829,9 +2031,9 @@ class UavCombatEnv(gymnasium.Env):
         return {
             "ic/long-gc-deg": lon,
             "ic/lat-geod-deg": lat_centre + lat_offset_deg,
-            "ic/h-sl-ft": 20000.0,
+            "ic/h-sl-ft": float(cfg.initial_altitude_m.value) / 0.3048,
             "ic/psi-true-deg": heading,
-            "ic/u-fps": 1000.0,
+            "ic/u-fps": float(cfg.initial_speed_mps.value) / 0.3048,
             "ic/v-fps": 0.0,
             "ic/w-fps": 0.0,
         }
@@ -1839,7 +2041,9 @@ class UavCombatEnv(gymnasium.Env):
     def _cleanup_missiles(self):
         done = [mid for mid, m in self._missiles_in_flight.items() if m.is_done]
         for mid in done:
-            del self._missiles_in_flight[mid]
+            missile = self._missiles_in_flight.pop(mid)
+            missile.detach_references()
+            self._engaged_targets.discard(missile._target_id)
 
     # ------------------------------------------------------------------
     #  Rendering (TacView .acmi export)

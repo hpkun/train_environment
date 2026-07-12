@@ -936,7 +936,7 @@ def main():
                       max_steps=config.max_episode_length,
                       enable_gcas_for_blue=config.enable_blue_gcas)
     print(f"Starting {config.num_envs} workers...", flush=True)
-    vec_env = SubprocVecEnv(config.num_envs, env_kwargs)
+    vec_env = SubprocVecEnv(config.num_envs, env_kwargs, base_seed=config.seed)
 
     red_ids = [f"red_{i}" for i in range(config.num_red)]
     blue_ids = [f"blue_{i}" for i in range(config.num_blue)]

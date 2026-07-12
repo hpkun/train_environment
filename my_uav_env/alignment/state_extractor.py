@@ -179,7 +179,8 @@ def extract_self_state_with_meta(sim) -> tuple[np.ndarray, dict]:
 
 
 def extract_relative_state(observer_sim, target_sim,
-                           radar_detected: bool = True) -> np.ndarray:
+                           radar_detected: bool = True,
+                           target_position_override=None) -> np.ndarray:
     """Extract paper Table 2 style relative observation.
 
     Output:
@@ -191,7 +192,9 @@ def extract_relative_state(observer_sim, target_sim,
     consistent across Table 2 and Eq.20-22.
     """
     obs_pos = np.asarray(observer_sim.get_position(), dtype=np.float64)
-    tgt_pos = np.asarray(target_sim.get_position(), dtype=np.float64)
+    tgt_pos = np.asarray(
+        target_sim.get_position() if target_position_override is None
+        else target_position_override, dtype=np.float64)
     obs_vel = np.asarray(observer_sim.get_velocity(), dtype=np.float64)
     tgt_vel = np.asarray(target_sim.get_velocity(), dtype=np.float64)
     roll, pitch, heading = np.asarray(observer_sim.get_rpy(), dtype=np.float64)
@@ -316,9 +319,16 @@ def build_strict_paper_entity_observation(env, agent_id: str):
             mask.append(1)
             continue
         radar_detected = True
-        if hasattr(env, "_is_detected_by_radar"):
+        target_position_override = None
+        if hasattr(env, "_get_sensor_track"):
+            track = env._get_sensor_track(ego_sim, sim)
+            radar_detected = track.source == "radar_full"
+            target_position_override = track.position_estimate
+        elif hasattr(env, "_is_detected_by_radar"):
             radar_detected = bool(env._is_detected_by_radar(ego_sim, sim))
-        rows.append(extract_relative_state(ego_sim, sim, radar_detected=radar_detected))
+        rows.append(extract_relative_state(
+            ego_sim, sim, radar_detected=radar_detected,
+            target_position_override=target_position_override))
         mask.append(0)
 
     entities = np.stack(rows).astype(np.float32)
