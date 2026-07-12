@@ -704,8 +704,10 @@ class MissileSimulator(BaseSimulator):
         vm_norm = float(np.linalg.norm(vm))
         los_norm = float(np.linalg.norm(los))
 
-        if vm_norm < 1e-8 or los_norm < 1e-8:
+        if los_norm < 1e-8:
             directional_match = 1.0
+        elif vm_norm < 1e-8:
+            directional_match = 0.0
         else:
             directional_match = float(np.dot(vm, los) / (vm_norm * los_norm + 1e-8))
             directional_match = max(0.0, directional_match)

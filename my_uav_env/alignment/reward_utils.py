@@ -18,8 +18,8 @@ REWARD_VERSION = "paper_literal_eq15_eq20_joint_v3"
 1. pitch penalty uses the literal discontinuous Eq.15 ``/ 12`` segment;
 2. situation reward Ta uses the paper Eq.20 original scale, including
    ``Ta=10`` when ``q_LOS < 4 deg`` and the literal lower branch at 4 deg;
-3. altitude reward uses a pairwise eq.17-style curve with the high-altitude
-   0.1 tail;
+3. altitude reward uses a pairwise Eq.17 structure with separately versioned
+   engineering thresholds and an explicitly unbounded default tail;
 4. situation reward geometry uses
    3D body-x q_LOS and 3D Euclidean distance.
 
@@ -30,15 +30,27 @@ REWARD_VERSION = "paper_literal_eq15_eq20_joint_v3"
 
 @dataclass(frozen=True)
 class AltitudeRewardConfig:
-    version: str = "eq17_engineering_thresholds_v1"
+    version: str = "eq17_engineering_thresholds_unbounded_tail_v2"
     h_min_m: float = 0.0
     h_att_m: float = 2000.0
     h_adv_m: float = 5000.0
     h_max_m: float = 10000.0
+    d_att_max_m: float | None = None
     high_altitude_tail: float = 0.1
-    d_att_max: float | None = None
-    h1: float | None = None
-    h2: float | None = None
+
+    def __post_init__(self):
+        if not (self.h_min_m < self.h_att_m <= self.h_adv_m < self.h_max_m):
+            raise ValueError(
+                "AltitudeRewardConfig requires "
+                "h_min_m < h_att_m <= h_adv_m < h_max_m")
+        if self.d_att_max_m is not None and not self.h_max_m < self.d_att_max_m:
+            raise ValueError(
+                "AltitudeRewardConfig requires h_max_m < d_att_max_m")
+        if not 0.0 <= self.high_altitude_tail <= 1.0:
+            raise ValueError("high_altitude_tail must be in [0, 1]")
+        if self.d_att_max_m is None and "unbounded_tail" not in self.version:
+            raise ValueError(
+                "an unbounded Eq.17 tail must be explicit in the config version")
 
 
 DEFAULT_ALTITUDE_REWARD_CONFIG = AltitudeRewardConfig()
@@ -152,16 +164,17 @@ def altitude_reward_paper_eq17(
     dz_m: float,
     config: AltitudeRewardConfig = DEFAULT_ALTITUDE_REWARD_CONFIG,
 ) -> float:
-    """Paper eq.17-style altitude curve with a high-altitude 0.1 tail.
+    """Eq.17 structure using explicit engineering thresholds.
 
-    This follows the pass21 reading of paper eq.17 using the current project
-    thresholds because exact h1/h2 and altitude constants still need visual
-    verification against the paper.
+    The paper does not publish the thresholds or polynomial coefficients. The
+    two quadratic segments are derived from endpoint continuity. ``None`` for
+    ``d_att_max_m`` explicitly selects an engineering unbounded-tail variant.
     """
     h_min = config.h_min_m
     h_att = config.h_att_m
     h_adv = config.h_adv_m
     h_max = config.h_max_m
+    d_att_max_m = config.d_att_max_m
     tail = config.high_altitude_tail
 
     if dz_m <= h_min:
@@ -174,8 +187,10 @@ def altitude_reward_paper_eq17(
     elif dz_m <= h_max:
         x = (dz_m - h_adv) / (h_max - h_adv)
         reward = 1.0 - (1.0 - tail) * x * x
-    else:
+    elif d_att_max_m is None or dz_m < d_att_max_m:
         reward = tail
+    else:
+        reward = 0.0
     return max(0.0, min(1.0, reward))
 
 

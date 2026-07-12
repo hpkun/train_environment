@@ -24,6 +24,8 @@ __all__ = [
     "extract_relative_state",
     "extract_self_state",
     "extract_self_state_with_meta",
+    "ordered_entity_slots",
+    "slot_aligned_alive_mask",
 ]
 
 
@@ -236,7 +238,8 @@ def compute_q_los_placeholder(rel_pos_body: np.ndarray) -> float:
     return compute_body_x_q_los_from_body(rel_pos_body)
 
 
-def _ordered_team_sims(env, agent_id: str):
+def ordered_entity_slots(env, agent_id: str):
+    """Return ``(ego, allies, enemies)`` slots in observation tensor order."""
     if agent_id.startswith("blue"):
         own_ids = getattr(env, "blue_ids", list(env.blue_planes.keys()))
         enemy_ids = getattr(env, "red_ids", list(env.red_planes.keys()))
@@ -247,9 +250,22 @@ def _ordered_team_sims(env, agent_id: str):
         enemy_ids = getattr(env, "blue_ids", list(env.blue_planes.keys()))
         own_planes = env.red_planes
         enemy_planes = env.blue_planes
+    if agent_id not in own_planes:
+        raise KeyError(f"Unknown agent_id: {agent_id}")
+    ego = [(agent_id, own_planes[agent_id])]
     allies = [(aid, own_planes[aid]) for aid in own_ids if aid != agent_id]
     enemies = [(aid, enemy_planes[aid]) for aid in enemy_ids]
-    return allies, enemies
+    return ego, allies, enemies
+
+
+def slot_aligned_alive_mask(env, agent_id: str) -> np.ndarray:
+    """Return 1=valid/alive in exact ``ego, allies, enemies`` slot order."""
+    ego, allies, enemies = ordered_entity_slots(env, agent_id)
+    ego_valid = _is_valid_sim(ego[0][1])
+    return np.asarray([
+        int(ego_valid and _is_valid_sim(sim))
+        for _aid, sim in ego + allies + enemies
+    ], dtype=np.int64)
 
 
 def _is_valid_sim(sim) -> bool:
@@ -268,7 +284,7 @@ def build_strict_paper_entity_observation(env, agent_id: str):
     if ego_sim is None:
         raise KeyError(f"Unknown agent_id: {agent_id}")
 
-    allies, enemies = _ordered_team_sims(env, agent_id)
+    ego_slots, allies, enemies = ordered_entity_slots(env, agent_id)
     rows = []
     mask = []
 
@@ -298,6 +314,9 @@ def build_strict_paper_entity_observation(env, agent_id: str):
 
     entities = np.stack(rows).astype(np.float32)
     entity_mask = np.asarray(mask, dtype=np.int64)
+    expected_mask = 1 - slot_aligned_alive_mask(env, agent_id)
+    if not np.array_equal(entity_mask, expected_mask):
+        raise RuntimeError("strict entity mask does not match entity slot order")
     meta = {
         "entity_dim": 10,
         "schema": "paper_table1_table2_v1",

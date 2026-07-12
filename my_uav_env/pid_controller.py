@@ -1,21 +1,10 @@
-"""
-PID flight controller implementing Bank-to-Turn (BTT) logic per paper §2.4.
+"""Bank-to-Turn PID controller for the paper environment.
 
-Converts high-level tactical commands (target_pitch, target_heading, target_velocity)
-to JSBSim control-surface commands (aileron, elevator, rudder, throttle).
-
-Paper reference:
-  - Formula (12): desired inertial direction vector d_I_des
-  - Formula (13): body-frame direction d_B_des = R_BI · d_I_des
-  - roll_error  e_φ = arctan(d_B_des[1] / d_B_des[2])   → arctan2(y, z)
-  - pitch_error e_θ = arctan(−d_B_des[2] / d_B_des[0])   → arctan2(−z, x)
-
-Three PID loops:
-  - Roll PID:    roll_error  e_φ  → aileron_cmd   [−1, 1]
-  - Pitch PID:   pitch_error e_θ  → elevator_cmd  [−1, 1]
-  - Velocity PID: velocity_error → throttle_cmd   [0, 1]
-
-Rudder is hard-locked to 0 per paper specification.
+Eq.12 constructs the desired direction in NED. Eq.13 converts it to the
+paper's body-z-up convention and uses ``atan2(y, x)`` for roll error and
+``atan2(z, x)`` for pitch error. F-16 actuator signs are adapted only at the
+final output. Eq.14 throttle uses an explicit engineering ``throttle_base``;
+rudder remains fixed at zero.
 """
 import numpy as np
 
@@ -106,7 +95,8 @@ class PIDController:
     """
 
     def __init__(self, dt, profile: str = "paper", debug: bool = False,
-                 integral_error_limits: tuple[float, float, float] | None = None):
+                 integral_error_limits: tuple[float, float, float] | None = None,
+                 throttle_base: float = 0.0):
         if profile not in ("paper", "engineering_safe"):
             raise ValueError("profile must be 'paper' or 'engineering_safe'")
         self.dt = dt
@@ -115,6 +105,9 @@ class PIDController:
         self._debug_step = 0          # throttled debug counter
         self._prev_target_heading = None   # for low-pass filter (Fix 2)
         self._prev_roll_error = None        # for D-term guard (clipped-error jump detection)
+        if not 0.0 <= float(throttle_base) <= 1.0:
+            raise ValueError("throttle_base must be in [0, 1]")
+        self.throttle_base = float(throttle_base)
 
         # --- Roll PID (drives aileron) ---
         # F-16 aero has strong natural roll-damping (Cl_p ≈ −0.5 rad⁻¹ at
@@ -148,7 +141,8 @@ class PIDController:
         # Afterburner engages at throttle-pos-norm > 0.77 → cmd-norm > 0.385.
         self._velocity_pid = PIDLoop(
             kp=0.04, ki=0.01, kd=0.003,
-            output_min=0.0, output_max=1.0,
+            output_min=-self.throttle_base,
+            output_max=1.0 - self.throttle_base,
             name="velocity", integral_error_limit=self.integral_error_limits[2],
         )
 
@@ -306,8 +300,10 @@ class PIDController:
             aileron = self._roll_pid.step(roll_error, self.dt)
             # F-16 actuator convention: positive elevator command pitches down.
             elevator = -self._pitch_pid.step(pitch_error, self.dt)
-            throttle = self._velocity_pid.step(
+            correction = self._velocity_pid.step(
                 target_velocity - current_velocity, self.dt)
+            throttle = float(np.clip(
+                self.throttle_base + correction, 0.0, 1.0))
             return aileron, elevator, 0.0, throttle
 
         # =================================================================
@@ -466,7 +462,9 @@ class PIDController:
 
         # Velocity error → throttle
         velocity_error = target_velocity - current_velocity
-        throttle = self._velocity_pid.step(velocity_error, self.dt)
+        correction = self._velocity_pid.step(velocity_error, self.dt)
+        throttle = float(np.clip(
+            self.throttle_base + correction, 0.0, 1.0))
 
         # Rudder: hard-locked to 0 per paper specification
         rudder = 0.0

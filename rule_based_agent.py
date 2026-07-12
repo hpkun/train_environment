@@ -43,6 +43,11 @@ _simple_lost_steps: dict[int, int] = {}
 _simple_debug_state: dict[int, dict] = {}
 BLUE_POLICY_DEBUG = False
 
+
+def _enemy_mask_start(num_allies: int) -> int:
+    """Return the enemy slice start for ``ego, allies, enemies`` observations."""
+    return 1 + max(int(num_allies), 0)
+
 # ==============================================================================
 #  State thresholds
 # ==============================================================================
@@ -421,10 +426,12 @@ def _simple_valid_targets(
         return []
     excluded = excluded or set()
     candidates: list[tuple[float, int, np.ndarray]] = []
+    enemy_mask_start = _enemy_mask_start(num_blue - 1)
     for red_idx in range(min(num_red, enemy_states.shape[0])):
         if red_idx in excluded:
             continue
-        if alive_mask.size > num_blue + red_idx and alive_mask[num_blue + red_idx] <= 0.5:
+        mask_idx = enemy_mask_start + red_idx
+        if alive_mask.size > mask_idx and alive_mask[mask_idx] <= 0.5:
             continue
         state = np.asarray(enemy_states[red_idx], dtype=np.float32)
         if state.size < 6 or np.allclose(state, 0.0):
@@ -667,11 +674,15 @@ def blue_coordinated_actions(
         }
 
     # ---- Build score matrix: score[b][r] for alive reds ----
-    # Pre-filter alive reds (same across all blues since alive_mask is shared)
-    # We read from the first blue's obs (all blues share the same red state).
+    # Enemy slots are identical across Blue observations even though ego/ally
+    # slots differ for each observer.
     first_obs = blue_obs[blue_ids[0]]
     alive_mask = first_obs.get("alive_mask", first_obs["death_mask"])
-    alive_reds_all = [i for i in range(num_red) if alive_mask[num_blue + i] > 0.5]
+    enemy_mask_start = _enemy_mask_start(num_blue - 1)
+    alive_reds_all = [
+        i for i in range(num_red)
+        if alive_mask[enemy_mask_start + i] > 0.5
+    ]
 
     if not alive_reds_all:
         actions = {}
@@ -876,8 +887,9 @@ def _blue_pursuit_action_impl(
     alive_mask = obs.get("alive_mask", obs["death_mask"])
 
     # --- Alive target list ---
+    enemy_mask_start = _enemy_mask_start(num_blue - 1)
     alive_reds_raw = [i for i in range(num_red)
-                      if alive_mask[num_blue + i] > 0.5]
+                      if alive_mask[enemy_mask_start + i] > 0.5]
     # enemy_states[idx][2] is a body-frame / pseudo-up component, not reliable
     # world altitude. True death / low-altitude status is represented by the
     # environment alive_mask, so Blue must not discard alive Reds using body z.

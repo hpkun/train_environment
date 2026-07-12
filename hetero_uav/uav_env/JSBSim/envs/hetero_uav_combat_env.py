@@ -135,7 +135,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
-        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8", "tam_brma_paper_aligned_v1", "tam_happo_table1_v1", "brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2"}:
+        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8", "tam_brma_paper_aligned_v1", "tam_happo_table1_v1", "brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2", "brma_tam_role_situation_v3"}:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
         self._tam_reward_scale = float(kwargs.pop("tam_reward_scale", 0.05))
@@ -193,6 +193,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.brma_tam_scale_aligned_v2_config = deepcopy(_scale_v2_cfg)
         if hetero_reward_mode == "brma_tam_scale_aligned_v2" and not self.brma_tam_scale_aligned_v2_config:
             raise ValueError("brma_tam_scale_aligned_v2 mode requires config block")
+        _v3_cfg = kwargs.pop("brma_tam_role_situation_v3", None) or {}
+        self.brma_tam_role_situation_v3_config = deepcopy(_v3_cfg)
+        if hetero_reward_mode == "brma_tam_role_situation_v3" and not self.brma_tam_role_situation_v3_config:
+            raise ValueError("brma_tam_role_situation_v3 mode requires config block")
         # Cached per-step obs for reward overlay (minimal_v1 / role_v1)
         self._last_step_obs: dict = {}
         # First-death detection for MAV — penalize once per episode
@@ -240,6 +244,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
             self._validate_brma_tam_scale_aligned_v1_contract()
         if self.hetero_reward_mode == "brma_tam_scale_aligned_v2":
             self._validate_brma_tam_scale_aligned_v2_contract()
+        if self.hetero_reward_mode == "brma_tam_role_situation_v3":
+            self._validate_role_situation_v3_contract()
 
     # -- TAM Paper Reward v6 JSBSim-aligned v3 -------------------------------
 
@@ -1102,6 +1108,13 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 if not isinstance(value, dict) or key not in value:
                     raise ValueError("brma_tam_scale_aligned_v2 missing config key: " + ".".join(path))
                 value = value[key]
+
+    def _validate_role_situation_v3_contract(self) -> None:
+        cfg = self.brma_tam_role_situation_v3_config
+        if int(cfg.get("contract_revision", 0)) != 5:
+            raise ValueError("brma_tam_role_situation_v3 requires contract_revision=5")
+        if self.observation_mode != "mav_shared_geo":
+            raise ValueError("brma_tam_role_situation_v3 requires observation_mode='mav_shared_geo'")
 
     @staticmethod
     def _scale_v1_distance_potential(distance_m: float, optimal_km: float = 5.0,
@@ -3397,14 +3410,16 @@ class HeteroUavCombatEnv(UavCombatEnv):
         }
 
     def step(self, actions: dict):
-        if self.hetero_reward_mode in {"brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2"}:
+        if self.hetero_reward_mode in {"brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2", "brma_tam_role_situation_v3"}:
             self._brma_tam_alive_before_step = {
                 aid: bool(getattr((self.red_planes.get(aid) or self.blue_planes.get(aid)), "is_alive", False))
                 for aid in self.agent_ids
             }
             self._reward_target_diagnostic_records = []
-        if self.hetero_reward_mode in {"brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2"}:
+        if self.hetero_reward_mode in {"brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2", "brma_tam_role_situation_v3"}:
             self._scale_v1_alive_before_step = dict(self._brma_tam_alive_before_step)
+        if self.hetero_reward_mode == "brma_tam_role_situation_v3":
+            self._v3_alive_before = dict(self._brma_tam_alive_before_step)
         trimmed = self._apply_action_trim(actions)
         obs, rewards, terminated, truncated, info = super().step(trimmed)
         if self._needs_last_step_obs_cache():
@@ -5245,6 +5260,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 return self._compute_brma_tam_scale_aligned_v1(base_rewards, components)
             if self.hetero_reward_mode == "brma_tam_scale_aligned_v2":
                 return self._compute_brma_tam_scale_aligned_v2(base_rewards, components)
+            if self.hetero_reward_mode == "brma_tam_role_situation_v3":
+                from uav_env.JSBSim.envs.role_situation_v3 import compute_v3_reward
+                return compute_v3_reward(self, base_rewards, components)
             return base_rewards, components
 
         mav_id = self.red_ids[0] if self.red_ids else None

@@ -26,6 +26,7 @@ import os
 import sys
 import traceback
 from collections import Counter
+from dataclasses import asdict
 import numpy as np
 import torch
 
@@ -51,8 +52,12 @@ except Exception:
     pass
 
 from rule_based_agent import blue_coordinated_actions
-from my_uav_env.alignment.reward_utils import REWARD_VERSION
+from my_uav_env.alignment.reward_utils import (
+    DEFAULT_ALTITUDE_REWARD_CONFIG,
+    REWARD_VERSION,
+)
 from train_vanilla_mappo import (
+    ACTION_DISTRIBUTION_VERSION,
     CHECKPOINT_SCHEMA_VERSION,
     VanillaActor,
     _classify_death_reason,
@@ -61,6 +66,7 @@ from train_vanilla_mappo import (
     _episode_outcome,
     _flatten_obs,
     _joint_team_reward_once,
+    _ratio_with_denominator_zero,
     _safe_div,
     _unpack_and_validate_checkpoint,
 )
@@ -178,9 +184,13 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
              obs_mode: str = "paper_strict",
              obs_normalization: str = "paper_fixed_v1",
              pid_profile: str = "paper",
+             pid_throttle_base: float = 0.0,
              reward_mode: str = "paper_joint",
              missile_guidance_mode: str = "paper_eq9"):
     """Load a model, run one episode with TacView recording, save .acmi."""
+
+    print(f"pid_throttle_base: {pid_throttle_base}", flush=True)
+    print(f"action_distribution: {ACTION_DISTRIBUTION_VERSION}", flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rnn_hidden_size = 128  # default; overridden by checkpoint auto-inference
@@ -192,6 +202,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                            max_steps=max_steps,
                            obs_mode=obs_mode,
                            pid_profile=pid_profile,
+                           pid_throttle_base=pid_throttle_base,
                            reward_mode=reward_mode,
                            missile_guidance_mode=missile_guidance_mode,
                            enable_gcas_for_blue=False,
@@ -217,7 +228,10 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                 "reward_version": REWARD_VERSION,
                 "reward_mode": reward_mode,
                 "pid_profile": pid_profile,
+                "pid_throttle_base": float(pid_throttle_base),
                 "missile_guidance_mode": missile_guidance_mode,
+                "altitude_reward_config": asdict(DEFAULT_ALTITUDE_REWARD_CONFIG),
+                "action_distribution": ACTION_DISTRIBUTION_VERSION,
                 "num_red": num_red,
                 "num_blue": num_blue,
                 "global_state_dim": _compute_global_state_dim(num_red, obs_mode),
@@ -364,7 +378,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                     rnn_t = torch.as_tensor(rnn_a[alive_indices], device=device)
                     with torch.no_grad():
                         action_dist, new_rnn = actor(obs_t, rnn_t)
-                        act = action_dist.mean  # deterministic eval (no exploration noise)
+                        act = action_dist.mode  # deterministic squashed action
                     for k, i in enumerate(alive_indices):
                         actions[red_ids[i]] = act[k].cpu().numpy()
                         rnn_a[i] = new_rnn[k].cpu().numpy()
@@ -492,7 +506,13 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                 blue_missile_hits = red_deaths_missile
                 red_total_deaths = sum(red_deaths.values())
                 blue_total_deaths = sum(blue_deaths.values())
-                rwr_single = 1.0 if _episode_outcome(red_alive, blue_alive) == "red" else 0.0
+                kd_all, _ = _ratio_with_denominator_zero(
+                    blue_total_deaths, red_total_deaths)
+                kd_missile, _ = _ratio_with_denominator_zero(
+                    blue_deaths_missile, red_deaths_missile)
+                outcome_key = _episode_outcome(red_alive, blue_alive)
+                rwr_single, rwr_zero = _ratio_with_denominator_zero(
+                    int(outcome_key == "red"), int(outcome_key == "blue"))
 
                 print("  Paper metrics:", flush=True)
                 print(f"    EpisodeRewardRed: {red_episode_joint_reward:.6f}",
@@ -507,9 +527,10 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                       f"{_safe_div(red_missile_hits, red_missiles_total):.6f} / "
                       f"{_safe_div(blue_missile_hits, blue_missiles_total):.6f}",
                       flush=True)
-                print(f"    KD_Red: {_safe_div(blue_total_deaths, red_total_deaths):.6f}",
-                      flush=True)
-                print(f"    RWR_single_episode: {rwr_single:.6f}", flush=True)
+                print(f"    KD_Red_AllDeaths: {kd_all}", flush=True)
+                print(f"    KD_Red_MissileOnly: {kd_missile}", flush=True)
+                print(f"    RWR: {rwr_single} "
+                      f"(denominator_zero={rwr_zero})", flush=True)
                 if trackers:
                     print(f"  可视化导弹轨迹: {len(trackers)} 条", flush=True)
     except Exception:
@@ -561,6 +582,7 @@ if __name__ == "__main__":
                             default="paper_fixed_v1")
         parser.add_argument("--pid-profile", choices=("paper", "engineering_safe"),
                             default="paper")
+        parser.add_argument("--pid-throttle-base", type=float, default=0.0)
         parser.add_argument("--reward-mode", choices=("paper_joint", "engineering_local"),
                             default="paper_joint")
         parser.add_argument("--missile-guidance-mode",
@@ -599,6 +621,7 @@ if __name__ == "__main__":
                  obs_mode=args.obs_mode,
                  obs_normalization=args.obs_normalization,
                  pid_profile=args.pid_profile,
+                 pid_throttle_base=args.pid_throttle_base,
                  reward_mode=args.reward_mode,
                  missile_guidance_mode=args.missile_guidance_mode)
     except Exception:

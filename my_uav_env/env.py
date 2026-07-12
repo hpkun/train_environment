@@ -22,6 +22,12 @@ from my_uav_env.alignment.reward_utils import (
     ta_angle_advantage_fixed,
     td_distance_advantage,
 )
+from my_uav_env.alignment.state_extractor import (
+    extract_relative_state,
+    extract_self_state_with_meta,
+    ordered_entity_slots,
+    slot_aligned_alive_mask,
+)
 
 from .simulator import AircraftSimulator, MissileSimulator
 from .pid_controller import PIDController
@@ -136,7 +142,8 @@ class UavCombatEnv(gymnasium.Env):
       - "ego_state"     (entity_dim,)       self state
       - "ally_states"   (max_allies-1, entity_dim)  allied aircraft, excluding self
       - "enemy_states"  (max_enemies, entity_dim)    enemy aircraft
-      - "alive_mask"    (max_allies+max_enemies,)  1=alive, 0=dead
+      - "alive_mask"    (max_allies+max_enemies,)  1=valid/alive, 0=invalid/dead;
+        slots are ordered ego, allies excluding ego, then enemies
       - "death_mask"    deprecated alias with the same values as alive_mask
     """
 
@@ -206,6 +213,7 @@ class UavCombatEnv(gymnasium.Env):
                  missile_detection_half_angle_deg: float = 45.0,
                  missile_min_launch_range_m: float = 500.0,
                  pid_profile: str = "paper",
+                 pid_throttle_base: float = 0.0,
                  reward_mode: str = "paper_joint",
                  missile_guidance_mode: str = "paper_eq9",
                  altitude_reward_config=None,
@@ -226,6 +234,9 @@ class UavCombatEnv(gymnasium.Env):
         if pid_profile not in ("paper", "engineering_safe"):
             raise ValueError("pid_profile must be 'paper' or 'engineering_safe'")
         self.pid_profile = pid_profile
+        if not 0.0 <= float(pid_throttle_base) <= 1.0:
+            raise ValueError("pid_throttle_base must be in [0, 1]")
+        self.pid_throttle_base = float(pid_throttle_base)
         if reward_mode not in ("paper_joint", "engineering_local"):
             raise ValueError("reward_mode must be 'paper_joint' or 'engineering_local'")
         self.reward_mode = reward_mode
@@ -435,7 +446,8 @@ class UavCombatEnv(gymnasium.Env):
         if first_reset:
             for aid in self.agent_ids:
                 self.pid_controllers[aid] = PIDController(
-                    self.physics_dt, profile=self.pid_profile)
+                    self.physics_dt, profile=self.pid_profile,
+                    throttle_base=self.pid_throttle_base)
         else:
             for pid in self.pid_controllers.values():
                 pid.reset()
@@ -1419,9 +1431,9 @@ class UavCombatEnv(gymnasium.Env):
         alive = sim is not None and sim.is_alive
         color = "Blue" if agent_id.startswith("blue") else "Red"
 
-        # Gather all sims sorted by ID for consistent ordering
-        blue_sims = [self.blue_planes[bid] for bid in self.blue_ids]
-        red_sims = [self.red_planes[rid] for rid in self.red_ids]
+        _ego_slots, ally_slots, enemy_slots = ordered_entity_slots(self, agent_id)
+        ally_sims = [slot[1] for slot in ally_slots]
+        enemy_sims = [slot[1] for slot in enemy_slots]
 
         # ---- ego_state (self-observation: delta=0, frame-independent) ----
         if alive:
@@ -1444,12 +1456,7 @@ class UavCombatEnv(gymnasium.Env):
             ego_state = np.zeros(11, dtype=np.float32)
 
         # ---- ally_states ----
-        if color == "Blue":
-            ally_sims = [s for s in blue_sims if s.uid != agent_id]
-            max_allies = self.max_num_blue - 1
-        else:
-            ally_sims = [s for s in red_sims if s.uid != agent_id]
-            max_allies = self.max_num_red - 1
+        max_allies = len(ally_sims)
 
         ally_vecs = np.zeros((max_allies, 11), dtype=np.float32)
         if alive:
@@ -1464,8 +1471,7 @@ class UavCombatEnv(gymnasium.Env):
                 ally_vecs[j] = self._normalize_obs_vec(raw_ally)
 
         # ---- enemy_states (partial observability per paper) ----
-        enemy_sims = red_sims if color == "Blue" else blue_sims
-        max_enemies = self.max_num_red if color == "Blue" else self.max_num_blue
+        max_enemies = len(enemy_sims)
 
         enemy_vecs = np.zeros((max_enemies, 11), dtype=np.float32)
         if alive:
@@ -1507,9 +1513,7 @@ class UavCombatEnv(gymnasium.Env):
                     ], dtype=np.float32)
 
         # Canonical mask: 1=alive/valid, 0=dead/invalid.
-        all_sims_ordered = blue_sims + red_sims
-        alive_mask = np.array(
-            [1 if s.is_alive else 0 for s in all_sims_ordered], dtype=np.int64)
+        alive_mask = slot_aligned_alive_mask(self, agent_id)
 
         # ---- missile_warning ----
         mw = 0.0
@@ -1536,32 +1540,19 @@ class UavCombatEnv(gymnasium.Env):
 
     def _get_agent_obs_paper_strict(self, agent_id: str) -> dict:
         """Build Table 1 / Table 2 10-dim observations for reset/step."""
-        from my_uav_env.alignment.state_extractor import (
-            extract_relative_state,
-            extract_self_state_with_meta,
-        )
-
         sim = self._get_sim(agent_id)
         alive = sim is not None and sim.is_alive
-        color = "Blue" if agent_id.startswith("blue") else "Red"
-        blue_sims = [self.blue_planes[bid] for bid in self.blue_ids]
-        red_sims = [self.red_planes[rid] for rid in self.red_ids]
+        _ego_slots, ally_slots, enemy_slots = ordered_entity_slots(self, agent_id)
+        ally_sims = [slot[1] for slot in ally_slots]
+        enemy_sims = [slot[1] for slot in enemy_slots]
 
         if alive:
             ego_state, _meta = extract_self_state_with_meta(sim)
         else:
             ego_state = np.zeros(10, dtype=np.float32)
 
-        if color == "Blue":
-            ally_sims = [s for s in blue_sims if s.uid != agent_id]
-            enemy_sims = red_sims
-            max_allies = self.max_num_blue - 1
-            max_enemies = self.max_num_red
-        else:
-            ally_sims = [s for s in red_sims if s.uid != agent_id]
-            enemy_sims = blue_sims
-            max_allies = self.max_num_red - 1
-            max_enemies = self.max_num_blue
+        max_allies = len(ally_sims)
+        max_enemies = len(enemy_sims)
 
         ally_vecs = np.zeros((max_allies, 10), dtype=np.float32)
         enemy_vecs = np.zeros((max_enemies, 10), dtype=np.float32)
@@ -1576,9 +1567,7 @@ class UavCombatEnv(gymnasium.Env):
                     enemy_vecs[j] = extract_relative_state(
                         sim, enemy, radar_detected=radar_detected)
 
-        all_sims_ordered = blue_sims + red_sims
-        alive_mask = np.array(
-            [1 if s.is_alive else 0 for s in all_sims_ordered], dtype=np.int64)
+        alive_mask = slot_aligned_alive_mask(self, agent_id)
         mw = 1.0 if alive and sim.check_missile_warning() is not None else 0.0
         missile_warning = np.array([mw], dtype=np.float32)
         alt_m = sim.get_geodetic()[2] if alive else 0.0
@@ -1667,9 +1656,19 @@ class UavCombatEnv(gymnasium.Env):
         info["__environment_config__"] = {
             "obs_mode": self.obs_mode,
             "pid_profile": self.pid_profile,
+            "pid_throttle_base": self.pid_throttle_base,
             "reward_mode": self.reward_mode,
             "missile_guidance_mode": self.missile_guidance_mode,
             "altitude_reward_config_version": self.altitude_reward_config.version,
+            "altitude_reward_config": {
+                "version": self.altitude_reward_config.version,
+                "h_min_m": self.altitude_reward_config.h_min_m,
+                "h_att_m": self.altitude_reward_config.h_att_m,
+                "h_adv_m": self.altitude_reward_config.h_adv_m,
+                "h_max_m": self.altitude_reward_config.h_max_m,
+                "d_att_max_m": self.altitude_reward_config.d_att_max_m,
+                "high_altitude_tail": self.altitude_reward_config.high_altitude_tail,
+            },
         }
         info["__reward_summary__"] = dict(self._reward_summary_step)
         return info

@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import random
 import sys
+from dataclasses import asdict
 
 # ---- 多进程性能：禁止底层库的线程池竞争 ----
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -90,8 +92,10 @@ class Config:
     obs_mode: str = "paper_strict"
     obs_normalization: str = "paper_fixed_v1"
     pid_profile: str = "paper"
+    pid_throttle_base: float = 0.0
     reward_mode: str = "paper_joint"
     missile_guidance_mode: str = "paper_eq9"
+    altitude_reward_config = DEFAULT_ALTITUDE_REWARD_CONFIG
     resume_from_best: bool = False
     action_dim: int = 3
 
@@ -173,8 +177,43 @@ def _global_state_from_local_obs_flats(
     ]).astype(np.float32)
 
 
+class SquashedNormal:
+    """Tanh-squashed diagonal Gaussian with stable transformed log density."""
+
+    def __init__(self, loc: torch.Tensor, scale: torch.Tensor, eps: float = 1e-6):
+        self.loc = loc
+        self.scale = scale
+        self.eps = float(eps)
+        self.base_dist = torch.distributions.Normal(loc, scale)
+
+    @property
+    def batch_shape(self):
+        return self.base_dist.batch_shape
+
+    @property
+    def mode(self) -> torch.Tensor:
+        return torch.tanh(self.loc)
+
+    def sample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
+        return torch.tanh(self.base_dist.sample(sample_shape))
+
+    def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
+        return torch.tanh(self.base_dist.rsample(sample_shape))
+
+    def log_prob(self, action: torch.Tensor) -> torch.Tensor:
+        bounded = action.clamp(-1.0 + self.eps, 1.0 - self.eps)
+        latent = torch.atanh(bounded)
+        log_det = 2.0 * (
+            np.log(2.0) - latent - F.softplus(-2.0 * latent))
+        return self.base_dist.log_prob(latent) - log_det
+
+    def base_entropy(self) -> torch.Tensor:
+        """Latent Gaussian entropy; not exact squashed-action entropy."""
+        return self.base_dist.entropy()
+
+
 class VanillaActor(nn.Module):
-    """纯 MLP 策略网络：展平 obs → GRU → MLP → Gaussian(mu, learnable sigma)."""
+    """Flattened observation -> GRU -> tanh-squashed diagonal Gaussian."""
 
     def __init__(self, obs_dim: int, action_dim: int = 3,
                  hidden: int = 128, rnn_hidden: int = 128):
@@ -185,7 +224,6 @@ class VanillaActor(nn.Module):
             nn.Linear(rnn_hidden, 64),
             nn.ReLU(),
             nn.Linear(64, action_dim),
-            nn.Tanh(),
         )
         self.action_log_std = nn.Parameter(torch.full((action_dim,), -1.204))  # ln(0.3)
 
@@ -195,19 +233,17 @@ class VanillaActor(nn.Module):
             obs_flat:   (B, obs_dim)  展平观测
             rnn_hidden: (B, rnn_hidden)  GRU 隐藏状态
         Returns:
-            action_dist: Normal
+            action_dist: SquashedNormal
             rnn_hidden:  (B, rnn_hidden)
         """
         x = F.relu(self.fc_in(obs_flat))          # (B, hidden)
         rnn_hidden_new = self.rnn(x, rnn_hidden)  # (B, rnn_hidden)
-        mu = self.action_head(rnn_hidden_new)      # (B, action_dim) in [-1, 1]
-        # Guard: if weights were corrupted by a previous NaN backward pass,
-        # replace NaN mu with zeros so Normal() doesn't raise.
-        mu = torch.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
-        mu = mu.clamp(-0.999, 0.999)  # keep mu strictly inside [-1, 1]
+        latent_mu = self.action_head(rnn_hidden_new)
+        latent_mu = torch.nan_to_num(
+            latent_mu, nan=0.0, posinf=20.0, neginf=-20.0)
         sigma = torch.exp(self.action_log_std).clamp(min=1e-4)
-        sigma = sigma.unsqueeze(0).expand_as(mu)
-        return torch.distributions.Normal(mu, sigma), rnn_hidden_new
+        sigma = sigma.unsqueeze(0).expand_as(latent_mu)
+        return SquashedNormal(latent_mu, sigma), rnn_hidden_new
 
 
 class CentralizedCritic(nn.Module):
@@ -384,16 +420,16 @@ LAUNCH_QUALITY_AGG_CSV_FIELDS = (
     "BlueLaunchHitRateFromQualityRecords",
 )
 
-ACTION_CLIP_CSV_FIELDS = (
-    "RedActionRawAbsMean",
-    "RedActionRawClipFrac",
-    "RedActionClampedFrac",
-    "RedActionRawClipFracPitch",
-    "RedActionRawClipFracHeading",
-    "RedActionRawClipFracVelocity",
+ACTION_BOUND_CSV_FIELDS = (
+    "RedActionAbsMean",
+    "RedActionNearBoundFrac",
+    "RedActionNearBoundFracPitch",
+    "RedActionNearBoundFracHeading",
+    "RedActionNearBoundFracVelocity",
 )
 
-CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v1"
+CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v2"
+ACTION_DISTRIBUTION_VERSION = "tanh_squashed_normal_v1"
 
 
 def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
@@ -404,7 +440,10 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "reward_version": REWARD_VERSION,
         "reward_mode": config.reward_mode,
         "pid_profile": config.pid_profile,
+        "pid_throttle_base": float(config.pid_throttle_base),
         "missile_guidance_mode": config.missile_guidance_mode,
+        "altitude_reward_config": asdict(config.altitude_reward_config),
+        "action_distribution": ACTION_DISTRIBUTION_VERSION,
         "num_red": int(config.num_red),
         "num_blue": int(config.num_blue),
         "global_state_dim": int(global_state_dim),
@@ -546,51 +585,49 @@ def _launch_quality_metrics(
     return metrics
 
 
-def _empty_action_clip_totals() -> dict:
+def _empty_action_bound_totals() -> dict:
     return {
-        "raw_abs_sum": 0.0,
+        "abs_sum": 0.0,
         "element_count": 0,
-        "clip_count": 0,
-        "clamped_count": 0,
-        "dim_clip_count": np.zeros(3, dtype=np.int64),
+        "near_bound_count": 0,
+        "dim_near_bound_count": np.zeros(3, dtype=np.int64),
         "dim_count": np.zeros(3, dtype=np.int64),
     }
 
 
-def _accumulate_action_clip_totals(
+def _accumulate_action_bound_totals(
     totals: dict,
-    action_raw,
-    action_clamped,
+    actions,
     threshold: float = 0.999,
 ) -> None:
-    raw = np.asarray(action_raw, dtype=np.float64)
-    clamped = np.asarray(action_clamped, dtype=np.float64)
-    if raw.size == 0:
+    values = np.asarray(actions, dtype=np.float64)
+    if values.size == 0:
         return
-    raw = raw.reshape(-1, raw.shape[-1])
-    clamped = clamped.reshape(raw.shape)
-    clipped = np.abs(raw) > threshold
-    totals["raw_abs_sum"] += float(np.abs(raw).sum())
-    totals["element_count"] += int(raw.size)
-    totals["clip_count"] += int(clipped.sum())
-    totals["clamped_count"] += int(np.abs(raw - clamped).sum() > 0) if raw.ndim == 1 else int(
-        np.abs(raw - clamped).reshape(-1).astype(bool).sum())
-    dims = min(3, raw.shape[-1])
-    totals["dim_clip_count"][:dims] += clipped[:, :dims].sum(axis=0).astype(np.int64)
-    totals["dim_count"][:dims] += raw.shape[0]
+    values = values.reshape(-1, values.shape[-1])
+    near_bound = np.abs(values) >= threshold
+    totals["abs_sum"] += float(np.abs(values).sum())
+    totals["element_count"] += int(values.size)
+    totals["near_bound_count"] += int(near_bound.sum())
+    dims = min(3, values.shape[-1])
+    totals["dim_near_bound_count"][:dims] += near_bound[:, :dims].sum(
+        axis=0).astype(np.int64)
+    totals["dim_count"][:dims] += values.shape[0]
 
 
-def _action_clip_metrics(totals: dict) -> dict:
+def _action_bound_metrics(totals: dict) -> dict:
     elem_count = int(totals["element_count"])
     dim_count = totals["dim_count"]
-    dim_clip = totals["dim_clip_count"]
+    dim_near_bound = totals["dim_near_bound_count"]
     return {
-        "RedActionRawAbsMean": _safe_div(totals["raw_abs_sum"], elem_count),
-        "RedActionRawClipFrac": _safe_div(totals["clip_count"], elem_count),
-        "RedActionClampedFrac": _safe_div(totals["clamped_count"], elem_count),
-        "RedActionRawClipFracPitch": _safe_div(int(dim_clip[0]), int(dim_count[0])),
-        "RedActionRawClipFracHeading": _safe_div(int(dim_clip[1]), int(dim_count[1])),
-        "RedActionRawClipFracVelocity": _safe_div(int(dim_clip[2]), int(dim_count[2])),
+        "RedActionAbsMean": _safe_div(totals["abs_sum"], elem_count),
+        "RedActionNearBoundFrac": _safe_div(
+            totals["near_bound_count"], elem_count),
+        "RedActionNearBoundFracPitch": _safe_div(
+            int(dim_near_bound[0]), int(dim_count[0])),
+        "RedActionNearBoundFracHeading": _safe_div(
+            int(dim_near_bound[1]), int(dim_count[1])),
+        "RedActionNearBoundFracVelocity": _safe_div(
+            int(dim_near_bound[2]), int(dim_count[2])),
     }
 
 
@@ -1062,6 +1099,8 @@ class RolloutBuffer:
     def __init__(self, num_steps: int, num_envs: int, num_red: int,
                  action_dim: int, rnn_hidden_size: int):
         self.num_steps = num_steps
+        self.num_envs = num_envs
+        self.num_red = num_red
         T, E, A = num_steps, num_envs, num_red
         H = rnn_hidden_size
 
@@ -1069,11 +1108,10 @@ class RolloutBuffer:
         self.obs: list[list[list[np.ndarray]]] = [
             [[None for _ in range(A)] for _ in range(E)] for _ in range(T)]
         self.actions = np.zeros((T, E, A, action_dim), dtype=np.float32)
-        self.rewards = np.zeros((T, E, A), dtype=np.float32)
-        self.values = np.zeros((T, E, A), dtype=np.float32)
         self.log_probs = np.zeros((T, E, A), dtype=np.float32)
-        self.dones = np.zeros((T, E, A), dtype=np.float32)
         self.alive = np.zeros((T, E, A), dtype=bool)
+        self.actor_rnn_states_before = np.zeros((T, E, A, H), dtype=np.float32)
+        self.actor_sequence_start = np.zeros((T, E, A), dtype=bool)
 
         # Paper joint trajectory: exactly one state/reward/value/done per env-step.
         self.global_states: list[list[np.ndarray | None]] = [
@@ -1082,12 +1120,7 @@ class RolloutBuffer:
         self.team_values = np.zeros((T, E), dtype=np.float32)
         self.episode_dones = np.zeros((T, E), dtype=np.float32)
 
-        # Actor RNN states only (centralized critic has no RNN)
-        self.rnn_actor_init = np.zeros((E, A, H), dtype=np.float32)
-        self.rnn_actor_final = np.zeros((E, A, H), dtype=np.float32)
-
-        # GAE bootstrap values: V(s_T) shared by all agents (centralized critic)
-        self.bootstrap_values = np.zeros((E, A), dtype=np.float32)
+        # GAE bootstrap value is environment-level; critic has one team value.
         self.bootstrap_value = np.zeros(E, dtype=np.float32)
 
     def store_team_step(self, step: int, env_idx: int, global_state: np.ndarray,
@@ -1099,15 +1132,16 @@ class RolloutBuffer:
 
     def store_step(self, step: int, env_idx: int, agent_idx: int,
                    obs_np: np.ndarray, action: np.ndarray,
-                   reward: float, value: float, log_prob: float,
-                   done: float, alive: bool):
+                   log_prob: float, alive: bool,
+                   actor_rnn_state_before: np.ndarray,
+                   sequence_start: bool):
         self.obs[step][env_idx][agent_idx] = obs_np
         self.actions[step, env_idx, agent_idx] = action
-        self.rewards[step, env_idx, agent_idx] = reward
-        self.values[step, env_idx, agent_idx] = value
         self.log_probs[step, env_idx, agent_idx] = log_prob
-        self.dones[step, env_idx, agent_idx] = done
         self.alive[step, env_idx, agent_idx] = alive
+        self.actor_rnn_states_before[step, env_idx, agent_idx] = np.asarray(
+            actor_rnn_state_before, dtype=np.float32)
+        self.actor_sequence_start[step, env_idx, agent_idx] = bool(sequence_start)
 
 
 # ==============================================================================
@@ -1166,6 +1200,15 @@ def _current_entropy_coef(config, _total_steps: int = 0) -> float:
 
 def _safe_div(num: float, den: float) -> float:
     return float(num) / max(float(den), 1.0)
+
+
+def _ratio_with_denominator_zero(num: float, den: float) -> tuple[float, bool]:
+    """Return a true ratio plus an explicit zero-denominator indicator."""
+    numerator = float(num)
+    denominator = float(den)
+    if denominator != 0.0:
+        return numerator / denominator, False
+    return (float("inf") if numerator > 0.0 else 0.0), True
 
 
 def _classify_death_reason(reason: str | None) -> str:
@@ -1228,12 +1271,11 @@ def _actor_std_stats(actor) -> dict:
 
 def _ppo_update_legacy(actor, critic, actor_opt, critic_opt, buffer, config, device,
                        total_steps: int = 0):
-    """MAPPO CTDE update: critic sees all red native ego states.
+    """Disabled pre-joint-reward update retained only for migration errors.
 
-    The critic outputs a single V(s_global) shared by all agents.  GAE uses
-    per-agent rewards + the shared value to compute per-agent advantages.
-    The critic loss averages MSE across all alive agent-timesteps.
+    It references the removed per-agent return buffer and must never be called.
     """
+    raise RuntimeError("legacy per-agent PPO update is disabled")
     num_steps = buffer.num_steps
     num_envs = buffer.rnn_actor_init.shape[0]
     num_red = buffer.rnn_actor_init.shape[1]
@@ -1326,7 +1368,7 @@ def _ppo_update_legacy(actor, critic, actor_opt, critic_opt, buffer, config, dev
 
                 new_lp = action_dist.log_prob(act_t.unsqueeze(0)).sum(dim=-1)
                 new_lps.append(new_lp)
-                entropies.append(action_dist.entropy().mean())
+                entropies.append(action_dist.base_entropy().mean())
 
             new_lp = torch.cat(new_lps)
             old_lp = torch.tensor(t_lp, device=device)
@@ -1380,15 +1422,82 @@ def _ppo_update_legacy(actor, critic, actor_opt, critic_opt, buffer, config, dev
     }
 
 
+def _build_actor_segments(
+    buffer: RolloutBuffer,
+    team_advantages: list[torch.Tensor],
+) -> list[dict]:
+    """Split alive actor samples into contiguous recurrent segments."""
+    segments = []
+
+    def append_segment(env_idx: int, agent_idx: int, steps: list[int]):
+        if not steps:
+            return
+        indices = np.asarray(steps, dtype=np.int64)
+        if indices.size > 1 and not np.all(np.diff(indices) == 1):
+            raise RuntimeError("actor recurrent segment contains a time gap")
+        segments.append({
+            "env_idx": env_idx,
+            "agent_idx": agent_idx,
+            "steps": indices,
+            "initial_hidden": buffer.actor_rnn_states_before[
+                indices[0], env_idx, agent_idx].copy(),
+            "obs": np.stack([
+                buffer.obs[t][env_idx][agent_idx] for t in indices
+            ]).astype(np.float32),
+            "actions": buffer.actions[indices, env_idx, agent_idx].copy(),
+            "old_log_probs": buffer.log_probs[indices, env_idx, agent_idx].copy(),
+            "advantages": team_advantages[env_idx][indices].detach(),
+        })
+
+    for env_idx in range(buffer.num_envs):
+        for agent_idx in range(buffer.num_red):
+            current: list[int] = []
+            for step in range(buffer.num_steps):
+                alive = bool(buffer.alive[step, env_idx, agent_idx])
+                starts = bool(buffer.actor_sequence_start[step, env_idx, agent_idx])
+                previous_episode_done = bool(
+                    step > 0 and buffer.episode_dones[step - 1, env_idx])
+                if not alive:
+                    append_segment(env_idx, agent_idx, current)
+                    current = []
+                    continue
+                if current and (starts or previous_episode_done
+                                or step != current[-1] + 1):
+                    append_segment(env_idx, agent_idx, current)
+                    current = []
+                current.append(step)
+            append_segment(env_idx, agent_idx, current)
+    return segments
+
+
+def _recompute_segment_log_probs(
+    actor: VanillaActor, segment: dict, device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Recompute transformed log-probs from the segment's true start hidden."""
+    rnn = torch.as_tensor(
+        segment["initial_hidden"], dtype=torch.float32,
+        device=device).unsqueeze(0)
+    obs = torch.as_tensor(segment["obs"], dtype=torch.float32, device=device)
+    actions = torch.as_tensor(
+        segment["actions"], dtype=torch.float32, device=device)
+    log_probs = []
+    base_entropies = []
+    for step in range(obs.shape[0]):
+        distribution, rnn = actor(obs[step].unsqueeze(0), rnn)
+        log_probs.append(
+            distribution.log_prob(actions[step].unsqueeze(0)).sum(dim=-1))
+        base_entropies.append(distribution.base_entropy().sum(dim=-1))
+    return torch.cat(log_probs), torch.cat(base_entropies)
+
+
 # ==============================================================================
-#  主训练循环
+#  Main paper-joint PPO update
 # ==============================================================================
 def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
                total_steps: int = 0):
     """Paper joint-reward MAPPO update with one team GAE per environment."""
     num_steps = buffer.num_steps
-    num_envs = buffer.rnn_actor_init.shape[0]
-    num_red = buffer.rnn_actor_init.shape[1]
+    num_envs = buffer.num_envs
     team_advantages, team_returns = _compute_joint_gae_by_env(
         buffer, config.gamma, config.gae_lambda, device)
 
@@ -1400,23 +1509,7 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
     team_advantages = [
         (adv - adv_mean) / (adv_std + 1e-8) for adv in team_advantages]
 
-    actor_trajectories = []
-    for env_idx in range(num_envs):
-        for agent_idx in range(num_red):
-            alive_steps = np.flatnonzero(buffer.alive[:, env_idx, agent_idx])
-            if alive_steps.size == 0:
-                continue
-            actor_trajectories.append({
-                "env_idx": env_idx,
-                "agent_idx": agent_idx,
-                "alive_steps": alive_steps,
-                "obs": np.stack([
-                    buffer.obs[t][env_idx][agent_idx] for t in alive_steps
-                ]).astype(np.float32),
-                "actions": buffer.actions[alive_steps, env_idx, agent_idx],
-                "old_log_probs": buffer.log_probs[alive_steps, env_idx, agent_idx],
-                "advantages": team_advantages[env_idx][alive_steps].detach(),
-            })
+    actor_trajectories = _build_actor_segments(buffer, team_advantages)
 
     if not actor_trajectories:
         return {"actor_loss": 0.0, "critic_loss": 0.0, "entropy": 0.0}
@@ -1440,42 +1533,31 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
             if len(mb) == 0:
                 continue
             actor_opt.zero_grad()
-            losses = []
-            entropies = []
+            sample_losses = []
+            sample_entropies = []
             for traj_idx in mb:
                 traj = actor_trajectories[int(traj_idx)]
-                rnn = torch.as_tensor(
-                    buffer.rnn_actor_init[traj["env_idx"], traj["agent_idx"]],
-                    dtype=torch.float32, device=device).unsqueeze(0)
-                obs = torch.as_tensor(traj["obs"], dtype=torch.float32, device=device)
-                actions = torch.as_tensor(
-                    traj["actions"], dtype=torch.float32, device=device)
                 old_log_probs = torch.as_tensor(
                     traj["old_log_probs"], dtype=torch.float32, device=device)
-                new_log_probs = []
-                step_entropies = []
-                for t in range(obs.shape[0]):
-                    distribution, rnn = actor(obs[t].unsqueeze(0), rnn)
-                    new_log_probs.append(
-                        distribution.log_prob(actions[t].unsqueeze(0)).sum(dim=-1))
-                    step_entropies.append(distribution.entropy().mean())
-                new_log_probs = torch.cat(new_log_probs)
-                entropy = torch.stack(step_entropies).mean()
+                new_log_probs, base_entropies = _recompute_segment_log_probs(
+                    actor, traj, device)
                 ratio = torch.exp(new_log_probs - old_log_probs)
                 advantage = traj["advantages"].to(device)
                 surrogate = torch.min(
                     ratio * advantage,
                     torch.clamp(ratio, 1.0 - config.clip_epsilon,
                                 1.0 + config.clip_epsilon) * advantage)
-                losses.append(-surrogate.mean() - entropy_coef * entropy)
-                entropies.append(entropy.detach())
-            actor_loss = torch.stack(losses).mean()
+                sample_losses.append(-surrogate)
+                sample_entropies.append(base_entropies)
+            policy_loss = torch.cat(sample_losses).mean()
+            latent_entropy = torch.cat(sample_entropies).mean()
+            actor_loss = policy_loss - entropy_coef * latent_entropy
             actor_loss.backward()
             if not _grad_has_nan(actor):
                 nn.utils.clip_grad_norm_(actor.parameters(), config.max_grad_norm)
                 actor_opt.step()
                 actor_loss_log.append(float(actor_loss.item()))
-                entropy_log.append(float(torch.stack(entropies).mean().item()))
+                entropy_log.append(float(latent_entropy.item()))
 
         critic_opt.zero_grad()
         critic_values = critic(critic_states).squeeze(-1)
@@ -1495,7 +1577,8 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
 
 def _ppo_update_agent_legacy(actor, critic, actor_opt, critic_opt, buffer, config, device,
                              total_steps: int = 0):
-    """Trajectory-minibatch MAPPO update used by the training loop."""
+    """Disabled discontinuous-alive-step PPO update; not a training path."""
+    raise RuntimeError("legacy discontinuous actor PPO update is disabled")
     num_steps = buffer.num_steps
     num_envs = buffer.rnn_actor_init.shape[0]
     num_red = buffer.rnn_actor_init.shape[1]
@@ -1600,7 +1683,7 @@ def _ppo_update_agent_legacy(actor, critic, actor_opt, critic_opt, buffer, confi
                     action_dist, rnn_a = actor(obs[t].unsqueeze(0), rnn_a)
                     new_lps.append(
                         action_dist.log_prob(acts[t].unsqueeze(0)).sum(dim=-1))
-                    traj_entropies.append(action_dist.entropy().mean())
+                    traj_entropies.append(action_dist.base_entropy().mean())
 
                 new_lp = torch.cat(new_lps)
                 ent_avg = torch.stack(traj_entropies).mean()
@@ -1684,6 +1767,8 @@ def parse_args():
     parser.add_argument("--pid-profile", type=str,
                         choices=("paper", "engineering_safe"),
                         default=defaults.pid_profile)
+    parser.add_argument("--pid-throttle-base", type=float,
+                        default=defaults.pid_throttle_base)
     parser.add_argument("--reward-mode", type=str,
                         choices=("paper_joint", "engineering_local"),
                         default=defaults.reward_mode)
@@ -1710,6 +1795,7 @@ _VANILLA_PRESET_CLI_FLAGS = {
     "max_episode_length", "replay_buffer_size", "n_minibatches",
     "actor_lr", "critic_lr", "entropy_coef",
     "enable_blue_gcas", "obs_mode", "obs_normalization", "pid_profile",
+    "pid_throttle_base",
     "reward_mode", "missile_guidance_mode", "resume_from_best",
     "log_file", "results_file", "launch_quality_file",
     "checkpoint_dir", "device",
@@ -1750,6 +1836,7 @@ def make_config_from_args(args) -> Config:
     config.obs_mode = args.obs_mode
     config.obs_normalization = args.obs_normalization
     config.pid_profile = args.pid_profile
+    config.pid_throttle_base = args.pid_throttle_base
     config.reward_mode = args.reward_mode
     config.missile_guidance_mode = args.missile_guidance_mode
     config.resume_from_best = args.resume_from_best
@@ -1832,7 +1919,7 @@ def main():
     csv_file = open(config.log_file, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["Iteration", "Step", "ActorLoss", "CriticLoss",
-                         "Entropy", "RedMeanReward", "RedWinRate",
+                         "LatentEntropy", "RedMeanReward", "RedWinRate",
                          "RedRewardStd", "WinRateRecent",
                          "RedMissiles", "BlueMissiles",
                          "Episodes", "RedWins", "BlueWins", "Draws",
@@ -1841,15 +1928,19 @@ def main():
                           "BlueDeathsMissile", "BlueDeathsCrash",
                           "RedMissileHits", "BlueMissileHits",
                           "RedMissileHitRate", "BlueMissileHitRate",
-                          "KD_Red", "RWR", "RewardVersion", "RewardMode",
-                          "ObsNormalization", "PIDProfile", "MissileGuidanceMode",
-                          "AltitudeRewardConfigVersion",
+                          "KD_Red_AllDeaths", "KD_Red_MissileOnly",
+                          "RWR", "RWRDenominatorZero",
+                          "RewardVersion", "RewardMode",
+                          "ObsNormalization", "PIDProfile", "PIDThrottleBase",
+                          "MissileGuidanceMode", "CheckpointSchema",
+                          "ActionDistribution",
+                          "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
                           *REWARD_COMPONENT_LOG_FIELDS,
                           "ActionStdMean", "ActionStdMin", "ActionStdMax",
                           "ActionLogStdMean",
                           *LAUNCH_DIAG_CSV_FIELDS,
                           *LAUNCH_QUALITY_AGG_CSV_FIELDS,
-                          *ACTION_CLIP_CSV_FIELDS])
+                          *ACTION_BOUND_CSV_FIELDS])
     csv_file.flush()
 
     launch_quality_file = config.launch_quality_file
@@ -1880,8 +1971,13 @@ def main():
     print(f"  obs_mode: {config.obs_mode}")
     print(f"  obs_normalization: {config.obs_normalization}")
     print(f"  pid_profile: {config.pid_profile}")
+    print(f"  pid_throttle_base: {config.pid_throttle_base}")
     print(f"  reward_mode: {config.reward_mode}")
     print(f"  missile_guidance_mode: {config.missile_guidance_mode}")
+    print(f"  action_distribution: {ACTION_DISTRIBUTION_VERSION}")
+    print(f"  checkpoint_schema: {CHECKPOINT_SCHEMA_VERSION}")
+    print("  altitude_reward_config: "
+          f"{json.dumps(asdict(config.altitude_reward_config), sort_keys=True)}")
     print(f"架构: Vanilla MLP + GRU (无注意力, 无掩码)")
     print(f"场景: {config.num_red}v{config.num_blue} (红方 RL, 蓝方规则)")
     print(f"展平 obs 维度: {obs_dim}")
@@ -1900,8 +1996,10 @@ def main():
                       max_steps=config.max_episode_length,
                       obs_mode=config.obs_mode,
                       pid_profile=config.pid_profile,
+                      pid_throttle_base=config.pid_throttle_base,
                       reward_mode=config.reward_mode,
                       missile_guidance_mode=config.missile_guidance_mode,
+                      altitude_reward_config=config.altitude_reward_config,
                       enable_gcas_for_blue=config.enable_blue_gcas)
     print(f"正在启动 {config.num_envs} 个 worker 进程...", flush=True)
     vec_env = SubprocVecEnv(config.num_envs, env_kwargs)
@@ -1944,6 +2042,8 @@ def main():
     # ---- 4. 初始 RNN 状态 ----
     rnn_hidden_actor = np.zeros(
         (config.num_envs, config.num_red, config.rnn_hidden_size), dtype=np.float32)
+    actor_reset_before = np.ones(
+        (config.num_envs, config.num_red), dtype=bool)
 
     # ---- 5. 重置 ----
     print(f"正在重置 {config.num_envs} 个环境...", flush=True)
@@ -1992,15 +2092,13 @@ def main():
             num_red=config.num_red, action_dim=config.action_dim,
             rnn_hidden_size=config.rnn_hidden_size,
         )
-        buffer.rnn_actor_init = rnn_hidden_actor.copy()
-
         # Per-iteration episode counters (for sliding-window win rate)
         iter_episodes = 0
         iter_red_wins = 0
         iter_launch_diag = _empty_launch_diag_totals()
         iter_launch_quality_records: list[dict] = []
         iter_launch_quality_done_records: list[dict] = []
-        iter_action_clip = _empty_action_clip_totals()
+        iter_action_bound = _empty_action_bound_totals()
 
         # ---- Rollout ----
         for step in range(num_steps):
@@ -2015,6 +2113,7 @@ def main():
             # Batched actor inputs
             all_red_obs_flat = []        # list of np.ndarray for alive agents across ALL envs
             all_rnn_hidden_in = []       # corresponding RNN hidden states
+            all_sequence_start = []      # segment start before current action
             alive_map = []               # list of (env_idx, agent_idx) tuples for split-back
             # Batched critic inputs
             all_global_obs_np = []       # per-env global obs for centralized critic batch
@@ -2027,6 +2126,8 @@ def main():
                     env_actions_builders.append({"dead": True})
                     all_global_obs_np.append(np.zeros(global_obs_dim, dtype=np.float32))
                     env_dead_records.append([])
+                    rnn_hidden_actor[env_idx].fill(0.0)
+                    actor_reset_before[env_idx].fill(True)
                     continue
 
                 # ---- Blue rule-based actions (fast CPU, per-env) ----
@@ -2049,11 +2150,18 @@ def main():
                     red_obs_flat_all.append(obs_flat)
                     alive = not np.allclose(obs_np["ego_state"], 0.0)
                     if alive:
+                        if actor_reset_before[env_idx, i]:
+                            rnn_hidden_actor[env_idx, i].fill(0.0)
                         all_red_obs_flat.append(obs_flat)
-                        all_rnn_hidden_in.append(rnn_hidden_actor[env_idx, i])
+                        all_rnn_hidden_in.append(
+                            rnn_hidden_actor[env_idx, i].copy())
+                        all_sequence_start.append(
+                            bool(step == 0 or actor_reset_before[env_idx, i]))
                         alive_map.append((env_idx, i))
                         alive_agent_indices.append(i)
                     else:
+                        rnn_hidden_actor[env_idx, i].fill(0.0)
+                        actor_reset_before[env_idx, i] = True
                         dead_agent_records.append((i, obs_flat))
 
                 all_global_obs_np.append(_global_state_from_local_obs_flats(
@@ -2074,15 +2182,11 @@ def main():
 
                 with torch.no_grad():
                     action_dist, new_rnn_a = actor(obs_batch, batch_rnn_a)
-                    action_raw = action_dist.sample()
-                    action = action_raw.clamp(-0.999, 0.999)
+                    action = action_dist.sample()
                     log_prob = action_dist.log_prob(action).sum(dim=-1)
 
-                _accumulate_action_clip_totals(
-                    iter_action_clip,
-                    action_raw.cpu().numpy(),
-                    action.cpu().numpy(),
-                )
+                _accumulate_action_bound_totals(
+                    iter_action_bound, action.cpu().numpy())
                 actions_np = action.cpu().numpy()
                 log_probs_np = log_prob.cpu().numpy()
                 new_rnn_np = new_rnn_a.cpu().numpy()
@@ -2120,7 +2224,10 @@ def main():
                     env_actions[rid] = np.zeros(config.action_dim, dtype=np.float32)
                     buffer.store_step(step, env_idx, agent_idx_i, obs_flat,
                                       np.zeros(config.action_dim, dtype=np.float32),
-                                      0.0, 0.0, 0.0, 1.0, alive=False)
+                                      0.0, alive=False,
+                                      actor_rnn_state_before=np.zeros(
+                                          config.rnn_hidden_size, dtype=np.float32),
+                                      sequence_start=True)
 
                 # Alive agents: assign batched actions, store to buffer
                 for k, (batch_env, agent_idx_i) in enumerate(alive_map):
@@ -2132,8 +2239,10 @@ def main():
                     # Get obs_flat for buffer storage
                     obs_flat = all_red_obs_flat[k]
                     buffer.store_step(step, env_idx, agent_idx_i, obs_flat,
-                                      actions_np[k], 0.0, v_global,
-                                      float(log_probs_np[k]), 0.0, alive=True)
+                                      actions_np[k], float(log_probs_np[k]),
+                                      alive=True,
+                                      actor_rnn_state_before=all_rnn_hidden_in[k],
+                                      sequence_start=all_sequence_start[k])
 
                 actions_list.append(env_actions)
 
@@ -2169,12 +2278,12 @@ def main():
 
                 # ---- accumulate step rewards FIRST (incl. terminal r_end for dead agents) ----
                 for i, rid in enumerate(red_ids):
-                    if buffer.alive[step, env_idx, i]:
-                        buffer.rewards[step, env_idx, i] = float(rew.get(rid, 0.0))
-                        buffer.dones[step, env_idx, i] = float(don.get(rid, False))
                     if don.get(rid, False):
                         rnn_hidden_actor[env_idx, i] = np.zeros(
                             config.rnn_hidden_size, dtype=np.float32)
+                        actor_reset_before[env_idx, i] = True
+                    elif buffer.alive[step, env_idx, i]:
+                        actor_reset_before[env_idx, i] = False
                     # Accumulate per-component diagnostics
                     rcinfo = info.get(rid, {})
                     for k in COMP_KEYS:
@@ -2246,9 +2355,6 @@ def main():
             raw_obs_list = next_obs_list
             total_steps += config.num_envs
 
-        # 保存 rollout 结束后的 RNN 状态 (用于 GAE bootstrap)
-        buffer.rnn_actor_final = rnn_hidden_actor.copy()
-
         # 计算 GAE bootstrap 值: centralized V(s_T) — batched across all envs
         bootstrap_global_obs_list = []
         for env_idx in range(config.num_envs):
@@ -2274,8 +2380,6 @@ def main():
             v_bootstrap = (0.0 if buffer.episode_dones[-1, env_idx]
                            else float(v_bootstrap_all[env_idx]))
             buffer.bootstrap_value[env_idx] = v_bootstrap
-            for i in range(config.num_red):
-                buffer.bootstrap_values[env_idx, i] = v_bootstrap
 
         # ---- PPO 更新 ----
         stats = ppo_update(actor, critic, actor_opt, critic_opt,
@@ -2309,8 +2413,12 @@ def main():
         blue_total_deaths = sum(death_stats["blue"].values())
         red_missile_hit_rate = _safe_div(red_missile_hits, red_missiles_total)
         blue_missile_hit_rate = _safe_div(blue_missile_hits, blue_missiles_total)
-        kd_red = _safe_div(blue_total_deaths, red_total_deaths)
-        rwr = _safe_div(red_wins, total_episodes)
+        kd_red_all, _ = _ratio_with_denominator_zero(
+            blue_total_deaths, red_total_deaths)
+        kd_red_missile, _ = _ratio_with_denominator_zero(
+            blue_deaths_missile, red_deaths_missile)
+        rwr, rwr_denominator_zero = _ratio_with_denominator_zero(
+            red_wins, blue_wins)
 
         std_stats = _actor_std_stats(actor)
         launch_diag_metrics = _launch_diag_metrics(iter_launch_diag)
@@ -2318,7 +2426,7 @@ def main():
             iter_launch_quality_records,
             iter_launch_quality_done_records,
         )
-        action_clip_metrics = _action_clip_metrics(iter_action_clip)
+        action_bound_metrics = _action_bound_metrics(iter_action_bound)
 
         # Average per-component breakdown across completed episodes
         if recent_ep_comps_red:
@@ -2328,6 +2436,9 @@ def main():
             avg_comps = {k: 0.0 for k in COMP_KEYS}
         component_log_metrics = _reward_component_log_metrics(
             avg_comps, config.num_red)
+        altitude_config_json = json.dumps(
+            asdict(config.altitude_reward_config), sort_keys=True,
+            separators=(",", ":"))
 
         # Build breakdown string: [Alt:+12.3 Pitch:-0.5 Roll:0.0 Vel:-0.3 Adv:+0.0 End:-180.0]
         comp_str = " ".join(
@@ -2356,14 +2467,20 @@ def main():
                              blue_missile_hits,
                              f"{red_missile_hit_rate:.6f}",
                              f"{blue_missile_hit_rate:.6f}",
-                             f"{kd_red:.6f}",
+                             f"{kd_red_all:.6f}",
+                             f"{kd_red_missile:.6f}",
                              f"{rwr:.6f}",
+                             int(rwr_denominator_zero),
                              REWARD_VERSION,
                              config.reward_mode,
                              config.obs_normalization,
                              config.pid_profile,
+                             f"{config.pid_throttle_base:.6f}",
                              config.missile_guidance_mode,
-                             DEFAULT_ALTITUDE_REWARD_CONFIG.version,
+                             CHECKPOINT_SCHEMA_VERSION,
+                             ACTION_DISTRIBUTION_VERSION,
+                             config.altitude_reward_config.version,
+                             altitude_config_json,
                              *[
                                  f"{component_log_metrics[field]:.6f}"
                                  for field in REWARD_COMPONENT_LOG_FIELDS
@@ -2382,8 +2499,8 @@ def main():
                                  for field in LAUNCH_QUALITY_AGG_CSV_FIELDS
                              ],
                              *[
-                                 f"{action_clip_metrics[field]:.6f}"
-                                 for field in ACTION_CLIP_CSV_FIELDS
+                                 f"{action_bound_metrics[field]:.6f}"
+                                 for field in ACTION_BOUND_CSV_FIELDS
                              ]])
         csv_file.flush()
 
@@ -2411,21 +2528,27 @@ def main():
             "BlueMissileHits": blue_missile_hits,
             "RedMissileHitRate": red_missile_hit_rate,
             "BlueMissileHitRate": blue_missile_hit_rate,
-            "KD_Red":         kd_red,
+            "KD_Red_AllDeaths": kd_red_all,
+            "KD_Red_MissileOnly": kd_red_missile,
             "RWR":            rwr,
+            "RWRDenominatorZero": rwr_denominator_zero,
             "RewardVersion":  REWARD_VERSION,
             "RewardMode": config.reward_mode,
             "ObsNormalization": config.obs_normalization,
             "PIDProfile": config.pid_profile,
+            "PIDThrottleBase": config.pid_throttle_base,
             "MissileGuidanceMode": config.missile_guidance_mode,
-            "AltitudeRewardConfigVersion": DEFAULT_ALTITUDE_REWARD_CONFIG.version,
+            "CheckpointSchema": CHECKPOINT_SCHEMA_VERSION,
+            "ActionDistribution": ACTION_DISTRIBUTION_VERSION,
+            "AltitudeRewardConfigVersion": config.altitude_reward_config.version,
+            "AltitudeRewardConfig": altitude_config_json,
             "ActionStdMean":  std_stats["action_std_mean"],
             "ActionStdMin":   std_stats["action_std_min"],
             "ActionStdMax":   std_stats["action_std_max"],
             "ActionLogStdMean": std_stats["action_log_std_mean"],
             "ActorLoss":      stats["actor_loss"],
             "CriticLoss":     stats["critic_loss"],
-            "Entropy":        stats["entropy"],
+            "LatentEntropy":  stats["entropy"],
             "r_pitch":        avg_comps.get("r_pitch", 0.0),
             "r_roll":         avg_comps.get("r_roll", 0.0),
             "r_alt":          avg_comps.get("r_alt", 0.0),
@@ -2438,7 +2561,7 @@ def main():
         results_log[-1].update(component_log_metrics)
         results_log[-1].update(launch_diag_metrics)
         results_log[-1].update(launch_quality_metrics)
-        results_log[-1].update(action_clip_metrics)
+        results_log[-1].update(action_bound_metrics)
         milestone_cur = total_steps // 1_000_000
         milestone_prev = (total_steps - config.num_envs * num_steps) // 1_000_000
         if milestone_cur > milestone_prev or total_steps >= config.total_env_steps:
@@ -2474,7 +2597,7 @@ def main():
               f"ActorLoss={stats['actor_loss']:+.4f} "
               f"CriticLoss={stats['critic_loss']:+.4f} "
               f"EntCoef={_current_entropy_coef(config, total_steps):.4f} "
-              f"Entropy={stats['entropy']:.4f} "
+              f"LatentEntropy={stats['entropy']:.4f} "
               f"Std={std_stats['action_std_mean']:.4f} | "
               f"LaunchDiag R={launch_diag_metrics['LaunchDiagRedGeometryOk']}/"
               f"{launch_diag_metrics['LaunchDiagRedLaunches']} "

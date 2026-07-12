@@ -17,7 +17,10 @@ from my_uav_env.simulator import (
 )
 from my_uav_env.utils import get2d_heading_AO_TA_R
 from my_uav_env.alignment.reward_utils import (
+    AltitudeRewardConfig,
+    DEFAULT_ALTITUDE_REWARD_CONFIG,
     REWARD_VERSION,
+    altitude_reward_paper_eq17,
     pitch_penalty_current,
     ta_angle_advantage_fixed,
     td_distance_advantage,
@@ -25,6 +28,7 @@ from my_uav_env.alignment.reward_utils import (
 from my_uav_env.alignment.state_extractor import (
     build_strict_paper_entity_observation,
     extract_relative_state,
+    ordered_entity_slots,
 )
 from rule_based_agent import (
     _blue_simple_pursuit_action_impl,
@@ -38,9 +42,11 @@ from rule_based_agent import (
 from train_vanilla_mappo import (
     Config,
     CentralizedCritic,
+    SquashedNormal,
     REWARD_COMPONENT_LOG_FIELDS,
     RolloutBuffer,
     VanillaActor,
+    _build_actor_segments,
     _checkpoint_metadata,
     _classify_death_reason,
     _compute_global_state_dim,
@@ -52,6 +58,8 @@ from train_vanilla_mappo import (
     _joint_team_reward_once,
     _normalize_paper_fixed_v1,
     _reward_component_log_metrics,
+    _recompute_segment_log_probs,
+    _ratio_with_denominator_zero,
     _unpack_and_validate_checkpoint,
     ppo_update,
 )
@@ -59,14 +67,23 @@ import torch
 
 
 def test_evaluation_csv_header_covers_joint_reward_and_environment_semantics():
-    from evaluate_vanilla_mappo import EVALUATION_FIELDNAMES
+    from evaluate_vanilla_mappo import (
+        EVALUATION_FIELDNAMES,
+        EVALUATION_SUMMARY_FIELDNAMES,
+    )
 
     required = {
         "EpisodeRewardRed", "RewardVersion", "RewardMode",
-        "ObsNormalization", "PIDProfile", "MissileGuidanceMode",
+        "ObsNormalization", "PIDProfile", "PIDThrottleBase",
+        "MissileGuidanceMode", "CheckpointSchema", "ActionDistribution",
+        "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
     }
     assert required.issubset(EVALUATION_FIELDNAMES)
     assert len(EVALUATION_FIELDNAMES) == len(set(EVALUATION_FIELDNAMES))
+    assert {
+        "RWR", "RWRDenominatorZero", "KD_Red_AllDeaths",
+        "KD_Red_MissileOnly",
+    }.issubset(EVALUATION_SUMMARY_FIELDNAMES)
 
 
 def test_ta_uses_paper_eq20_scale():
@@ -263,6 +280,21 @@ def test_run_one_episode_does_not_reference_outer_args():
     assert "args" not in names
 
 
+def test_training_rollout_main_has_no_post_sample_clamp():
+    tree = ast.parse(Path("train_vanilla_mappo.py").read_text(encoding="utf-8"))
+    main_func = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    clamp_calls = [
+        node for node in ast.walk(main_func)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "clamp"
+    ]
+    assert not clamp_calls
+
+
 def test_evaluation_and_acmi_use_shared_joint_reward_reader():
     for path, function_name in (
         ("evaluate_vanilla_mappo.py", "run_one_episode"),
@@ -278,6 +310,78 @@ def test_evaluation_and_acmi_use_shared_joint_reward_reader():
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
         assert "_joint_team_reward_once" in called_names
+
+
+def test_evaluation_executes_squashed_distribution_mode(monkeypatch):
+    import evaluate_vanilla_mappo as evaluation
+
+    def observation():
+        return {
+            "ego_state": np.array(
+                [0, 0, 6000, 250, 0, 0, 0, 0, 0, 0], dtype=np.float32),
+            "ally_states": np.zeros((0, 10), dtype=np.float32),
+            "enemy_states": np.zeros((1, 10), dtype=np.float32),
+            "alive_mask": np.ones(2, dtype=np.int64),
+            "death_mask": np.ones(2, dtype=np.int64),
+        }
+
+    class ModeOnlyDistribution:
+        @property
+        def mode(self):
+            return torch.tensor([[0.25, -0.5, 0.75]], dtype=torch.float32)
+
+    class FakeActor:
+        def __call__(self, obs, hidden):
+            return ModeOnlyDistribution(), hidden
+
+    class FakeEnv:
+        last_red_action = None
+
+        def __init__(self, **_kwargs):
+            self.agent_ids = ["blue_0", "red_0"]
+
+        def reset(self):
+            obs = {"blue_0": observation(), "red_0": observation()}
+            return obs, {}
+
+        def refresh_engaged_targets(self):
+            return set()
+
+        def get_blue_own_kinematics(self):
+            return {}
+
+        def step(self, actions):
+            FakeEnv.last_red_action = np.asarray(actions["red_0"])
+            obs = {"blue_0": observation(), "red_0": observation()}
+            rewards = {"blue_0": 0.0, "red_0": 0.0}
+            terminated = {"blue_0": True, "red_0": True}
+            truncated = {"blue_0": False, "red_0": False}
+            info = {
+                "blue_0": {"alive": True}, "red_0": {"alive": True},
+            }
+            return obs, rewards, terminated, truncated, info
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(evaluation, "UavCombatEnv", FakeEnv)
+    monkeypatch.setattr(
+        evaluation, "blue_coordinated_actions",
+        lambda *_args, **_kwargs: {"blue_0": np.zeros(3, dtype=np.float32)})
+
+    evaluation.run_one_episode(
+        actor=FakeActor(), rnn_hidden_size=4, num_red=1, num_blue=1,
+        max_steps=1, device=torch.device("cpu"), episode_idx=1,
+        enable_blue_gcas=False, obs_mode="paper_strict")
+
+    assert np.allclose(FakeEnv.last_red_action, [0.25, -0.5, 0.75])
+
+
+def test_formal_evaluation_defaults_to_100_episodes(monkeypatch):
+    import evaluate_vanilla_mappo as evaluation
+
+    monkeypatch.setattr("sys.argv", ["evaluate_vanilla_mappo.py"])
+    assert evaluation.parse_args().episodes == 100
 
 
 def test_paper_strict_world_bearing_zero_roll_pitch_matches_yaw_plane():
@@ -487,6 +591,22 @@ def test_missile_hit_probability_follows_velocity_to_target_direction(monkeypatc
     assert not missile._roll_hit_probability()
 
 
+def test_missile_hit_probability_zero_los_and_zero_speed_are_distinct(monkeypatch):
+    missile = MissileSimulator(dt=1.0 / 60.0)
+    missile._position[:] = np.array([0.0, 0.0, 0.0])
+    missile._velocity[:] = np.array([0.0, 0.0, 0.0])
+
+    missile.target_aircraft = _FakeSim(
+        [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    monkeypatch.setattr(np.random, "random", lambda: 0.99)
+    assert missile._roll_hit_probability()  # geometric contact -> p=1
+
+    missile.target_aircraft = _FakeSim(
+        [1000.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    monkeypatch.setattr(np.random, "random", lambda: 0.10)
+    assert not missile._roll_hit_probability()  # zero speed -> base p=0.05
+
+
 def test_pid_channels_rudder_and_reset_match_paper_interface():
     pid = PIDController(dt=1.0 / 60.0)
     aileron, elevator, rudder, throttle = pid.compute_control(
@@ -595,7 +715,7 @@ def test_standard_mappo_actor_critic_shapes_for_paper_6v6():
     )
     values = critic(torch.zeros((2, global_dim), dtype=torch.float32))
 
-    assert distribution.mean.shape == (6, 3)
+    assert distribution.mode.shape == (6, 3)
     assert hidden.shape == (6, 8)
     assert values.shape == (2, 1)
 
@@ -627,7 +747,7 @@ def test_dead_entities_are_zeroed_in_paper_strict_observation():
         env.blue_planes["blue_0"].shotdown()
         obs = env._get_obs()
         assert np.all(obs["red_0"]["enemy_states"][0] == 0.0)
-        assert obs["red_0"]["death_mask"][0] == 0
+        assert obs["red_0"]["death_mask"].tolist() == [1, 0]
         assert np.all(obs["blue_0"]["ego_state"] == 0.0)
     finally:
         env.close()
@@ -843,12 +963,61 @@ def test_alive_mask_alias_and_entity_mask_have_explicit_opposite_semantics():
         _entities, entity_mask, _meta = build_strict_paper_entity_observation(
             env, "red_0")
         assert np.array_equal(obs["alive_mask"], obs["death_mask"])
-        assert obs["alive_mask"].tolist() == [0, 1]
-        alive_in_entity_order = obs["alive_mask"][[1, 0]]  # ego red, enemy blue
-        assert np.array_equal(entity_mask, 1 - alive_in_entity_order)
+        assert obs["alive_mask"].tolist() == [1, 0]
+        assert np.array_equal(entity_mask, 1 - obs["alive_mask"])
         assert np.all(obs["enemy_states"][0] == 0.0)
     finally:
         env.close()
+
+
+def test_3v2_masks_match_each_agents_ego_ally_enemy_slots_in_both_obs_modes():
+    for obs_mode in ("paper_strict", "engineering"):
+        env = UavCombatEnv(
+            max_num_blue=3, max_num_red=2, obs_mode=obs_mode,
+            suppress_jsbsim_output=True)
+        try:
+            env.reset()
+            env.blue_planes["blue_1"].shotdown()
+            env.red_planes["red_0"].shotdown()
+            observations = env._get_obs()
+
+            for aid in ("blue_0", "blue_1", "blue_2", "red_0", "red_1"):
+                ego, allies, enemies = ordered_entity_slots(env, aid)
+                slots = ego + allies + enemies
+                expected_ids = [slot_id for slot_id, _sim in slots]
+                if aid.startswith("blue"):
+                    expected_layout = [aid] + [
+                        bid for bid in env.blue_ids if bid != aid
+                    ] + env.red_ids
+                else:
+                    expected_layout = [aid] + [
+                        rid for rid in env.red_ids if rid != aid
+                    ] + env.blue_ids
+                assert expected_ids == expected_layout
+
+                ego_alive = bool(slots[0][1].is_alive)
+                expected_alive = np.asarray([
+                    int(ego_alive and sim.is_alive) for _slot_id, sim in slots
+                ], dtype=np.int64)
+                obs = observations[aid]
+                assert np.array_equal(obs["alive_mask"], expected_alive)
+                assert np.array_equal(obs["death_mask"], expected_alive)
+
+                _entities, entity_mask, _meta = \
+                    build_strict_paper_entity_observation(env, aid)
+                assert np.array_equal(entity_mask, 1 - obs["alive_mask"])
+
+                rows = [obs["ego_state"], *obs["ally_states"], *obs["enemy_states"]]
+                for slot_idx, valid in enumerate(expected_alive):
+                    if not valid:
+                        assert np.allclose(rows[slot_idx], 0.0)
+                if aid.startswith("blue"):
+                    candidates = rule_agent._simple_valid_targets(
+                        obs, num_blue=3, num_red=2)
+                    expected_targets = [] if not ego_alive else [1]
+                    assert [candidate[1] for candidate in candidates] == expected_targets
+        finally:
+            env.close()
 
 
 def test_paper_fixed_v1_normalization_uses_declared_physical_scales():
@@ -888,6 +1057,57 @@ def test_reward_component_logs_distinguish_team_sum_and_per_agent_mean():
     assert set(metrics) == set(REWARD_COMPONENT_LOG_FIELDS)
 
 
+def test_eq17_all_boundaries_finite_and_unbounded_tail_modes():
+    finite = AltitudeRewardConfig(
+        version="eq17_engineering_thresholds_finite_tail_test",
+        h_min_m=0.0, h_att_m=2.0, h_adv_m=5.0, h_max_m=10.0,
+        d_att_max_m=12.0, high_altitude_tail=0.1)
+    eps = 1e-4
+    assert altitude_reward_paper_eq17(0.0, finite) == 0.0
+    assert altitude_reward_paper_eq17(0.0 + eps, finite) > 0.0
+    assert altitude_reward_paper_eq17(2.0 - eps, finite) <= 1.0
+    assert altitude_reward_paper_eq17(2.0, finite) == 1.0
+    assert altitude_reward_paper_eq17(5.0, finite) == 1.0
+    assert altitude_reward_paper_eq17(5.0 + eps, finite) < 1.0
+    assert math.isclose(altitude_reward_paper_eq17(10.0, finite), 0.1)
+    assert altitude_reward_paper_eq17(10.0 + eps, finite) == 0.1
+    assert altitude_reward_paper_eq17(12.0 - eps, finite) == 0.1
+    assert altitude_reward_paper_eq17(12.0, finite) == 0.0
+
+    assert DEFAULT_ALTITUDE_REWARD_CONFIG.d_att_max_m is None
+    assert "unbounded_tail" in DEFAULT_ALTITUDE_REWARD_CONFIG.version
+    assert altitude_reward_paper_eq17(
+        1e9, DEFAULT_ALTITUDE_REWARD_CONFIG) == \
+        DEFAULT_ALTITUDE_REWARD_CONFIG.high_altitude_tail
+
+
+def test_eq17_rejects_invalid_thresholds_and_tail():
+    with np.testing.assert_raises_regex(ValueError, "h_min_m"):
+        AltitudeRewardConfig(h_min_m=2.0, h_att_m=1.0)
+    with np.testing.assert_raises_regex(ValueError, "d_att_max_m"):
+        AltitudeRewardConfig(d_att_max_m=9000.0)
+    with np.testing.assert_raises_regex(ValueError, "high_altitude_tail"):
+        AltitudeRewardConfig(high_altitude_tail=1.1)
+    with np.testing.assert_raises_regex(ValueError, "unbounded"):
+        AltitudeRewardConfig(version="ambiguous", d_att_max_m=None)
+
+
+def test_pid_throttle_base_is_explicit_correction_offset():
+    common = dict(
+        current_rpy=np.zeros(3), current_velocity=250.0,
+        target_pitch=0.0, target_heading=0.0, target_velocity=250.0,
+        ned_velocity=np.array([250.0, 0.0, 0.0]))
+    zero_base = PIDController(1.0 / 60.0, throttle_base=0.0)
+    nonzero_base = PIDController(1.0 / 60.0, throttle_base=0.3)
+    assert zero_base.compute_control(**common)[3] == 0.0
+    assert math.isclose(nonzero_base.compute_control(**common)[3], 0.3)
+    faster = dict(common, target_velocity=1000.0)
+    slower = dict(common, target_velocity=0.0)
+    assert nonzero_base.compute_control(**faster)[3] == 1.0
+    nonzero_base.reset()
+    assert nonzero_base.compute_control(**slower)[3] == 0.0
+
+
 def test_joint_gae_is_one_trajectory_per_env_and_terminal_bootstrap_is_zeroed():
     buffer = RolloutBuffer(
         num_steps=3, num_envs=1, num_red=2, action_dim=3, rnn_hidden_size=4)
@@ -901,6 +1121,86 @@ def test_joint_gae_is_one_trajectory_per_env_and_terminal_bootstrap_is_zeroed():
     assert len(advantages) == 1 and len(returns) == 1
     assert torch.allclose(advantages[0], torch.tensor([6.0, 5.0, 3.0]))
     assert torch.allclose(returns[0], torch.tensor([6.0, 5.0, 3.0]))
+
+
+def test_squashed_normal_samples_and_boundary_log_probs_are_finite():
+    distribution = SquashedNormal(
+        torch.zeros(10000, 3), torch.ones(10000, 3))
+    samples = distribution.sample()
+    assert torch.all(samples > -1.0)
+    assert torch.all(samples < 1.0)
+    boundary_actions = torch.tensor([
+        [-1.0, -0.9999999, 0.0], [1.0, 0.9999999, 0.5]
+    ])
+    boundary_dist = SquashedNormal(
+        torch.zeros_like(boundary_actions), torch.ones_like(boundary_actions))
+    assert torch.isfinite(boundary_dist.log_prob(boundary_actions)).all()
+    assert torch.allclose(boundary_dist.mode, torch.zeros_like(boundary_actions))
+
+
+def _fill_actor_step(buffer, actor, step, obs, hidden, sequence_start):
+    obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
+    hidden_t = torch.as_tensor(hidden, dtype=torch.float32).unsqueeze(0)
+    with torch.no_grad():
+        distribution, next_hidden = actor(obs_t, hidden_t)
+        action = distribution.mode
+        log_prob = distribution.log_prob(action).sum(dim=-1)
+    buffer.store_step(
+        step, 0, 0, obs, action[0].numpy(), float(log_prob.item()), True,
+        actor_rnn_state_before=hidden,
+        sequence_start=sequence_start)
+    return next_hidden[0].numpy()
+
+
+def test_recurrent_segments_split_two_episodes_and_recompute_old_log_probs():
+    torch.manual_seed(5)
+    actor = VanillaActor(obs_dim=4, action_dim=3, hidden=8, rnn_hidden=6)
+    buffer = RolloutBuffer(6, 1, 1, 3, 6)
+    hidden = np.zeros(6, dtype=np.float32)
+    for step in range(6):
+        if step == 3:
+            hidden = np.zeros(6, dtype=np.float32)
+        obs = np.full(4, 0.1 * (step + 1), dtype=np.float32)
+        hidden = _fill_actor_step(
+            buffer, actor, step, obs, hidden,
+            sequence_start=step in (0, 3))
+        buffer.global_states[step][0] = np.zeros(10, dtype=np.float32)
+    buffer.episode_dones[:, 0] = [0, 0, 1, 0, 0, 1]
+    advantages = [torch.arange(6, dtype=torch.float32)]
+
+    segments = _build_actor_segments(buffer, advantages)
+
+    assert [segment["steps"].tolist() for segment in segments] == [
+        [0, 1, 2], [3, 4, 5]]
+    assert np.allclose(segments[1]["initial_hidden"], 0.0)
+    for segment in segments:
+        recomputed, _entropy = _recompute_segment_log_probs(
+            actor, segment, torch.device("cpu"))
+        assert torch.allclose(
+            recomputed,
+            torch.as_tensor(segment["old_log_probs"]),
+            atol=1e-6, rtol=1e-6)
+
+
+def test_recurrent_segments_do_not_cross_individual_death_gap():
+    actor = VanillaActor(obs_dim=3, action_dim=3, hidden=8, rnn_hidden=5)
+    buffer = RolloutBuffer(5, 1, 1, 3, 5)
+    hidden = np.zeros(5, dtype=np.float32)
+    for step in (0, 1, 3, 4):
+        if step == 3:
+            hidden = np.zeros(5, dtype=np.float32)
+        hidden = _fill_actor_step(
+            buffer, actor, step,
+            np.full(3, step + 1, dtype=np.float32), hidden,
+            sequence_start=step in (0, 3))
+    buffer.alive[2, 0, 0] = False
+    buffer.episode_dones[-1, 0] = 1.0
+
+    segments = _build_actor_segments(
+        buffer, [torch.ones(5, dtype=torch.float32)])
+
+    assert [segment["steps"].tolist() for segment in segments] == [[0, 1], [3, 4]]
+    assert np.allclose(segments[1]["initial_hidden"], 0.0)
 
 
 def test_missile_eq10_eq11_and_eq9_match_direct_geometry():
@@ -983,6 +1283,9 @@ def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     global_dim = _compute_global_state_dim(6, "paper_strict")
     metadata = _checkpoint_metadata(cfg, obs_dim, global_dim)
     state = VanillaActor(obs_dim, hidden=16, rnn_hidden=8).state_dict()
+    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v2"
+    assert metadata["action_distribution"] == "tanh_squashed_normal_v1"
+    assert metadata["pid_throttle_base"] == 0.0
 
     with np.testing.assert_raises(ValueError):
         _unpack_and_validate_checkpoint(state, metadata, "actor")
@@ -990,6 +1293,76 @@ def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     payload["metadata"]["obs_normalization"] = "none"
     with np.testing.assert_raises(ValueError):
         _unpack_and_validate_checkpoint(payload, metadata, "actor")
+
+    payload = {"state_dict": state, "metadata": dict(metadata), "model_kind": "actor"}
+    payload["metadata"]["schema_version"] = "vanilla_mappo_paper_env_v1"
+    with np.testing.assert_raises_regex(ValueError, "schema_version"):
+        _unpack_and_validate_checkpoint(payload, metadata, "actor")
+
+    payload = {"state_dict": state, "metadata": dict(metadata), "model_kind": "actor"}
+    payload["metadata"]["altitude_reward_config"] = dict(
+        metadata["altitude_reward_config"])
+    payload["metadata"]["altitude_reward_config"]["h_max_m"] += 1.0
+    with np.testing.assert_raises_regex(ValueError, "altitude_reward_config"):
+        _unpack_and_validate_checkpoint(payload, metadata, "actor")
+
+
+def _evaluation_row(**overrides):
+    row = {
+        "RedWin": 0, "BlueWin": 0, "Draw": 1,
+        "RedAlive": 1, "BlueAlive": 1,
+        "RedDeathsMissile": 0, "RedDeathsCrash": 0, "RedDeathsOther": 0,
+        "BlueDeathsMissile": 0, "BlueDeathsCrash": 0, "BlueDeathsOther": 0,
+        "RedMissilesFired": 0, "BlueMissilesFired": 0,
+        "RedMissileHits": 0, "BlueMissileHits": 0,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_evaluation_summary_uses_aggregate_kd_and_true_rwr():
+    from evaluate_vanilla_mappo import _aggregate_evaluation_summary
+
+    rows = [
+        _evaluation_row(
+            RedWin=1, BlueWin=0, Draw=0,
+            RedDeathsMissile=1, BlueDeathsMissile=3),
+        _evaluation_row(
+            RedWin=0, BlueWin=0, Draw=1,
+            RedDeathsCrash=3, BlueDeathsMissile=0),
+    ]
+    summary = _aggregate_evaluation_summary(rows)
+    assert math.isclose(summary["KD_Red_AllDeaths"], 3.0 / 4.0)
+    assert not math.isclose(summary["KD_Red_AllDeaths"], (3.0 + 0.0) / 2.0)
+    assert math.isinf(summary["RWR"])
+    assert summary["RWRDenominatorZero"] is True
+
+    all_draw = _aggregate_evaluation_summary([_evaluation_row()])
+    assert all_draw["RWR"] == 0.0
+    assert all_draw["RWRDenominatorZero"] is True
+
+    finite, zero = _ratio_with_denominator_zero(2, 4)
+    assert finite == 0.5 and zero is False
+
+
+def test_attention_presets_distinguish_2v2_probes_from_6v6_canonical():
+    from configs.experiment_presets import EXPERIMENT_PRESETS
+
+    assert "attention_2v2_brma_paper_main" not in EXPERIMENT_PRESETS
+    assert "attention_2v2_attn_nobrma_paper_baseline" not in EXPERIMENT_PRESETS
+    assert EXPERIMENT_PRESETS["attention_2v2_brma_probe"]["num_red"] == 2
+    for name in (
+        "attention_6v6_brma_paper_main",
+        "attention_6v6_attn_nobrma_paper_baseline",
+    ):
+        preset = EXPERIMENT_PRESETS[name]
+        assert preset["num_red"] == preset["num_blue"] == 6
+        assert preset["num_envs"] == 32
+        assert preset["max_episode_length"] == 1400
+        assert preset["total_env_steps"] == 10_000_000
+        assert preset["reward_mode"] == "paper_joint"
+        assert preset["pid_profile"] == "paper"
+        assert preset["missile_guidance_mode"] == "paper_eq9"
 
 
 def test_joint_mappo_short_buffer_forward_and_backward_is_finite():
