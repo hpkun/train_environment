@@ -60,6 +60,118 @@ V3_EPISODE_FIELDS = (
     "episode_role_situation_v3_final_j_combat", "episode_role_situation_v3_max_abs_identity_error",
 )
 
+_V3_COMMON_EFFECTIVE_MAP = {
+    "effective_role_situation_v3_task_attrition": "role_situation_v3_task_attrition",
+    "effective_role_situation_v3_task_terminal": "role_situation_v3_task_terminal",
+    "effective_role_situation_v3_common": "role_situation_v3_common",
+    "effective_role_situation_v3_delta_j": "role_situation_v3_delta_j",
+    "effective_role_situation_v3_j_combat": "role_situation_v3_j_combat",
+    "effective_role_situation_v3_role_encoded": "role_situation_v3_role_encoded",
+    "effective_role_situation_v3_total": "role_situation_v3_total",
+    "effective_role_situation_v3_component_sum": "role_situation_v3_component_sum",
+    "effective_role_situation_v3_identity_error": "role_situation_v3_identity_error",
+}
+_V3_UAV_EFFECTIVE_MAP = {
+    "effective_role_situation_v3_uav_local_offense": "role_situation_v3_uav_local_offense_raw",
+    "effective_role_situation_v3_uav_local_threat": "role_situation_v3_uav_local_threat_raw",
+    "effective_role_situation_v3_team_coverage": "role_situation_v3_team_coverage_raw",
+    "effective_role_situation_v3_team_exposure": "role_situation_v3_team_exposure_raw",
+    "effective_role_situation_v3_uav_situation_raw": "role_situation_v3_uav_situation_raw",
+    "effective_role_situation_v3_uav_situation_scaled": "role_situation_v3_uav_situation_scaled",
+    "effective_role_situation_v3_uav_situation_encoded": "role_situation_v3_uav_situation_encoded",
+    "effective_role_situation_v3_uav_flight_encoded": "role_situation_v3_flight_encoded",
+}
+_V3_MAV_EFFECTIVE_MAP = {
+    "effective_role_situation_v3_mav_marginal_information": "role_situation_v3_mav_marginal_information_raw",
+    "effective_role_situation_v3_mav_support_position": "role_situation_v3_mav_support_position_raw",
+    "effective_role_situation_v3_mav_threat": "role_situation_v3_mav_threat_raw",
+    "effective_role_situation_v3_mav_role_raw": "role_situation_v3_mav_role_raw",
+    "effective_role_situation_v3_mav_role_scaled": "role_situation_v3_mav_role_scaled",
+    "effective_role_situation_v3_mav_role_encoded": "role_situation_v3_mav_role_encoded",
+    "effective_role_situation_v3_mav_flight_encoded": "role_situation_v3_flight_encoded",
+}
+
+
+def validate_v3_reward_components(comp, *, agent_id, step):
+    missing = [key for key in V3_REWARD_COMPONENT_FIELDS if key not in comp]
+    if missing:
+        raise ValueError(f"v3 reward fields missing: agent={agent_id} step={step} missing={missing}")
+    values = {}
+    for key in V3_REWARD_COMPONENT_FIELDS:
+        try:
+            values[key] = float(comp[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"v3 reward field is not numeric: agent={agent_id} step={step} field={key}") from exc
+        if not math.isfinite(values[key]):
+            raise ValueError(f"v3 reward field is non-finite: agent={agent_id} step={step} field={key} value={values[key]}")
+    total = values["role_situation_v3_total"]
+    common = values["role_situation_v3_common"]
+    role = values["role_situation_v3_role_encoded"]
+    flight = values["role_situation_v3_flight_encoded"]
+    component_sum = values["role_situation_v3_component_sum"]
+    identity_error = values["role_situation_v3_identity_error"]
+    expected = common + role + flight
+    if abs(component_sum - expected) > 1e-6 or abs(identity_error) > 1e-6 or abs(total - component_sum) > 1e-6:
+        raise ValueError(
+            "v3 reward identity failure: "
+            f"agent={agent_id} step={step} total={total} common={common} "
+            f"role_encoded={role} flight_encoded={flight} component_sum={component_sum} "
+            f"identity_error={identity_error}"
+        )
+    return values
+
+
+def aggregate_v3_effective_step(components, roles, active_mask, red_ids, *, step):
+    sums = {key: 0.0 for key in V3_EFFECTIVE_FIELDS}
+    counts = {"common": 0.0, "uav": 0.0, "mav": 0.0}
+    for index, agent_id in enumerate(red_ids):
+        active = float(active_mask[index]) if index < len(active_mask) else 0.0
+        if active <= 0.0:
+            continue
+        values = validate_v3_reward_components(components.get(agent_id, {}), agent_id=agent_id, step=step)
+        counts["common"] += active
+        for output, source in _V3_COMMON_EFFECTIVE_MAP.items():
+            sums[output] += active * values[source]
+        role = roles.get(agent_id, "")
+        if role == "mav":
+            counts["mav"] += active
+            mapping = _V3_MAV_EFFECTIVE_MAP
+        elif role == "attack_uav":
+            counts["uav"] += active
+            mapping = _V3_UAV_EFFECTIVE_MAP
+        else:
+            mapping = {}
+        for output, source in mapping.items():
+            sums[output] += active * values[source]
+    common_outputs = set(_V3_COMMON_EFFECTIVE_MAP)
+    uav_outputs = set(_V3_UAV_EFFECTIVE_MAP)
+    for key in V3_EFFECTIVE_FIELDS:
+        denominator = counts["common"] if key in common_outputs else counts["uav"] if key in uav_outputs else counts["mav"]
+        sums[key] = sums[key] / denominator if denominator > 0.0 else 0.0
+    return sums
+
+
+def accumulate_v3_episode_step(accumulator, comp, *, agent_id, role, alive_before, step):
+    if not alive_before:
+        return
+    values = validate_v3_reward_components(comp, agent_id=agent_id, step=step)
+    additions = {
+        "episode_role_situation_v3_task_attrition_sum": values["role_situation_v3_task_attrition"],
+        "episode_role_situation_v3_task_terminal_sum": values["role_situation_v3_task_terminal"],
+        "episode_role_situation_v3_common_sum": values["role_situation_v3_common"],
+        "episode_role_situation_v3_uav_situation_encoded_sum": values["role_situation_v3_uav_situation_encoded"] if role == "attack_uav" else 0.0,
+        "episode_role_situation_v3_mav_role_encoded_sum": values["role_situation_v3_mav_role_encoded"] if role == "mav" else 0.0,
+        "episode_role_situation_v3_flight_encoded_sum": values["role_situation_v3_flight_encoded"],
+        "episode_role_situation_v3_total_sum": values["role_situation_v3_total"],
+    }
+    for key, value in additions.items():
+        accumulator[key] = float(accumulator.get(key, 0.0)) + value
+    accumulator["episode_role_situation_v3_final_j_combat"] = values["role_situation_v3_j_combat"]
+    accumulator["episode_role_situation_v3_max_abs_identity_error"] = max(
+        float(accumulator.get("episode_role_situation_v3_max_abs_identity_error", 0.0)),
+        abs(values["role_situation_v3_identity_error"]),
+    )
+
 # ── Clipping helpers -----------------------------------------------------------
 def _clip_unit(x):
     return float(np.clip(x, 0.0, 1.0))
@@ -74,7 +186,7 @@ def _softmax_agg(values, tau: float = 0.2):
         return 0.0
     arr = np.asarray(values, dtype=np.float64)
     if not np.isfinite(arr).all():
-        arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=-1.0)
+        raise ValueError(f"v3 softmax input must be finite: values={values}")
     shifted = arr / max(float(tau), 1e-9)
     shifted -= shifted.max()
     exps = np.exp(shifted)
@@ -173,8 +285,8 @@ def compute_v3_reward(env, base_rewards, components):
     L_attack = attack_dead_now / max(n_attack_initial, 1)
     L_mav = float(mav_dead_now)
 
-    lambda_u = float(task_cfg.get("attack_uav_loss_weight", 1.0))
-    lambda_m = float(task_cfg.get("mav_loss_weight", 0.75))
+    lambda_u = float(task_cfg["attack_uav_loss_weight"])
+    lambda_m = float(task_cfg["mav_loss_weight"])
     J_combat = L_blue - lambda_u * L_attack - lambda_m * L_mav
 
     delta_blue = L_blue - es["prev_blue_loss"]
@@ -182,7 +294,7 @@ def compute_v3_reward(env, base_rewards, components):
     delta_mav = float(mav_dead_now - es["prev_mav_dead"])
     delta_J = delta_blue - lambda_u * delta_attack - lambda_m * delta_mav
 
-    attrition_scale = float(task_cfg.get("attrition_scale", 10.0))
+    attrition_scale = float(task_cfg["attrition_scale"])
     r_attrition = attrition_scale * delta_J
 
     # Update episode cumulative state
@@ -200,14 +312,14 @@ def compute_v3_reward(env, base_rewards, components):
         if n_blue_alive == 0 and n_red_alive == 0:
             r_terminal = 0.0  # mutual elimination
         elif n_blue_alive == 0 and n_red_alive > 0:
-            r_terminal = float(task_cfg.get("decisive_win_bonus", 10.0))
+            r_terminal = float(task_cfg["decisive_win_bonus"])
         elif n_red_alive == 0 and n_blue_alive > 0:
-            r_terminal = float(task_cfg.get("decisive_loss_penalty", -10.0))
+            r_terminal = float(task_cfg["decisive_loss_penalty"])
         elif env.current_step >= env.max_steps:
             if J_combat > 1e-9:
-                r_terminal = float(task_cfg.get("timeout_advantage_bonus", 2.0))
+                r_terminal = float(task_cfg["timeout_advantage_bonus"])
             elif J_combat < -1e-9:
-                r_terminal = -float(task_cfg.get("timeout_advantage_bonus", 2.0))
+                r_terminal = -float(task_cfg["timeout_advantage_bonus"])
             else:
                 r_terminal = 0.0
         es["terminal_applied"] = True
@@ -220,14 +332,14 @@ def compute_v3_reward(env, base_rewards, components):
     R_min = getattr(env, "_missile_launch_min_range_m_effective", env.MISSILE_LAUNCH_MIN_RANGE)
 
     # ── Quality parameters ──
-    D_low = float(sit_cfg.get("distance_optimal_low_ratio", 0.35)) * R_launch
-    D_high = float(sit_cfg.get("distance_optimal_high_ratio", 0.75)) * R_launch
-    tau_v = float(sit_cfg.get("softmax_temperature", 0.2))
-    threat_w = float(sit_cfg.get("threat_weight", 1.0))
-    local_w = float(sit_cfg.get("local_weight", 0.6))
-    team_w = float(sit_cfg.get("team_weight", 0.4))
-    spd_min = float(sit_cfg.get("speed_modulation_min", 0.75))
-    spd_max = float(sit_cfg.get("speed_modulation_max", 1.0))
+    D_low = float(sit_cfg["distance_optimal_low_ratio"]) * R_launch
+    D_high = float(sit_cfg["distance_optimal_high_ratio"]) * R_launch
+    tau_v = float(sit_cfg["softmax_temperature"])
+    threat_w = float(sit_cfg["threat_weight"])
+    local_w = float(sit_cfg["local_weight"])
+    team_w = float(sit_cfg["team_weight"])
+    spd_min = float(sit_cfg["speed_modulation_min"])
+    spd_max = float(sit_cfg["speed_modulation_max"])
 
     blue_ids_list = list(alive_blue.keys())
 
@@ -295,12 +407,12 @@ def compute_v3_reward(env, base_rewards, components):
             e_rear = e_rear / e_rear_norm
             rear_proj = float(np.dot(P_M - C_U, e_rear))
         mav_dist = float(np.linalg.norm(P_M - C_U))
-        s_min = float(mav_cfg.get("support_min_distance_ratio", 0.5)) * R_launch
-        s_max = float(mav_cfg.get("support_max_distance_ratio", 1.5)) * R_launch
+        s_min = float(mav_cfg["support_min_distance_ratio"]) * R_launch
+        s_max = float(mav_cfg["support_max_distance_ratio"]) * R_launch
         if mav_dist < s_min: dq = _clip_unit(mav_dist / max(s_min, 1e-9))
         elif mav_dist <= s_max: dq = 1.0
         else: dq = _clip_unit(1.0 - (mav_dist - s_max) / max(R_launch, 1e-9))
-        rear_ref = float(mav_cfg.get("rear_reference_ratio", 0.75)) * R_launch
+        rear_ref = float(mav_cfg["rear_reference_ratio"]) * R_launch
         rq = _clip_unit(rear_proj / max(rear_ref, 1e-9))
         P_support = dq * rq
         # MAV threat (from blue to MAV perspective)
@@ -313,18 +425,18 @@ def compute_v3_reward(env, base_rewards, components):
         mw = 1.0 if (hasattr(mav, "check_missile_warning") and mav.check_missile_warning() is not None) else 0.0
         T_mav_raw = _clip_unit(0.7 * geom_threat + 0.3 * mw)
         # MAV role
-        miw = float(mav_cfg.get("marginal_information_weight", 0.5))
-        spw = float(mav_cfg.get("support_position_weight", 0.3))
-        mtw = float(mav_cfg.get("threat_weight", 0.4))
+        miw = float(mav_cfg["marginal_information_weight"])
+        spw = float(mav_cfg["support_position_weight"])
+        mtw = float(mav_cfg["threat_weight"])
         S_mav = _clip_signed(miw * I_marginal + spw * P_support - mtw * T_mav_raw)
         mag_logs = {"marginal_raw": I_marginal, "support_dist_q": dq, "support_rear_q": rq,
                     "support_pos": P_support, "geom_threat": geom_threat, "mw": mw, "threat_raw": T_mav_raw}
 
     # ── Flight ──
-    mav_flight_scale = float(flight_cfg.get("mav_scale", 0.01))
-    uav_flight_scale = float(flight_cfg.get("uav_scale", 0.01))
-    mav_role_scale = float(mav_cfg.get("role_scale", 0.05))
-    uav_sit_scale = float(uav_cfg.get("situation_scale", 0.05))
+    mav_flight_scale = float(flight_cfg["mav_scale"])
+    uav_flight_scale = float(flight_cfg["uav_scale"])
+    mav_role_scale = float(mav_cfg["role_scale"])
+    uav_sit_scale = float(uav_cfg["situation_scale"])
 
     # ── Per-agent reward assembly ──
     for rid in env.red_ids:
@@ -424,8 +536,7 @@ def compute_v3_reward(env, base_rewards, components):
         vals["role_situation_v3_total"] = total
         vals["role_situation_v3_component_sum"] = comp_sum
         vals["role_situation_v3_identity_error"] = total - comp_sum
-        if abs(total - comp_sum) > 1e-6:
-            raise ValueError(f"v3 identity failure: agent={rid} total={total} comp_sum={comp_sum} error={total-comp_sum}")
+        validate_v3_reward_components(vals, agent_id=rid, step=env.current_step)
 
         comp.update(vals)
         comp["total"] = float(total)

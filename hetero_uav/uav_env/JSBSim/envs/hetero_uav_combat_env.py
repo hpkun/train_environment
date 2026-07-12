@@ -1111,16 +1111,58 @@ class HeteroUavCombatEnv(UavCombatEnv):
 
     def _validate_role_situation_v3_contract(self) -> None:
         cfg = self.brma_tam_role_situation_v3_config
+        required = (
+            ("task", "attrition_scale"), ("task", "attack_uav_loss_weight"),
+            ("task", "mav_loss_weight"), ("task", "decisive_win_bonus"),
+            ("task", "decisive_loss_penalty"), ("task", "timeout_advantage_bonus"),
+            ("situation", "softmax_temperature"), ("situation", "threat_weight"),
+            ("situation", "local_weight"), ("situation", "team_weight"),
+            ("situation", "speed_modulation_min"), ("situation", "speed_modulation_max"),
+            ("situation", "distance_optimal_low_ratio"),
+            ("situation", "distance_optimal_high_ratio"),
+            ("mav", "marginal_information_weight"), ("mav", "support_position_weight"),
+            ("mav", "threat_weight"), ("mav", "role_scale"),
+            ("mav", "support_min_distance_ratio"), ("mav", "support_max_distance_ratio"),
+            ("mav", "rear_reference_ratio"), ("uav", "situation_scale"),
+            ("flight", "mav_scale"), ("flight", "uav_scale"),
+        )
+        for path in required:
+            value = cfg
+            for key in path:
+                if not isinstance(value, dict) or key not in value:
+                    raise ValueError("brma_tam_role_situation_v3 missing config key: " + ".".join(path))
+                value = value[key]
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("brma_tam_role_situation_v3 config must be numeric: " + ".".join(path)) from exc
+            if not np.isfinite(numeric):
+                raise ValueError("brma_tam_role_situation_v3 config must be finite: " + ".".join(path))
         if int(cfg.get("contract_revision", 0)) != 5:
             raise ValueError("brma_tam_role_situation_v3 requires contract_revision=5")
         if self.observation_mode != "mav_shared_geo":
             raise ValueError("brma_tam_role_situation_v3 requires observation_mode='mav_shared_geo'")
         if int(self.aircraft_type_params.get("mav", {}).get("num_missiles", 0)) != 0:
             raise ValueError("brma_tam_role_situation_v3 requires MAV num_missiles == 0")
-        # Check all config sections exist
-        for section in ("task", "situation", "mav", "uav", "flight"):
-            if section not in cfg:
-                raise ValueError(f"brma_tam_role_situation_v3 missing config section: {section}")
+        evasion = getattr(self, "missile_evasion_config", {}) or {}
+        if str(evasion.get("mode", "")).lower() != "brma_scripted":
+            raise ValueError("brma_tam_role_situation_v3 requires missile_evasion.mode='brma_scripted'")
+        if str(evasion.get("teams", "")).lower() not in {"red_only", "both"}:
+            raise ValueError("brma_tam_role_situation_v3 requires missile_evasion.teams in {'red_only', 'both'}")
+        guidance = getattr(self, "missile_guidance_config", {}) or {}
+        protocol = getattr(self, "missile_protocol_meta", {}) or {}
+        if float(getattr(self, "_missile_launch_range_m_effective", 0.0)) != 14000.0:
+            raise ValueError("brma_tam_role_situation_v3 requires missile_launch_range_m=14000")
+        if float(getattr(self, "_missile_attack_interval_sec_effective", 0.0)) != 25.0:
+            raise ValueError("brma_tam_role_situation_v3 requires missile_attack_interval_sec=25")
+        if str(guidance.get("mode", "")).lower() != "pn":
+            raise ValueError("brma_tam_role_situation_v3 requires missile_guidance.mode='pn'")
+        if float(guidance.get("navigation_gain", 0.0)) != 3.0:
+            raise ValueError("brma_tam_role_situation_v3 requires missile_guidance.navigation_gain=3")
+        if float(guidance.get("max_overload_g", 0.0)) != 30.0:
+            raise ValueError("brma_tam_role_situation_v3 requires missile_guidance.max_overload_g=30")
+        if str(protocol.get("missile_protocol_version", "")) != "tam_paper_protocol_v1":
+            raise ValueError("brma_tam_role_situation_v3 requires tam_paper_protocol_v1")
         # Softmax temperature
         if float(cfg["situation"].get("softmax_temperature", 0.0)) <= 0:
             raise ValueError("v3 softmax_temperature must be > 0")
@@ -1144,6 +1186,20 @@ class HeteroUavCombatEnv(UavCombatEnv):
         smax = float(cfg["mav"].get("support_max_distance_ratio", 0))
         if not (smin < smax):
             raise ValueError(f"v3 mav support ratios must satisfy min={smin} < max={smax}")
+        rear = float(cfg["mav"]["rear_reference_ratio"])
+        if rear <= 0.0:
+            raise ValueError("v3 mav rear_reference_ratio must be > 0")
+        nonnegative = (
+            ("task", "attrition_scale"), ("task", "attack_uav_loss_weight"),
+            ("task", "mav_loss_weight"), ("task", "decisive_win_bonus"),
+            ("task", "timeout_advantage_bonus"), ("situation", "threat_weight"),
+            ("mav", "marginal_information_weight"), ("mav", "support_position_weight"),
+            ("mav", "threat_weight"), ("mav", "role_scale"),
+            ("uav", "situation_scale"), ("flight", "mav_scale"), ("flight", "uav_scale"),
+        )
+        for section, key in nonnegative:
+            if float(cfg[section][key]) < 0.0:
+                raise ValueError(f"v3 reward scale must be non-negative: {section}.{key}")
 
     def _reset_role_situation_v3_episode_state(self) -> None:
         self._v3_episode_state = {
@@ -3444,7 +3500,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "brma_role_no_missile_reward_v8", "happo_ref_v1_mav_support",
             "tam_brma_paper_aligned_v1", "tam_happo_table1_v1",
             "brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1",
-            "brma_tam_scale_aligned_v2",
+            "brma_tam_scale_aligned_v2", "brma_tam_role_situation_v3",
         }
 
     def step(self, actions: dict):

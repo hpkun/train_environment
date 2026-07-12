@@ -538,6 +538,13 @@ from scripts.experiment_logging_schema import (
     BRMA_TAM_SCALE_V1_COMPONENT_COLUMNS,
     _SCALE_V1_EPISODE_LAST_FIELDS,
 )
+from uav_env.JSBSim.envs.role_situation_v3 import (
+    V3_EFFECTIVE_FIELDS,
+    V3_EPISODE_FIELDS,
+    V3_REWARD_COMPONENT_FIELDS,
+    accumulate_v3_episode_step,
+    aggregate_v3_effective_step,
+)
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 
 
@@ -2117,6 +2124,12 @@ def _run_training_main() -> None:
                     _SINGLE_RUNNER_STATE["total_steps"] = total_steps
                     _SINGLE_RUNNER_STATE["episode_id"] = current_ep_id[env_idx]
                     rc = next_info.get("reward_components", {}) if isinstance(next_info, dict) else {}
+                    if actual_reward_mode == "brma_tam_role_situation_v3":
+                        v3_effective = aggregate_v3_effective_step(
+                            rc, rollout_env.agent_roles, active, rollout_env.red_ids, step=total_steps,
+                        )
+                        for key, value in v3_effective.items():
+                            rollout_reward_sums[key] += value
                     for aid in rollout_env.red_ids:
                         comp = rc.get(aid, {}) if isinstance(rc, dict) else {}
                         if not isinstance(comp, dict):
@@ -2135,7 +2148,19 @@ def _run_training_main() -> None:
                         if not isinstance(comp, dict):
                             continue
                         agent_acc = current_ep_reward_comp_by_agent[env_idx].setdefault(rid, {})
+                        if actual_reward_mode == "brma_tam_role_situation_v3":
+                            ridx = rollout_env.red_ids.index(rid)
+                            accumulate_v3_episode_step(
+                                agent_acc,
+                                comp,
+                                agent_id=rid,
+                                role=rollout_env.agent_roles.get(rid, ""),
+                                alive_before=float(active[ridx]) > 0.0,
+                                step=total_steps,
+                            )
                         for key, value in comp.items():
+                            if key in V3_REWARD_COMPONENT_FIELDS:
+                                continue
                             if not (
                                 key.startswith("tam_v7_")
                                 or key.startswith("tam_table1_")
@@ -2205,6 +2230,8 @@ def _run_training_main() -> None:
                             role = rollout_env.agent_roles.get(rid, "")
                             scale_v1 = actual_reward_mode == "brma_tam_scale_aligned_v1"
                             scale_v2 = actual_reward_mode == "brma_tam_scale_aligned_v2"
+                            if actual_reward_mode == "brma_tam_role_situation_v3":
+                                continue
                             if scale_v1 and role == "mav":
                                 identity_keys = (
                                     "scale_v1_flight_total", "scale_v1_mav_role",
@@ -2735,6 +2762,7 @@ def _run_training_main() -> None:
                 "effective_scale_v2_mav_role", "effective_scale_v2_mav_event",
                 "effective_scale_v2_terminal", "effective_scale_v2_total",
                 "effective_scale_v2_component_sum", "effective_scale_v2_identity_error",
+                *V3_EFFECTIVE_FIELDS,
             ):
                 stats[key] = rollout_reward_sums[key] / reward_step_denom
             stats.update({
@@ -3029,6 +3057,7 @@ def _run_training_main() -> None:
                             "gradient_nonfinite_count",
                         )
                     },
+                    **{key: stats.get(key, 0.0) for key in V3_EFFECTIVE_FIELDS},
                     "nan_detected": int(nan_detected),
                 })
             if not f.closed:
