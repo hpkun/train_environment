@@ -83,14 +83,11 @@ for _col in FINAL_PURE_HAPPO_COLUMNS:
 for _col in PURE_HAPPO_LEARNABILITY_COLUMNS:
     if _col not in TRAIN_METRICS_COLUMNS:
         TRAIN_METRICS_COLUMNS.append(_col)
-# V3 role-situation effective + episode fields
-from uav_env.JSBSim.envs.role_situation_v3 import V3_EFFECTIVE_FIELDS, V3_EPISODE_FIELDS
+# V3 role-situation effective fields (TRAIN_METRICS only -- episode fields appended later)
+from uav_env.JSBSim.envs.role_situation_v3 import V3_EFFECTIVE_FIELDS
 for _col in V3_EFFECTIVE_FIELDS:
     if _col not in TRAIN_METRICS_COLUMNS:
         TRAIN_METRICS_COLUMNS.append(_col)
-for _col in V3_EPISODE_FIELDS:
-    if _col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
-        EPISODE_REWARD_COMPONENTS_COLUMNS.append(_col)
 
 EVAL_EPISODE_COLUMNS = [
     "run_id", "checkpoint_name", "eval_scenario", "episode_id", "seed",
@@ -344,6 +341,10 @@ BRMA_TAM_SCALE_V1_COMPONENT_COLUMNS = [
 for _col in BRMA_TAM_SCALE_V1_COMPONENT_COLUMNS:
     if _col not in REWARD_COMPONENT_COLUMNS:
         REWARD_COMPONENT_COLUMNS.append(_col)
+from uav_env.JSBSim.envs.role_situation_v3 import V3_REWARD_COMPONENT_FIELDS
+for _col in V3_REWARD_COMPONENT_FIELDS:
+    if _col not in REWARD_COMPONENT_COLUMNS:
+        REWARD_COMPONENT_COLUMNS.append(_col)
 
 REWARD_TARGET_DIAGNOSTICS_COLUMNS = [
     "run_id", "scenario", "episode_id", "step", "sim_time",
@@ -536,6 +537,10 @@ for _col in BRMA_TAM_SCALE_V1_COMPONENT_COLUMNS:
     _episode_col = f"{_col}_last" if _col in _SCALE_V1_EPISODE_LAST_FIELDS else f"{_col}_sum"
     if _episode_col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
         EPISODE_REWARD_COMPONENTS_COLUMNS.append(_episode_col)
+from uav_env.JSBSim.envs.role_situation_v3 import V3_EPISODE_FIELDS
+for _col in V3_EPISODE_FIELDS:
+    if _col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
+        EPISODE_REWARD_COMPONENTS_COLUMNS.append(_col)
 
 FILE_SCHEMAS = {
     "train_metrics.csv": TRAIN_METRICS_COLUMNS,
