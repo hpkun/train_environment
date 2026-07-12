@@ -199,19 +199,36 @@ def altitude_reward_paper_candidate(dz_m: float) -> float:
     return altitude_reward_paper_eq17(dz_m)
 
 
-def altitude_reward_pairwise_mean_eq17(
+def altitude_reward_pairwise_sum_eq17(
     ego_alt_m: float,
     enemy_altitudes_m: list[float],
     config: AltitudeRewardConfig = DEFAULT_ALTITUDE_REWARD_CONFIG,
 ) -> float:
-    """Mean paper eq.17-style altitude reward over pairwise enemy deltas."""
+    """Sum Eq.17 pair rewards over alive enemies.
+
+    The paper does not explicitly state Eq.17 multi-enemy aggregation.  The
+    paper profile uses a sum, matching the explicit all-enemy sum in Eq.22;
+    this interpretation is recorded in the paper specification metadata.
+    """
     if not enemy_altitudes_m:
         return 0.0
     values = [
         altitude_reward_paper_eq17(ego_alt_m - enemy_alt, config=config)
         for enemy_alt in enemy_altitudes_m
     ]
-    return float(sum(values) / len(values))
+    return float(sum(values))
+
+
+def altitude_reward_pairwise_mean_eq17(
+    ego_alt_m: float,
+    enemy_altitudes_m: list[float],
+    config: AltitudeRewardConfig = DEFAULT_ALTITUDE_REWARD_CONFIG,
+) -> float:
+    """Legacy engineering mean retained for old experiment compatibility."""
+    if not enemy_altitudes_m:
+        return 0.0
+    return altitude_reward_pairwise_sum_eq17(
+        ego_alt_m, enemy_altitudes_m, config=config) / len(enemy_altitudes_m)
 
 
 def altitude_reward_pairwise_mean_candidate(

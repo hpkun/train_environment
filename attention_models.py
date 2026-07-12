@@ -10,6 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from train_vanilla_mappo import SquashedNormal
+
 
 class EntityObservationEncoder(nn.Module):
     """Encode entity-wise observations with shared MLP + self-attention.
@@ -117,7 +119,6 @@ class AttentionActor(nn.Module):
             nn.Linear(rnn_hidden, 64),
             nn.ReLU(),
             nn.Linear(64, action_dim),
-            nn.Tanh(),
         )
         self.action_log_std = nn.Parameter(torch.full((action_dim,), -1.204))
 
@@ -141,16 +142,17 @@ class AttentionActor(nn.Module):
         encoded_first, attn_weights = self.encoder(
             entities, entity_mask, soft_keep_mask=soft_keep_mask)
         new_rnn_hidden = self.rnn(encoded_first, rnn_hidden)
-        mu = self.action_head(new_rnn_hidden)
-        mu = torch.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
-        mu = mu.clamp(-0.999, 0.999)
-        sigma = torch.exp(self.action_log_std).clamp(min=1e-4)
-        sigma = sigma.unsqueeze(0).expand_as(mu)
+        latent_mu = self.action_head(new_rnn_hidden)
+        latent_mu = torch.nan_to_num(
+            latent_mu, nan=0.0, posinf=20.0, neginf=-20.0)
+        log_std = self.action_log_std.clamp(-5.0, 2.0)
+        sigma = torch.exp(log_std).clamp(min=1e-4)
+        sigma = sigma.unsqueeze(0).expand_as(latent_mu)
         return {
-            "dist": torch.distributions.Normal(mu, sigma),
+            "dist": SquashedNormal(latent_mu, sigma),
             "new_rnn_hidden": new_rnn_hidden,
             "attn_weights": attn_weights,
-            "mu": mu,
+            "mu": latent_mu,
             "sigma": sigma,
         }
 
@@ -192,8 +194,8 @@ class AttentionActor(nn.Module):
             entities, entity_mask, rnn_hidden, soft_keep_mask=soft_keep_mask)
         dist = out["dist"]
         log_prob = dist.log_prob(actions).sum(dim=-1)    # (B,)
-        entropy_mean = dist.entropy().mean(dim=-1)        # (B,)
-        entropy_sum = dist.entropy().sum(dim=-1)          # (B,)
+        entropy_mean = dist.base_entropy().mean(dim=-1)   # latent Gaussian
+        entropy_sum = dist.base_entropy().sum(dim=-1)
         return {
             "log_prob": log_prob,
             "entropy_mean": entropy_mean,
@@ -289,8 +291,8 @@ class CentralizedAttentionCritic(nn.Module):
     concatenates the per-agent features and passes them through an MLP
     value head to produce one value per red agent.
 
-    This critic does NOT use a biased random mask (BRMA).  Entity masks
-    only mark dead / padded entities.
+    This critic does NOT use a biased random mask. It emits one team value per
+    environment step, matching the paper MAPPO centralized critic objective.
     """
 
     def __init__(self, entity_dim: int = 10, hidden_size: int = 128,
@@ -309,7 +311,7 @@ class CentralizedAttentionCritic(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(concat_dim, hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, num_agents),
+            nn.Linear(hidden_size, 1),
         )
 
     def forward(self, team_entities: torch.Tensor,
@@ -321,7 +323,7 @@ class CentralizedAttentionCritic(nn.Module):
             team_masks:    (B, A, N) entity masks.
 
         Returns:
-            values: (B, A) per-agent value estimates.
+            values: (B, 1) team value estimates.
         """
         B, A, N, D = team_entities.shape
         # Flatten agent dimension into batch for shared encoder

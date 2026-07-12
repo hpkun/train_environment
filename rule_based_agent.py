@@ -475,6 +475,7 @@ def _blue_simple_pursuit_action_impl(
     forced_target_idx: int | None,
     own_position: np.ndarray | None = None,
     own_heading: float | None = None,
+    paper_profile: bool = False,
 ) -> np.ndarray:
     """Simple safe-pursuit opponent path.
 
@@ -495,7 +496,8 @@ def _blue_simple_pursuit_action_impl(
                 range_m: float | None, desired_heading: float, action: np.ndarray,
                 reacquire: bool = False) -> np.ndarray:
         _simple_debug_state[blue_id] = {
-            "pursuit_variant": "simple_safe_pursuit",
+            "pursuit_variant": (
+                "paper_pursuit" if paper_profile else "simple_safe_pursuit"),
             "simple_target_selection": "nearest_valid",
             "desired_heading_source": source,
             "uses_red_action_bounds": 1,
@@ -519,16 +521,16 @@ def _blue_simple_pursuit_action_impl(
         return action
 
     center_heading = _simple_center_bearing(own_position, our_heading)
-    if alt_m < HARD_DECK:
+    if not paper_profile and alt_m < HARD_DECK:
         action = _simple_rescale_absolute_heading(0.45, center_heading, 1.0)
         return _record("safety", None, None, None, center_heading, action)
-    if alt_m < DESCENT_WARN_ALT and v_up < -MAX_DESCENT_RATE:
+    if not paper_profile and alt_m < DESCENT_WARN_ALT and v_up < -MAX_DESCENT_RATE:
         action = _simple_rescale_absolute_heading(0.45, center_heading, 1.0)
         return _record("safety", None, None, None, center_heading, action)
-    if ego_vel < 220.0:
+    if not paper_profile and ego_vel < 220.0:
         action = _simple_rescale_absolute_heading(max(0.15, _TRIM_BASELINE), our_heading, 1.0)
         return _record("low_speed_recovery", None, None, None, our_heading, action)
-    if _should_override_for_boundary_safety(own_position, our_heading):
+    if not paper_profile and _should_override_for_boundary_safety(own_position, our_heading):
         pitch = np.clip((SAFE_COMBAT_ALT - alt_m) / 2000.0, -0.10, 0.15) + _TRIM_BASELINE
         action = _simple_rescale_absolute_heading(float(pitch), center_heading, 0.8)
         return _record("safety", None, None, None, center_heading, action)
@@ -554,12 +556,13 @@ def _blue_simple_pursuit_action_impl(
         _simple_lost_steps[blue_id] = 0
         delta_alt = _relative_delta_alt_m(target_state)
         pitch = np.clip(delta_alt / max(float(range_m or 300.0), 300.0) * 2.0 + _TRIM_BASELINE, -0.20, 0.25)
-        if alt_m < SAFE_COMBAT_ALT:
+        if not paper_profile and alt_m < SAFE_COMBAT_ALT:
             pitch = max(float(pitch), 0.0)
         action = _simple_rescale_absolute_heading(float(pitch), desired_heading, 0.8)
         return _record("current_target", target_idx, target_state, range_m, desired_heading, action)
 
-    if blue_id in _simple_last_seen_bearing and _simple_lost_steps.get(blue_id, 0) < _SIMPLE_REACQUIRE_STEPS:
+    if (not paper_profile and blue_id in _simple_last_seen_bearing
+            and _simple_lost_steps.get(blue_id, 0) < _SIMPLE_REACQUIRE_STEPS):
         _simple_lost_steps[blue_id] = _simple_lost_steps.get(blue_id, 0) + 1
         desired_heading = _simple_last_seen_bearing[blue_id]
         pitch = np.clip((SAFE_COMBAT_ALT - alt_m) / 2000.0, -0.10, 0.15) + _TRIM_BASELINE
@@ -568,9 +571,12 @@ def _blue_simple_pursuit_action_impl(
 
     _simple_last_seen_bearing.pop(blue_id, None)
     _simple_lost_steps.pop(blue_id, None)
-    source = "center_cruise" if own_position is not None else "hold_heading"
-    desired_heading = center_heading if own_position is not None else our_heading
-    pitch = np.clip((SAFE_COMBAT_ALT - alt_m) / 2000.0, -0.10, 0.15) + _TRIM_BASELINE
+    source = ("hold_heading" if paper_profile else
+              ("center_cruise" if own_position is not None else "hold_heading"))
+    desired_heading = our_heading if paper_profile else (
+        center_heading if own_position is not None else our_heading)
+    pitch = _TRIM_BASELINE if paper_profile else (
+        np.clip((SAFE_COMBAT_ALT - alt_m) / 2000.0, -0.10, 0.15) + _TRIM_BASELINE)
     action = _simple_rescale_absolute_heading(float(pitch), desired_heading, 0.6)
     return _record(source, None, None, None, desired_heading, action)
 
@@ -626,7 +632,7 @@ def blue_coordinated_actions(
     engaged_targets: set[str] | None = None,
     own_positions: dict[str, np.ndarray] | None = None,
     own_headings: dict[str, float] | None = None,
-    pursuit_mode: str = "safe_pursuit",
+    pursuit_mode: str = "paper_pursuit",
 ) -> dict[str, np.ndarray]:
     """Greedy target deconfliction: distribute blues across different reds.
 
@@ -654,7 +660,7 @@ def blue_coordinated_actions(
                 except (ValueError, IndexError):
                     pass
 
-    if pursuit_mode == "safe_pursuit":
+    if pursuit_mode in ("paper_pursuit", "safe_pursuit"):
         taken: set[int] = set(engaged_red_indices)
         assignments: dict[int, int | None] = {}
         for b_idx, bid in enumerate(blue_ids):
@@ -669,7 +675,8 @@ def blue_coordinated_actions(
                 blue_obs.get(bid, {}), num_blue, num_red, b_idx,
                 forced_target_idx=assignments.get(b_idx),
                 own_position=own_positions.get(bid) if own_positions else None,
-                own_heading=own_headings.get(bid) if own_headings else None)
+                own_heading=own_headings.get(bid) if own_headings else None,
+                paper_profile=(pursuit_mode == "paper_pursuit"))
             for b_idx, bid in enumerate(blue_ids)
         }
 

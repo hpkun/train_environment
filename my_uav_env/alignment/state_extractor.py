@@ -186,15 +186,16 @@ def extract_relative_state(observer_sim, target_sim,
     [x_body, y_body, z_body, theta_v_body, psi_v_body, V_target,
      theta_LOS_body, psi_LOS_body, q_LOS, d]
 
-    ``q_LOS`` uses the project's explicit interpretation of the paper: the
-    three-dimensional angle between observer body-x and observer-to-target LOS.
+    ``q_LOS`` is the three-dimensional angle between observer velocity and the
+    observer-to-target LOS.  This keeps directional q_ij/q_ji semantics
+    consistent across Table 2 and Eq.20-22.
     """
     obs_pos = np.asarray(observer_sim.get_position(), dtype=np.float64)
     tgt_pos = np.asarray(target_sim.get_position(), dtype=np.float64)
     obs_vel = np.asarray(observer_sim.get_velocity(), dtype=np.float64)
     tgt_vel = np.asarray(target_sim.get_velocity(), dtype=np.float64)
     roll, pitch, heading = np.asarray(observer_sim.get_rpy(), dtype=np.float64)
-    rel_pos_body, theta_los_body, psi_los_body, q_los = \
+    rel_pos_body, theta_los_body, psi_los_body, _body_axis_q_los = \
         body_angles_from_neu_vector(
             tgt_pos - obs_pos, roll, pitch, heading)
     x_body, y_body, z_body = [float(v) for v in rel_pos_body]
@@ -204,6 +205,14 @@ def extract_relative_state(observer_sim, target_sim,
         body_angles_from_neu_vector(
             tgt_vel - obs_vel, roll, pitch, heading)
     target_speed = float(np.linalg.norm(tgt_vel))
+    los_neu = tgt_pos - obs_pos
+    los_norm = float(np.linalg.norm(los_neu))
+    obs_speed = float(np.linalg.norm(obs_vel))
+    if los_norm <= 1e-8 or obs_speed <= 1e-8:
+        q_los = 0.0
+    else:
+        q_los = float(np.arccos(np.clip(
+            float(np.dot(obs_vel, los_neu)) / (obs_speed * los_norm), -1.0, 1.0)))
 
     if not radar_detected:
         theta_v_body = 0.0
@@ -324,7 +333,7 @@ def build_strict_paper_entity_observation(env, agent_id: str):
             "alpha_source": self_meta["alpha_source"],
             "beta_source": self_meta["beta_source"],
         },
-        "q_los": "observer_body_x_to_target_los_3d_angle_interpretation",
+        "q_los": "observer_velocity_to_target_los_3d_angle_interpretation",
         "radar_detected": radar_mode,
         "layout": {
             "n_ego": 1,

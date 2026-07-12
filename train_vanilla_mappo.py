@@ -98,6 +98,8 @@ class Config:
     altitude_reward_config = DEFAULT_ALTITUDE_REWARD_CONFIG
     resume_from_best: bool = False
     action_dim: int = 3
+    algorithm_type: str = "mappo_mlp"
+    environment_version: str = "brma_paper_profile_v1"
 
     # ---- PPO (论文 Table 3) ----
     replay_buffer_size: int = 2000  
@@ -444,6 +446,10 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "missile_guidance_mode": config.missile_guidance_mode,
         "altitude_reward_config": asdict(config.altitude_reward_config),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
+        "algorithm_type": str(config.algorithm_type),
+        "environment_version": str(config.environment_version),
+        "q_los_version": "observer_velocity_to_target_los_3d_v1",
+        "altitude_reward_interpretation": "pairwise_sum_all_alive_enemies_v1",
         "num_red": int(config.num_red),
         "num_blue": int(config.num_blue),
         "global_state_dim": int(global_state_dim),

@@ -130,7 +130,7 @@ def parse_args_attention():
     brma_temperature = 0.1
     brma_max_mask_allies = 2
     brma_max_mask_enemies = 2
-    brma_lr = 3e-4
+    brma_lr = 5e-4
     brma_entropy_coef = 0.05
     brma_max_grad_norm = 0.5
     brma_update_minibatch_size = 256
@@ -649,7 +649,7 @@ def ppo_update_attention(actor, critic, actor_opt, critic_opt,
                     )
                     new_lps.append(
                         action_dist.log_prob(actions[t_idx].unsqueeze(0)).sum(dim=-1))
-                    traj_entropies.append(action_dist.entropy().mean())
+                    traj_entropies.append(action_dist.base_entropy().mean())
 
                 new_lp = torch.cat(new_lps)
                 entropy_mean = torch.stack(traj_entropies).mean()
@@ -670,8 +670,7 @@ def ppo_update_attention(actor, critic, actor_opt, critic_opt,
                                             dtype=torch.float32, device=device)
                     msk_t = torch.as_tensor(np.stack(crit_msks),
                                             dtype=torch.long, device=device)
-                    all_values = critic(ent_t, msk_t)  # (T, num_red)
-                    values = all_values[:, agent_idx]
+                    values = critic(ent_t, msk_t).squeeze(-1)
                 else:
                     global_obs = torch.as_tensor(
                         global_obs_by_env[env_idx][traj["alive_steps"]],
@@ -1217,10 +1216,10 @@ def main():
                     msk_t = torch.as_tensor(team_msk, dtype=torch.long,
                                             device=device).unsqueeze(0)
                     with torch.no_grad():
-                        v_per_agent = critic(ent_t, msk_t).squeeze(0)
+                        v_team = critic(ent_t, msk_t).item()
                     for i in range(config.num_red):
                         if buffer.alive[step, env_idx, i]:
-                            buffer.values[step, env_idx, i] = float(v_per_agent[i].item())
+                            buffer.values[step, env_idx, i] = float(v_team)
                 else:
                     global_obs_np = _build_global_obs_for_env(
                         env_obs,
@@ -1252,10 +1251,14 @@ def main():
                     if dones.get(rid, False):
                         rnn_hidden_actor[env_idx, i] = np.zeros(
                             config.rnn_hidden_size, dtype=np.float32)
-                    current_ep_reward_red[env_idx] += rew.get(rid, 0.0)
                     rcinfo = info.get(rid, {})
                     for key in comp_keys:
                         current_ep_comp_red[key][env_idx] += rcinfo.get(key, 0.0)
+
+                # paper_joint is identical for every teammate; accumulate the
+                # team reward once per environment step, never once per agent.
+                if red_ids:
+                    current_ep_reward_red[env_idx] += rew.get(red_ids[0], 0.0)
 
                 for rid in red_ids:
                     fired = info.get(rid, {}).get("missiles_fired_this_step", 0)
@@ -1325,9 +1328,9 @@ def main():
                 msk_t = torch.as_tensor(team_msk, dtype=torch.long,
                                         device=device).unsqueeze(0)
                 with torch.no_grad():
-                    v_per_agent = critic(ent_t, msk_t).squeeze(0)
+                    v_team = critic(ent_t, msk_t).item()
                 for i in range(config.num_red):
-                    buffer.bootstrap_values[env_idx, i] = float(v_per_agent[i].item())
+                    buffer.bootstrap_values[env_idx, i] = float(v_team)
             else:
                 global_obs_np = _build_global_obs_for_env(
                     env_obs,

@@ -213,7 +213,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                                             dtype=torch.float32, device=device)
                     with torch.no_grad():
                         action_dist, new_rnn, _attn = actor(entities_t, masks_t, rnn_t)
-                        act = action_dist.mean.clamp(-1.0, 1.0)
+                        act = action_dist.mode
                     for k, i in enumerate(alive_indices):
                         actions[red_ids[i]] = act[k].cpu().numpy().astype(np.float32)
                         rnn_a[i] = new_rnn[k].cpu().numpy()

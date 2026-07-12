@@ -453,6 +453,79 @@ EXPERIMENT_PRESETS = {
 }
 
 
+_PAPER_COMMON = {
+    "obs_mode": "paper_strict",
+    "obs_normalization": "paper_fixed_v1",
+    "obs_adapter": "strict",
+    "reward_mode": "paper_joint",
+    "pid_profile": "paper",
+    "pid_throttle_base": 0.0,
+    "missile_guidance_mode": "paper_eq9",
+    "max_episode_length": 1400,
+    "replay_buffer_size": 2000,
+    "actor_lr": 2e-4,
+    "critic_lr": 5e-4,
+    "entropy_coef": 0.05,
+    "hidden_size": 128,
+    "rnn_hidden_size": 128,
+    "enable_blue_gcas": False,
+    "enable_kill_cooldown_gate": False,
+    "enable_single_kill_per_step_gate": False,
+}
+
+
+def _paper_preset(team_size: int, algorithm_type: str, *, canonical: bool) -> dict:
+    p = dict(_PAPER_COMMON)
+    p.update({
+        "num_red": team_size,
+        "num_blue": team_size,
+        "algorithm_type": algorithm_type,
+        "num_envs": 32 if canonical else 8,
+        "total_env_steps": 10_000_000 if canonical else 200_000,
+        "eval_episodes": 100 if canonical else 20,
+        "seed_count": 3,
+    })
+    if algorithm_type != "mappo_mlp":
+        p.update({
+            "encoder_mode": "paper-eq33",
+            "critic_state": "attention-entities",
+            "attention_heads": 4,
+            "brma_mode": "train" if algorithm_type == "brma_mappo" else "off",
+            "brma_temperature": 0.1,
+            "brma_max_mask_allies": 2,
+            "brma_max_mask_enemies": 2,
+            "brma_lr": 5e-4,
+            "brma_entropy_coef": 0.05,
+        })
+    return p
+
+
+EXPERIMENT_PRESETS.update({
+    "main_3v3_mappo_mlp": _paper_preset(3, "mappo_mlp", canonical=False),
+    "main_3v3_mappo_attention": _paper_preset(3, "mappo_attention", canonical=False),
+    "main_3v3_brma_mappo": _paper_preset(3, "brma_mappo", canonical=False),
+    "paper_6v6_mappo_mlp": _paper_preset(6, "mappo_mlp", canonical=True),
+    "paper_6v6_mappo_attention": _paper_preset(6, "mappo_attention", canonical=True),
+    "paper_6v6_mappo_dropout": _paper_preset(6, "mappo_dropout", canonical=True),
+    "paper_6v6_brma_mappo": _paper_preset(6, "brma_mappo", canonical=True),
+    "paper_6v6_hardware_8env": {
+        **_paper_preset(6, "brma_mappo", canonical=True), "num_envs": 8,
+    },
+    "paper_eval_6v6": {"num_red": 6, "num_blue": 6, "eval_episodes": 100,
+                       "inference_friend_drop": 0, "inference_enemy_drop": 0},
+    "paper_eval_8v8_zero_shot": {
+        "num_red": 8, "num_blue": 8, "train_team_size": 6,
+        "eval_episodes": 100, "inference_friend_drop": 2,
+        "inference_enemy_drop": 2,
+    },
+    "paper_eval_10v10_zero_shot": {
+        "num_red": 10, "num_blue": 10, "train_team_size": 6,
+        "eval_episodes": 100, "inference_friend_drop": 4,
+        "inference_enemy_drop": 4,
+    },
+})
+
+
 def list_presets() -> list[str]:
     return sorted(EXPERIMENT_PRESETS.keys())
 

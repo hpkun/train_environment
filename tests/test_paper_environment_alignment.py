@@ -520,7 +520,19 @@ def test_paper_relative_body_axes_use_z_down_and_positive_pitch_nose_up():
     row_on_nose = extract_relative_state(pitched, on_nose)
     assert row_on_nose[0] > 999.0
     assert abs(row_on_nose[2]) < 1e-6
-    assert abs(row_on_nose[8]) < 1e-6
+    # qLOS follows velocity rather than body-x; a level velocity vector sees
+    # this pitched-up LOS at 30 degrees.
+    assert math.isclose(row_on_nose[8], pitch, rel_tol=0.0, abs_tol=1e-6)
+
+
+def test_paper_q_los_uses_velocity_direction_not_body_axis():
+    observer = _FakeSim(
+        [0.0, 0.0, 0.0], [100.0, 0.0, 0.0],
+        rpy=(0.0, 0.0, math.pi / 2.0),
+    )
+    target = _FakeSim([1000.0, 0.0, 0.0], [100.0, 0.0, 0.0])
+    row = extract_relative_state(observer, target)
+    assert math.isclose(row[8], 0.0, abs_tol=1e-6)
 
 
 def test_body_x_q_los_geometry_cardinal_cases():

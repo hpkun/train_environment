@@ -9,7 +9,13 @@ import logging
 import numpy as np
 import gymnasium
 
-from my_uav_env.alignment.los_geometry import compute_3d_range, compute_body_x_q_los
+from configs.brma_mappo_paper_spec import paper_value
+
+from my_uav_env.alignment.los_geometry import (
+    compute_3d_range,
+    compute_body_x_q_los,
+    compute_velocity_q_los,
+)
 from my_uav_env.alignment.launch_quality import (
     LAUNCH_QUALITY_FIELDS,
     make_launch_quality_record,
@@ -18,7 +24,7 @@ from my_uav_env.alignment.launch_quality import (
 from my_uav_env.alignment.reward_utils import (
     DEFAULT_ALTITUDE_REWARD_CONFIG,
     REWARD_VERSION,
-    altitude_reward_pairwise_mean_eq17,
+    altitude_reward_pairwise_sum_eq17,
     ta_angle_advantage_fixed,
     td_distance_advantage,
 )
@@ -161,35 +167,35 @@ class UavCombatEnv(gymnasium.Env):
     #            in level flight at 10 kft.  Mach reference: a ≈ 340 m/s at sea level,
     #            ≈ 328 m/s at 10 kft ISA.
     PITCH_DEG = 90.0             # paper §2.4: full longitudinal authority (±90°)
-    VELOCITY_MIN = 102.0         # m/s TAS  (M0.30)
-    VELOCITY_MAX = 408.0         # m/s TAS  (M1.20)
+    VELOCITY_MIN = paper_value("action_speed_mach")[0] * paper_value("mach_reference_mps")
+    VELOCITY_MAX = paper_value("action_speed_mach")[1] * paper_value("mach_reference_mps")
 
     MISSILE_COOLDOWN_STEPS = 30        # default 0.5 s at 60 Hz; __init__ scales with sim_freq
     MISSILE_LOCK_DELAY_FRAMES = 15     # default 0.25 s at 60 Hz; __init__ scales with sim_freq
     KILL_COOLDOWN_STEPS = 3            # legacy engineering guard; disabled by default
     MISSILE_LAUNCH_AO_THRESH = np.deg2rad(45)
-    MISSILE_LAUNCH_RANGE_THRESH = 10000.0  # m — paper: photoelectric sensor max range
-    MISSILE_LAUNCH_MIN_RANGE = 500.0      # m — minimum safe launch distance (prevents point-blank self-hit)
+    MISSILE_LAUNCH_RANGE_THRESH = paper_value("electro_optical_range_m")
+    MISSILE_LAUNCH_MIN_RANGE = paper_value("minimum_launch_range_m")
     MISSILE_LAUNCH_TA_THRESH = np.pi / 2   # 90° — must be in enemy rear hemisphere (3-9 line)
 
     # ---- Airborne radar (paper: ±60° azimuth, [-10°, +32°] elevation) ----
     RADAR_AZIMUTH_HALF = np.deg2rad(60)       # ±60° horizontal FOV
     RADAR_ELEVATION_MIN = np.deg2rad(-10)     # look-down limit
     RADAR_ELEVATION_MAX = np.deg2rad(32)      # look-up limit
-    RADAR_K = 40000.0                         # range calibration constant for Rmax = K * RCS^(1/4)
-    RCS_FRONTAL = 0.1                         # m² — front ±30° mean RCS
-    RCS_SIDE = 2.0                            # m² — broadside RCS
+    RADAR_K = paper_value("radar_range_constant")
+    RCS_FRONTAL = paper_value("radar_rcs_frontal_m2")
+    RCS_SIDE = paper_value("radar_rcs_side_m2")
 
     # ---- Battlefield boundaries ----
     # Paper eq.18 uses |x|,|y| > 4e4. Table 4 describes 100 km x 100 km x
     # 10 km, so the two statements are not fully identical; reward/boundary
     # logic follows eq.18 here.
-    BATTLEFIELD_HALF_SIZE = 40000.0   # m, core area +/-40 km
+    BATTLEFIELD_HALF_SIZE = paper_value("boundary_reward_half_width_m")
     BATTLEFIELD_ALTITUDE_MAX = 10000.0  # m — ceiling
     BATTLEFIELD_ALTITUDE_MIN = 2500.0   # m — floor (crash)
-    OVERLOAD_G_LIMIT = 9.0             # paper Table 4: max load factor 9g
+    OVERLOAD_G_LIMIT = paper_value("maximum_aircraft_load_g")
     OVERLOAD_TIME_LIMIT = 10.0         # s after which >9G triggers termination
-    MAX_SPEED = 600.0                  # m/s — paper Table 4: maximum speed
+    MAX_SPEED = paper_value("maximum_aircraft_speed_mps")
 
     # ---- GCAS (Ground Collision Avoidance System) ----
     GCAS_ALTITUDE_THRESH = 3000.0       # m — 静态触发阈值 (低下降率时)
@@ -1325,13 +1331,11 @@ class UavCombatEnv(gymnasium.Env):
     def _situation_reward(self, ego_sim: AircraftSimulator) -> float:
         """r_adv^i = Σ_j (1.0 × Ta_i^j × Td_i^j - 0.8 × Ta_j^i × Td_j^i).
 
-        Uses 3D body-x q_LOS (paper Table 2 geometry) instead of the old
-        2D horizontal AO/TA.  ``q_ij`` is the angle between ego's body
-        x-axis and the LOS to the enemy; ``q_ji`` is the same from the
-        enemy's perspective.  Distance is 3D Euclidean.
+        q_ij and q_ji use each observer's 3D velocity-to-LOS angle.  Launch
+        AO/TA remains a separate fire-control geometry diagnostic.
         """
         ego_pos = ego_sim.get_position()
-        ego_rpy = ego_sim.get_rpy()
+        ego_vel = ego_sim.get_velocity()
 
         enemies = self.red_planes if ego_sim.color == "Blue" else self.blue_planes
         total = 0.0
@@ -1339,10 +1343,10 @@ class UavCombatEnv(gymnasium.Env):
             if not enemy_sim.is_alive:
                 continue
             enemy_pos = enemy_sim.get_position()
-            enemy_rpy = enemy_sim.get_rpy()
+            enemy_vel = enemy_sim.get_velocity()
 
-            q_ij = compute_body_x_q_los(ego_pos, ego_rpy, enemy_pos)
-            q_ji = compute_body_x_q_los(enemy_pos, enemy_rpy, ego_pos)
+            q_ij = compute_velocity_q_los(ego_pos, ego_vel, enemy_pos)
+            q_ji = compute_velocity_q_los(enemy_pos, enemy_vel, ego_pos)
             d_ij = compute_3d_range(ego_pos, enemy_pos)
             d_ji = compute_3d_range(enemy_pos, ego_pos)
 
@@ -1363,7 +1367,7 @@ class UavCombatEnv(gymnasium.Env):
         if not enemy_alts:
             return 0.0
 
-        return altitude_reward_pairwise_mean_eq17(
+        return altitude_reward_pairwise_sum_eq17(
             alt_ego, enemy_alts, config=self.altitude_reward_config)
 
     def _boundary_penalty(self, sim: AircraftSimulator) -> float:

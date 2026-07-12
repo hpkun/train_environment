@@ -189,7 +189,7 @@ class MaskVectorGenerator:
 
 
 # ============================================================================
-#  BRMA learned mask generator (candidate API — not wired into training)
+#  BRMA learned mask generator used by train_attention_mappo.py
 # ============================================================================
 
 @dataclass
@@ -216,12 +216,11 @@ class BRMAMaskGeneratorConfig:
 
 
 class BRMAMaskGenerator(nn.Module):
-    """Candidate learned mask generator for BRMA-MAPPO.
+    """Learned mask generator for BRMA-MAPPO.
 
     Maps per-entity features to a retention probability ``p`` via a
     two-layer MLP.  Lower ``p`` means the entity is more likely to be
-    masked.  This module is **not** wired into training — it provides
-    ``logits`` and ``p`` only; mask sampling is done by external helpers.
+    masked. Mask sampling and straight-through selection are external helpers.
     """
 
     def __init__(self, config: BRMAMaskGeneratorConfig):
@@ -451,7 +450,7 @@ def generate_brma_masks(
 ) -> dict:
     """Generate a full BRMA mask set for one timestep.
 
-    This is a candidate API; it is **not** called by any training script.
+    This API is used by BRMA rollout collection and mask-generator updates.
     """
     B = entity_features.shape[0]
     forward_out = generator_model(entity_features, entity_mask)
@@ -497,6 +496,6 @@ def generate_brma_masks(
             "n_allies": n_allies,
             "n_enemies": n_enemies,
             "temperature": generator_model.cfg.temperature,
-            "mask_type": "brma_candidate_no_verification",
+            "mask_type": "paper_brma_top_m_st_v1",
         },
     }
