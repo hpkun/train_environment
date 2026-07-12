@@ -714,7 +714,12 @@ class UavCombatEnv(gymnasium.Env):
                                 (vn * dn + ve * de) / (vh * rh))
                 turn_dir = 1.0 if ao > 0 else -1.0
 
-                if alt_m > 5000.0:
+                if alt_m > 8500.0:
+                    # Preserve the break turn but do not climb through the
+                    # physical ceiling while carrying positive vertical speed.
+                    target_pitch = np.deg2rad(-5.0 if sim.get_velocity()[2] > 5.0 else 0.0)
+                    target_heading = current_heading + turn_dir * np.deg2rad(60.0)
+                elif alt_m > 5000.0:
                     # High altitude: break turn with ~60° bank.
                     # Pull 25° pitch while executing a ~60° heading break.
                     target_pitch = np.deg2rad(25.0)
@@ -722,7 +727,7 @@ class UavCombatEnv(gymnasium.Env):
                 else:
                     # Low altitude (< 5000 m): wings-level zoom climb.
                     # Pull 30° pitch, maintain current heading (roll out first).
-                    target_pitch = np.deg2rad(30.0)
+                    target_pitch = np.deg2rad(15.0 if alt_m < 1200.0 else 25.0)
                     ego_roll = float(rpy[0])
                     if abs(ego_roll) > np.deg2rad(5):
                         target_heading = current_heading - np.sign(ego_roll) * np.deg2rad(15.0)
@@ -829,9 +834,10 @@ class UavCombatEnv(gymnasium.Env):
                 self._crashed_this_step.add(aid)
                 continue
             g_limit = float(self.environment_config.aircraft.maximum_load_g.value)
-            if self.pid_profile == "paper" and g_load >= 0.95 * g_limit:
-                aileron = 0.0
-                elevator = 0.0
+            if self.pid_profile == "paper" and g_load > g_limit:
+                scale = float(np.clip(g_limit / max(g_load, 1e-9), 0.1, 1.0))
+                aileron *= scale
+                elevator *= scale
                 diag["load_limiter_activations"] += 1
 
             sim.set_property_value("fcs/aileron-cmd-norm", aileron)
@@ -862,18 +868,10 @@ class UavCombatEnv(gymnasium.Env):
             return
         speed = float(np.linalg.norm(velocity))
         maximum = float(self.environment_config.aircraft.maximum_speed_mps.value)
-        if speed <= maximum or speed <= 1e-9:
-            return
         if speed > 10.0 * maximum:
             sim.crash()
             self._death_reasons.setdefault(aid, "Crash_NumericalEnvelope")
             self._crashed_this_step.add(aid)
-            return
-        scale = maximum / speed
-        for prop in ("velocities/u-fps", "velocities/v-fps", "velocities/w-fps"):
-            sim.set_property_value(prop, sim.get_property_value(prop) * scale)
-        sim.set_property_value("fcs/throttle-cmd-norm", 0.0)
-        sim._update_properties()
 
     def _check_missile_launch(self):
         """Rule-based missile launch with lock-delay + hot-update deconfliction.
@@ -1796,6 +1794,17 @@ class UavCombatEnv(gymnasium.Env):
 
     def _get_info(self, reward_components: dict | None = None) -> dict:
         info = {}
+        death_categories = {
+            "Missile_Kill": "missile_hit",
+            "Crash_LowAlt": "low_altitude",
+            "Crash_HighAlt": "high_altitude",
+            "Crash_BattleVolume": "horizontal_out_of_bounds",
+            "Crash_NumericalEnvelope": "overspeed_instability",
+            "Crash_NumericalLoad": "over_g_instability",
+            "Crash_NonFinite": "invalid_jsbsim_state",
+            "Crash_Extreme": "numerical_instability",
+            "Crash_OverG": "over_g_instability",
+        }
         for aid in self.agent_ids:
             sim = self._get_sim(aid)
             # Return per-step delta and reset counter so callers can safely
@@ -1808,6 +1817,9 @@ class UavCombatEnv(gymnasium.Env):
                 "missiles_fired_this_step": delta,
                 "missiles_left": sim.num_left_missiles if sim is not None else 0,
                 "death_reason": self._death_reasons.get(aid, None),
+                "death_category": death_categories.get(
+                    self._death_reasons.get(aid),
+                    "unknown" if self._death_reasons.get(aid) else ""),
                 **dict(self._aircraft_diagnostics.get(aid, {})),
                 "fire_control": self._fire_control_states[aid].snapshot(),
                 "evasion": dict(self._evasion_diagnostics.get(aid, {})),

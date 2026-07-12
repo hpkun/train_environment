@@ -1,4 +1,5 @@
 import math
+import inspect
 
 import numpy as np
 
@@ -7,6 +8,7 @@ from configs.brma_mappo_paper_spec import (
     environment_config_snapshot,
 )
 from my_uav_env import UavCombatEnv
+from rule_based_agent import _blue_simple_pursuit_action_impl
 from my_uav_env.sensors import (
     bilinear_rcs_m2,
     radar_diagnostic,
@@ -135,3 +137,26 @@ def test_initial_centroid_range_and_headings_for_3v3():
         assert math.isclose(delta, math.pi, abs_tol=1e-5)
     finally:
         env.close()
+
+
+def test_paper_pursuit_same_altitude_has_zero_pitch_and_stable_cruise_speed():
+    obs = {
+        "ego_state": np.array([0, 0, 6096, 250, 0, 0, 0, 0, 0, 0], np.float32),
+        "ally_states": np.zeros((0, 10), np.float32),
+        "enemy_states": np.array([[5000, 0, 0, 0, 0, 250, 0, 0, 0, 5000]], np.float32),
+        "alive_mask": np.array([1, 1]),
+        "velocity": np.array([250, 0, 0], np.float32),
+        "altitude": np.array([6096], np.float32),
+    }
+    action = _blue_simple_pursuit_action_impl(
+        obs, 1, 1, 0, 0, own_heading=0.0, paper_profile=True)
+    assert abs(action[0]) < 1e-6
+    expected_speed = 2.0 * (250.0 - 102.0) / 306.0 - 1.0
+    assert math.isclose(action[2], expected_speed, abs_tol=1e-6)
+
+
+def test_paper_constraint_does_not_write_jsbsim_velocity_state():
+    source = inspect.getsource(UavCombatEnv._enforce_aircraft_constraints)
+    assert "velocities/u-fps" not in source
+    assert "velocities/v-fps" not in source
+    assert "velocities/w-fps" not in source

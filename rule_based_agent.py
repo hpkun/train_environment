@@ -467,6 +467,21 @@ def _simple_rescale_absolute_heading(pitch_int: float, target_heading_abs: float
     ], dtype=np.float32)
 
 
+def _paper_cruise_speed_action(speed_mps: float = 250.0) -> float:
+    """Map a stable paper-profile cruise speed into the normalized action."""
+    return float(np.clip(2.0 * (speed_mps - 102.0) / (408.0 - 102.0) - 1.0,
+                         -1.0, 1.0))
+
+
+def _paper_absolute_action(pitch_norm: float, heading_rad: float,
+                           speed_mps: float = 250.0) -> np.ndarray:
+    return np.array([
+        float(np.clip(pitch_norm, -1.0, 1.0)),
+        float(np.clip(_wrap_pi(heading_rad) / np.pi, -1.0, 1.0)),
+        _paper_cruise_speed_action(speed_mps),
+    ], dtype=np.float32)
+
+
 def _blue_simple_pursuit_action_impl(
     obs: dict,
     num_blue: int,
@@ -495,6 +510,8 @@ def _blue_simple_pursuit_action_impl(
     def _record(source: str, target_idx: int | None, state: np.ndarray | None,
                 range_m: float | None, desired_heading: float, action: np.ndarray,
                 reacquire: bool = False) -> np.ndarray:
+        if paper_profile:
+            return action
         _simple_debug_state[blue_id] = {
             "pursuit_variant": (
                 "paper_pursuit" if paper_profile else "simple_safe_pursuit"),
@@ -555,10 +572,34 @@ def _blue_simple_pursuit_action_impl(
         _simple_last_seen_bearing[blue_id] = desired_heading
         _simple_lost_steps[blue_id] = 0
         delta_alt = _relative_delta_alt_m(target_state)
-        pitch = np.clip(delta_alt / max(float(range_m or 300.0), 300.0) * 2.0 + _TRIM_BASELINE, -0.20, 0.25)
+        if paper_profile:
+            horizontal_range = max(float(np.hypot(
+                target_state[0], target_state[1])), 300.0)
+            desired_pitch_rad = float(np.clip(
+                np.arctan2(delta_alt, horizontal_range),
+                -np.deg2rad(15.0), np.deg2rad(15.0)))
+            if alt_m > 8500.0:
+                recovery = np.deg2rad(5.0 if alt_m < 9500.0 else 10.0)
+                if v_up > 5.0:
+                    desired_pitch_rad = min(desired_pitch_rad, -recovery)
+                else:
+                    desired_pitch_rad = min(desired_pitch_rad, 0.0)
+            elif alt_m < 1200.0:
+                recovery = np.deg2rad(5.0 if alt_m > 500.0 else 10.0)
+                if v_up < -5.0:
+                    desired_pitch_rad = max(desired_pitch_rad, recovery)
+                else:
+                    desired_pitch_rad = max(desired_pitch_rad, 0.0)
+            pitch = desired_pitch_rad / (np.pi / 2.0)
+        else:
+            pitch = np.clip(
+                delta_alt / max(float(range_m or 300.0), 300.0) * 2.0
+                + _TRIM_BASELINE, -0.20, 0.25)
         if not paper_profile and alt_m < SAFE_COMBAT_ALT:
             pitch = max(float(pitch), 0.0)
-        action = _simple_rescale_absolute_heading(float(pitch), desired_heading, 0.8)
+        action = (_paper_absolute_action(float(pitch), desired_heading)
+                  if paper_profile else
+                  _simple_rescale_absolute_heading(float(pitch), desired_heading, 0.8))
         return _record("current_target", target_idx, target_state, range_m, desired_heading, action)
 
     if (not paper_profile and blue_id in _simple_last_seen_bearing
@@ -575,9 +616,19 @@ def _blue_simple_pursuit_action_impl(
               ("center_cruise" if own_position is not None else "hold_heading"))
     desired_heading = our_heading if paper_profile else (
         center_heading if own_position is not None else our_heading)
-    pitch = _TRIM_BASELINE if paper_profile else (
+    if paper_profile:
+        if alt_m > 8500.0 and v_up > 5.0:
+            pitch = -np.deg2rad(5.0) / (np.pi / 2.0)
+        elif alt_m < 1200.0 and v_up < -5.0:
+            pitch = np.deg2rad(5.0) / (np.pi / 2.0)
+        else:
+            pitch = 0.0
+    else:
+        pitch = (
         np.clip((SAFE_COMBAT_ALT - alt_m) / 2000.0, -0.10, 0.15) + _TRIM_BASELINE)
-    action = _simple_rescale_absolute_heading(float(pitch), desired_heading, 0.6)
+    action = (_paper_absolute_action(float(pitch), desired_heading)
+              if paper_profile else
+              _simple_rescale_absolute_heading(float(pitch), desired_heading, 0.6))
     return _record(source, None, None, None, desired_heading, action)
 
 
