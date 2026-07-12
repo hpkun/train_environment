@@ -543,7 +543,7 @@ from uav_env.JSBSim.envs.role_situation_v3 import (
     V3_EPISODE_FIELDS,
     V3_REWARD_COMPONENT_FIELDS,
     accumulate_v3_episode_step,
-    aggregate_v3_effective_step,
+    collect_v3_effective_samples,
 )
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 
@@ -1876,6 +1876,7 @@ def _run_training_main() -> None:
                                         **buffer_kwargs)
             red_fired = blue_fired = red_hits = blue_hits = 0
             rollout_reward_sums: defaultdict[str, float] = defaultdict(float)
+            rollout_reward_counts: defaultdict[str, float] = defaultdict(float)
             rollout_reward_steps = 0
             rollout_target_distance_sum = 0.0
             rollout_target_valid_count = 0
@@ -2125,11 +2126,12 @@ def _run_training_main() -> None:
                     _SINGLE_RUNNER_STATE["episode_id"] = current_ep_id[env_idx]
                     rc = next_info.get("reward_components", {}) if isinstance(next_info, dict) else {}
                     if actual_reward_mode == "brma_tam_role_situation_v3":
-                        v3_effective = aggregate_v3_effective_step(
+                        v3_sums, v3_counts = collect_v3_effective_samples(
                             rc, rollout_env.agent_roles, active, rollout_env.red_ids, step=total_steps,
                         )
-                        for key, value in v3_effective.items():
+                        for key, value in v3_sums.items():
                             rollout_reward_sums[key] += value
+                            rollout_reward_counts[key] += v3_counts[key]
                     for aid in rollout_env.red_ids:
                         comp = rc.get(aid, {}) if isinstance(rc, dict) else {}
                         if not isinstance(comp, dict):
@@ -2762,9 +2764,11 @@ def _run_training_main() -> None:
                 "effective_scale_v2_mav_role", "effective_scale_v2_mav_event",
                 "effective_scale_v2_terminal", "effective_scale_v2_total",
                 "effective_scale_v2_component_sum", "effective_scale_v2_identity_error",
-                *V3_EFFECTIVE_FIELDS,
             ):
                 stats[key] = rollout_reward_sums[key] / reward_step_denom
+            for key in V3_EFFECTIVE_FIELDS:
+                count = rollout_reward_counts[key]
+                stats[key] = rollout_reward_sums[key] / count if count > 0.0 else 0.0
             stats.update({
                 "initial_red_count": float(len(env.red_ids)),
                 "attack_uav_reward_target_distance_mean": (

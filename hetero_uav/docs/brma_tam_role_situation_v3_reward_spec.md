@@ -58,7 +58,7 @@ The same rule applies to role-specific flight. A current-step death is included;
 
 Raw fields describe unscaled geometry or role quantities. Scaled fields apply YAML coefficients. Encoded fields include alive-before role-size compensation.
 
-Iteration `effective_*` values are means over actual rollout transitions: common fields over all alive-before red agents, UAV fields over alive-before attack UAVs, and MAV fields over alive-before MAVs. Empty groups are numeric zero.
+Iteration `effective_*` values are alive-before sample means, not per-step means with absent roles filled by zero. The logger maintains a separate sum and count for every field. Common/task/total fields use all alive-before red samples, UAV fields use only alive-before attack-UAV samples, and MAV fields use only alive-before MAV samples. A role that has no samples in a rollout is written as numeric `0.0`. Counts are reset at every rollout boundary.
 
 `episode_reward_components.csv` contains one row per red agent. Sums include only that agent's alive-before transitions. `final_j_combat` is the final valid v3 value, while `max_abs_identity_error` is a maximum rather than a sum. Accumulators are isolated by environment, episode, and agent.
 
@@ -66,7 +66,9 @@ Iteration `effective_*` values are means over actual rollout transitions: common
 
 Static checks require favorable tail geometry to outrank side, head-on, distant, and tailed geometry; concentrated exposure to be penalized; distributed coverage to be preferred; marginal MAV information and safe rear support to be positive; dangerous forward support to be negative; abnormal flight to be penalized; and terminal outcomes to follow the configured ordering.
 
-Equivalent 3V2 and 5V4 constructions must preserve corresponding local offense/threat, normalized coverage/exposure, MAV role magnitude, and alive-before team-mean role contributions within numerical tolerance.
+The deterministic UAV ordering contract is `tail > side_rear > head_on > far_neutral > tailed`, with a negative tailed situation. Team tests compare distributed and concentrated offense matrices and local versus team-wide exposure matrices. The MAV ordering contract is `safe_shared > safe_no_shared > far_no_support > dangerous_forward`; the dangerous-forward value must be negative. Complete task return, rather than terminal bonus alone, is ordered across decisive win, partial attrition, timeout, partial red loss, and red elimination.
+
+The scale test constructs a symmetric 3V2 geometry and duplicates its positions, velocities, headings, and track visibility into 5V4. It compares pair quality, local offense/threat, normalized coverage/exposure, UAV situation, MAV information/support/threat, and role/flight contributions after Pure HAPPO alive-before team averaging. Exact symmetric quantities require absolute error at most `1e-6`. In non-identical entity sets, softmax aggregation can change because normalization is over a different multiset; such cases must report the measured error rather than claim exact invariance.
 
 ## 200K probe gate
 

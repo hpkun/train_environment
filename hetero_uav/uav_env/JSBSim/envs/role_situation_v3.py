@@ -121,33 +121,36 @@ def validate_v3_reward_components(comp, *, agent_id, step):
     return values
 
 
-def aggregate_v3_effective_step(components, roles, active_mask, red_ids, *, step):
+def collect_v3_effective_samples(components, roles, active_mask, red_ids, *, step):
     sums = {key: 0.0 for key in V3_EFFECTIVE_FIELDS}
-    counts = {"common": 0.0, "uav": 0.0, "mav": 0.0}
+    counts = {key: 0.0 for key in V3_EFFECTIVE_FIELDS}
     for index, agent_id in enumerate(red_ids):
         active = float(active_mask[index]) if index < len(active_mask) else 0.0
         if active <= 0.0:
             continue
         values = validate_v3_reward_components(components.get(agent_id, {}), agent_id=agent_id, step=step)
-        counts["common"] += active
         for output, source in _V3_COMMON_EFFECTIVE_MAP.items():
             sums[output] += active * values[source]
+            counts[output] += active
         role = roles.get(agent_id, "")
         if role == "mav":
-            counts["mav"] += active
             mapping = _V3_MAV_EFFECTIVE_MAP
         elif role == "attack_uav":
-            counts["uav"] += active
             mapping = _V3_UAV_EFFECTIVE_MAP
         else:
             mapping = {}
         for output, source in mapping.items():
             sums[output] += active * values[source]
-    common_outputs = set(_V3_COMMON_EFFECTIVE_MAP)
-    uav_outputs = set(_V3_UAV_EFFECTIVE_MAP)
+            counts[output] += active
+    return sums, counts
+
+
+def aggregate_v3_effective_step(components, roles, active_mask, red_ids, *, step):
+    sums, counts = collect_v3_effective_samples(
+        components, roles, active_mask, red_ids, step=step,
+    )
     for key in V3_EFFECTIVE_FIELDS:
-        denominator = counts["common"] if key in common_outputs else counts["uav"] if key in uav_outputs else counts["mav"]
-        sums[key] = sums[key] / denominator if denominator > 0.0 else 0.0
+        sums[key] = sums[key] / counts[key] if counts[key] > 0.0 else 0.0
     return sums
 
 

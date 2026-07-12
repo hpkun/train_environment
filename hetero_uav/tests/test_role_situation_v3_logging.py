@@ -4,6 +4,7 @@ import csv
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from scripts.experiment_logging_schema import (
     EPISODE_REWARD_COMPONENTS_COLUMNS,
@@ -17,6 +18,7 @@ from uav_env.JSBSim.envs.role_situation_v3 import (
     V3_REWARD_COMPONENT_FIELDS,
     accumulate_v3_episode_step,
     aggregate_v3_effective_step,
+    collect_v3_effective_samples,
 )
 
 
@@ -83,6 +85,41 @@ def test_v3_effective_role_means_are_scale_consistent_3v2_to_5v4():
         assert values5[key] == values3[key]
 
 
+def _rollout_field_mean(step_records, field):
+    total = count = 0.0
+    for components, roles, active in step_records:
+        sums, counts = collect_v3_effective_samples(
+            components, roles, active, list(roles), step=1,
+        )
+        total += sums[field]
+        count += counts[field]
+    return total / count if count else 0.0
+
+
+def test_v3_mav_effective_mean_is_not_zero_filled_after_death():
+    roles = {"red_0": "mav", "red_1": "attack_uav", "red_2": "attack_uav"}
+    components = {"red_0": _component(0, mav=True), "red_1": _component(0, uav=True), "red_2": _component(0, uav=True)}
+    components["red_0"]["role_situation_v3_mav_role_raw"] = 0.2
+    records = [(components, roles, np.array([1, 1, 1])) for _ in range(100)]
+    records += [(components, roles, np.array([0, 1, 1])) for _ in range(156)]
+    field = "effective_role_situation_v3_mav_role_raw"
+    assert _rollout_field_mean(records, field) == pytest.approx(0.2)
+    assert sum(aggregate_v3_effective_step(*r, list(r[1]), step=1)[field] for r in records) / 256 == 0.078125
+
+
+def test_v3_parallel_env_role_deaths_use_actual_samples_only():
+    roles = {"red_0": "mav", "red_1": "attack_uav", "red_2": "attack_uav"}
+    c0 = {"red_0": _component(0, mav=True), "red_1": _component(0, uav=True), "red_2": _component(0, uav=True)}
+    c1 = {"red_0": _component(0, mav=True), "red_1": _component(0, uav=True), "red_2": _component(0, uav=True)}
+    c0["red_0"]["role_situation_v3_mav_role_raw"] = 0.2
+    c1["red_0"]["role_situation_v3_mav_role_raw"] = 0.4
+    records = [(c0, roles, np.array([1, 1, 1])) for _ in range(2)]
+    records += [(c1, roles, np.array([1, 1, 1])) for _ in range(3)]
+    records += [(c0, roles, np.array([0, 1, 0])), (c1, roles, np.array([0, 0, 0]))]
+    assert _rollout_field_mean(records, "effective_role_situation_v3_mav_role_raw") == pytest.approx(0.32)
+    assert _rollout_field_mean([(c0, roles, np.zeros(3))], "effective_role_situation_v3_mav_role_raw") == 0.0
+
+
 def test_v3_episode_accumulator_last_and_max_semantics_and_dead_before():
     acc = {}
     first = _component(0, uav=True, j=0.2)
@@ -96,6 +133,24 @@ def test_v3_episode_accumulator_last_and_max_semantics_and_dead_before():
     assert acc["episode_role_situation_v3_final_j_combat"] == 0.7
     assert acc["episode_role_situation_v3_max_abs_identity_error"] == 0.0
     assert set(V3_EPISODE_FIELDS) <= set(acc)
+
+
+def test_v3_parallel_episode_accumulators_are_isolated_by_composite_key():
+    accumulators = {}
+    roles = {"red_0": "mav", "red_1": "attack_uav"}
+    for env_idx, episode_id, length in ((0, 10, 2), (1, 10, 3), (0, 11, 1)):
+        for rid, role in roles.items():
+            key = (env_idx, episode_id, rid)
+            acc = accumulators.setdefault(key, {})
+            for step in range(length):
+                comp = _component(0, mav=role == "mav", uav=role == "attack_uav", j=episode_id + step / 10)
+                accumulate_v3_episode_step(acc, comp, agent_id=rid, role=role, alive_before=True, step=step)
+    assert len(accumulators) == 6
+    assert accumulators[(0, 10, "red_0")]["episode_role_situation_v3_task_attrition_sum"] == 2.0
+    assert accumulators[(1, 10, "red_0")]["episode_role_situation_v3_task_attrition_sum"] == 3.0
+    assert accumulators[(0, 11, "red_0")]["episode_role_situation_v3_task_attrition_sum"] == 1.0
+    assert accumulators[(0, 10, "red_1")]["episode_role_situation_v3_final_j_combat"] == 10.1
+    print("parallel_episode_keys", sorted(accumulators), "rows", len(accumulators))
 
 
 def test_logging_schemas_are_unique_and_contain_v3_contracts():
