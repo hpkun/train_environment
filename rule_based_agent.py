@@ -565,19 +565,38 @@ def _blue_simple_pursuit_action_impl(
         target_idx, target_state, range_m = _simple_nearest_target(obs, num_blue, num_red)
 
     if target_state is not None:
-        ao = _relative_bearing_rad(target_state)
-        geo_heading = _simple_body_vector_to_world_bearing(
-            target_state, np.asarray(obs.get("ego_state", []), dtype=np.float32), our_heading)
-        desired_heading = geo_heading if geo_heading is not None else _wrap_pi(our_heading + ao)
-        _simple_last_seen_bearing[blue_id] = desired_heading
-        _simple_lost_steps[blue_id] = 0
-        delta_alt = _relative_delta_alt_m(target_state)
+        if not paper_profile:
+            _simple_last_seen_bearing[blue_id] = desired_heading = (
+                _simple_body_vector_to_world_bearing(
+                    target_state, np.asarray(obs.get("ego_state", []), dtype=np.float32), our_heading)
+            )
+            if desired_heading is None:
+                ao = _relative_bearing_rad(target_state)
+                desired_heading = _wrap_pi(our_heading + ao)
+            _simple_lost_steps[blue_id] = 0
+        else:
+            # Paper profile: single body→inertial conversion for heading + pitch
+            ego = np.asarray(obs.get("ego_state", []), dtype=np.float32)
+            if ego.size >= 10:
+                roll = float(ego[4]); pitch = float(ego[5])
+                hdg = float(our_heading)
+            else:
+                roll = float(np.arctan2(float(ego[7]), float(ego[8])))
+                pitch = float(np.arctan2(float(ego[9]), float(ego[10])))
+                hdg = float(our_heading)
+            tgt = np.asarray(target_state, dtype=np.float32)
+            rel_body = np.array([float(tgt[0]), float(tgt[1]), float(tgt[2])], dtype=np.float64)
+            rel_neu = body_vector_to_inertial_neu(rel_body, roll, pitch, hdg)
+            if np.all(np.isfinite(rel_neu)):
+                desired_heading = _wrap_pi(float(np.arctan2(rel_neu[1], rel_neu[0])))
+                horizontal_range = max(float(np.hypot(rel_neu[0], rel_neu[1])), 1e-6)
+                desired_pitch_rad = float(np.clip(
+                    np.arctan2(rel_neu[2], horizontal_range),
+                    -np.deg2rad(15.0), np.deg2rad(15.0)))
+            else:
+                desired_heading = our_heading
+                desired_pitch_rad = 0.0
         if paper_profile:
-            horizontal_range = max(float(np.hypot(
-                target_state[0], target_state[1])), 300.0)
-            desired_pitch_rad = float(np.clip(
-                np.arctan2(delta_alt, horizontal_range),
-                -np.deg2rad(15.0), np.deg2rad(15.0)))
             if alt_m > 8500.0:
                 recovery = np.deg2rad(5.0 if alt_m < 9500.0 else 10.0)
                 if v_up > 5.0:
@@ -592,6 +611,7 @@ def _blue_simple_pursuit_action_impl(
                     desired_pitch_rad = max(desired_pitch_rad, 0.0)
             pitch = desired_pitch_rad / (np.pi / 2.0)
         else:
+            delta_alt = _relative_delta_alt_m(target_state)
             pitch = np.clip(
                 delta_alt / max(float(range_m or 300.0), 300.0) * 2.0
                 + _TRIM_BASELINE, -0.20, 0.25)
