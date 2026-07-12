@@ -112,3 +112,24 @@ brma_tam_role_situation_v3:
   flight:
     mav_scale: 0.01
     uav_scale: 0.01
+missile_launch_range_m: 14000.0
+missile_attack_interval_sec: 25.0
+missile_guidance:
+  mode: pn
+  navigation_gain: 3.0
+  max_overload_g: 30.0
+missile_protocol:
+  missile_protocol_version: tam_paper_protocol_v1
+  missile_alignment_claim: paper-aligned kinematic approximation, not exact missile
+    reproduction
+  missile_attack_range_m: 14000.0
+  missile_attack_interval_sec: 25.0
+  missile_navigation_gain: 3.0
+  missile_max_overload_g: 30.0
+  missile_mass_kg: 84.0
+  missile_length_m: 2.87
+  missile_diameter_m: 0.127
+  missile_unmodeled_parameters:
+  - missile_mass_kg
+  - missile_length_m
+  - missile_diameter_m

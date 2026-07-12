@@ -1115,6 +1115,44 @@ class HeteroUavCombatEnv(UavCombatEnv):
             raise ValueError("brma_tam_role_situation_v3 requires contract_revision=5")
         if self.observation_mode != "mav_shared_geo":
             raise ValueError("brma_tam_role_situation_v3 requires observation_mode='mav_shared_geo'")
+        if int(self.aircraft_type_params.get("mav", {}).get("num_missiles", 0)) != 0:
+            raise ValueError("brma_tam_role_situation_v3 requires MAV num_missiles == 0")
+        # Check all config sections exist
+        for section in ("task", "situation", "mav", "uav", "flight"):
+            if section not in cfg:
+                raise ValueError(f"brma_tam_role_situation_v3 missing config section: {section}")
+        # Softmax temperature
+        if float(cfg["situation"].get("softmax_temperature", 0.0)) <= 0:
+            raise ValueError("v3 softmax_temperature must be > 0")
+        # Distance ratios
+        dl = float(cfg["situation"].get("distance_optimal_low_ratio", 0))
+        dh = float(cfg["situation"].get("distance_optimal_high_ratio", 0))
+        if not (0 <= dl < dh <= 1):
+            raise ValueError(f"v3 distance ratios must satisfy 0 <= low={dl} < high={dh} <= 1")
+        # Speed modulation
+        smi = float(cfg["situation"].get("speed_modulation_min", 0))
+        sma = float(cfg["situation"].get("speed_modulation_max", 0))
+        if not (0 <= smi <= sma <= 1):
+            raise ValueError(f"v3 speed_modulation must satisfy 0 <= min={smi} <= max={sma} <= 1")
+        # Local/team weights
+        lw = float(cfg["situation"].get("local_weight", 0))
+        tw = float(cfg["situation"].get("team_weight", 0))
+        if not (0 <= lw <= 1 and 0 <= tw <= 1 and abs(lw + tw - 1.0) < 1e-8):
+            raise ValueError(f"v3 local_weight({lw}) + team_weight({tw}) must == 1")
+        # MAV support ratios
+        smin = float(cfg["mav"].get("support_min_distance_ratio", 0))
+        smax = float(cfg["mav"].get("support_max_distance_ratio", 0))
+        if not (smin < smax):
+            raise ValueError(f"v3 mav support ratios must satisfy min={smin} < max={smax}")
+
+    def _reset_role_situation_v3_episode_state(self) -> None:
+        self._v3_episode_state = {
+            "prev_blue_dead": 0, "prev_attack_dead": 0, "prev_mav_dead": 0,
+            "prev_blue_loss": 0.0, "prev_attack_loss": 0.0,
+            "terminal_applied": False,
+            "latest_j_combat": 0.0,
+        }
+        self._v3_alive_before = {}
 
     @staticmethod
     def _scale_v1_distance_potential(distance_m: float, optimal_km: float = 5.0,
@@ -3447,6 +3485,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self._tam_brma_scripted_terminal_applied: bool = False
         self._tam_brma_scripted_mav_death_penalized: bool = False
         self._tam_brma_scripted_uav_death_penalized: set[str] = set()
+        if self.hetero_reward_mode == "brma_tam_role_situation_v3":
+            self._reset_role_situation_v3_episode_state()
         obs, info = super().reset(*args, **kwargs)
         if self._needs_last_step_obs_cache():
             self._last_step_obs = obs
