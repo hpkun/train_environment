@@ -83,6 +83,14 @@ for _col in FINAL_PURE_HAPPO_COLUMNS:
 for _col in PURE_HAPPO_LEARNABILITY_COLUMNS:
     if _col not in TRAIN_METRICS_COLUMNS:
         TRAIN_METRICS_COLUMNS.append(_col)
+# V3 role-situation effective + episode fields
+from uav_env.JSBSim.envs.role_situation_v3 import V3_EFFECTIVE_FIELDS, V3_EPISODE_FIELDS
+for _col in V3_EFFECTIVE_FIELDS:
+    if _col not in TRAIN_METRICS_COLUMNS:
+        TRAIN_METRICS_COLUMNS.append(_col)
+for _col in V3_EPISODE_FIELDS:
+    if _col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
+        EPISODE_REWARD_COMPONENTS_COLUMNS.append(_col)
 
 EVAL_EPISODE_COLUMNS = [
     "run_id", "checkpoint_name", "eval_scenario", "episode_id", "seed",

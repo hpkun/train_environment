@@ -10,6 +10,55 @@ from __future__ import annotations
 import math
 import numpy as np
 
+# ── Unified field constants (used by reward, logging, tests) -------------------
+V3_REWARD_COMPONENT_FIELDS = (
+    "reward_contract_revision",
+    "role_situation_v3_task_attrition", "role_situation_v3_task_terminal",
+    "role_situation_v3_common", "role_situation_v3_delta_j", "role_situation_v3_j_combat",
+    "role_situation_v3_blue_loss_fraction", "role_situation_v3_uav_loss_fraction",
+    "role_situation_v3_mav_loss_indicator", "role_situation_v3_blue_loss_delta",
+    "role_situation_v3_uav_loss_delta", "role_situation_v3_mav_loss_delta",
+    "role_situation_v3_uav_local_offense_raw", "role_situation_v3_uav_local_threat_raw",
+    "role_situation_v3_team_coverage_raw", "role_situation_v3_team_exposure_raw",
+    "role_situation_v3_uav_situation_raw", "role_situation_v3_uav_situation_scaled",
+    "role_situation_v3_uav_situation_encoded",
+    "role_situation_v3_mav_marginal_information_raw", "role_situation_v3_mav_support_distance_raw",
+    "role_situation_v3_mav_support_rear_raw", "role_situation_v3_mav_support_position_raw",
+    "role_situation_v3_mav_geometric_threat_raw", "role_situation_v3_mav_missile_warning",
+    "role_situation_v3_mav_threat_raw", "role_situation_v3_mav_role_raw",
+    "role_situation_v3_mav_role_scaled", "role_situation_v3_mav_role_encoded",
+    "role_situation_v3_flight_raw", "role_situation_v3_flight_norm", "role_situation_v3_flight_scaled",
+    "role_situation_v3_flight_encoded", "role_situation_v3_role_encoded",
+    "role_situation_v3_total", "role_situation_v3_component_sum", "role_situation_v3_identity_error",
+    "role_situation_v3_alive_red_before_count", "role_situation_v3_alive_uav_before_count",
+    "role_situation_v3_alive_blue_after_count", "role_situation_v3_is_mav", "role_situation_v3_is_attack_uav",
+)
+
+V3_EFFECTIVE_FIELDS = (
+    "effective_role_situation_v3_task_attrition", "effective_role_situation_v3_task_terminal",
+    "effective_role_situation_v3_common", "effective_role_situation_v3_delta_j",
+    "effective_role_situation_v3_j_combat",
+    "effective_role_situation_v3_uav_local_offense", "effective_role_situation_v3_uav_local_threat",
+    "effective_role_situation_v3_team_coverage", "effective_role_situation_v3_team_exposure",
+    "effective_role_situation_v3_uav_situation_raw", "effective_role_situation_v3_uav_situation_scaled",
+    "effective_role_situation_v3_uav_situation_encoded",
+    "effective_role_situation_v3_mav_marginal_information", "effective_role_situation_v3_mav_support_position",
+    "effective_role_situation_v3_mav_threat",
+    "effective_role_situation_v3_mav_role_raw", "effective_role_situation_v3_mav_role_scaled",
+    "effective_role_situation_v3_mav_role_encoded",
+    "effective_role_situation_v3_uav_flight_encoded", "effective_role_situation_v3_mav_flight_encoded",
+    "effective_role_situation_v3_role_encoded",
+    "effective_role_situation_v3_total", "effective_role_situation_v3_component_sum",
+    "effective_role_situation_v3_identity_error",
+)
+
+V3_EPISODE_FIELDS = (
+    "episode_role_situation_v3_task_attrition_sum", "episode_role_situation_v3_task_terminal_sum",
+    "episode_role_situation_v3_common_sum",
+    "episode_role_situation_v3_uav_situation_encoded_sum", "episode_role_situation_v3_mav_role_encoded_sum",
+    "episode_role_situation_v3_flight_encoded_sum", "episode_role_situation_v3_total_sum",
+    "episode_role_situation_v3_final_j_combat", "episode_role_situation_v3_max_abs_identity_error",
+)
 
 # ── Clipping helpers -----------------------------------------------------------
 def _clip_unit(x):
