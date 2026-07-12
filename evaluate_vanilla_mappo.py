@@ -24,6 +24,7 @@ from train_vanilla_mappo import (
     _compute_obs_dim,
     _episode_outcome,
     _flatten_obs,
+    _joint_team_reward_once,
     _safe_div,
     _unpack_and_validate_checkpoint,
 )
@@ -263,7 +264,8 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
 
             obs, _rewards, terminated, truncated, info = env.step(actions)
             steps += 1
-            red_episode_joint_reward += float(_rewards.get(red_ids[0], 0.0))
+            red_episode_joint_reward += _joint_team_reward_once(
+                _rewards, red_ids)
 
             for rid in red_ids:
                 red_missiles_fired += info.get(rid, {}).get(

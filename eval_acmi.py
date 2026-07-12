@@ -60,6 +60,7 @@ from train_vanilla_mappo import (
     _compute_obs_dim,
     _episode_outcome,
     _flatten_obs,
+    _joint_team_reward_once,
     _safe_div,
     _unpack_and_validate_checkpoint,
 )
@@ -316,6 +317,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
     death_reasons: dict[str, str] = {}      # agent_id → reason (recorded on death)
     red_missiles_total = 0.0
     blue_missiles_total = 0.0
+    red_episode_joint_reward = 0.0
 
     # ---- 5. 对战循环 ----
     step = 0
@@ -376,6 +378,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
             # 环境步进
             obs, rewards, terminated, truncated, info = env.step(actions)
             step += 1
+            red_episode_joint_reward += _joint_team_reward_once(rewards, red_ids)
 
             for rid in red_ids:
                 red_missiles_total += info.get(rid, {}).get("missiles_fired_this_step", 0)
@@ -492,6 +495,8 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                 rwr_single = 1.0 if _episode_outcome(red_alive, blue_alive) == "red" else 0.0
 
                 print("  Paper metrics:", flush=True)
+                print(f"    EpisodeRewardRed: {red_episode_joint_reward:.6f}",
+                      flush=True)
                 print(f"    RedAlive / BlueAlive: {red_alive} / {blue_alive}", flush=True)
                 print(f"    Red missiles fired / Blue missiles fired: "
                       f"{red_missiles_total:.0f} / {blue_missiles_total:.0f}",

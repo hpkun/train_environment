@@ -263,6 +263,23 @@ def test_run_one_episode_does_not_reference_outer_args():
     assert "args" not in names
 
 
+def test_evaluation_and_acmi_use_shared_joint_reward_reader():
+    for path, function_name in (
+        ("evaluate_vanilla_mappo.py", "run_one_episode"),
+        ("eval_acmi.py", "run_acmi"),
+    ):
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+        func = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == function_name
+        )
+        called_names = {
+            node.func.id for node in ast.walk(func)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "_joint_team_reward_once" in called_names
+
+
 def test_paper_strict_world_bearing_zero_roll_pitch_matches_yaw_plane():
     state = np.array(
         [1000.0, 1000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, math.sqrt(2) * 1000.0],
