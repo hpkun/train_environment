@@ -286,7 +286,7 @@ class RichExperimentLogger:
                 "agent_id": agent_id,
                 "role": role,
                 "total_reward": comp.get(
-                    "tam_v7_total",
+                    "total" if "uav_scaled_total" in comp or "mav_scaled_total" in comp else "tam_v7_total",
                     comp.get(
                         "tam_table1_total",
                         comp.get(

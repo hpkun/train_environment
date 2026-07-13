@@ -546,6 +546,11 @@ from uav_env.JSBSim.envs.role_situation_v3 import (
     collect_v3_effective_samples,
 )
 from uav_env.JSBSim.envs.paper_calibrated_v4 import V4_COMPONENT_FIELDS
+from uav_env.JSBSim.envs.paper_formula_v5 import (
+    V5_COMPONENT_FIELDS,
+    V5_TRAIN_FIELDS,
+    collect_v5_effective_samples,
+)
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 
 
@@ -1842,6 +1847,7 @@ def _run_training_main() -> None:
             "effective_team_total", "active_red_count",
             "effective_component_sum", "effective_total_minus_component_sum",
             "initial_red_count", "effective_initial_team_mean_total",
+            *V5_TRAIN_FIELDS,
             *MARL_DYNAMICS_TRAIN_FIELDS,
             "nan_detected",
         ])
@@ -2133,6 +2139,14 @@ def _run_training_main() -> None:
                         for key, value in v3_sums.items():
                             rollout_reward_sums[key] += value
                             rollout_reward_counts[key] += v3_counts[key]
+                    if actual_reward_mode == "tam_happo_paper_formula_v5":
+                        v5_sums, v5_counts = collect_v5_effective_samples(rc, rollout_env.agent_roles)
+                        for key, value in v5_sums.items():
+                            if key == "v5_identity_max_abs":
+                                rollout_reward_sums[key] = max(rollout_reward_sums[key], value)
+                            else:
+                                rollout_reward_sums[key] += value
+                            rollout_reward_counts[key] += v5_counts[key]
                     for aid in rollout_env.red_ids:
                         comp = rc.get(aid, {}) if isinstance(rc, dict) else {}
                         if not isinstance(comp, dict):
@@ -2179,6 +2193,7 @@ def _run_training_main() -> None:
                                 or key.startswith("paper_v1_")
                                 or key in BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS
                                 or key in V4_COMPONENT_FIELDS
+                                or key in V5_COMPONENT_FIELDS
                                 or key in BRMA_TAM_SCALE_V1_COMPONENT_COLUMNS
                                 or key in {
                                     "mav_observed_ratio",
@@ -2204,6 +2219,9 @@ def _run_training_main() -> None:
                                 continue
                             if key in {"scale_v1_progress_reset_reason", "scale_v1_reward_target_id"}:
                                 agent_acc[key + "_last"] = str(value)
+                                continue
+                            if key in {"target_id", "closest_target_id", "lock_target_id", "launch_target_id", "nearest_threat_id", "brma_key_entity_id"}:
+                                agent_acc[key + "_sum"] = str(value)
                                 continue
                             try:
                                 delta = float(value)
@@ -2242,7 +2260,7 @@ def _run_training_main() -> None:
                             role = rollout_env.agent_roles.get(rid, "")
                             scale_v1 = actual_reward_mode == "brma_tam_scale_aligned_v1"
                             scale_v2 = actual_reward_mode == "brma_tam_scale_aligned_v2"
-                            if actual_reward_mode in {"brma_tam_role_situation_v3", "brma_tam_paper_calibrated_v4"}:
+                            if actual_reward_mode in {"brma_tam_role_situation_v3", "brma_tam_paper_calibrated_v4", "tam_happo_paper_formula_v5"}:
                                 continue
                             if scale_v1 and role == "mav":
                                 identity_keys = (
@@ -2779,6 +2797,9 @@ def _run_training_main() -> None:
             for key in V3_EFFECTIVE_FIELDS:
                 count = rollout_reward_counts[key]
                 stats[key] = rollout_reward_sums[key] / count if count > 0.0 else 0.0
+            for key in V5_TRAIN_FIELDS:
+                count = rollout_reward_counts[key]
+                stats[key] = rollout_reward_sums[key] / count if count > 0.0 else 0.0
             stats.update({
                 "initial_red_count": float(len(env.red_ids)),
                 "attack_uav_reward_target_distance_mean": (
@@ -2962,6 +2983,7 @@ def _run_training_main() -> None:
                 f"{stats.get('effective_total_minus_component_sum', 0):.4f}",
                 f"{stats.get('initial_red_count', 0):.4f}",
                 f"{stats.get('effective_initial_team_mean_total', 0):.4f}",
+                *[f"{stats.get(field, 0.0):.6f}" for field in V5_TRAIN_FIELDS],
                 *[_format_metric(stats.get(field, 0.0)) for field in MARL_DYNAMICS_TRAIN_FIELDS],
                 int(nan_detected),
             ])

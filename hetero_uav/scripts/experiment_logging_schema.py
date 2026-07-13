@@ -349,6 +349,10 @@ from uav_env.JSBSim.envs.paper_calibrated_v4 import V4_COMPONENT_FIELDS
 for _col in V4_COMPONENT_FIELDS:
     if _col not in REWARD_COMPONENT_COLUMNS:
         REWARD_COMPONENT_COLUMNS.append(_col)
+from uav_env.JSBSim.envs.paper_formula_v5 import V5_COMPONENT_FIELDS
+for _col in V5_COMPONENT_FIELDS:
+    if _col not in REWARD_COMPONENT_COLUMNS:
+        REWARD_COMPONENT_COLUMNS.append(_col)
 
 REWARD_TARGET_DIAGNOSTICS_COLUMNS = [
     "run_id", "scenario", "episode_id", "step", "sim_time",
@@ -549,6 +553,10 @@ for _col in V3_EPISODE_FIELDS:
     if _col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
         EPISODE_REWARD_COMPONENTS_COLUMNS.append(_col)
 for _col in V4_COMPONENT_FIELDS:
+    _episode_col = f"{_col}_sum"
+    if _episode_col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
+        EPISODE_REWARD_COMPONENTS_COLUMNS.append(_episode_col)
+for _col in V5_COMPONENT_FIELDS:
     _episode_col = f"{_col}_sum"
     if _episode_col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
         EPISODE_REWARD_COMPONENTS_COLUMNS.append(_episode_col)

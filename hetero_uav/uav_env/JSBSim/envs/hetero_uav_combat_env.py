@@ -135,7 +135,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
-        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8", "tam_brma_paper_aligned_v1", "tam_happo_table1_v1", "brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2", "brma_tam_role_situation_v3", "brma_tam_paper_calibrated_v4"}:
+        if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8", "tam_brma_paper_aligned_v1", "tam_happo_table1_v1", "brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2", "brma_tam_role_situation_v3", "brma_tam_paper_calibrated_v4", "tam_happo_paper_formula_v5"}:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
         self._tam_reward_scale = float(kwargs.pop("tam_reward_scale", 0.05))
@@ -201,6 +201,10 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.brma_tam_paper_calibrated_v4_config = deepcopy(_v4_cfg)
         if hetero_reward_mode == "brma_tam_paper_calibrated_v4" and not self.brma_tam_paper_calibrated_v4_config:
             raise ValueError("brma_tam_paper_calibrated_v4 mode requires config block")
+        _v5_cfg = kwargs.pop("tam_happo_paper_formula_v5", None) or {}
+        self.tam_happo_paper_formula_v5_config = deepcopy(_v5_cfg)
+        if hetero_reward_mode == "tam_happo_paper_formula_v5" and not self.tam_happo_paper_formula_v5_config:
+            raise ValueError("tam_happo_paper_formula_v5 mode requires config block")
         # Cached per-step obs for reward overlay (minimal_v1 / role_v1)
         self._last_step_obs: dict = {}
         # First-death detection for MAV — penalize once per episode
@@ -3505,10 +3509,11 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "tam_brma_paper_aligned_v1", "tam_happo_table1_v1",
             "brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1",
             "brma_tam_scale_aligned_v2", "brma_tam_role_situation_v3", "brma_tam_paper_calibrated_v4",
+            "tam_happo_paper_formula_v5",
         }
 
     def step(self, actions: dict):
-        if self.hetero_reward_mode in {"brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2", "brma_tam_role_situation_v3", "brma_tam_paper_calibrated_v4"}:
+        if self.hetero_reward_mode in {"brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2", "brma_tam_role_situation_v3", "brma_tam_paper_calibrated_v4", "tam_happo_paper_formula_v5"}:
             self._brma_tam_alive_before_step = {
                 aid: bool(getattr((self.red_planes.get(aid) or self.blue_planes.get(aid)), "is_alive", False))
                 for aid in self.agent_ids
@@ -3550,6 +3555,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
         if self.hetero_reward_mode == "brma_tam_paper_calibrated_v4":
             from uav_env.JSBSim.envs.paper_calibrated_v4 import reset_v4_state
             reset_v4_state(self)
+        if self.hetero_reward_mode == "tam_happo_paper_formula_v5":
+            from uav_env.JSBSim.envs.paper_formula_v5 import reset_v5_state
+            reset_v5_state(self)
         obs, info = super().reset(*args, **kwargs)
         if self._needs_last_step_obs_cache():
             self._last_step_obs = obs
@@ -5369,6 +5377,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
             if self.hetero_reward_mode == "brma_tam_paper_calibrated_v4":
                 from uav_env.JSBSim.envs.paper_calibrated_v4 import compute_v4_reward
                 return compute_v4_reward(self, base_rewards, components)
+            if self.hetero_reward_mode == "tam_happo_paper_formula_v5":
+                from uav_env.JSBSim.envs.paper_formula_v5 import compute_v5_reward
+                return compute_v5_reward(self, base_rewards, components)
             return base_rewards, components
 
         mav_id = self.red_ids[0] if self.red_ids else None
