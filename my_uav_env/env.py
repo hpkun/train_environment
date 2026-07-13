@@ -622,6 +622,10 @@ class UavCombatEnv(gymnasium.Env):
         kinematics = self.get_blue_own_kinematics()
         selected_missiles: dict[str, str | None] = {}
         mws_detected: dict[str, bool] = {}
+        own_alive = {
+            blue_id: bool(sim.is_alive)
+            for blue_id, sim in self.blue_planes.items()
+        }
         for blue_id, sim in self.blue_planes.items():
             missile = (sim.check_missile_warning()
                        if sim.is_alive
@@ -633,7 +637,8 @@ class UavCombatEnv(gymnasium.Env):
             blue_obs, self.max_num_blue, self.max_num_red, engaged,
             {aid: data["position"] for aid, data in kinematics.items()},
             {aid: data["heading"] for aid, data in kinematics.items()},
-            self.current_step, selected_missiles, mws_detected)
+            self.current_step, selected_missiles, mws_detected,
+            own_alive=own_alive)
 
     def step(self, actions: dict):
         self.current_step += 1

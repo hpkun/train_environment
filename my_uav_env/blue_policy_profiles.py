@@ -210,25 +210,54 @@ class BluePolicyController:
     def record_executed_heading(self, blue_id: str, heading: float,
                                 source: str) -> None:
         """Record the final heading target emitted by environment priority logic."""
+        row = next((item for item in self.latest_per_blue
+                    if item.get("blue_id") == blue_id), None)
+        if row is None or not bool(row.get("alive", False)):
+            return
         heading = _wrap_pi(float(heading))
         previous = self.last_executed_headings.get(blue_id)
         delta = 0.0 if previous is None else _wrap_pi(heading - previous)
         if previous is not None and abs(delta) > self._HEADING_DISCONTINUITY_RAD:
             self.executed_heading_command_discontinuities += 1
         self.last_executed_headings[blue_id] = heading
-        matched = False
-        for row in self.latest_per_blue:
-            if row.get("blue_id") == blue_id:
-                matched = True
-                row["executed_heading_command_rad"] = heading
-                row["executed_heading_delta_rad"] = float(delta)
-                row["executed_command_source"] = str(source)
-                if source == "mws_override" and not row.get("mws_action_override", False):
-                    row["mws_action_override"] = True
-                    self.mws_override_agent_decisions += 1
-                break
-        if source == "mws_override" and not matched:
+        row["executed_heading_command_rad"] = heading
+        row["executed_heading_delta_rad"] = float(delta)
+        row["executed_command_source"] = str(source)
+        if source == "mws_override" and not row.get("mws_action_override", False):
+            row["mws_action_override"] = True
             self.mws_override_agent_decisions += 1
+
+    @staticmethod
+    def _ownship_alive_from_obs(obs: dict) -> bool:
+        mask = np.asarray(obs.get("alive_mask", obs.get("death_mask", []))).reshape(-1)
+        if mask.size:
+            return bool(mask[0] > 0.5)
+        ego = np.asarray(obs.get("ego_state", []))
+        return bool(ego.size and not np.allclose(ego, 0.0))
+
+    def _dead_diagnostic_row(self, blue_id: str) -> dict:
+        return {
+            "blue_id": blue_id,
+            "alive": False,
+            "assigned_target_id": self.current_targets.get(blue_id),
+            "initial_target_id": self.initial_targets.get(blue_id),
+            "assignment_reason": "dead_ownship_ignored",
+            "target_switch_count": int(self.target_switch_counts[blue_id]),
+            "last_switch_reason": self.last_switch_reasons.get(blue_id, ""),
+            "base_heading_command_rad": None,
+            "pursuit_heading_cmd_rad": None,
+            "pursuit_pitch_cmd_rad": None,
+            "target_speed_cmd_mps": None,
+            "mws_detected": False,
+            "mws_action_override": False,
+            "selected_missile_id": None,
+            "route_phase": self.route_phases.get(blue_id, ""),
+            "altitude_recovery_active": False,
+            "executed_heading_command_rad": None,
+            "executed_heading_delta_rad": None,
+            "executed_command_source": "not_executed_dead",
+            "command_heading_delta_rad": None,
+        }
 
     def act(self, blue_obs: dict[str, dict], num_blue: int, num_red: int,
             engaged_targets: set[str] | None,
@@ -236,11 +265,20 @@ class BluePolicyController:
             own_headings: dict[str, float] | None,
             current_step: int,
             selected_missiles: dict[str, str | None] | None = None,
-            mws_detected: dict[str, bool] | None = None) -> dict[str, np.ndarray]:
+            mws_detected: dict[str, bool] | None = None,
+            own_alive: dict[str, bool] | None = None) -> dict[str, np.ndarray]:
         own_positions = own_positions or {}
         own_headings = own_headings or {}
         selected_missiles = selected_missiles or {}
         mws_detected = mws_detected or {}
+        if own_alive is None:
+            own_alive = {
+                f"blue_{index}": self._ownship_alive_from_obs(
+                    blue_obs.get(f"blue_{index}", {}))
+                for index in range(num_blue)
+            }
+        else:
+            own_alive = {key: bool(value) for key, value in own_alive.items()}
 
         if self.profile == "paper_pursuit":
             assignments = self._paper_assignments(blue_obs, num_blue, num_red)
@@ -254,6 +292,11 @@ class BluePolicyController:
             assignment_reasons: dict[str, str] = {}
             for blue_index in range(num_blue):
                 blue_id = f"blue_{blue_index}"
+                if not own_alive.get(blue_id, False):
+                    actions[blue_id] = np.zeros(3, dtype=np.float32)
+                    assignments[blue_id] = self.current_targets.get(blue_id)
+                    assignment_reasons[blue_id] = "dead_ownship_ignored"
+                    continue
                 obs = blue_obs.get(blue_id, {})
                 if self.profile == "frozen_route_blue_v1":
                     action, _meta = self._frozen_action(
@@ -305,6 +348,9 @@ class BluePolicyController:
         self.latest_per_blue = []
         for blue_index in range(num_blue):
             blue_id = f"blue_{blue_index}"
+            if not own_alive.get(blue_id, False):
+                self.latest_per_blue.append(self._dead_diagnostic_row(blue_id))
+                continue
             obs = blue_obs.get(blue_id, {})
             action = np.asarray(actions.get(blue_id, np.zeros(3)), dtype=np.float32)
             detected = False
@@ -336,6 +382,7 @@ class BluePolicyController:
                 self.current_targets[blue_id] = assigned
             self.latest_per_blue.append({
                 "blue_id": blue_id,
+                "alive": True,
                 "assigned_target_id": assigned,
                 "initial_target_id": self.initial_targets.get(blue_id),
                 "assignment_reason": assignment_reason,

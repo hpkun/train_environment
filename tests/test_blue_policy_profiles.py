@@ -63,11 +63,12 @@ def _reset(controller):
     )
 
 
-def _act(controller, obs, step=0, engaged=None):
+def _act(controller, obs, step=0, engaged=None, own_alive=None):
     headings = {"blue_0": 0.0, "blue_1": 0.2, "blue_2": -0.2}
     positions = {key: np.zeros(3) for key in headings}
     return controller.act(
-        obs, 3, 3, engaged or set(), positions, headings, step)
+        obs, 3, 3, engaged or set(), positions, headings, step,
+        own_alive=own_alive)
 
 
 def test_profiles_and_default_remain_paper_pursuit():
@@ -406,6 +407,162 @@ def test_matrix_formal_fields_use_agent_decisions_and_two_heading_layers():
     assert "blue_executed_heading_command_discontinuities" in EVALUATION_FIELDNAMES
     assert not any("mws" in field and "frames" in field
                    for field in EVALUATION_FIELDNAMES)
+
+
+def test_dead_fixed_ownship_does_not_reassign_when_target_dies():
+    controller = BluePolicyController("fixed_pair_pursuit_v1")
+    _reset(controller)
+    _act(controller, _blue_obs())
+    targets_before = dict(controller.current_targets)
+    switches_before = controller.snapshot_episode_diagnostics()[
+        "blue_target_switches_total"]
+    actions = _act(
+        controller, _blue_obs(alive=(0, 1, 1)),
+        own_alive={"blue_0": False, "blue_1": True, "blue_2": True})
+    diag = controller.snapshot_episode_diagnostics()
+    row = diag["per_blue"][0]
+    np.testing.assert_array_equal(actions["blue_0"], np.zeros(3, dtype=np.float32))
+    assert controller.current_targets["blue_0"] == targets_before["blue_0"]
+    assert diag["blue_target_switches_total"] == switches_before
+    assert diag["blue_target_dead_switches"] == 0
+    assert row["alive"] is False
+    assert row["assignment_reason"] == "dead_ownship_ignored"
+    assert row["assigned_target_id"] == "red_0"
+    assert row["executed_command_source"] == "not_executed_dead"
+
+
+def test_dead_fixed_ownship_ignores_nearest_target_and_residual_mws():
+    controller = BluePolicyController("fixed_pair_no_mws_v1")
+    _reset(controller)
+    obs = _blue_obs(enemy_ranges=(15000.0, 100.0, 200.0), warning=1.0)
+    actions = _act(
+        controller, obs,
+        own_alive={"blue_0": False, "blue_1": True, "blue_2": True})
+    diag = controller.snapshot_episode_diagnostics()
+    row = diag["per_blue"][0]
+    np.testing.assert_array_equal(actions["blue_0"], np.zeros(3, dtype=np.float32))
+    assert controller.current_targets["blue_0"] == "red_0"
+    assert diag["blue_distance_triggered_switches"] == 0
+    assert diag["blue_mws_detected_agent_decisions"] == 2
+    assert diag["blue_mws_override_agent_decisions"] == 0
+    assert row["mws_detected"] is False
+    assert row["mws_action_override"] is False
+
+
+def test_dead_frozen_ownship_does_not_advance_route_or_read_recovery():
+    controller = BluePolicyController("frozen_route_blue_v1")
+    _reset(controller)
+    _act(controller, _blue_obs(), step=75)
+    before = controller.snapshot_episode_diagnostics()
+    actions = _act(
+        controller, _blue_obs(altitude=9000.0, v_up=50.0, warning=1.0),
+        step=176,
+        own_alive={"blue_0": False, "blue_1": True, "blue_2": True})
+    after = controller.snapshot_episode_diagnostics()
+    np.testing.assert_array_equal(actions["blue_0"], np.zeros(3, dtype=np.float32))
+    assert controller.route_phases["blue_0"] == "A"
+    assert after["blue_route_phase_changes"] - before["blue_route_phase_changes"] == 2
+    assert (after["blue_base_heading_command_discontinuities"]
+            - before["blue_base_heading_command_discontinuities"]) == 2
+    assert after["blue_altitude_recovery_frames"] - before[
+        "blue_altitude_recovery_frames"] == 2
+    assert after["per_blue"][0]["command_heading_delta_rad"] is None
+
+
+def test_dead_or_unmatched_executed_record_cannot_pollute_counters():
+    controller = BluePolicyController("fixed_pair_pursuit_v1")
+    _reset(controller)
+    _act(
+        controller, _blue_obs(warning=1.0),
+        own_alive={"blue_0": False, "blue_1": True, "blue_2": True})
+    before_history = dict(controller.last_executed_headings)
+    before_count = controller.mws_override_agent_decisions
+    controller.record_executed_heading("blue_0", 1.0, "mws_override")
+    controller.record_executed_heading("blue_missing", 1.0, "mws_override")
+    assert controller.last_executed_headings == before_history
+    assert controller.mws_override_agent_decisions == before_count
+    assert controller.executed_heading_command_discontinuities == 0
+
+
+def test_one_dead_two_alive_only_alive_agents_contribute_diagnostics():
+    controller = BluePolicyController("fixed_pair_pursuit_v1")
+    _reset(controller)
+    actions = _act(
+        controller, _blue_obs(warning=1.0),
+        own_alive={"blue_0": False, "blue_1": True, "blue_2": True})
+    controller.record_executed_heading("blue_0", 1.0, "mws_override")
+    controller.record_executed_heading("blue_1", 1.0, "mws_override")
+    controller.record_executed_heading("blue_2", -1.0, "mws_override")
+    diag = controller.snapshot_episode_diagnostics()
+    np.testing.assert_array_equal(actions["blue_0"], np.zeros(3, dtype=np.float32))
+    assert set(controller.last_base_commands) == {"blue_1", "blue_2"}
+    assert set(controller.last_executed_headings) == {"blue_1", "blue_2"}
+    assert diag["blue_mws_detected_agent_decisions"] == 2
+    assert diag["blue_mws_override_agent_decisions"] == 2
+
+
+def test_paper_pursuit_dead_blue_filters_only_diagnostics_not_alive_actions():
+    obs = _blue_obs(enemy_ranges=(9000.0, 11000.0, 13000.0))
+    positions = {f"blue_{i}": np.zeros(3) for i in range(3)}
+    headings = {"blue_0": 0.0, "blue_1": 0.2, "blue_2": -0.2}
+    expected = blue_coordinated_actions(
+        obs, 3, 3, engaged_targets={"red_1"}, own_positions=positions,
+        own_headings=headings, pursuit_mode="paper_pursuit")
+    controller = BluePolicyController("paper_pursuit")
+    _reset(controller)
+    actual = controller.act(
+        obs, 3, 3, {"red_1"}, positions, headings, 0,
+        own_alive={"blue_0": False, "blue_1": True, "blue_2": True})
+    np.testing.assert_array_equal(actual["blue_1"], expected["blue_1"])
+    np.testing.assert_array_equal(actual["blue_2"], expected["blue_2"])
+    row = controller.snapshot_episode_diagnostics()["per_blue"][0]
+    assert row["alive"] is False
+    assert row["assignment_reason"] == "dead_ownship_ignored"
+    assert "blue_0" not in controller.last_base_commands
+
+
+def test_dead_state_is_isolated_across_eight_controllers_and_reset_clears_rows():
+    controllers = [BluePolicyController("fixed_pair_pursuit_v1") for _ in range(8)]
+    for controller in controllers:
+        _reset(controller)
+    _act(
+        controllers[0], _blue_obs(warning=1.0),
+        own_alive={"blue_0": False, "blue_1": True, "blue_2": True})
+    assert controllers[0].snapshot_episode_diagnostics()["per_blue"][0][
+        "alive"] is False
+    assert all(controller.latest_per_blue == [] for controller in controllers[1:])
+    _reset(controllers[0])
+    assert controllers[0].latest_per_blue == []
+    assert controllers[0].last_base_commands == {}
+    assert controllers[0].last_executed_headings == {}
+    assert controllers[0].mws_detected_agent_decisions == 0
+    assert controllers[0].mws_override_agent_decisions == 0
+
+
+def test_environment_passes_authoritative_simulator_own_alive():
+    captured = {}
+
+    class CaptureController:
+        def act(self, *args, **kwargs):
+            captured.update(kwargs["own_alive"])
+            return {f"blue_{index}": np.zeros(3, dtype=np.float32)
+                    for index in range(3)}
+
+    env = UavCombatEnv.__new__(UavCombatEnv)
+    sims = {f"blue_{index}": _FakeBlueSim() for index in range(3)}
+    sims["blue_1"].is_alive = False
+    env.blue_planes = sims
+    env.blue_policy_profile = "fixed_pair_pursuit_v1"
+    env.blue_policy_controller = CaptureController()
+    env.max_num_blue = 3
+    env.max_num_red = 3
+    env.current_step = 0
+    env.refresh_engaged_targets = lambda: set()
+    env.get_blue_own_kinematics = lambda: {
+        blue_id: {"position": np.zeros(3), "heading": 0.0}
+        for blue_id, sim in sims.items() if sim.is_alive}
+    env.blue_policy_actions(_blue_obs())
+    assert captured == {"blue_0": True, "blue_1": False, "blue_2": True}
 
 
 def test_environment_fingerprint_includes_blue_policy_profile():
