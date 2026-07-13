@@ -345,6 +345,10 @@ from uav_env.JSBSim.envs.role_situation_v3 import V3_REWARD_COMPONENT_FIELDS
 for _col in V3_REWARD_COMPONENT_FIELDS:
     if _col not in REWARD_COMPONENT_COLUMNS:
         REWARD_COMPONENT_COLUMNS.append(_col)
+from uav_env.JSBSim.envs.paper_calibrated_v4 import V4_COMPONENT_FIELDS
+for _col in V4_COMPONENT_FIELDS:
+    if _col not in REWARD_COMPONENT_COLUMNS:
+        REWARD_COMPONENT_COLUMNS.append(_col)
 
 REWARD_TARGET_DIAGNOSTICS_COLUMNS = [
     "run_id", "scenario", "episode_id", "step", "sim_time",
@@ -537,10 +541,17 @@ for _col in BRMA_TAM_SCALE_V1_COMPONENT_COLUMNS:
     _episode_col = f"{_col}_last" if _col in _SCALE_V1_EPISODE_LAST_FIELDS else f"{_col}_sum"
     if _episode_col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
         EPISODE_REWARD_COMPONENTS_COLUMNS.append(_episode_col)
+for _col in ("v4_final_j_combat", "v4_max_abs_identity_error"):
+    if _col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
+        EPISODE_REWARD_COMPONENTS_COLUMNS.append(_col)
 from uav_env.JSBSim.envs.role_situation_v3 import V3_EPISODE_FIELDS
 for _col in V3_EPISODE_FIELDS:
     if _col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
         EPISODE_REWARD_COMPONENTS_COLUMNS.append(_col)
+for _col in V4_COMPONENT_FIELDS:
+    _episode_col = f"{_col}_sum"
+    if _episode_col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
+        EPISODE_REWARD_COMPONENTS_COLUMNS.append(_episode_col)
 
 FILE_SCHEMAS = {
     "train_metrics.csv": TRAIN_METRICS_COLUMNS,

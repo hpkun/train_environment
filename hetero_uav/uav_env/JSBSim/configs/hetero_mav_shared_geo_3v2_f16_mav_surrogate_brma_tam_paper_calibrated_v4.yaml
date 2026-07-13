@@ -1,0 +1,131 @@
+action_trim_by_role:
+  mav:
+    heading: 0.0
+    pitch: 0.0
+    speed: 0.0
+agent_interaction_steps: 12
+aircraft_type_params:
+  attack_uav:
+    aircraft_model: f16
+    role: attack_uav
+    num_missiles: 2
+  interceptor_uav:
+    aircraft_model: f16
+    role: interceptor_uav
+    num_missiles: 2
+  mav:
+    aircraft_model: f16
+    role: mav
+    num_missiles: 0
+  scout_uav:
+    aircraft_model: f16
+    role: scout_uav
+    num_missiles: 0
+blue_agent_types:
+- attack_uav
+- attack_uav
+enable_gcas_for_blue: true
+env_type: jsbsim_hetero
+hetero_reward_mode: brma_tam_paper_calibrated_v4
+missile_evasion:
+  mode: brma_scripted
+  teams: red_only
+red_target_selection_mode: closest
+initial_states:
+  blue_0:
+    altitude_m: 6000
+    lat: 60.2
+    lon: 120.0
+    speed_mps: 250
+    yaw_deg: 180.0
+  blue_1:
+    altitude_m: 6000
+    lat: 60.2
+    lon: 120.04
+    speed_mps: 250
+    yaw_deg: 180.0
+  red_0:
+    altitude_m: 6500
+    lat: 59.98
+    lon: 120.02
+    speed_mps: 230
+    yaw_deg: 0.0
+  red_1:
+    altitude_m: 6000
+    lat: 60.0
+    lon: 120.0
+    speed_mps: 250
+    yaw_deg: 0.0
+  red_2:
+    altitude_m: 6000
+    lat: 60.0
+    lon: 120.04
+    speed_mps: 250
+    yaw_deg: 0.0
+mav_observation_range_m: 80000
+max_num_blue: 2
+max_num_red: 3
+max_steps: 1000
+observation_mode: mav_shared_geo
+red_agent_types:
+- mav
+- attack_uav
+- attack_uav
+sim_freq: 60
+suppress_jsbsim_output: true
+uav_direct_observation_range_m: 10000.0
+pid_profile_by_role:
+  mav: f16_default
+  attack_uav: f16_default
+  interceptor_uav: f16_default
+acmi_visual_by_role:
+  mav: f22
+  attack_uav: f16
+brma_tam_paper_calibrated_v4:
+  claim: paper-grounded heterogeneous reward, not exact paper reproduction
+  calibration_status: bootstrap_unit_scales
+  uav:
+    reference_speed_mps: 300.0
+    altitude_min_m: 2500.0
+    altitude_max_m: 10000.0
+    vertical_speed_limit_mps: 150.0
+    dodge_speed_norm_mps: 1000.0
+  mav:
+    safety:
+      d_danger_m: 8000.0
+      d_safe_m: 15000.0
+    support:
+      d_opt_m: 8000.0
+      d_max_m: 25000.0
+  scales:
+    uav_dense_scale: 1.0
+    uav_event_scale: 1.0
+    terminal_scale: 1.0
+    mav_safety_scale: 1.0
+    mav_support_scale: 1.0
+    mav_event_scale: 1.0
+    mav_death_event_scale: 1.0
+    mav_team_kill_credit_scale: 0.5
+    mav_team_kill_credit_cap: 1.0
+    flight_scale: 0.01
+missile_launch_range_m: 14000.0
+missile_attack_interval_sec: 25.0
+missile_guidance:
+  mode: pn
+  navigation_gain: 3.0
+  max_overload_g: 30.0
+missile_protocol:
+  missile_protocol_version: tam_paper_protocol_v1
+  missile_alignment_claim: paper-aligned kinematic approximation, not exact missile
+    reproduction
+  missile_attack_range_m: 14000.0
+  missile_attack_interval_sec: 25.0
+  missile_navigation_gain: 3.0
+  missile_max_overload_g: 30.0
+  missile_mass_kg: 84.0
+  missile_length_m: 2.87
+  missile_diameter_m: 0.127
+  missile_unmodeled_parameters:
+  - missile_mass_kg
+  - missile_length_m
+  - missile_diameter_m

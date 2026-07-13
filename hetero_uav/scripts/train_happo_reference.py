@@ -545,6 +545,7 @@ from uav_env.JSBSim.envs.role_situation_v3 import (
     accumulate_v3_episode_step,
     collect_v3_effective_samples,
 )
+from uav_env.JSBSim.envs.paper_calibrated_v4 import V4_COMPONENT_FIELDS
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
 
 
@@ -2163,12 +2164,21 @@ def _run_training_main() -> None:
                         for key, value in comp.items():
                             if key in V3_REWARD_COMPONENT_FIELDS:
                                 continue
+                            if key == "v4_j_combat":
+                                agent_acc["v4_final_j_combat"] = float(value)
+                                continue
+                            if key == "v4_identity_error":
+                                agent_acc["v4_max_abs_identity_error"] = max(
+                                    float(agent_acc.get("v4_max_abs_identity_error", 0.0)), abs(float(value))
+                                )
+                                continue
                             if not (
                                 key.startswith("tam_v7_")
                                 or key.startswith("tam_table1_")
                                 or key.startswith("v1_mav_")
                                 or key.startswith("paper_v1_")
                                 or key in BRMA_TAM_SCRIPTED_COMPONENT_COLUMNS
+                                or key in V4_COMPONENT_FIELDS
                                 or key in BRMA_TAM_SCALE_V1_COMPONENT_COLUMNS
                                 or key in {
                                     "mav_observed_ratio",
@@ -2232,7 +2242,7 @@ def _run_training_main() -> None:
                             role = rollout_env.agent_roles.get(rid, "")
                             scale_v1 = actual_reward_mode == "brma_tam_scale_aligned_v1"
                             scale_v2 = actual_reward_mode == "brma_tam_scale_aligned_v2"
-                            if actual_reward_mode == "brma_tam_role_situation_v3":
+                            if actual_reward_mode in {"brma_tam_role_situation_v3", "brma_tam_paper_calibrated_v4"}:
                                 continue
                             if scale_v1 and role == "mav":
                                 identity_keys = (
