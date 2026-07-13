@@ -1,0 +1,9 @@
+source,launch_gate_records,launch_gate_alive_target,launch_gate_unengaged,launch_gate_track,launch_gate_range,launch_gate_ata,launch_gate_ta,launch_gate_geometry,launch_gate_lock_mature,launch_gate_cooldown_ready,launch_gate_actual_launch,unique_red_launch,unique_red_hit,unique_red_kill
+event_ckpt_pure_happo_mav_guided_v1_env4_3v2_50k_probe_v3_rear,8960.0,8960.0,8960.0,8960.0,5360.0,4840.0,1460.0,0.0,0.0,8960.0,0.0,0.0,0.0,0.0
+fixed_straight,15069.0,15069.0,15069.0,15069.0,11909.0,8460.0,3267.0,0.0,0.0,15069.0,0.0,0.0,0.0,0.0
+mav_shared_diagnostic_fixture,12244.0,12244.0,5496.0,5496.0,972.0,5166.0,4940.0,114.0,46.0,7238.0,46.0,46.0,40.0,36.0
+paper_pursuit_diagnostic,16537.0,16537.0,14874.0,14874.0,11894.0,9520.0,5514.0,800.0,676.0,13179.0,41.0,41.0,37.0,20.0
+random,10820.0,10820.0,10820.0,10768.0,7230.0,4293.0,910.0,0.0,0.0,10820.0,0.0,0.0,0.0,0.0
+v3_seed0,12322.0,12322.0,12322.0,8542.0,4182.0,1100.0,12.0,0.0,0.0,12322.0,0.0,0.0,0.0,0.0
+v3_seed1,8660.0,8660.0,8660.0,8660.0,3960.0,1620.0,0.0,0.0,0.0,8660.0,0.0,0.0,0.0,0.0
+v3_seed2,6460.0,6460.0,6460.0,6460.0,2180.0,920.0,0.0,0.0,0.0,6460.0,0.0,0.0,0.0,0.0

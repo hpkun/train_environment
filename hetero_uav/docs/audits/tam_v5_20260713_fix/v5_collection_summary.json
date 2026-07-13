@@ -1,0 +1,23 @@
+{
+  "episodes": 160,
+  "sources": [
+    "event_ckpt_pure_happo_mav_guided_v1_env4_3v2_50k_probe_v3_rear",
+    "fixed_straight",
+    "mav_shared_diagnostic_fixture",
+    "paper_pursuit_diagnostic",
+    "random",
+    "v3_seed0",
+    "v3_seed1",
+    "v3_seed2"
+  ],
+  "censored_count": 0,
+  "terminal_observed_count": 160,
+  "finite_check_passed": true,
+  "all_identity_valid": true,
+  "identity_max_abs": 2.220446049250313e-16,
+  "unique_red_launch_total": 87.0,
+  "unique_red_hit_total": 77.0,
+  "unique_red_kill_total": 56.0,
+  "unique_shared_only_kill_total": 36.0,
+  "note": "Evaluation only; no policy updates were performed."
+}

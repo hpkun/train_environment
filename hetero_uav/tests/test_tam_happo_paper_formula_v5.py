@@ -464,3 +464,20 @@ def test_probe_readiness_accepts_two_of_three_consistent_seeds():
     ])
     status, reasons = readiness(rows, ["mid"], baseline)
     assert status == "TAM_HAPPO_PAPER_FORMULA_V5_READY_FOR_200K_PROBE", reasons
+
+
+def test_probe_readiness_treats_unavailable_matched_baseline_as_insufficient():
+    rows = pd.DataFrame([
+        {"candidate": "mid", "seed": seed, "technical_pass": True, "evidence_pass": True,
+         "red_launch": 1, "blue_loss": 1, "uav_angle": 0.1,
+         "uav_distance": 0.1, "geometry_rate": 0.1}
+        for seed in (0, 1, 2)
+    ])
+    baseline = pd.DataFrame([
+        {"seed": seed, "red_launch": 0, "blue_loss": 0, "uav_angle": np.nan,
+         "uav_distance": np.nan, "geometry_rate": np.nan}
+        for seed in (0, 1, 2)
+    ])
+    status, reasons = readiness(rows, ["mid"], baseline)
+    assert status == INSUFFICIENT
+    assert "matched_v3_baseline_has_unavailable_required_evidence" in reasons

@@ -1,0 +1,4 @@
+mav_death_penalty,mav_team_credit_per_kill,mav_team_credit_cap,candidate
+200.0,5.0,5.0,lower_feasible_bound
+600.0,105.0,205.0,interval_midpoint
+1000.0,200.0,400.0,upper_feasible_bound

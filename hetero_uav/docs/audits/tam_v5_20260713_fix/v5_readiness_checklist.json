@@ -1,0 +1,31 @@
+{
+  "status": "TAM_HAPPO_PAPER_FORMULA_V5_INSUFFICIENT_EVIDENCE",
+  "expected_candidates": [
+    "lower_feasible_bound",
+    "interval_midpoint",
+    "upper_feasible_bound"
+  ],
+  "expected_runs": 9,
+  "observed_runs": 9,
+  "failures": [
+    "lower_feasible_bound/s0:evidence_missing_launch_gate_diagnostics",
+    "lower_feasible_bound/s0:evidence_dead_before_growth_unverifiable_summary_logging",
+    "lower_feasible_bound/s1:evidence_missing_launch_gate_diagnostics",
+    "lower_feasible_bound/s1:evidence_dead_before_growth_unverifiable_summary_logging",
+    "lower_feasible_bound/s2:evidence_missing_launch_gate_diagnostics",
+    "lower_feasible_bound/s2:evidence_dead_before_growth_unverifiable_summary_logging",
+    "interval_midpoint/s0:evidence_missing_launch_gate_diagnostics",
+    "interval_midpoint/s0:evidence_dead_before_growth_unverifiable_summary_logging",
+    "interval_midpoint/s1:evidence_missing_launch_gate_diagnostics",
+    "interval_midpoint/s1:evidence_dead_before_growth_unverifiable_summary_logging",
+    "interval_midpoint/s2:evidence_missing_launch_gate_diagnostics",
+    "interval_midpoint/s2:evidence_dead_before_growth_unverifiable_summary_logging",
+    "upper_feasible_bound/s0:evidence_missing_launch_gate_diagnostics",
+    "upper_feasible_bound/s0:evidence_dead_before_growth_unverifiable_summary_logging",
+    "upper_feasible_bound/s1:evidence_missing_launch_gate_diagnostics",
+    "upper_feasible_bound/s1:evidence_dead_before_growth_unverifiable_summary_logging",
+    "upper_feasible_bound/s2:evidence_missing_launch_gate_diagnostics",
+    "upper_feasible_bound/s2:evidence_dead_before_growth_unverifiable_summary_logging",
+    "matched_v3_baseline_has_unavailable_required_evidence"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "status": "TAM_V5_UNKNOWN_CONSTANTS_FEASIBLE",
+  "complete_episode_count": 160,
+  "feasible_point_count": 40260,
+  "feasible_interval": {
+    "mav_death_penalty": {
+      "min": 200.0,
+      "max": 1000.0
+    },
+    "mav_team_credit_per_kill": {
+      "min": 5.0,
+      "max": 200.0
+    },
+    "mav_team_credit_cap": {
+      "min": 5.0,
+      "max": 400.0
+    }
+  },
+  "coverage_statuses": [],
+  "notes": [],
+  "search_domain_is_project_constraint_not_paper_constant": true
+}
