@@ -179,7 +179,7 @@ class VisualMissileTracker:
 # ==============================================================================
 
 def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
-             num_red: int = 6, num_blue: int = 6, max_steps: int = 1400,
+             num_red: int = 3, num_blue: int = 3, max_steps: int = 1400,
              draw_boundary: bool = False, boundary_half_size: float = 40000.0,
              obs_mode: str = "paper_strict",
              obs_normalization: str = "paper_fixed_v1",
@@ -571,8 +571,8 @@ if __name__ == "__main__":
                             help="红方使用随机策略")
         parser.add_argument("--output", type=str, default="eval_battle.acmi",
                             help="输出 .acmi 文件路径")
-        parser.add_argument("--num-red", type=int, default=6)
-        parser.add_argument("--num-blue", type=int, default=6)
+        parser.add_argument("--num-red", type=int, default=3)
+        parser.add_argument("--num-blue", type=int, default=3)
         parser.add_argument("--max-steps", type=int, default=1400)
         parser.add_argument("--obs-mode", type=str,
                             choices=("paper_strict", "engineering"),

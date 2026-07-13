@@ -651,9 +651,29 @@ class UavCombatEnv(gymnasium.Env):
         obs = self._get_obs()
         terminated = self._get_terminated()
         truncated = self._get_truncated()
+        if all(terminated[aid] or truncated[aid] for aid in self.agent_ids):
+            self._clear_terminal_combat_state()
         info = self._get_info(reward_components)
 
         return obs, rewards, terminated, truncated, info
+
+    def _clear_terminal_combat_state(self):
+        """Release transient weapon/fire-control references at episode end."""
+        for missile in list(self._missiles_in_flight.values()):
+            if missile.is_alive:
+                missile._status = MissileSimulator.MISS
+                missile._termination_reason = "target_dead"
+                team = "red" if missile._parent_id.startswith("red") else "blue"
+                self._missile_term_reasons[team]["target_dead"] = (
+                    self._missile_term_reasons[team].get("target_dead", 0) + 1)
+                self._finalize_launch_quality_record(missile)
+        self._cleanup_missiles()
+        self._engaged_targets.clear()
+        for aid in self.agent_ids:
+            self._lock_timer[aid] = 0
+            self._lock_target[aid] = None
+            self._fire_control_states[aid] = FireControlState(
+                transition_reason="episode_end")
 
     # ------------------------------------------------------------------
     #  Action parsing

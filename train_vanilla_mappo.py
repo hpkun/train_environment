@@ -89,8 +89,8 @@ except AttributeError:
 class Config:
     # ---- 环境 (从局部冲突开始，降低协同难度) ----
     num_envs: int = 8           
-    num_red: int = 6
-    num_blue: int = 6
+    num_red: int = 3
+    num_blue: int = 3
     max_episode_length: int = 1400
     enable_blue_gcas: bool = False
     obs_mode: str = "paper_strict"

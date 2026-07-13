@@ -482,6 +482,33 @@ def _paper_absolute_action(pitch_norm: float, heading_rad: float,
     ], dtype=np.float32)
 
 
+def _paper_pursuit_geometry(ego_state: np.ndarray, target_state: np.ndarray,
+                            own_heading: float | None = None):
+    """Return absolute heading, pitch and horizontal range from strict tables."""
+    ego = np.asarray(ego_state, dtype=np.float64)
+    target = np.asarray(target_state, dtype=np.float64)
+    if ego.shape != (10,) or target.shape != (10,):
+        return None
+    heading = float(ego[6] if own_heading is None else own_heading)
+    values = np.concatenate([ego[[4, 5]], [heading], target[:3]])
+    if not np.all(np.isfinite(values)):
+        return None
+    relative_neu = body_vector_to_inertial_neu(
+        target[:3], float(ego[4]), float(ego[5]), heading)
+    if not np.all(np.isfinite(relative_neu)):
+        return None
+    horizontal_range = float(np.hypot(relative_neu[0], relative_neu[1]))
+    total_range = float(np.linalg.norm(relative_neu))
+    if total_range < 1e-6:
+        return None
+    desired_heading = (heading if horizontal_range < 1e-6 else
+                       _wrap_pi(float(np.arctan2(relative_neu[1], relative_neu[0]))))
+    desired_pitch = float(np.clip(
+        np.arctan2(relative_neu[2], max(horizontal_range, 1e-6)),
+        -np.deg2rad(15.0), np.deg2rad(15.0)))
+    return desired_heading, desired_pitch, horizontal_range
+
+
 def _blue_simple_pursuit_action_impl(
     obs: dict,
     num_blue: int,
@@ -566,36 +593,20 @@ def _blue_simple_pursuit_action_impl(
 
     if target_state is not None:
         if not paper_profile:
-            _simple_last_seen_bearing[blue_id] = desired_heading = (
-                _simple_body_vector_to_world_bearing(
-                    target_state, np.asarray(obs.get("ego_state", []), dtype=np.float32), our_heading)
-            )
+            desired_heading = _simple_body_vector_to_world_bearing(
+                target_state, np.asarray(obs.get("ego_state", []), dtype=np.float32), our_heading)
             if desired_heading is None:
                 ao = _relative_bearing_rad(target_state)
                 desired_heading = _wrap_pi(our_heading + ao)
+            _simple_last_seen_bearing[blue_id] = desired_heading
             _simple_lost_steps[blue_id] = 0
         else:
-            # Paper profile: single body→inertial conversion for heading + pitch
-            ego = np.asarray(obs.get("ego_state", []), dtype=np.float32)
-            if ego.size >= 10:
-                roll = float(ego[4]); pitch = float(ego[5])
-                hdg = float(our_heading)
-            else:
-                roll = float(np.arctan2(float(ego[7]), float(ego[8])))
-                pitch = float(np.arctan2(float(ego[9]), float(ego[10])))
-                hdg = float(our_heading)
-            tgt = np.asarray(target_state, dtype=np.float32)
-            rel_body = np.array([float(tgt[0]), float(tgt[1]), float(tgt[2])], dtype=np.float64)
-            rel_neu = body_vector_to_inertial_neu(rel_body, roll, pitch, hdg)
-            if np.all(np.isfinite(rel_neu)):
-                desired_heading = _wrap_pi(float(np.arctan2(rel_neu[1], rel_neu[0])))
-                horizontal_range = max(float(np.hypot(rel_neu[0], rel_neu[1])), 1e-6)
-                desired_pitch_rad = float(np.clip(
-                    np.arctan2(rel_neu[2], horizontal_range),
-                    -np.deg2rad(15.0), np.deg2rad(15.0)))
-            else:
-                desired_heading = our_heading
-                desired_pitch_rad = 0.0
+            geometry = _paper_pursuit_geometry(
+                np.asarray(obs.get("ego_state", [])), np.asarray(target_state),
+                own_heading=our_heading)
+            if geometry is None:
+                return _paper_absolute_action(0.0, our_heading)
+            desired_heading, desired_pitch_rad, _horizontal_range = geometry
         if paper_profile:
             if alt_m > 8500.0:
                 recovery = np.deg2rad(5.0 if alt_m < 9500.0 else 10.0)
@@ -732,7 +743,7 @@ def blue_coordinated_actions(
                     pass
 
     if pursuit_mode in ("paper_pursuit", "safe_pursuit"):
-        taken: set[int] = set(engaged_red_indices)
+        taken: set[int] = set() if pursuit_mode == "paper_pursuit" else set(engaged_red_indices)
         assignments: dict[int, int | None] = {}
         for b_idx, bid in enumerate(blue_ids):
             obs = blue_obs.get(bid, {})
@@ -741,6 +752,14 @@ def blue_coordinated_actions(
             assignments[b_idx] = target_idx
             if target_idx is not None:
                 taken.add(target_idx)
+        if pursuit_mode == "paper_pursuit":
+            # When targets are fewer than aircraft, keep pursuing the nearest
+            # alive target; missile engagement only blocks fire, not pursuit.
+            for b_idx, bid in enumerate(blue_ids):
+                if assignments[b_idx] is None:
+                    target_idx, _state, _range = _simple_nearest_target(
+                        blue_obs.get(bid, {}), num_blue, num_red, excluded=set())
+                    assignments[b_idx] = target_idx
         return {
             bid: _blue_simple_pursuit_action_impl(
                 blue_obs.get(bid, {}), num_blue, num_red, b_idx,

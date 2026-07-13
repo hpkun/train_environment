@@ -145,10 +145,10 @@ def test_reward_version_names_paper_eq20_default():
     assert "fixed_ta" not in REWARD_VERSION
 
 
-def test_main_training_defaults_match_paper_scale():
+def test_main_training_defaults_match_main_3v3_scale():
     cfg = Config()
-    assert cfg.num_red == 6
-    assert cfg.num_blue == 6
+    assert cfg.num_red == 3
+    assert cfg.num_blue == 3
     assert cfg.max_episode_length == 1400
     assert cfg.obs_mode == "paper_strict"
     assert cfg.obs_normalization == "paper_fixed_v1"
@@ -856,7 +856,8 @@ def test_safe_pursuit_excludes_inflight_engaged_target_without_mutating_set(monk
     engaged = {"red_0"}
 
     rule_agent.blue_coordinated_actions(
-        obs, num_blue=1, num_red=2, engaged_targets=engaged)
+        obs, num_blue=1, num_red=2, engaged_targets=engaged,
+        pursuit_mode="safe_pursuit")
 
     assert forced_targets == [1]
     assert engaged == {"red_0"}
@@ -939,16 +940,16 @@ def test_death_reason_categories_are_mutually_classified():
     assert _classify_death_reason("Crash_OverG") == "crash"
 
 
-def test_training_evaluation_and_acmi_defaults_use_paper_strict_6v6():
+def test_training_evaluation_and_acmi_defaults_use_paper_strict_3v3():
     evaluate_source = Path("evaluate_vanilla_mappo.py").read_text(encoding="utf-8")
     acmi_source = Path("eval_acmi.py").read_text(encoding="utf-8")
     preset_source = Path("configs/experiment_presets.py").read_text(encoding="utf-8")
-    assert 'default=6' in evaluate_source
+    assert 'default=3' in evaluate_source
     assert 'default=1400' in evaluate_source
     assert 'default="paper_strict"' in evaluate_source
-    assert 'num_red: int = 6, num_blue: int = 6, max_steps: int = 1400' in acmi_source
+    assert 'num_red: int = 3, num_blue: int = 3, max_steps: int = 1400' in acmi_source
     assert 'obs_mode: str = "paper_strict"' in acmi_source
-    assert '"vanilla_6v6_paper_main"' in preset_source
+    assert '"main_3v3_mappo_mlp"' in preset_source
 
 
 def test_table2_angles_use_up_positive_right_positive_convention():
