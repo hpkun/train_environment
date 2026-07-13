@@ -5,6 +5,7 @@ controllers to convert high-level tactical commands to control-surface inputs.
 """
 from __future__ import annotations
 
+import copy
 import logging
 import numpy as np
 import gymnasium
@@ -372,6 +373,7 @@ class UavCombatEnv(gymnasium.Env):
         self._sensor_tracks: dict[tuple[str, str], SensorTrack] = {}
         self._sensor_diagnostics_step: list[dict] = []
         self._episode_stats: dict = {}
+        self._terminal_cleanup_done = False
 
         # Missile launch counters (per-episode, for debugging)
         self._missile_launch_counts: dict[str, int] = {}
@@ -450,6 +452,7 @@ class UavCombatEnv(gymnasium.Env):
             "EpisodeRedTerminalReward": 0.0, "EpisodeBlueTerminalReward": 0.0,
             "EpisodeLength": 0,
         }
+        self._terminal_cleanup_done = False
         self._next_missile_acmi_id = 1001
         if self._tacview_recorder is not None:
             self._tacview_recorder.reset()
@@ -651,29 +654,104 @@ class UavCombatEnv(gymnasium.Env):
         obs = self._get_obs()
         terminated = self._get_terminated()
         truncated = self._get_truncated()
-        if all(terminated[aid] or truncated[aid] for aid in self.agent_ids):
-            self._clear_terminal_combat_state()
         info = self._get_info(reward_components)
+        if all(terminated[aid] or truncated[aid] for aid in self.agent_ids):
+            final_info = self._freeze_terminal_info(info)
+            cleanup = self._clear_terminal_combat_state()
+            final_info["__terminal_cleanup__"].update(cleanup)
+            info = final_info
 
         return obs, rewards, terminated, truncated, info
 
-    def _clear_terminal_combat_state(self):
-        """Release transient weapon/fire-control references at episode end."""
+    def _freeze_terminal_info(self, info: dict) -> dict:
+        """Deep-copy final combat statistics before releasing episode objects."""
+        frozen = copy.deepcopy(info)
+        fire_snapshot = {
+            aid: state.snapshot() for aid, state in self._fire_control_states.items()
+        }
+        locks_snapshot = {
+            aid: {"target_id": self._lock_target.get(aid),
+                  "continuous_detection_frames": int(self._lock_timer.get(aid, 0))}
+            for aid in self.agent_ids
+        }
+        censored = []
+        for mid, missile in self._missiles_in_flight.items():
+            if missile.is_alive:
+                record = copy.deepcopy(self._launch_quality_records.get(mid, {}))
+                record.update({
+                    "missile_id": mid,
+                    "censored": True,
+                    "censor_reason": "episode_end_cleanup",
+                    "flight_time_sec": float(getattr(missile, "_t", 0.0)),
+                })
+                censored.append(record)
+        active_fc = sum(int(
+            state.current_target_id is not None
+            or state.continuous_detection_frames > 0
+            or state.lock_mature
+            or state.cooldown_frames_remaining > 0)
+            for state in self._fire_control_states.values())
+        active_locks = sum(int(
+            self._lock_target.get(aid) is not None
+            or self._lock_timer.get(aid, 0) > 0) for aid in self.agent_ids)
+        frozen["__terminal_cleanup__"] = {
+            "missiles_in_flight_at_episode_end": sum(
+                int(m.is_alive) for m in self._missiles_in_flight.values()),
+            "fire_control_active_at_episode_end": active_fc,
+            "locks_active_at_episode_end": active_locks,
+            "engaged_targets_at_episode_end": sorted(self._engaged_targets),
+            "final_fire_control_snapshot": fire_snapshot,
+            "final_lock_snapshot": locks_snapshot,
+            "completed_launch_records": copy.deepcopy(
+                self._launch_quality_done_step_records),
+            "censored_launch_records": censored,
+        }
+        return frozen
+
+    def _clear_terminal_combat_state(self) -> dict:
+        """Idempotently release objects without creating physical terminations."""
+        if self._terminal_cleanup_done:
+            return {
+                "red_episode_end_cleanup_count": 0,
+                "blue_episode_end_cleanup_count": 0,
+                "missiles_remaining_after_cleanup": len(self._missiles_in_flight),
+                "fire_control_remaining_after_cleanup": 0,
+                "locks_remaining_after_cleanup": 0,
+                "engaged_targets_remaining_after_cleanup": len(self._engaged_targets),
+            }
+        cleanup_counts = {"red": 0, "blue": 0}
         for missile in list(self._missiles_in_flight.values()):
             if missile.is_alive:
-                missile._status = MissileSimulator.MISS
-                missile._termination_reason = "target_dead"
                 team = "red" if missile._parent_id.startswith("red") else "blue"
-                self._missile_term_reasons[team]["target_dead"] = (
-                    self._missile_term_reasons[team].get("target_dead", 0) + 1)
-                self._finalize_launch_quality_record(missile)
-        self._cleanup_missiles()
+                cleanup_counts[team] += 1
+            missile.detach_references()
+            missile.close()
+        self._missiles_in_flight.clear()
         self._engaged_targets.clear()
         for aid in self.agent_ids:
             self._lock_timer[aid] = 0
             self._lock_target[aid] = None
             self._fire_control_states[aid] = FireControlState(
                 transition_reason="episode_end")
+        self._launch_quality_records.clear()
+        self._launch_quality_step_records = []
+        self._launch_quality_done_step_records = []
+        self._terminal_cleanup_done = True
+        return {
+            "red_episode_end_cleanup_count": cleanup_counts["red"],
+            "blue_episode_end_cleanup_count": cleanup_counts["blue"],
+            "missiles_remaining_after_cleanup": len(self._missiles_in_flight),
+            "fire_control_remaining_after_cleanup": sum(int(
+                state.current_target_id is not None
+                or state.continuous_detection_frames > 0
+                or state.lock_mature
+                or state.cooldown_frames_remaining > 0)
+                for state in self._fire_control_states.values()),
+            "locks_remaining_after_cleanup": sum(int(
+                self._lock_target.get(aid) is not None
+                or self._lock_timer.get(aid, 0) > 0) for aid in self.agent_ids),
+            "engaged_targets_remaining_after_cleanup": len(self._engaged_targets),
+        }
 
     # ------------------------------------------------------------------
     #  Action parsing
