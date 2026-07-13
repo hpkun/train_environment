@@ -51,7 +51,6 @@ try:
 except Exception:
     pass
 
-from rule_based_agent import blue_coordinated_actions
 from my_uav_env.alignment.reward_utils import (
     DEFAULT_ALTITUDE_REWARD_CONFIG,
     REWARD_VERSION,
@@ -186,7 +185,8 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
              pid_profile: str = "paper",
              pid_throttle_base: float = 0.0,
              reward_mode: str = "paper_joint",
-             missile_guidance_mode: str = "paper_eq9"):
+             missile_guidance_mode: str = "paper_eq9",
+             blue_policy_profile: str = "paper_pursuit"):
     """Load a model, run one episode with TacView recording, save .acmi."""
 
     print(f"pid_throttle_base: {pid_throttle_base}", flush=True)
@@ -205,6 +205,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                            pid_throttle_base=pid_throttle_base,
                            reward_mode=reward_mode,
                            missile_guidance_mode=missile_guidance_mode,
+                           blue_policy_profile=blue_policy_profile,
                            enable_gcas_for_blue=False,
                            suppress_jsbsim_output=True)
     except Exception:
@@ -232,6 +233,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                 "missile_guidance_mode": missile_guidance_mode,
                 "altitude_reward_config": asdict(DEFAULT_ALTITUDE_REWARD_CONFIG),
                 "action_distribution": ACTION_DISTRIBUTION_VERSION,
+                "blue_policy_profile": blue_policy_profile,
                 "num_red": num_red,
                 "num_blue": num_blue,
                 "global_state_dim": _compute_global_state_dim(num_red, obs_mode),
@@ -342,20 +344,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
 
             # 蓝方协同目标分配 + 引导律 (GCAS / 导弹规避在 env 层自动保护)
             blue_obs_dict = {bid: obs[bid] for bid in blue_ids}
-            engaged = env.refresh_engaged_targets()
-            kin = env.get_blue_own_kinematics()
-            blue_own_positions = {
-                bid: data["position"] for bid, data in kin.items()
-                if "position" in data
-            }
-            blue_own_headings = {
-                bid: data["heading"] for bid, data in kin.items()
-                if "heading" in data
-            }
-            actions.update(blue_coordinated_actions(blue_obs_dict, num_blue, num_red,
-                                                    engaged_targets=engaged,
-                                                    own_positions=blue_own_positions,
-                                                    own_headings=blue_own_headings))
+            actions.update(env.blue_policy_actions(blue_obs_dict))
 
             # 红方：模型推理 / 随机
             if actor is not None:
@@ -588,6 +577,10 @@ if __name__ == "__main__":
         parser.add_argument("--missile-guidance-mode",
                             choices=("paper_eq9", "legacy_simplified"),
                             default="paper_eq9")
+        parser.add_argument("--blue-policy-profile", choices=(
+            "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
+            "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1"),
+            default="paper_pursuit")
         parser.add_argument("--draw-boundary", action="store_true", default=False,
                             help="Draw battlefield boundary in ACMI for debugging.")
         parser.add_argument("--boundary-half-size", type=float, default=40000.0,
@@ -623,7 +616,8 @@ if __name__ == "__main__":
                  pid_profile=args.pid_profile,
                  pid_throttle_base=args.pid_throttle_base,
                  reward_mode=args.reward_mode,
-                 missile_guidance_mode=args.missile_guidance_mode)
+                 missile_guidance_mode=args.missile_guidance_mode,
+                 blue_policy_profile=args.blue_policy_profile)
     except Exception:
         print("FATAL: 未捕获的异常:", flush=True)
         traceback.print_exc()

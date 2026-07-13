@@ -18,6 +18,10 @@ from configs.brma_mappo_paper_spec import (
 )
 from my_uav_env.sensors import SensorTrack, radar_diagnostic
 from my_uav_env.fire_control import FireControlState
+from my_uav_env.blue_policy_profiles import (
+    BluePolicyController,
+    validate_blue_policy_profile,
+)
 
 from my_uav_env.alignment.los_geometry import (
     compute_3d_range,
@@ -232,6 +236,7 @@ class UavCombatEnv(gymnasium.Env):
                  missile_guidance_mode: str = "paper_eq9",
                  altitude_reward_config=None,
                  obs_mode: str = "paper_strict",
+                 blue_policy_profile: str = "paper_pursuit",
                  suppress_jsbsim_output: bool = True,
                  environment_config: PaperEnvironmentConfig | None = None,
                  render_mode=None):
@@ -280,6 +285,10 @@ class UavCombatEnv(gymnasium.Env):
         if obs_mode not in ("engineering", "paper_strict"):
             raise ValueError("obs_mode must be 'engineering' or 'paper_strict'")
         self.obs_mode = obs_mode
+        self.blue_policy_profile = validate_blue_policy_profile(
+            blue_policy_profile)
+        self.blue_policy_controller = BluePolicyController(
+            self.blue_policy_profile)
         self.entity_dim = 10 if obs_mode == "paper_strict" else 11
         self.physics_dt = 1.0 / sim_freq
         self.env_dt = agent_interaction_steps * self.physics_dt
@@ -432,7 +441,8 @@ class UavCombatEnv(gymnasium.Env):
         self._environment_config_snapshot = environment_config_snapshot(
             self.environment_config, num_red=self.max_num_red,
             num_blue=self.max_num_blue, sim_freq=self.sim_freq,
-            agent_interaction_steps=self.agent_interaction_steps, seed=self._seed)
+            agent_interaction_steps=self.agent_interaction_steps, seed=self._seed,
+            blue_policy_profile=self.blue_policy_profile)
         self.current_step = 0
         self._physics_frame = 0
         self._sim_time = 0.0
@@ -497,6 +507,12 @@ class UavCombatEnv(gymnasium.Env):
         for sim in red_list:
             sim.partners = [s for s in red_list if s.uid != sim.uid]
             sim.enemies = blue_list.copy()
+
+        self.blue_policy_controller.reset(
+            self.blue_ids, self.red_ids,
+            {aid: float(sim.get_rpy()[2]) for aid, sim in self.blue_planes.items()},
+            {aid: float(sim.get_geodetic()[2]) for aid, sim in self.blue_planes.items()},
+        )
 
         # Create or reset PID controllers
         if first_reset:
@@ -599,6 +615,25 @@ class UavCombatEnv(gymnasium.Env):
                     "heading": float(sim.get_rpy()[2]),
                 }
         return result
+
+    def blue_policy_actions(self, blue_obs: dict[str, dict]) -> dict[str, np.ndarray]:
+        """Generate actions with this environment's isolated blue controller."""
+        engaged = self.refresh_engaged_targets()
+        kinematics = self.get_blue_own_kinematics()
+        selected_missiles: dict[str, str | None] = {}
+        mws_detected: dict[str, bool] = {}
+        for blue_id, sim in self.blue_planes.items():
+            missile = (sim.check_missile_warning()
+                       if sim.is_alive
+                       and self.blue_policy_profile != "frozen_route_blue_v1"
+                       else None)
+            selected_missiles[blue_id] = getattr(missile, "uid", None)
+            mws_detected[blue_id] = missile is not None
+        return self.blue_policy_controller.act(
+            blue_obs, self.max_num_blue, self.max_num_red, engaged,
+            {aid: data["position"] for aid, data in kinematics.items()},
+            {aid: data["heading"] for aid, data in kinematics.items()},
+            self.current_step, selected_missiles, mws_detected)
 
     def step(self, actions: dict):
         self.current_step += 1
@@ -790,8 +825,12 @@ class UavCombatEnv(gymnasium.Env):
             #  overrides all other control.  The paper explicitly lists missile
             #  evasion as scripted behaviour that is NOT learned.
             # =================================================================
-            incoming = sim.check_missile_warning()
-            if incoming is not None:
+            blue_mws_enabled = (
+                not is_blue
+                or self.blue_policy_controller.blue_mws_override_enabled)
+            incoming = (sim.check_missile_warning()
+                        if blue_mws_enabled else None)
+            if incoming is not None and blue_mws_enabled:
                 evasion = self._evasion_diagnostics[aid]
                 if not evasion["active"]:
                     evasion["activations"] += 1
@@ -1945,6 +1984,8 @@ class UavCombatEnv(gymnasium.Env):
         info["__sensor_diagnostics__"] = [
             dict(row) for row in self._sensor_diagnostics_step]
         info["__reward_summary__"] = dict(self._reward_summary_step)
+        info["__blue_policy_diag__"] = (
+            self.blue_policy_controller.snapshot_episode_diagnostics())
         n_red_alive = sum(int(s.is_alive) for s in self.red_planes.values())
         n_blue_alive = sum(int(s.is_alive) for s in self.blue_planes.values())
         timeout = self.current_step >= self.max_steps
@@ -2239,6 +2280,7 @@ class UavCombatEnv(gymnasium.Env):
         return n
 
     def close(self):
+        self.blue_policy_controller.clear()
         for sim in self._all_sims():
             sim.close()
         self.blue_planes.clear()

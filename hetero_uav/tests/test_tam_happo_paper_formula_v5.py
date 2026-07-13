@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import json
 from pathlib import Path
 
 import numpy as np
@@ -425,13 +424,13 @@ def test_v5_train_metrics_are_written_to_real_rich_csv(tmp_path, mode):
     )
     expected = {field: float(index + 1) / 10.0 for index, field in enumerate(V5_TRAIN_FIELDS)}
     try:
-        logger.write_train_metrics({"iteration": 1, "total_env_steps_actual": 4, **expected})
+        logger.write_train_metrics({"train_steps": 4, "total_env_steps_actual": 4, **expected})
     finally:
         logger.close()
     frame = pd.read_csv(directory / "train_metrics.csv")
     assert len(frame) == 1
     assert set(V5_TRAIN_FIELDS) <= set(frame.columns)
-    assert np.isfinite(frame[V5_TRAIN_FIELDS].to_numpy(dtype=float)).all()
+    assert np.isfinite(frame[list(V5_TRAIN_FIELDS)].to_numpy(dtype=float)).all()
     for field, value in expected.items():
         assert frame.loc[0, field] == pytest.approx(value)
 
@@ -439,14 +438,14 @@ def test_v5_train_metrics_are_written_to_real_rich_csv(tmp_path, mode):
 def test_diagnostic_fixture_preserves_formal_reward_and_missile_contract():
     formal = yaml.safe_load(CFG3.read_text(encoding="utf-8"))
     diagnostic = yaml.safe_load(DIAGNOSTIC_CFG.read_text(encoding="utf-8"))
-    assert diagnostic["diagnostic_only"] is True
-    assert diagnostic["diagnostic_claim"] == "diagnostic-only observability fixture, not training configuration"
-    for key in (
-        "hetero_reward_mode", "tam_happo_paper_formula_v5", "missile_launch_range_m",
-        "missile_launch_min_range_m", "missile_launch_ao_deg", "missile_launch_ta_deg",
-        "missile_attack_interval_sec", "missile_guidance_mode", "missile_navigation_gain",
-        "missile_max_overload_g",
-    ):
+    assert diagnostic["tam_happo_paper_formula_v5"]["diagnostic_fixture_claim"] == (
+        "diagnostic-only observability fixture, not training configuration"
+    )
+    diagnostic_reward = dict(diagnostic["tam_happo_paper_formula_v5"])
+    diagnostic_reward.pop("diagnostic_fixture_claim")
+    assert diagnostic_reward == formal["tam_happo_paper_formula_v5"]
+    for key in ("hetero_reward_mode", "missile_launch_range_m", "missile_attack_interval_sec",
+                "missile_guidance", "missile_protocol"):
         assert diagnostic[key] == formal[key]
 
 

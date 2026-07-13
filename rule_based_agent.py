@@ -641,8 +641,9 @@ def _blue_simple_pursuit_action_impl(
         action = _simple_rescale_absolute_heading(float(pitch), desired_heading, 0.8)
         return _record("reacquire_last_seen", None, None, None, desired_heading, action, reacquire=True)
 
-    _simple_last_seen_bearing.pop(blue_id, None)
-    _simple_lost_steps.pop(blue_id, None)
+    if not paper_profile:
+        _simple_last_seen_bearing.pop(blue_id, None)
+        _simple_lost_steps.pop(blue_id, None)
     source = ("hold_heading" if paper_profile else
               ("center_cruise" if own_position is not None else "hold_heading"))
     desired_heading = our_heading if paper_profile else (

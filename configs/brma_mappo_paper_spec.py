@@ -228,12 +228,14 @@ DEFAULT_PAPER_ENVIRONMENT_CONFIG = PaperEnvironmentConfig()
 
 def environment_config_snapshot(config: PaperEnvironmentConfig, *, num_red: int,
                                 num_blue: int, sim_freq: int,
-                                agent_interaction_steps: int, seed: int | None) -> dict:
+                                agent_interaction_steps: int, seed: int | None,
+                                blue_policy_profile: str = "paper_pursuit") -> dict:
     payload = asdict(config)
     payload.update({"num_red": int(num_red), "num_blue": int(num_blue),
                     "sim_freq": int(sim_freq),
                     "agent_interaction_steps": int(agent_interaction_steps),
                     "decision_frequency_hz": float(sim_freq / agent_interaction_steps),
+                    "blue_policy_profile": str(blue_policy_profile),
                     "seed": seed})
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     payload["environment_config_fingerprint"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()

@@ -1426,6 +1426,7 @@ class UavCombatEnv(gymnasium.Env):
             on_kill_cooldown = aid in self._agents_deny_kill
             lock_mature = (best_enemy is not None
                            and self._lock_timer[aid] >= self.missile_lock_delay_frames)
+            launched_this_frame = False
             if lock_mature:
                 diag["lock_mature_pairs"] += 1
                 if self._missile_cooldown[aid] != 0:
@@ -1439,6 +1440,7 @@ class UavCombatEnv(gymnasium.Env):
                 launch_quality = self._build_launch_quality_record(
                     sim, best_enemy, best_distance, selection_debug)
                 self._launch_missile(sim, best_enemy, launch_quality)
+                launched_this_frame = True
                 diag["launches"] += 1
                 # ---- HOT-UPDATE: immediately mark target as engaged ----
                 # Subsequent agents in the same physics frame will see this
@@ -1457,7 +1459,8 @@ class UavCombatEnv(gymnasium.Env):
                 _lf = int(getattr(self, "_lock_timer", {}).get(aid, 0) or 0)
                 _lr = int(getattr(self, "missile_lock_delay_frames", 15))
                 _kc = aid in getattr(self, "_agents_deny_kill", set())
-                if not getattr(sim, "is_alive", False): _fr = "inactive"
+                if launched_this_frame: _fr = "launch"
+                elif not getattr(sim, "is_alive", False): _fr = "inactive"
                 elif _ammo <= 0: _fr = "no_ammo"
                 elif _debug.get("alive_target_pair_scans", 0) == 0: _fr = "no_alive_target"
                 elif _debug.get("unengaged_target_pair_scans", 0) == 0: _fr = "all_targets_engaged"
@@ -1473,7 +1476,7 @@ class UavCombatEnv(gymnasium.Env):
                 else: _fr = "unknown"
                 self._launch_gate_accum.setdefault(aid, []).append({
                     "fr": _fr, "ammo": _ammo, "cd": _cd, "lf": _lf, "lr": _lr,
-                    "lm": 1 if _lf >= _lr else 0,
+                    "lm": 1 if lock_mature else 0,
                     "alive": _debug.get("alive_target_pair_scans", 0),
                     "engaged": _debug.get("engaged_blocked_pair_scans", 0),
                     "unengaged": _debug.get("unengaged_target_pair_scans", 0),

@@ -49,6 +49,13 @@ EVALUATION_FIELDNAMES = [
     "EnableBlueGCAS", "RewardVersion", "RewardMode", "ObsNormalization",
     "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
     "ActionDistribution", "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
+    "BluePolicyProfile", "RedGeometry", "RedLockMature", "BlueGeometry",
+    "BlueLockMature", "RedTerminalReward", "NaNInfCount",
+    "blue_target_switches_total", "blue_target_dead_switches",
+    "blue_distance_triggered_switches", "blue_engaged_triggered_switches",
+    "blue_mws_detected_frames", "blue_mws_override_frames",
+    "blue_route_phase_changes", "blue_heading_command_discontinuities",
+    "blue_altitude_recovery_frames",
 ]
 
 EVALUATION_SUMMARY_FIELDNAMES = [
@@ -65,6 +72,7 @@ EVALUATION_SUMMARY_FIELDNAMES = [
     "RewardVersion", "RewardMode", "ObsNormalization",
     "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
     "ActionDistribution", "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
+    "BluePolicyProfile",
 ]
 
 
@@ -81,6 +89,10 @@ def parse_args():
     parser.add_argument("--device", type=str, choices=("auto", "cpu", "cuda"),
                         default="auto")
     parser.add_argument("--enable-blue-gcas", action="store_true", default=False)
+    parser.add_argument("--blue-policy-profile", choices=(
+        "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
+        "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1"),
+        default="paper_pursuit")
     parser.add_argument("--obs-mode", type=str,
                         choices=("paper_strict", "engineering"),
                         default="paper_strict")
@@ -174,6 +186,7 @@ def _load_actor(args, device: torch.device):
         "missile_guidance_mode": args.missile_guidance_mode,
         "altitude_reward_config": asdict(DEFAULT_ALTITUDE_REWARD_CONFIG),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
+        "blue_policy_profile": args.blue_policy_profile,
         "num_red": args.num_red,
         "num_blue": args.num_blue,
         "global_state_dim": _compute_global_state_dim(args.num_red, args.obs_mode),
@@ -220,7 +233,10 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                     pid_profile: str = "paper",
                     pid_throttle_base: float = 0.0,
                     reward_mode: str = "paper_joint",
-                    missile_guidance_mode: str = "paper_eq9"):
+                    missile_guidance_mode: str = "paper_eq9",
+                    blue_policy_profile: str = "paper_pursuit",
+                    seed: int | None = None,
+                    deterministic: bool = True):
     env = UavCombatEnv(
         max_num_blue=num_blue,
         max_num_red=num_red,
@@ -230,11 +246,12 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         pid_throttle_base=pid_throttle_base,
         reward_mode=reward_mode,
         missile_guidance_mode=missile_guidance_mode,
+        blue_policy_profile=blue_policy_profile,
         enable_gcas_for_blue=enable_blue_gcas,
         suppress_jsbsim_output=True,
     )
     try:
-        obs, _ = env.reset()
+        obs, _ = env.reset() if seed is None else env.reset(seed=seed)
         red_ids = [f"red_{i}" for i in range(num_red)]
         blue_ids = [f"blue_{i}" for i in range(num_blue)]
         rnn_a = np.zeros((num_red, rnn_hidden_size), dtype=np.float32)
@@ -244,26 +261,28 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         info = {}
         steps = 0
         red_episode_joint_reward = 0.0
+        red_terminal_reward = 0.0
+        launch_diag_totals = {"red": Counter(), "blue": Counter()}
+        nan_inf_count = 0
 
         done = False
         while not done:
             actions = {}
 
             blue_obs_dict = {bid: obs[bid] for bid in blue_ids}
-            engaged = env.refresh_engaged_targets()
-            kin = env.get_blue_own_kinematics()
-            blue_own_positions = {
-                bid: data["position"] for bid, data in kin.items()
-                if "position" in data
-            }
-            blue_own_headings = {
-                bid: data["heading"] for bid, data in kin.items()
-                if "heading" in data
-            }
-            actions.update(blue_coordinated_actions(
-                blue_obs_dict, num_blue, num_red, engaged_targets=engaged,
-                own_positions=blue_own_positions,
-                own_headings=blue_own_headings))
+            if hasattr(env, "blue_policy_actions"):
+                actions.update(env.blue_policy_actions(blue_obs_dict))
+            else:
+                engaged = env.refresh_engaged_targets()
+                kinematics = env.get_blue_own_kinematics()
+                actions.update(blue_coordinated_actions(
+                    blue_obs_dict, num_blue, num_red, engaged_targets=engaged,
+                    own_positions={
+                        aid: value["position"] for aid, value in kinematics.items()
+                        if "position" in value},
+                    own_headings={
+                        aid: value["heading"] for aid, value in kinematics.items()
+                        if "heading" in value}))
 
             if actor is not None:
                 alive_indices = []
@@ -286,7 +305,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                                             dtype=torch.float32, device=device)
                     with torch.no_grad():
                         action_dist, new_rnn = actor(obs_t, rnn_t)
-                        act = action_dist.mode
+                        act = action_dist.mode if deterministic else action_dist.sample()
                     for k, i in enumerate(alive_indices):
                         actions[red_ids[i]] = act[k].cpu().numpy().astype(np.float32)
                         rnn_a[i] = new_rnn[k].cpu().numpy()
@@ -295,9 +314,18 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                     actions[rid] = np.random.uniform(-1, 1, 3).astype(np.float32)
 
             obs, _rewards, terminated, truncated, info = env.step(actions)
+            nan_inf_count += sum(int(not np.all(np.isfinite(value)))
+                                 for value in actions.values())
+            nan_inf_count += sum(int(not np.isfinite(float(value)))
+                                 for value in _rewards.values())
             steps += 1
             red_episode_joint_reward += _joint_team_reward_once(
                 _rewards, red_ids)
+            red_terminal_reward += float(info.get("__reward_summary__", {}).get(
+                "red_team_terminal_reward", 0.0))
+            for team in ("red", "blue"):
+                launch_diag_totals[team].update(
+                    info.get("__launch_diag__", {}).get(team, {}))
 
             for rid in red_ids:
                 red_missiles_fired += info.get(rid, {}).get(
@@ -334,6 +362,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         blue_deaths_other = blue_deaths["other"]
         red_missile_hits = blue_deaths_missile
         blue_missile_hits = red_deaths_missile
+        blue_diag = info.get("__blue_policy_diag__", {})
 
         return {
             "Episode": episode_idx,
@@ -373,6 +402,19 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "AltitudeRewardConfig": json.dumps(
                 asdict(DEFAULT_ALTITUDE_REWARD_CONFIG), sort_keys=True,
                 separators=(",", ":")),
+            "BluePolicyProfile": blue_policy_profile,
+            "RedGeometry": int(launch_diag_totals["red"]["geometry_ok_pairs"]),
+            "RedLockMature": int(launch_diag_totals["red"]["lock_mature_pairs"]),
+            "BlueGeometry": int(launch_diag_totals["blue"]["geometry_ok_pairs"]),
+            "BlueLockMature": int(launch_diag_totals["blue"]["lock_mature_pairs"]),
+            "RedTerminalReward": red_terminal_reward,
+            "NaNInfCount": nan_inf_count,
+            **{field: int(blue_diag.get(field, 0)) for field in (
+                "blue_target_switches_total", "blue_target_dead_switches",
+                "blue_distance_triggered_switches", "blue_engaged_triggered_switches",
+                "blue_mws_detected_frames", "blue_mws_override_frames",
+                "blue_route_phase_changes", "blue_heading_command_discontinuities",
+                "blue_altitude_recovery_frames")},
         }
     finally:
         env.close()
@@ -429,7 +471,7 @@ def _aggregate_evaluation_summary(rows: list[dict]) -> dict:
                 "EnableBlueGCAS", "RewardVersion", "RewardMode", "ObsNormalization",
                 "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
                 "ActionDistribution", "AltitudeRewardConfigVersion",
-                "AltitudeRewardConfig",
+                "AltitudeRewardConfig", "BluePolicyProfile",
             )
         },
     }
@@ -499,6 +541,8 @@ def main():
                 pid_throttle_base=args.pid_throttle_base,
                 reward_mode=args.reward_mode,
                 missile_guidance_mode=args.missile_guidance_mode,
+                blue_policy_profile=args.blue_policy_profile,
+                seed=None if args.seed is None else args.seed + ep - 1,
             )
             rows.append(row)
             writer.writerow(row)

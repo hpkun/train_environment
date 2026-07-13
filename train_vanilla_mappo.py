@@ -104,6 +104,7 @@ class Config:
     action_dim: int = 3
     algorithm_type: str = "mappo_mlp"
     environment_version: str = "brma_paper_profile_v1"
+    blue_policy_profile: str = "paper_pursuit"
 
     # ---- PPO (论文 Table 3) ----
     replay_buffer_size: int = 2000  
@@ -434,6 +435,18 @@ ACTION_BOUND_CSV_FIELDS = (
     "RedActionNearBoundFracVelocity",
 )
 
+BLUE_POLICY_DIAG_CSV_FIELDS = (
+    "blue_target_switches_total",
+    "blue_target_dead_switches",
+    "blue_distance_triggered_switches",
+    "blue_engaged_triggered_switches",
+    "blue_mws_detected_frames",
+    "blue_mws_override_frames",
+    "blue_route_phase_changes",
+    "blue_heading_command_discontinuities",
+    "blue_altitude_recovery_frames",
+)
+
 CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v2"
 ACTION_DISTRIBUTION_VERSION = "tanh_squashed_normal_v1"
 
@@ -442,7 +455,8 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
     environment_snapshot = environment_config_snapshot(
         DEFAULT_PAPER_ENVIRONMENT_CONFIG,
         num_red=config.num_red, num_blue=config.num_blue,
-        sim_freq=60, agent_interaction_steps=12, seed=config.seed)
+        sim_freq=60, agent_interaction_steps=12, seed=config.seed,
+        blue_policy_profile=config.blue_policy_profile)
     return {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": config.obs_mode,
@@ -456,6 +470,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
         "algorithm_type": str(config.algorithm_type),
         "environment_version": str(config.environment_version),
+        "blue_policy_profile": str(config.blue_policy_profile),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
         "altitude_reward_interpretation": "pairwise_sum_all_alive_enemies_v1",
         "num_red": int(config.num_red),
@@ -487,7 +502,26 @@ def _unpack_and_validate_checkpoint(payload, expected_metadata: dict,
         raise ValueError(
             f"checkpoint model_kind mismatch: expected {model_kind!r}, "
             f"got {payload.get('model_kind')!r}")
-    metadata = payload["metadata"]
+    metadata = dict(payload["metadata"])
+    expected_profile = expected_metadata.get("blue_policy_profile")
+    if "blue_policy_profile" not in metadata and expected_profile == "paper_pursuit":
+        metadata["blue_policy_profile"] = "paper_pursuit"
+        print("[COMPAT] checkpoint has no blue_policy_profile; interpreting it "
+              "as paper_pursuit.", flush=True)
+    actual_env = metadata.get("environment_config")
+    expected_env = expected_metadata.get("environment_config")
+    if (expected_profile == "paper_pursuit" and isinstance(actual_env, dict)
+            and isinstance(expected_env, dict)
+            and "blue_policy_profile" not in actual_env):
+        actual_core = dict(actual_env)
+        expected_core = dict(expected_env)
+        actual_core.pop("environment_config_fingerprint", None)
+        expected_core.pop("environment_config_fingerprint", None)
+        expected_core.pop("blue_policy_profile", None)
+        if actual_core == expected_core:
+            metadata["environment_config"] = expected_env
+            metadata["environment_config_fingerprint"] = expected_metadata.get(
+                "environment_config_fingerprint")
     mismatches = {
         key: (metadata.get(key), expected)
         for key, expected in expected_metadata.items()
@@ -678,9 +712,6 @@ def _cleanup_rotating_checkpoints(directory: str, prefix: str, keep: int = 5):
 #    action[1] = heading_cmd  → target_heading_delta (正=右转, PID→aileron)
 #    action[2] = vel_cmd      → target_velocity      (正=加速, PID→throttle)
 # ==============================================================================
-
-from rule_based_agent import blue_coordinated_actions
-
 
 # ==============================================================================
 #  SubprocVecEnv (从 train_ppo.py 精简，保留超时保护)
@@ -1027,6 +1058,27 @@ class SubprocVecEnv:
                       f"died during env_method recv", flush=True)
                 self._dead_workers.add(i)
                 results.append(set())
+        return results
+
+    def env_method_each(self, method_name: str, calls: list[tuple[tuple, dict]],
+                        timeout: float = 30.0):
+        """Call one method with per-environment arguments."""
+        if len(calls) != len(self.remotes):
+            raise ValueError("calls length must match number of environments")
+        for i, (remote, (args, kwargs)) in enumerate(zip(self.remotes, calls)):
+            if i not in self._dead_workers:
+                remote.send(("call", (method_name, args, kwargs)))
+        results = []
+        for i, remote in enumerate(self.remotes):
+            if i in self._dead_workers:
+                results.append({})
+                continue
+            if not remote.poll(timeout):
+                raise TimeoutError(f"Worker {i} timed out during {method_name}")
+            msg = remote.recv()
+            if isinstance(msg, tuple) and len(msg) == 2 and msg[0] == "error":
+                raise RuntimeError(f"Worker {i} error in {method_name}: {msg[1]}")
+            results.append(msg)
         return results
 
     def _restart_worker(self, i: int, env_kwargs: dict):
@@ -1780,6 +1832,10 @@ def parse_args():
                         default=defaults.entropy_coef)
     parser.add_argument("--enable-blue-gcas", action="store_true",
                         default=defaults.enable_blue_gcas)
+    parser.add_argument("--blue-policy-profile", choices=(
+        "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
+        "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1"),
+        default=defaults.blue_policy_profile)
     parser.add_argument("--obs-mode", type=str,
                         choices=("paper_strict", "engineering"),
                         default=defaults.obs_mode)
@@ -1816,7 +1872,7 @@ _VANILLA_PRESET_CLI_FLAGS = {
     "num_red", "num_blue", "num_envs", "total_env_steps",
     "max_episode_length", "replay_buffer_size", "n_minibatches",
     "actor_lr", "critic_lr", "entropy_coef",
-    "enable_blue_gcas", "obs_mode", "obs_normalization", "pid_profile",
+    "enable_blue_gcas", "blue_policy_profile", "obs_mode", "obs_normalization", "pid_profile",
     "pid_throttle_base",
     "reward_mode", "missile_guidance_mode", "resume_from_best",
     "log_file", "results_file", "launch_quality_file",
@@ -1855,6 +1911,7 @@ def make_config_from_args(args) -> Config:
     config.critic_lr = args.critic_lr
     config.entropy_coef = args.entropy_coef
     config.enable_blue_gcas = args.enable_blue_gcas
+    config.blue_policy_profile = args.blue_policy_profile
     config.obs_mode = args.obs_mode
     config.obs_normalization = args.obs_normalization
     config.pid_profile = args.pid_profile
@@ -1962,7 +2019,8 @@ def main():
                           "ActionLogStdMean",
                           *LAUNCH_DIAG_CSV_FIELDS,
                           *LAUNCH_QUALITY_AGG_CSV_FIELDS,
-                          *ACTION_BOUND_CSV_FIELDS])
+                          *ACTION_BOUND_CSV_FIELDS,
+                          *BLUE_POLICY_DIAG_CSV_FIELDS])
     csv_file.flush()
 
     launch_quality_file = config.launch_quality_file
@@ -2022,6 +2080,7 @@ def main():
                       reward_mode=config.reward_mode,
                       missile_guidance_mode=config.missile_guidance_mode,
                       altitude_reward_config=config.altitude_reward_config,
+                      blue_policy_profile=config.blue_policy_profile,
                       enable_gcas_for_blue=config.enable_blue_gcas)
     print(f"正在启动 {config.num_envs} 个 worker 进程...", flush=True)
     vec_env = SubprocVecEnv(config.num_envs, env_kwargs, base_seed=config.seed)
@@ -2121,13 +2180,17 @@ def main():
         iter_launch_quality_records: list[dict] = []
         iter_launch_quality_done_records: list[dict] = []
         iter_action_bound = _empty_action_bound_totals()
+        iter_blue_policy_diag = Counter()
 
         # ---- Rollout ----
         for step in range(num_steps):
-            # Fetch engaged-targets sets from all envs (one pipe round-trip)
-            engaged_sets = vec_env.env_method("refresh_engaged_targets")
-            blue_own_positions_list, blue_own_headings_list = (
-                _fetch_blue_own_kinematics(vec_env))
+            blue_calls = []
+            for env_obs in raw_obs_list:
+                blue_obs = ({bid: env_obs[bid] for bid in blue_ids}
+                            if env_obs else {})
+                blue_calls.append(((blue_obs,), {}))
+            blue_actions_list = vec_env.env_method_each(
+                "blue_policy_actions", blue_calls)
 
             # ---- Phase 1: per-env blue actions + collect red obs for batching ----
             # env_actions_builders stores per-env data needed to finalize actions after batched inference
@@ -2153,12 +2216,7 @@ def main():
                     continue
 
                 # ---- Blue rule-based actions (fast CPU, per-env) ----
-                blue_obs_dict = {bid: env_obs[bid] for bid in blue_ids}
-                blue_actions = blue_coordinated_actions(
-                    blue_obs_dict, config.num_blue, config.num_red,
-                    engaged_targets=engaged_sets[env_idx],
-                    own_positions=blue_own_positions_list[env_idx],
-                    own_headings=blue_own_headings_list[env_idx])
+                blue_actions = blue_actions_list[env_idx]
 
                 # ---- Red: collect alive agents for batched actor forward pass ----
                 red_obs_flat_all = []
@@ -2334,6 +2392,9 @@ def main():
 
                 # ---- episodic settlement AFTER accumulation (terminal r_end is included) ----
                 if all(don.values()):
+                    blue_diag = info.get("__blue_policy_diag__", {})
+                    for field in BLUE_POLICY_DIAG_CSV_FIELDS:
+                        iter_blue_policy_diag[field] += int(blue_diag.get(field, 0))
                     total_episodes += 1
                     iter_episodes += 1
                     blue_alive = sum(
@@ -2523,7 +2584,9 @@ def main():
                              *[
                                  f"{action_bound_metrics[field]:.6f}"
                                  for field in ACTION_BOUND_CSV_FIELDS
-                             ]])
+                             ],
+                             *[iter_blue_policy_diag[field]
+                               for field in BLUE_POLICY_DIAG_CSV_FIELDS]])
         csv_file.flush()
 
         # ---- 持久化：results/ 绘图数据 (累计 + 每 1M 步自动保存) ----
