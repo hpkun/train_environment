@@ -15,6 +15,7 @@ from rule_based_agent import (
     _blue_simple_pursuit_action_impl,
     _paper_absolute_action,
     _simple_nearest_target,
+    _simple_target_by_index,
     _wrap_pi,
     blue_coordinated_actions,
 )
@@ -61,12 +62,14 @@ class BluePolicyController:
         self.initial_altitudes: dict[str, float] = {}
         self.hold_headings: dict[str, float] = {}
         self.route_phases: dict[str, str] = {}
-        self.last_commands: dict[str, tuple[float, float, float]] = {}
+        self.last_base_commands: dict[str, tuple[float, float, float]] = {}
+        self.last_executed_headings: dict[str, float] = {}
         self.latest_per_blue: list[dict] = []
-        self.mws_detected_frames = 0
-        self.mws_override_frames = 0
+        self.mws_detected_agent_decisions = 0
+        self.mws_override_agent_decisions = 0
         self.route_phase_changes = 0
-        self.heading_command_discontinuities = 0
+        self.base_heading_command_discontinuities = 0
+        self.executed_heading_command_discontinuities = 0
         self.altitude_recovery_frames = 0
 
     def reset(self, blue_ids: list[str], red_ids: list[str],
@@ -191,18 +194,41 @@ class BluePolicyController:
 
     def _record_command(self, blue_id: str, heading: float, pitch: float,
                         speed: float, phase: str, recovery: bool) -> float:
-        previous = self.last_commands.get(blue_id)
+        previous = self.last_base_commands.get(blue_id)
         delta = 0.0 if previous is None else _wrap_pi(heading - previous[0])
         if previous is not None and abs(delta) > self._HEADING_DISCONTINUITY_RAD:
-            self.heading_command_discontinuities += 1
+            self.base_heading_command_discontinuities += 1
         previous_phase = self.route_phases.get(blue_id)
         if previous_phase is not None and phase != previous_phase:
             self.route_phase_changes += 1
         self.route_phases[blue_id] = phase
-        self.last_commands[blue_id] = (heading, pitch, speed)
+        self.last_base_commands[blue_id] = (heading, pitch, speed)
         if recovery:
             self.altitude_recovery_frames += 1
         return float(delta)
+
+    def record_executed_heading(self, blue_id: str, heading: float,
+                                source: str) -> None:
+        """Record the final heading target emitted by environment priority logic."""
+        heading = _wrap_pi(float(heading))
+        previous = self.last_executed_headings.get(blue_id)
+        delta = 0.0 if previous is None else _wrap_pi(heading - previous)
+        if previous is not None and abs(delta) > self._HEADING_DISCONTINUITY_RAD:
+            self.executed_heading_command_discontinuities += 1
+        self.last_executed_headings[blue_id] = heading
+        matched = False
+        for row in self.latest_per_blue:
+            if row.get("blue_id") == blue_id:
+                matched = True
+                row["executed_heading_command_rad"] = heading
+                row["executed_heading_delta_rad"] = float(delta)
+                row["executed_command_source"] = str(source)
+                if source == "mws_override" and not row.get("mws_action_override", False):
+                    row["mws_action_override"] = True
+                    self.mws_override_agent_decisions += 1
+                break
+        if source == "mws_override" and not matched:
+            self.mws_override_agent_decisions += 1
 
     def act(self, blue_obs: dict[str, dict], num_blue: int, num_red: int,
             engaged_targets: set[str] | None,
@@ -225,6 +251,7 @@ class BluePolicyController:
         else:
             assignments = {}
             actions = {}
+            assignment_reasons: dict[str, str] = {}
             for blue_index in range(num_blue):
                 blue_id = f"blue_{blue_index}"
                 obs = blue_obs.get(blue_id, {})
@@ -233,6 +260,7 @@ class BluePolicyController:
                         blue_id, blue_index, obs, current_step)
                     actions[blue_id] = action
                     assignments[blue_id] = None
+                    assignment_reasons[blue_id] = "open_loop_route"
                     continue
 
                 target_id = self.current_targets.get(blue_id)
@@ -257,12 +285,22 @@ class BluePolicyController:
                     heading = self.hold_headings.setdefault(
                         blue_id, _wrap_pi(float(own_headings.get(blue_id, 0.0))))
                     actions[blue_id] = _paper_absolute_action(0.0, heading)
+                    assignment_reasons[blue_id] = "hold_after_kill"
                 else:
+                    _idx, target_state, _range = _simple_target_by_index(
+                        obs, num_blue, num_red, target_index)
                     actions[blue_id] = _blue_simple_pursuit_action_impl(
                         obs, num_blue, num_red, blue_index,
                         forced_target_idx=target_index,
                         own_position=own_positions.get(blue_id),
                         own_heading=own_headings.get(blue_id), paper_profile=True)
+                    assignment_reasons[blue_id] = (
+                        "fixed_pair" if target_state is not None
+                        else "track_unavailable_hold")
+
+        if self.profile == "paper_pursuit":
+            assignment_reasons = {
+                blue_id: "per_step_nearest" for blue_id in assignments}
 
         self.latest_per_blue = []
         for blue_index in range(num_blue):
@@ -274,9 +312,8 @@ class BluePolicyController:
                 warning = np.asarray(obs.get("missile_warning", [0.0])).reshape(-1)
                 detected = bool(mws_detected.get(
                     blue_id, warning[0] > 0.5 if warning.size else False))
-            override = detected and self.blue_mws_override_enabled
-            self.mws_detected_frames += int(detected)
-            self.mws_override_frames += int(override)
+            override = False
+            self.mws_detected_agent_decisions += int(detected)
             heading = _wrap_pi(float(action[1]) * np.pi)
             pitch = float(action[0]) * (np.pi / 2.0)
             phase = self._route_phase(current_step) if self.profile == "frozen_route_blue_v1" else "pursuit"
@@ -288,9 +325,8 @@ class BluePolicyController:
             delta = self._record_command(blue_id, heading, pitch, 250.0, phase, recovery)
             assigned = assignments.get(blue_id)
             previous = self.current_targets.get(blue_id)
-            assignment_reason = "fixed_pair"
+            assignment_reason = assignment_reasons.get(blue_id, "fixed_pair")
             if self.profile == "paper_pursuit":
-                assignment_reason = "per_step_nearest"
                 if previous is not None and assigned != previous:
                     reason = ("target_dead" if not self._target_alive(
                         obs, previous, num_blue, num_red) else "distance")
@@ -298,10 +334,6 @@ class BluePolicyController:
                     self.switch_reason_counts[reason] += 1
                     self.last_switch_reasons[blue_id] = reason
                 self.current_targets[blue_id] = assigned
-            elif self.profile == "frozen_route_blue_v1":
-                assignment_reason = "open_loop_route"
-            elif assigned is None:
-                assignment_reason = "hold_after_kill"
             self.latest_per_blue.append({
                 "blue_id": blue_id,
                 "assigned_target_id": assigned,
@@ -309,6 +341,7 @@ class BluePolicyController:
                 "assignment_reason": assignment_reason,
                 "target_switch_count": int(self.target_switch_counts[blue_id]),
                 "last_switch_reason": self.last_switch_reasons.get(blue_id, ""),
+                "base_heading_command_rad": float(heading),
                 "pursuit_heading_cmd_rad": float(heading),
                 "pursuit_pitch_cmd_rad": float(pitch),
                 "target_speed_cmd_mps": 250.0,
@@ -319,6 +352,9 @@ class BluePolicyController:
                     else selected_missiles.get(blue_id)),
                 "route_phase": phase,
                 "altitude_recovery_active": recovery,
+                "executed_heading_command_rad": None,
+                "executed_heading_delta_rad": None,
+                "executed_command_source": "pending_parse",
                 "command_heading_delta_rad": delta,
             })
         return actions
@@ -332,10 +368,19 @@ class BluePolicyController:
             "blue_target_dead_switches": int(self.switch_reason_counts["target_dead"]),
             "blue_distance_triggered_switches": int(self.switch_reason_counts["distance"]),
             "blue_engaged_triggered_switches": int(self.switch_reason_counts["engaged"]),
-            "blue_mws_detected_frames": int(self.mws_detected_frames),
-            "blue_mws_override_frames": int(self.mws_override_frames),
+            "blue_mws_detected_agent_decisions": int(
+                self.mws_detected_agent_decisions),
+            "blue_mws_override_agent_decisions": int(
+                self.mws_override_agent_decisions),
+            # Compatibility aliases: units are agent decisions, not physics frames.
+            "blue_mws_detected_frames": int(self.mws_detected_agent_decisions),
+            "blue_mws_override_frames": int(self.mws_override_agent_decisions),
             "blue_route_phase_changes": int(self.route_phase_changes),
+            "blue_base_heading_command_discontinuities": int(
+                self.base_heading_command_discontinuities),
+            "blue_executed_heading_command_discontinuities": int(
+                self.executed_heading_command_discontinuities),
             "blue_heading_command_discontinuities": int(
-                self.heading_command_discontinuities),
+                self.base_heading_command_discontinuities),
             "blue_altitude_recovery_frames": int(self.altitude_recovery_frames),
         })

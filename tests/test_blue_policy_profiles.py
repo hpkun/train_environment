@@ -9,6 +9,10 @@ from my_uav_env.blue_policy_profiles import (
     BluePolicyController,
 )
 from rule_based_agent import blue_coordinated_actions
+from rule_based_agent import _paper_cruise_speed_action
+from my_uav_env.env import UavCombatEnv
+from evaluate_blue_profile_matrix import MATRIX_FIELDS
+from evaluate_vanilla_mappo import EVALUATION_FIELDNAMES
 from train_vanilla_mappo import (
     BLUE_POLICY_DIAG_CSV_FIELDS,
     Config,
@@ -124,14 +128,18 @@ def test_fixed_pair_awacs_track_keeps_target_and_target_death_cycles():
 def test_fixed_pair_reset_restores_initial_mapping():
     controller = BluePolicyController("fixed_pair_pursuit_v1")
     _reset(controller)
-    _act(controller, _blue_obs(alive=(0, 1, 1)))
+    _act(controller, _blue_obs(alive=(0, 1, 1), warning=1.0))
+    controller.record_executed_heading("blue_0", 1.0, "mws_override")
     generation = controller.episode_generation
     _reset(controller)
     assert controller.episode_generation == generation + 1
     assert controller.current_targets == {
         "blue_0": "red_0", "blue_1": "red_1", "blue_2": "red_2"}
     assert sum(controller.target_switch_counts.values()) == 0
-    assert controller.mws_detected_frames == 0
+    assert controller.mws_detected_agent_decisions == 0
+    assert controller.mws_override_agent_decisions == 0
+    assert controller.last_base_commands == {}
+    assert controller.last_executed_headings == {}
 
 
 def test_no_mws_records_detection_without_action_override():
@@ -145,10 +153,15 @@ def test_no_mws_records_detection_without_action_override():
     for blue_id in a:
         np.testing.assert_array_equal(a[blue_id], b[blue_id])
     diag = no_mws.snapshot_episode_diagnostics()
-    assert diag["blue_mws_detected_frames"] == 3
-    assert diag["blue_mws_override_frames"] == 0
+    assert diag["blue_mws_detected_agent_decisions"] == 3
+    assert diag["blue_mws_override_agent_decisions"] == 0
     assert not no_mws.blue_mws_override_enabled
     assert pursuit.blue_mws_override_enabled
+    for blue_id in ("blue_0", "blue_1", "blue_2"):
+        pursuit.record_executed_heading(blue_id, 0.0, "mws_override")
+    pursuit_diag = pursuit.snapshot_episode_diagnostics()
+    assert pursuit_diag["blue_mws_detected_agent_decisions"] == 3
+    assert pursuit_diag["blue_mws_override_agent_decisions"] == 3
 
 
 def test_hold_after_kill_does_not_reassign_and_holds_cruise():
@@ -161,6 +174,45 @@ def test_hold_after_kill_does_not_reassign_and_holds_cruise():
     assert row["target_switch_count"] == 0
     assert row["target_speed_cmd_mps"] == 250.0
     assert actions["blue_0"][0] == 0.0
+
+
+def test_fixed_target_valid_uses_only_requested_target():
+    controller = BluePolicyController("fixed_pair_pursuit_v1")
+    _reset(controller)
+    obs = _blue_obs(enemy_ranges=(10000.0, 500.0, 700.0))
+    obs["blue_0"]["enemy_states"][0, :3] = (10000.0, 10000.0, 0.0)
+    actions = _act(controller, obs)
+    assert actions["blue_0"][1] > 0.2
+    row = controller.snapshot_episode_diagnostics()["per_blue"][0]
+    assert row["assigned_target_id"] == "red_0"
+    assert row["assignment_reason"] == "fixed_pair"
+
+
+def test_fixed_target_track_unavailable_holds_without_nearest_fallback_then_recovers():
+    controller = BluePolicyController("fixed_pair_pursuit_v1")
+    _reset(controller)
+    obs = _blue_obs(enemy_ranges=(10000.0, 500.0, 700.0), heading=0.4)
+    obs["blue_0"]["enemy_states"][0] = 0.0
+    headings = {"blue_0": 0.4, "blue_1": 0.2, "blue_2": -0.2}
+    positions = {key: np.zeros(3) for key in headings}
+    actions = controller.act(obs, 3, 3, set(), positions, headings, 0)
+    np.testing.assert_allclose(
+        actions["blue_0"],
+        np.asarray([0.0, 0.4 / np.pi, _paper_cruise_speed_action(250.0)]),
+        rtol=0.0, atol=1e-7)
+    row = controller.snapshot_episode_diagnostics()["per_blue"][0]
+    assert row["assigned_target_id"] == "red_0"
+    assert row["target_switch_count"] == 0
+    assert row["assignment_reason"] == "track_unavailable_hold"
+
+    recovered = _blue_obs(enemy_ranges=(10000.0, 500.0, 700.0), heading=0.4)
+    recovered["blue_0"]["enemy_states"][0, :3] = (10000.0, 10000.0, 0.0)
+    actions = controller.act(recovered, 3, 3, set(), positions, headings, 1)
+    row = controller.snapshot_episode_diagnostics()["per_blue"][0]
+    assert row["assigned_target_id"] == "red_0"
+    assert row["target_switch_count"] == 0
+    assert row["assignment_reason"] == "fixed_pair"
+    assert actions["blue_0"][1] > 0.2
 
 
 def test_frozen_route_phases_wrap_and_have_no_target_or_mws_override():
@@ -244,8 +296,116 @@ def test_eight_controller_instances_are_isolated_and_reproducible():
 def test_dimensions_and_training_diagnostic_fields_are_unchanged_or_present():
     assert _compute_obs_dim(3, 3, True, obs_mode="paper_strict") == 66
     assert _compute_global_state_dim(3, "paper_strict") == 30
-    assert "blue_mws_override_frames" in BLUE_POLICY_DIAG_CSV_FIELDS
+    assert "blue_mws_override_agent_decisions" in BLUE_POLICY_DIAG_CSV_FIELDS
+    assert "blue_mws_detected_agent_decisions" in BLUE_POLICY_DIAG_CSV_FIELDS
+    assert "blue_base_heading_command_discontinuities" in BLUE_POLICY_DIAG_CSV_FIELDS
+    assert "blue_executed_heading_command_discontinuities" in BLUE_POLICY_DIAG_CSV_FIELDS
+    assert not any("mws" in field and "frames" in field
+                   for field in BLUE_POLICY_DIAG_CSV_FIELDS)
     assert "blue_distance_triggered_switches" in BLUE_POLICY_DIAG_CSV_FIELDS
+
+
+class _FakeIncomingMissile:
+    uid = "red_missile_0"
+
+    def get_position(self):
+        return np.asarray([0.0, 1000.0, 6000.0])
+
+
+class _FakeBlueSim:
+    is_alive = True
+
+    def __init__(self):
+        self.incoming = None
+        self.altitude = 6000.0
+
+    def get_rpy(self):
+        return np.zeros(3)
+
+    def check_missile_warning(self):
+        return self.incoming
+
+    def get_geodetic(self):
+        return (0.0, 0.0, self.altitude)
+
+    def get_position(self):
+        return np.asarray([0.0, 0.0, 6000.0])
+
+    def get_velocity(self):
+        return np.asarray([250.0, 0.0, 0.0])
+
+
+def _diagnostic_env_and_action():
+    env = UavCombatEnv.__new__(UavCombatEnv)
+    sim = _FakeBlueSim()
+    env.blue_planes = {"blue_0": sim}
+    env.red_planes = {}
+    env.blue_policy_controller = BluePolicyController("fixed_pair_pursuit_v1")
+    env.blue_policy_controller.reset(
+        ["blue_0"], ["red_0"], {"blue_0": 0.0}, {"blue_0": 6000.0})
+    env._evasion_diagnostics = {
+        "blue_0": {"activations": 0, "active_frames": 0, "active": False}}
+    env.enable_gcas_for_blue = False
+    obs = _obs(enemy_ranges=(10000.0, 12000.0, 14000.0))
+    action = env.blue_policy_controller.act(
+        {"blue_0": obs}, 1, 1, set(), {"blue_0": np.zeros(3)},
+        {"blue_0": 0.0}, 0, mws_detected={"blue_0": False})["blue_0"]
+    return env, sim, obs, action
+
+
+def test_executed_heading_tracks_base_policy_without_mws():
+    env, _sim, _obs_one, action = _diagnostic_env_and_action()
+    targets = env._parse_actions({"blue_0": action})
+    row = env.blue_policy_controller.snapshot_episode_diagnostics()["per_blue"][0]
+    assert row["executed_command_source"] == "base_policy"
+    assert row["executed_heading_command_rad"] == pytest.approx(
+        row["base_heading_command_rad"])
+    assert targets["blue_0"][1] == pytest.approx(row["executed_heading_command_rad"])
+
+
+def test_mws_changes_executed_not_base_heading_discontinuity():
+    env, sim, obs, action = _diagnostic_env_and_action()
+    env._parse_actions({"blue_0": action})
+    sim.incoming = _FakeIncomingMissile()
+    obs["missile_warning"][:] = 1.0
+    action = env.blue_policy_controller.act(
+        {"blue_0": obs}, 1, 1, set(), {"blue_0": np.zeros(3)},
+        {"blue_0": 0.0}, 1, selected_missiles={"blue_0": sim.incoming.uid},
+        mws_detected={"blue_0": True})["blue_0"]
+    targets = env._parse_actions({"blue_0": action})
+    diag = env.blue_policy_controller.snapshot_episode_diagnostics()
+    row = diag["per_blue"][0]
+    assert diag["blue_base_heading_command_discontinuities"] == 0
+    assert diag["blue_executed_heading_command_discontinuities"] == 1
+    assert diag["blue_mws_detected_agent_decisions"] == 1
+    assert diag["blue_mws_override_agent_decisions"] == 1
+    assert row["executed_command_source"] == "mws_override"
+    assert row["executed_heading_command_rad"] == pytest.approx(np.deg2rad(60.0))
+    assert targets["blue_0"][1] == pytest.approx(row["executed_heading_command_rad"])
+
+
+def test_gcas_executed_command_source_is_recorded():
+    env, sim, _obs_one, action = _diagnostic_env_and_action()
+    env.enable_gcas_for_blue = True
+    sim.altitude = 2000.0
+    env._parse_actions({"blue_0": action})
+    row = env.blue_policy_controller.snapshot_episode_diagnostics()["per_blue"][0]
+    assert row["executed_command_source"] == "gcas_override"
+    assert row["executed_heading_command_rad"] == pytest.approx(0.0)
+
+
+def test_matrix_formal_fields_use_agent_decisions_and_two_heading_layers():
+    assert "blue_mws_detected_agent_decisions" in MATRIX_FIELDS
+    assert "blue_mws_override_agent_decisions" in MATRIX_FIELDS
+    assert "blue_base_heading_command_discontinuities" in MATRIX_FIELDS
+    assert "blue_executed_heading_command_discontinuities" in MATRIX_FIELDS
+    assert not any("mws" in field and "frames" in field for field in MATRIX_FIELDS)
+    assert "blue_mws_detected_agent_decisions" in EVALUATION_FIELDNAMES
+    assert "blue_mws_override_agent_decisions" in EVALUATION_FIELDNAMES
+    assert "blue_base_heading_command_discontinuities" in EVALUATION_FIELDNAMES
+    assert "blue_executed_heading_command_discontinuities" in EVALUATION_FIELDNAMES
+    assert not any("mws" in field and "frames" in field
+                   for field in EVALUATION_FIELDNAMES)
 
 
 def test_environment_fingerprint_includes_blue_policy_profile():

@@ -32,8 +32,10 @@ MATRIX_FIELDS = (
     "blue_launches", "blue_hits", "red_missile_deaths", "red_crash_deaths",
     "blue_missile_deaths", "blue_crash_deaths", "blue_target_switches_total",
     "blue_target_dead_switches", "blue_distance_triggered_switches",
-    "blue_engaged_triggered_switches", "blue_mws_detected_frames",
-    "blue_mws_override_frames", "blue_heading_command_discontinuities",
+    "blue_engaged_triggered_switches", "blue_mws_detected_agent_decisions",
+    "blue_mws_override_agent_decisions",
+    "blue_base_heading_command_discontinuities",
+    "blue_executed_heading_command_discontinuities",
     "nan_inf_count",
 )
 
@@ -132,10 +134,14 @@ def _matrix_row(row: dict, checkpoint: str, source_profile: str,
             "blue_distance_triggered_switches"],
         "blue_engaged_triggered_switches": row[
             "blue_engaged_triggered_switches"],
-        "blue_mws_detected_frames": row["blue_mws_detected_frames"],
-        "blue_mws_override_frames": row["blue_mws_override_frames"],
-        "blue_heading_command_discontinuities": row[
-            "blue_heading_command_discontinuities"],
+        "blue_mws_detected_agent_decisions": row[
+            "blue_mws_detected_agent_decisions"],
+        "blue_mws_override_agent_decisions": row[
+            "blue_mws_override_agent_decisions"],
+        "blue_base_heading_command_discontinuities": row[
+            "blue_base_heading_command_discontinuities"],
+        "blue_executed_heading_command_discontinuities": row[
+            "blue_executed_heading_command_discontinuities"],
         "nan_inf_count": row["NaNInfCount"],
     }
 
@@ -159,8 +165,12 @@ def _summary(rows: list[dict]) -> dict:
                 "blue_geometry", "blue_lock_mature", "blue_launches", "blue_hits",
                 "blue_target_switches_total", "blue_target_dead_switches",
                 "blue_distance_triggered_switches",
-                "blue_engaged_triggered_switches", "blue_mws_detected_frames",
-                "blue_mws_override_frames", "red_crash_deaths",
+                "blue_engaged_triggered_switches",
+                "blue_mws_detected_agent_decisions",
+                "blue_mws_override_agent_decisions",
+                "blue_base_heading_command_discontinuities",
+                "blue_executed_heading_command_discontinuities",
+                "red_crash_deaths",
                 "blue_crash_deaths", "nan_inf_count"):
             summary[profile][f"{key}_mean"] = float(np.mean(
                 [float(r[key]) for r in items]))
@@ -217,8 +227,10 @@ def main():
                 f"{values['red_launches_mean']:.2f}/"
                 f"{values['red_hits_mean']:.2f}, blue_switches="
                 f"{values['blue_target_switches_total_mean']:.2f}, mws="
-                f"{values['blue_mws_detected_frames_mean']:.2f}/"
-                f"{values['blue_mws_override_frames_mean']:.2f}, crashes="
+                f"{values['blue_mws_detected_agent_decisions_mean']:.2f}/"
+                f"{values['blue_mws_override_agent_decisions_mean']:.2f}, "
+                f"heading_jumps={values['blue_base_heading_command_discontinuities_mean']:.2f}/"
+                f"{values['blue_executed_heading_command_discontinuities_mean']:.2f}, crashes="
                 f"{values['red_crash_deaths_mean']:.2f}/"
                 f"{values['blue_crash_deaths_mean']:.2f}\n")
     print(f"Wrote {len(rows)} episodes to {args.output_dir}", flush=True)

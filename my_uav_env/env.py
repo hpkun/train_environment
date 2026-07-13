@@ -872,6 +872,9 @@ class UavCombatEnv(gymnasium.Env):
                         target_heading = current_heading
 
                 targets[aid] = (target_pitch, target_heading, self.VELOCITY_MAX)
+                if is_blue:
+                    self.blue_policy_controller.record_executed_heading(
+                        aid, target_heading, "mws_override")
                 continue
             self._evasion_diagnostics[aid]["active"] = False
 
@@ -905,6 +908,8 @@ class UavCombatEnv(gymnasium.Env):
                         target_heading = current_heading
                     targets[aid] = (np.deg2rad(self.GCAS_MAX_PITCH_DEG),
                                     target_heading, self.VELOCITY_MAX)
+                    self.blue_policy_controller.record_executed_heading(
+                        aid, target_heading, "gcas_override")
                     continue
 
             # =================================================================
@@ -920,6 +925,9 @@ class UavCombatEnv(gymnasium.Env):
             target_heading = float(act[1]) * np.pi
 
             targets[aid] = (target_pitch, target_heading, target_velocity)
+            if is_blue:
+                self.blue_policy_controller.record_executed_heading(
+                    aid, target_heading, "base_policy")
         return targets
 
     # ------------------------------------------------------------------

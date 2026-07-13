@@ -458,6 +458,20 @@ def _simple_nearest_target(
     return idx, state, range_m
 
 
+def _simple_target_by_index(
+    obs: dict,
+    num_blue: int,
+    num_red: int,
+    target_index: int,
+) -> tuple[int | None, np.ndarray | None, float | None]:
+    """Return one valid target without falling back to another entity."""
+    for range_m, index, state in _simple_valid_targets(
+            obs, num_blue, num_red, excluded=set()):
+        if index == target_index:
+            return index, state, range_m
+    return None, None, None
+
+
 def _simple_rescale_absolute_heading(pitch_int: float, target_heading_abs: float, vel_int: float) -> np.ndarray:
     vel_new = (90.0 + 100.0 * float(vel_int)) / 306.0
     return np.array([
@@ -583,12 +597,11 @@ def _blue_simple_pursuit_action_impl(
     target_state = None
     range_m = None
     if forced_target_idx is not None:
-        candidates = _simple_valid_targets(obs, num_blue, num_red, set())
-        for cand_range, cand_idx, cand_state in candidates:
-            if cand_idx == forced_target_idx:
-                target_idx, target_state, range_m = cand_idx, cand_state, cand_range
-                break
-    if target_state is None:
+        target_idx, target_state, range_m = _simple_target_by_index(
+            obs, num_blue, num_red, forced_target_idx)
+        if target_state is None:
+            return _paper_absolute_action(0.0, our_heading, 250.0)
+    else:
         target_idx, target_state, range_m = _simple_nearest_target(obs, num_blue, num_red)
 
     if target_state is not None:

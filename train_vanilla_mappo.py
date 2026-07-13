@@ -440,10 +440,11 @@ BLUE_POLICY_DIAG_CSV_FIELDS = (
     "blue_target_dead_switches",
     "blue_distance_triggered_switches",
     "blue_engaged_triggered_switches",
-    "blue_mws_detected_frames",
-    "blue_mws_override_frames",
+    "blue_mws_detected_agent_decisions",
+    "blue_mws_override_agent_decisions",
     "blue_route_phase_changes",
-    "blue_heading_command_discontinuities",
+    "blue_base_heading_command_discontinuities",
+    "blue_executed_heading_command_discontinuities",
     "blue_altitude_recovery_frames",
 )
 

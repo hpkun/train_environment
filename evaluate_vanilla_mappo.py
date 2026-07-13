@@ -53,8 +53,9 @@ EVALUATION_FIELDNAMES = [
     "BlueLockMature", "RedTerminalReward", "NaNInfCount",
     "blue_target_switches_total", "blue_target_dead_switches",
     "blue_distance_triggered_switches", "blue_engaged_triggered_switches",
-    "blue_mws_detected_frames", "blue_mws_override_frames",
-    "blue_route_phase_changes", "blue_heading_command_discontinuities",
+    "blue_mws_detected_agent_decisions", "blue_mws_override_agent_decisions",
+    "blue_route_phase_changes", "blue_base_heading_command_discontinuities",
+    "blue_executed_heading_command_discontinuities",
     "blue_altitude_recovery_frames",
 ]
 
@@ -412,8 +413,11 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             **{field: int(blue_diag.get(field, 0)) for field in (
                 "blue_target_switches_total", "blue_target_dead_switches",
                 "blue_distance_triggered_switches", "blue_engaged_triggered_switches",
-                "blue_mws_detected_frames", "blue_mws_override_frames",
-                "blue_route_phase_changes", "blue_heading_command_discontinuities",
+                "blue_mws_detected_agent_decisions",
+                "blue_mws_override_agent_decisions",
+                "blue_route_phase_changes",
+                "blue_base_heading_command_discontinuities",
+                "blue_executed_heading_command_discontinuities",
                 "blue_altitude_recovery_frames")},
         }
     finally:
