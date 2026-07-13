@@ -205,6 +205,9 @@ class HeteroUavCombatEnv(UavCombatEnv):
         self.tam_happo_paper_formula_v5_config = deepcopy(_v5_cfg)
         if hetero_reward_mode == "tam_happo_paper_formula_v5" and not self.tam_happo_paper_formula_v5_config:
             raise ValueError("tam_happo_paper_formula_v5 mode requires config block")
+        if hetero_reward_mode == "tam_happo_paper_formula_v5":
+            from uav_env.JSBSim.envs.paper_formula_v5 import validate_global_reward_scale
+            validate_global_reward_scale(self.tam_happo_paper_formula_v5_config)
         # Cached per-step obs for reward overlay (minimal_v1 / role_v1)
         self._last_step_obs: dict = {}
         # First-death detection for MAV — penalize once per episode

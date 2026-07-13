@@ -23,7 +23,7 @@ TARGET_WEIGHTS = {"angle": 0.35, "distance": 0.25, "height": 0.20, "speed": 0.20
 
 UAV_FIELDS = (
     "height_pv_raw", "height_ph_raw", "height_raw", "height_adaptation_active",
-    "speed_own", "speed_target", "speed_ratio", "speed_invalid", "speed_raw",
+    "speed_own", "speed_target", "speed_target_valid", "speed_ratio", "speed_invalid", "speed_raw",
     "target_id", "target_score", "target_rank", "closest_target_id",
     "lock_target_id", "launch_target_id", "reward_target_matches_lock",
     "reward_target_matches_launch", "ata", "aa", "angle_raw", "distance_km",
@@ -36,10 +36,16 @@ MAV_FIELDS = (
     "dist_safe_raw", "nearest_threat_id", "nearest_threat_distance_m",
     "missile_safe_raw", "aspect_raw_sum", "aspect_raw_mean", "safety_raw",
     "support_rear_projection", "support_lateral_offset", "support_distance",
-    "support_position_raw", "awareness_shared_pair_count",
-    "awareness_valid_pair_count", "awareness_ratio", "awareness_raw",
+    "support_position_raw", "awareness_observed_blue_count",
+    "awareness_valid_blue_count", "awareness_ratio", "awareness_raw",
+    "marginal_shared_pair_count", "marginal_valid_pair_count",
+    "marginal_shared_ratio", "marginal_shared_awareness_raw",
     "support_raw", "death_event_raw", "team_kill_alive_raw",
-    "team_kill_after_mav_death_raw", "shared_kill_raw", "direct_kill_raw",
+    "team_kill_after_mav_death_raw", "shared_launch_raw", "shared_hit_raw",
+    "shared_kill_raw", "direct_launch_raw", "direct_hit_raw", "direct_kill_raw",
+    "direct_and_shared_launch_raw", "direct_and_shared_hit_raw",
+    "direct_and_shared_kill_raw", "kill_attribution_available",
+    "kill_attribution_unavailable_count",
     "event_credit_delta", "event_credit_used", "event_credit_cap",
     "mav_event_raw", "mav_raw_total", "mav_scaled_total",
 )
@@ -59,6 +65,38 @@ V5_TRAIN_FIELDS = (
     "v5_mav_safety_mean", "v5_mav_support_mean", "v5_mav_event_mean",
     "v5_identity_max_abs",
 )
+V5_EPISODE_LAST_FIELDS = {
+    "true_final_j", "red_alive_final", "blue_alive_final", "mav_alive_final",
+    "unique_red_launch", "unique_red_hit", "unique_blue_launch", "unique_blue_hit",
+    "environment_timeout", "censored", "terminal_observed", "event_credit_used",
+    "event_credit_cap",
+}
+V5_EPISODE_STRING_FIELDS = {
+    "target_id", "closest_target_id", "lock_target_id", "launch_target_id",
+    "nearest_threat_id", "brma_key_entity_id",
+}
+
+
+def accumulate_v5_episode_step(accumulator: dict, components: dict) -> None:
+    for key, value in (components or {}).items():
+        if key not in V5_COMPONENT_FIELDS:
+            continue
+        if key in V5_EPISODE_STRING_FIELDS:
+            accumulator[f"{key}_last"] = str(value)
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if key == "identity_error":
+            accumulator["identity_error_max_abs"] = max(
+                float(accumulator.get("identity_error_max_abs", 0.0)), abs(numeric)
+            )
+        elif key in V5_EPISODE_LAST_FIELDS:
+            accumulator[f"{key}_last"] = numeric
+        else:
+            sum_key = f"{key}_sum"
+            accumulator[sum_key] = float(accumulator.get(sum_key, 0.0)) + numeric
 
 
 def collect_v5_effective_samples(components: dict, roles: dict) -> tuple[dict[str, float], dict[str, float]]:
@@ -87,7 +125,7 @@ def collect_v5_effective_samples(components: dict, roles: dict) -> tuple[dict[st
         for key, value in values.items():
             sums[key] += float(value); counts[key] += 1.0
         sums["v5_identity_max_abs"] = max(sums["v5_identity_max_abs"], abs(float(comp.get("identity_error", 0.0))))
-        counts["v5_identity_max_abs"] = 1.0
+        counts["v5_identity_max_abs"] = 0.0
     return sums, counts
 
 
@@ -100,12 +138,26 @@ def reset_v5_state(env) -> None:
         "mav_event_credit_used": 0.0,
         "launches": {},
         "terminals": set(),
+        "kills": set(),
         "red_launch": set(),
         "red_hit": set(),
         "blue_launch": set(),
         "blue_hit": set(),
         "new_red_hit": set(),
+        "new_red_launch": set(),
+        "new_red_kill": set(),
+        "unattributed_kill_count": 0,
     }
+
+
+def validate_global_reward_scale(config: dict) -> float:
+    value = float((config or {}).get("global_reward_scale", float("nan")))
+    if not np.isfinite(value) or abs(value - GLOBAL_REWARD_SCALE) > 1e-12:
+        raise ValueError(
+            "tam_happo_paper_formula_v5.global_reward_scale must equal 1/200 (0.005); "
+            f"got {value!r}"
+        )
+    return value
 
 
 def tam_speed_reward(own_speed: float, target_speed: float, eps: float = 1e-8) -> dict[str, float]:
@@ -114,7 +166,8 @@ def tam_speed_reward(own_speed: float, target_speed: float, eps: float = 1e-8) -
     if not np.isfinite(own) or not np.isfinite(target) or own <= eps:
         return {"speed_own": own if np.isfinite(own) else 0.0,
                 "speed_target": target if np.isfinite(target) else 0.0,
-                "speed_ratio": 0.0, "speed_invalid": 1.0, "speed_raw": -1.0}
+                "speed_target_valid": 1.0, "speed_ratio": 0.0,
+                "speed_invalid": 1.0, "speed_raw": -1.0}
     ratio = target / own
     if target < 0.5 * own:
         raw = 1.0
@@ -122,8 +175,16 @@ def tam_speed_reward(own_speed: float, target_speed: float, eps: float = 1e-8) -
         raw = 2.0 - 2.0 * ratio
     else:
         raw = -1.0
-    return {"speed_own": own, "speed_target": target, "speed_ratio": ratio,
+    return {"speed_own": own, "speed_target": target, "speed_target_valid": 1.0,
+            "speed_ratio": ratio,
             "speed_invalid": 0.0, "speed_raw": float(raw)}
+
+
+def no_target_speed_reward(own_speed: float) -> dict[str, float]:
+    own = float(own_speed)
+    return {"speed_own": own if np.isfinite(own) else 0.0, "speed_target": 0.0,
+            "speed_target_valid": 0.0, "speed_ratio": 0.0,
+            "speed_invalid": 0.0, "speed_raw": 0.0}
 
 
 def tam_distance_reward(distance_m: float) -> dict[str, float]:
@@ -277,14 +338,21 @@ def _lock_and_launch_target(env, aid: str) -> tuple[str, str]:
 
 def _update_missile_events(env, state: dict) -> None:
     state["new_red_hit"] = set()
+    state["new_red_launch"] = set()
+    state["new_red_kill"] = set()
     for record in getattr(env, "_launch_quality_step_records", []) or []:
         mid = str(record.get("missile_id", "") or "")
         if not mid or mid in state["launches"]:
             continue
         shooter = str(record.get("shooter_id", "") or "")
-        state["launches"][mid] = {"shooter": shooter,
-                                  "source": str(record.get("launch_track_source", "") or "")}
+        state["launches"][mid] = {
+            "shooter": shooter,
+            "target": str(record.get("target_id", "") or ""),
+            "source": str(record.get("launch_track_source", "") or "unknown"),
+        }
         state["red_launch" if shooter.startswith("red_") else "blue_launch"].add(mid)
+        if shooter.startswith("red_"):
+            state["new_red_launch"].add(mid)
     for record in getattr(env, "_launch_quality_done_step_records", []) or []:
         mid = str(record.get("missile_id", "") or "")
         if not mid or mid in state["terminals"]:
@@ -296,6 +364,44 @@ def _update_missile_events(env, state: dict) -> None:
         state["red_hit" if shooter.startswith("red_") else "blue_hit"].add(mid)
         if shooter.startswith("red_"):
             state["new_red_hit"].add(mid)
+    step_kills = getattr(env, "_step_kill_count", {}) or {}
+    for mid in state["new_red_hit"]:
+        launch = state["launches"].get(mid, {})
+        shooter = str(launch.get("shooter", "") or "")
+        target = str(launch.get("target", "") or "")
+        target_sim = getattr(env, "blue_planes", {}).get(target)
+        reason = str(getattr(env, "_brma_tam_death_reason", lambda _aid: "")(target)).lower()
+        reliable = bool(
+            shooter
+            and target
+            and int(step_kills.get(shooter, 0)) > 0
+            and target_sim is not None
+            and not bool(getattr(target_sim, "is_alive", True))
+            and "missile" in reason
+        )
+        if reliable and mid not in state["kills"]:
+            state["kills"].add(mid)
+            state["new_red_kill"].add(mid)
+    observed_step_kills = sum(
+        int(step_kills.get(rid, 0))
+        for rid in getattr(env, "red_ids", [])
+        if getattr(env, "agent_roles", {}).get(rid) == "attack_uav"
+    )
+    missing = max(0, observed_step_kills - len(state["new_red_kill"]))
+    state["unattributed_kill_count"] += missing
+
+
+def _source_event_counts(state: dict, missile_ids: set[str]) -> dict[str, float]:
+    counts = {"shared": 0.0, "direct": 0.0, "direct_and_shared": 0.0}
+    for mid in missile_ids:
+        source = str(state["launches"].get(mid, {}).get("source", "") or "")
+        if source == "mav_shared":
+            counts["shared"] += 1.0
+        elif source == "direct":
+            counts["direct"] += 1.0
+        elif source == "direct_and_mav_shared":
+            counts["direct_and_shared"] += 1.0
+    return counts
 
 
 def _brma_reference(env, sim) -> dict[str, Any]:
@@ -352,6 +458,42 @@ def _mav_position(env, mav, cfg: dict) -> dict[str, float]:
             "support_distance": db, "support_position_raw": float(r_pos)}
 
 
+def paper_mav_awareness(env, mav_id: str, mav, alive_blue: list[tuple[str, Any]]) -> dict[str, float]:
+    observed = 0
+    raw = 0.0
+    for bid, blue in alive_blue:
+        if not env._mav_shared_track_state(mav_id, bid)["direct_visible"]:
+            continue
+        observed += 1
+        ao = float(_pair_geometry(env, mav, blue)["tam_ata_rad"])
+        if ao < math.pi / 2.0:
+            raw += 0.3 * (1.0 - ao / (math.pi / 2.0))
+    return {"awareness_observed_blue_count": float(observed),
+            "awareness_valid_blue_count": float(len(alive_blue)),
+            "awareness_ratio": float(observed / max(len(alive_blue), 1)),
+            "awareness_raw": float(raw)}
+
+
+def marginal_shared_awareness(env, mav, alive_blue: list[tuple[str, Any]]) -> dict[str, float]:
+    valid = shared = 0
+    raw = 0.0
+    for rid in env.red_ids:
+        if env.agent_roles.get(rid) != "attack_uav" or not getattr(env.red_planes.get(rid), "is_alive", False):
+            continue
+        for bid, blue in alive_blue:
+            valid += 1
+            track = env._mav_shared_track_state(rid, bid)
+            if track["mav_shared_visible"] and not track["direct_visible"]:
+                shared += 1
+                ao = float(_pair_geometry(env, mav, blue)["tam_ata_rad"])
+                if ao < math.pi / 2.0:
+                    raw += 0.3 * (1.0 - ao / (math.pi / 2.0))
+    return {"marginal_shared_pair_count": float(shared),
+            "marginal_valid_pair_count": float(valid),
+            "marginal_shared_ratio": float(shared / max(valid, 1)),
+            "marginal_shared_awareness_raw": float(raw)}
+
+
 def _mav_reward(env, aid: str, sim, state: dict, cfg: dict, alive_before: bool) -> tuple[float, dict]:
     vals = {key: 0.0 for key in MAV_FIELDS}
     if not alive_before:
@@ -376,35 +518,21 @@ def _mav_reward(env, aid: str, sim, state: dict, cfg: dict, alive_before: bool) 
     warning = getattr(sim, "check_missile_warning", lambda: None)()
     vals["missile_safe_raw"] = -1.0 if warning is not None else 0.0
     aspects = []
-    mav_feature = env._tam_v2_feature(sim)
-    for _bid, blue in alive_blue:
-        _ao, ta, _distance = get2d_AO_TA_R(mav_feature, env._tam_v2_feature(blue))
-        if ta < math.pi / 4.0:
-            aspects.append(-(1.0 - ta / (math.pi / 4.0)))
-        else:
-            aspects.append(0.0)
+    if alive_blue:
+        mav_feature = env._tam_v2_feature(sim)
+        for _bid, blue in alive_blue:
+            _ao, ta, _distance = get2d_AO_TA_R(mav_feature, env._tam_v2_feature(blue))
+            if ta < math.pi / 4.0:
+                aspects.append(-(1.0 - ta / (math.pi / 4.0)))
+            else:
+                aspects.append(0.0)
     vals["aspect_raw_sum"] = float(sum(aspects))
     vals["aspect_raw_mean"] = float(np.mean(aspects)) if aspects else 0.0
     vals["safety_raw"] = (0.5 * vals["dist_safe_raw"] + 0.3 * vals["missile_safe_raw"]
                           + 0.2 * vals["aspect_raw_sum"])
     vals.update(_mav_position(env, sim, cfg))
-    valid = shared = 0
-    aware = 0.0
-    for rid in env.red_ids:
-        if env.agent_roles.get(rid) != "attack_uav" or not getattr(env.red_planes.get(rid), "is_alive", False):
-            continue
-        for bid, blue in alive_blue:
-            valid += 1
-            track = env._mav_shared_track_state(rid, bid)
-            if track["mav_shared_visible"] and not track["direct_visible"]:
-                shared += 1
-                geom = _pair_geometry(env, sim, blue)
-                ao = float(geom["tam_ata_rad"])
-                if ao < math.pi / 2.0:
-                    aware += 0.3 * (1.0 - ao / (math.pi / 2.0))
-    vals.update({"awareness_shared_pair_count": float(shared),
-                 "awareness_valid_pair_count": float(valid),
-                 "awareness_ratio": float(shared / max(valid, 1)), "awareness_raw": float(aware)})
+    vals.update(paper_mav_awareness(env, aid, sim, alive_blue))
+    vals.update(marginal_shared_awareness(env, sim, alive_blue))
     vals["support_raw"] = 0.6 * vals["support_position_raw"] + 0.4 * vals["awareness_raw"]
     alive_after = bool(getattr(sim, "is_alive", False))
     if alive_before and not alive_after and not state["mav_death_seen"]:
@@ -422,12 +550,15 @@ def _mav_reward(env, aid: str, sim, state: dict, cfg: dict, alive_before: bool) 
         vals["event_credit_delta"] = float(delta)
     else:
         vals["team_kill_after_mav_death_raw"] = float(step_kills)
-    for mid in state["new_red_hit"]:
-        launch = state["launches"].get(mid, {})
-        if launch.get("source") == "mav_shared":
-            vals["shared_kill_raw"] += 1.0
-        elif launch.get("source") in {"direct", "direct_and_mav_shared"}:
-            vals["direct_kill_raw"] += 1.0
+    launch_counts = _source_event_counts(state, state["new_red_launch"])
+    hit_counts = _source_event_counts(state, state["new_red_hit"])
+    kill_counts = _source_event_counts(state, state["new_red_kill"])
+    for prefix, counts in (("launch", launch_counts), ("hit", hit_counts), ("kill", kill_counts)):
+        vals[f"shared_{prefix}_raw"] = counts["shared"]
+        vals[f"direct_{prefix}_raw"] = counts["direct"]
+        vals[f"direct_and_shared_{prefix}_raw"] = counts["direct_and_shared"]
+    vals["kill_attribution_available"] = float(step_kills == 0 or len(state["new_red_kill"]) == step_kills)
+    vals["kill_attribution_unavailable_count"] = float(max(0, step_kills - len(state["new_red_kill"])))
     vals["event_credit_used"] = float(state["mav_event_credit_used"])
     vals["event_credit_cap"] = float(cfg.get("unknown_constants", {}).get("mav_team_credit_cap", 200.0))
     vals["mav_event_raw"] = vals["death_event_raw"] + vals["event_credit_delta"]
@@ -456,7 +587,7 @@ def _uav_reward(env, aid: str, sim, state: dict, cfg: dict, alive_before: bool) 
                      "angle_raw": tam_angle_reward(target_logs["ata"], target_logs["aa"])})
         vals.update(tam_distance_reward(target_logs["distance_m"]))
     else:
-        vals.update(tam_speed_reward(float(np.linalg.norm(_safe_vec(sim, "get_velocity"))), 0.0))
+        vals.update(no_target_speed_reward(float(np.linalg.norm(_safe_vec(sim, "get_velocity")))))
     lock_id, launch_id = _lock_and_launch_target(env, aid)
     vals.update({"lock_target_id": lock_id, "launch_target_id": launch_id,
                  "reward_target_matches_lock": float(bool(target_id and target_id == lock_id)),
@@ -497,7 +628,7 @@ def compute_v5_reward(env, base_rewards: dict, components: dict):
     mav_alive = bool(mav_id and getattr(env.red_planes.get(mav_id), "is_alive", False))
     round_over = bool(red_alive == 0 or blue_alive == 0 or env.current_step >= env.max_steps)
     timeout = bool(env.current_step >= env.max_steps and red_alive > 0 and blue_alive > 0)
-    final_j = float(red_alive / max(len(env.red_ids), 1) - blue_alive / max(len(env.blue_ids), 1))
+    final_j = float(red_alive / max(len(env.red_ids), 1) - blue_alive / max(len(env.blue_ids), 1)) if round_over else 0.0
     brma_end = brma_end_reference(red_alive, blue_alive) if round_over else 0.0
     for aid in env.red_ids:
         sim = env.red_planes.get(aid)

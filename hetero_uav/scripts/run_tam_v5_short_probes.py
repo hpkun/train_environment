@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
 
 import pandas as pd
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def main() -> None:
@@ -39,6 +45,17 @@ def main() -> None:
                        "--seed", str(seed)]
             print(" ".join(command), flush=True)
             if not args.dry_run:
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "probe_manifest.json").write_text(json.dumps({
+                    "candidate": name, "seed": seed, "config": str(config.resolve()),
+                    "config_sha256": _sha256(config), "expected_steps": 20480,
+                    "known_reward_contract": {
+                        "global_reward_scale": 0.005,
+                        "uav_weights": [10, 10, 15, 10, 30],
+                        "target_weights": [0.35, 0.25, 0.20, 0.20],
+                    },
+                    "command": command,
+                }, indent=2), encoding="utf-8")
                 subprocess.run(command, cwd=root, check=True)
 
 

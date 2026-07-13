@@ -549,6 +549,7 @@ from uav_env.JSBSim.envs.paper_calibrated_v4 import V4_COMPONENT_FIELDS
 from uav_env.JSBSim.envs.paper_formula_v5 import (
     V5_COMPONENT_FIELDS,
     V5_TRAIN_FIELDS,
+    accumulate_v5_episode_step,
     collect_v5_effective_samples,
 )
 from scripts.rich_logging import RichExperimentLogger, write_not_available_attention
@@ -2165,6 +2166,9 @@ def _run_training_main() -> None:
                         if not isinstance(comp, dict):
                             continue
                         agent_acc = current_ep_reward_comp_by_agent[env_idx].setdefault(rid, {})
+                        if actual_reward_mode == "tam_happo_paper_formula_v5":
+                            accumulate_v5_episode_step(agent_acc, comp)
+                            continue
                         if actual_reward_mode == "brma_tam_role_situation_v3":
                             ridx = rollout_env.red_ids.index(rid)
                             accumulate_v3_episode_step(
@@ -2798,8 +2802,11 @@ def _run_training_main() -> None:
                 count = rollout_reward_counts[key]
                 stats[key] = rollout_reward_sums[key] / count if count > 0.0 else 0.0
             for key in V5_TRAIN_FIELDS:
-                count = rollout_reward_counts[key]
-                stats[key] = rollout_reward_sums[key] / count if count > 0.0 else 0.0
+                if key == "v5_identity_max_abs":
+                    stats[key] = rollout_reward_sums[key]
+                else:
+                    count = rollout_reward_counts[key]
+                    stats[key] = rollout_reward_sums[key] / count if count > 0.0 else 0.0
             stats.update({
                 "initial_red_count": float(len(env.red_ids)),
                 "attack_uav_reward_target_distance_mean": (
@@ -3094,6 +3101,7 @@ def _run_training_main() -> None:
                         )
                     },
                     **{key: stats.get(key, 0.0) for key in V3_EFFECTIVE_FIELDS},
+                    **{key: stats.get(key, 0.0) for key in V5_TRAIN_FIELDS},
                     "nan_detected": int(nan_detected),
                 })
             if not f.closed:

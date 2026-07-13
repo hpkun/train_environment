@@ -15,23 +15,31 @@ def _event_value(row, death_penalty: float, per_kill: float, cap: float) -> floa
     return -death_penalty * death + min(per_kill * kills, cap)
 
 
+def coverage_statuses(frame: pd.DataFrame) -> list[str]:
+    complete = frame[(frame["censored"] == 0) & (frame["terminal_observed"] == 1)].copy()
+    if complete.empty:
+        return ["NO_COMPLETE_EPISODE_COVERAGE"]
+    statuses = []
+    if not (complete["mav_alive_final"] > 0.5).any():
+        statuses.append("NO_MAV_ALIVE_COVERAGE")
+    if not (complete["mav_alive_final"] < 0.5).any():
+        statuses.append("NO_MAV_DEAD_COVERAGE")
+    if not (complete["blue_alive_final"] < 2).any():
+        statuses.append("NO_BLUE_LOSS_COVERAGE")
+    if float(complete.get("team_kill_alive_raw", pd.Series(0.0, index=complete.index)).sum()) <= 0:
+        statuses.append("NO_TEAM_KILL_WHILE_MAV_ALIVE")
+    if float(complete.get("shared_kill_raw", pd.Series(0.0, index=complete.index)).sum()) <= 0:
+        statuses.append("NO_SHARED_ONLY_KILL_COVERAGE")
+    if float(complete.get("kill_attribution_unavailable_count", pd.Series(0.0, index=complete.index)).sum()) > 0:
+        statuses.append("KILL_ATTRIBUTION_UNAVAILABLE")
+    return statuses
+
+
 def solve(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     complete = frame[(frame["censored"] == 0) & (frame["terminal_observed"] == 1)].copy()
-    notes = []
-    if complete.empty:
-        return pd.DataFrame(), ["no complete environment episodes"]
-    shared_kills = float(complete.get("shared_kill_raw", pd.Series([0.0])).sum())
-    productive = complete[complete["blue_alive_final"] < 2]
-    mav_alive = complete[complete["mav_alive_final"] > 0.5]
-    mav_dead = complete[complete["mav_alive_final"] < 0.5]
-    if shared_kills <= 0:
-        notes.append("no MAV-shared-only kill was observed; positive shared contribution cannot be identified")
-    if productive.empty:
-        notes.append("no episode caused blue aircraft loss; productive-event ordering cannot be evaluated")
-    if mav_alive.empty or mav_dead.empty:
-        notes.append("both MAV-alive and MAV-dead terminal episodes are required for death-event ordering")
-    if notes:
-        return pd.DataFrame(), notes
+    statuses = coverage_statuses(frame)
+    if statuses:
+        return pd.DataFrame(), statuses
     feasible = []
     for death_penalty in np.arange(200.0, 1000.1, 25.0):
         for per_kill in np.arange(5.0, 200.1, 5.0):
@@ -48,7 +56,7 @@ def solve(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
                 feasible.append({"mav_death_penalty": death_penalty,
                                  "mav_team_credit_per_kill": per_kill,
                                  "mav_team_credit_cap": cap})
-    return pd.DataFrame(feasible), notes
+    return pd.DataFrame(feasible), []
 
 
 def _select_candidates(feasible: pd.DataFrame) -> pd.DataFrame:
@@ -78,11 +86,10 @@ def main() -> None:
     args = parser.parse_args()
     output = Path(args.output_dir); output.mkdir(parents=True, exist_ok=True)
     frame = pd.read_csv(args.episodes_csv)
-    feasible, notes = solve(frame)
+    feasible, coverage = solve(frame)
     feasible.to_csv(output / "v5_unknown_constants_feasible_points.csv", index=False)
     if feasible.empty:
-        status = ("TAM_HAPPO_PAPER_FORMULA_V5_UNPUBLISHED_CONSTANTS_REQUIRE_EMPIRICAL_SELECTION"
-                  if notes else "TAM_V5_UNKNOWN_CONSTANTS_INFEASIBLE")
+        status = coverage[0] if coverage else "TAM_V5_UNKNOWN_CONSTANTS_INFEASIBLE"
         candidates = pd.DataFrame()
         interval = {}
     else:
@@ -102,11 +109,11 @@ def main() -> None:
             }
             path = output / f"tam_v5_{candidate['candidate']}.yaml"
             path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-        status = ("TAM_HAPPO_PAPER_FORMULA_V5_UNPUBLISHED_CONSTANTS_REQUIRE_EMPIRICAL_SELECTION"
-                  if notes else "TAM_V5_UNKNOWN_CONSTANTS_FEASIBLE")
+        status = "TAM_V5_UNKNOWN_CONSTANTS_FEASIBLE"
     payload = {"status": status, "complete_episode_count": int(((frame.censored == 0) & (frame.terminal_observed == 1)).sum()),
                "feasible_point_count": int(len(feasible)), "feasible_interval": interval,
-               "notes": notes,
+               "coverage_statuses": coverage,
+               "notes": coverage,
                "search_domain_is_project_constraint_not_paper_constant": True}
     (output / "v5_unknown_constants_solution.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     (output / "v5_unknown_constants_solution.md").write_text(

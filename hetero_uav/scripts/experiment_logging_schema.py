@@ -349,7 +349,15 @@ from uav_env.JSBSim.envs.paper_calibrated_v4 import V4_COMPONENT_FIELDS
 for _col in V4_COMPONENT_FIELDS:
     if _col not in REWARD_COMPONENT_COLUMNS:
         REWARD_COMPONENT_COLUMNS.append(_col)
-from uav_env.JSBSim.envs.paper_formula_v5 import V5_COMPONENT_FIELDS
+from uav_env.JSBSim.envs.paper_formula_v5 import (
+    V5_COMPONENT_FIELDS,
+    V5_EPISODE_LAST_FIELDS,
+    V5_EPISODE_STRING_FIELDS,
+    V5_TRAIN_FIELDS,
+)
+for _col in V5_TRAIN_FIELDS:
+    if _col not in TRAIN_METRICS_COLUMNS:
+        TRAIN_METRICS_COLUMNS.append(_col)
 for _col in V5_COMPONENT_FIELDS:
     if _col not in REWARD_COMPONENT_COLUMNS:
         REWARD_COMPONENT_COLUMNS.append(_col)
@@ -557,7 +565,12 @@ for _col in V4_COMPONENT_FIELDS:
     if _episode_col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
         EPISODE_REWARD_COMPONENTS_COLUMNS.append(_episode_col)
 for _col in V5_COMPONENT_FIELDS:
-    _episode_col = f"{_col}_sum"
+    if _col == "identity_error":
+        _episode_col = "identity_error_max_abs"
+    elif _col in V5_EPISODE_LAST_FIELDS or _col in V5_EPISODE_STRING_FIELDS:
+        _episode_col = f"{_col}_last"
+    else:
+        _episode_col = f"{_col}_sum"
     if _episode_col not in EPISODE_REWARD_COMPONENTS_COLUMNS:
         EPISODE_REWARD_COMPONENTS_COLUMNS.append(_episode_col)
 
