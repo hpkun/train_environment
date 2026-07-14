@@ -1366,15 +1366,21 @@ def _write_runner_status(
     return payload
 
 
-def _write_failure_artifacts(policy, state: dict, exc: BaseException) -> None:
+def _write_failure_artifacts(
+    policy, state: dict, exc: BaseException, *, status_override: str | None = None
+) -> None:
     out_dir = Path(state["output_dir"])
+    failure_status = status_override or (
+        "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+    )
     checkpoint_saved = False
     if policy is not None and all(torch.isfinite(p).all() for p in policy.parameters()):
         try:
             failure_dir = out_dir / "latest_failure"
             failure_meta = {
                 **dict(state.get("meta", {})),
-                "status": "failed",
+                "status": failure_status,
+                "checkpoint_stage": "interrupted" if failure_status == "interrupted" else "failure",
                 "total_env_steps_actual": int(state.get("total_steps", 0)),
                 "iteration": int(state.get("iteration", 0)),
                 "exception_type": type(exc).__name__,
@@ -1386,7 +1392,7 @@ def _write_failure_artifacts(policy, state: dict, exc: BaseException) -> None:
             checkpoint_saved = False
     _write_runner_status(
         out_dir,
-        status="failed",
+        status=failure_status,
         total_steps=int(state.get("total_steps", 0)),
         iteration=int(state.get("iteration", 0)),
         exception=exc,
@@ -1484,6 +1490,58 @@ def _prune_eval_checkpoints(eval_dir: Path, keep: int) -> None:
         for child in path.iterdir():
             child.unlink()
         path.rmdir()
+
+
+def _crossed_checkpoint_thresholds(
+    next_checkpoint_step: int | None,
+    total_steps: int,
+    checkpoint_interval_steps: int,
+) -> tuple[list[int], int | None]:
+    """Return newly crossed nominal thresholds and the next pending threshold."""
+    if next_checkpoint_step is None or checkpoint_interval_steps <= 0:
+        return [], None
+    crossed = []
+    while total_steps >= next_checkpoint_step:
+        crossed.append(int(next_checkpoint_step))
+        next_checkpoint_step += checkpoint_interval_steps
+    return crossed, next_checkpoint_step
+
+
+def _prune_periodic_checkpoints(checkpoint_dir: Path, keep: int) -> None:
+    existing = sorted(checkpoint_dir.glob("step_*"), key=lambda path: path.name)
+    while len(existing) > keep:
+        import shutil
+        shutil.rmtree(existing.pop(0), ignore_errors=True)
+
+
+def _save_periodic_checkpoint(
+    policy,
+    checkpoint_dir: Path,
+    *,
+    total_steps: int,
+    iteration: int,
+    checkpoint_interval_steps: int,
+    keep_checkpoints: int,
+    crossed_thresholds: list[int],
+    meta: dict,
+) -> Path | None:
+    if not crossed_thresholds:
+        return None
+    target = checkpoint_dir / f"step_{total_steps:09d}"
+    checkpoint_meta = {
+        **meta,
+        "total_env_steps": int(total_steps),
+        "total_env_steps_actual": int(total_steps),
+        "iteration": int(iteration),
+        "checkpoint_interval_steps": int(checkpoint_interval_steps),
+        "checkpoint_stage": "periodic",
+        "requested_checkpoint_step": int(crossed_thresholds[0]),
+        "checkpoint_threshold_step": int(crossed_thresholds[0]),
+        "checkpoint_threshold_steps": [int(step) for step in crossed_thresholds],
+    }
+    _save_policy_checkpoint(policy, target, checkpoint_meta)
+    _prune_periodic_checkpoints(checkpoint_dir, keep_checkpoints)
+    return target
 
 
 def _run_training_main() -> None:
@@ -1898,6 +1956,9 @@ def _run_training_main() -> None:
                 "red_missile_hits_mean", "blue_missile_hits_mean",
             ])
         last_eval = -999999 if args.eval_at_start else 0
+        next_checkpoint_step = (
+            args.checkpoint_interval_steps if args.checkpoint_interval_steps > 0 else None
+        )
         for iteration in range(1, iterations + 1):
             _SINGLE_RUNNER_STATE["iteration"] = iteration
             rollout_transitions = min(transitions_per_rollout, args.total_env_steps - total_steps)
@@ -3165,14 +3226,19 @@ def _run_training_main() -> None:
                 flush=True,
             )
             # ---- Periodic checkpoint ----
-            if args.checkpoint_interval_steps > 0:
-                milestone = (total_steps // args.checkpoint_interval_steps) * args.checkpoint_interval_steps
-                prev_milestone = ((total_steps - transitions_per_rollout) // args.checkpoint_interval_steps) * args.checkpoint_interval_steps
-                if milestone > prev_milestone or total_steps >= args.total_env_steps:
-                    ckpt_dir = out_dir / "checkpoints" / f"step_{total_steps:09d}"
-                    ckpt_dir.mkdir(parents=True, exist_ok=True)
-                    policy.save(ckpt_dir / "model.pt")
-                    (ckpt_dir / "meta.json").write_text(json.dumps({
+            crossed_thresholds, next_checkpoint_step = _crossed_checkpoint_thresholds(
+                next_checkpoint_step, total_steps, args.checkpoint_interval_steps
+            )
+            if crossed_thresholds:
+                _save_periodic_checkpoint(
+                    policy,
+                    out_dir / "checkpoints",
+                    total_steps=total_steps,
+                    iteration=iteration,
+                    checkpoint_interval_steps=args.checkpoint_interval_steps,
+                    keep_checkpoints=args.keep_checkpoints,
+                    crossed_thresholds=crossed_thresholds,
+                    meta={
                         "algorithm": "happo_reference_v0",
                         "policy_arch": args.policy_arch,
                         **base_v2_meta,
@@ -3181,17 +3247,8 @@ def _run_training_main() -> None:
                         "action_dim": action_dim,
                         "entity_dim": getattr(policy, "entity_dim", None),
                         "num_agents": len(env.red_ids),
-                        "total_env_steps": total_steps,
-                        "iteration": iteration,
-                    }, indent=2), encoding="utf-8")
-                    # Rotate old checkpoints
-                    existing = sorted(
-                        (out_dir / "checkpoints").glob("step_*"),
-                        key=lambda p: p.name,
-                    )
-                    while len(existing) > args.keep_checkpoints:
-                        import shutil
-                        shutil.rmtree(existing.pop(0), ignore_errors=True)
+                    },
+                )
             if total_steps - last_eval >= args.eval_interval_steps and args.eval_during_training:
                 last_eval = total_steps
                 tmp_model = out_dir / "_tmp_eval.pt"

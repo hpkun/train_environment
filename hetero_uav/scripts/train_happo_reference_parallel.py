@@ -447,8 +447,11 @@ def _write_runner_status(out_dir: Path, *, worker_restart_count: int,
                          failure_checkpoint_saved: bool = False,
                          extra: dict | None = None) -> None:
     """Write runner_status.json with structured exit information."""
+    status = "normal" if exit_reason == "normal" else (
+        "interrupted" if exit_reason == "keyboard_interrupt" else "failed"
+    )
     payload = {
-        "status": "normal" if exit_reason == "normal" else "failed",
+        "status": status,
         "worker_restart_count": worker_restart_count,
         "rollout_aborted_count": rollout_aborted_count,
         "consecutive_rollout_abort_count": consecutive_rollout_abort_count,
@@ -1376,6 +1379,9 @@ def _run_training(args: argparse.Namespace) -> None:
                     "init_checkpoint": args.init_checkpoint,
                     "total_env_steps_actual": total_steps, "episodes": episodes,
                     "checkpoint_step": next_checkpoint_step,
+                    "requested_checkpoint_step": next_checkpoint_step,
+                    "checkpoint_threshold_step": next_checkpoint_step,
+                    "checkpoint_stage": "periodic",
                     "red_target_selection_mode": _rtsm,
                     "resolved_config_path": str(Path(args.config).resolve()),
                     "checkpoint_interval_steps": args.checkpoint_interval_steps,
@@ -1603,7 +1609,8 @@ def main() -> None:
             failure_exc = RuntimeError(exception_message or exit_reason)
             try:
                 _write_failure_artifacts(
-                    _RUNNER_RESOURCES["policy"], failure_state, failure_exc
+                    _RUNNER_RESOURCES["policy"], failure_state, failure_exc,
+                    status_override="interrupted" if exit_reason == "keyboard_interrupt" else "failed",
                 )
             except Exception:
                 pass

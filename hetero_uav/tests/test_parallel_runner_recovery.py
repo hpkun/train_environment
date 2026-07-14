@@ -214,6 +214,33 @@ def test_status_helper_marks_exception_paths_not_normal(tmp_path):
     assert status["nonfinite_detected"] is False
 
 
+def test_parallel_keyboard_interrupt_status_is_explicit(tmp_path):
+    from scripts.train_happo_reference_parallel import _write_runner_status
+
+    _write_runner_status(
+        tmp_path,
+        worker_restart_count=0,
+        rollout_aborted_count=0,
+        consecutive_rollout_abort_count=0,
+        last_worker_timeout_info={},
+        exit_reason="keyboard_interrupt",
+        total_steps=50_176,
+        latest_iteration=196,
+        exception_type="KeyboardInterrupt",
+    )
+    status = json.loads((tmp_path / "runner_status.json").read_text())
+    assert status["status"] == "interrupted"
+    assert status["runner_completed_normally"] is False
+    assert status["total_env_steps_actual"] == 50_176
+
+
+def test_parallel_periodic_meta_distinguishes_actual_and_requested_steps():
+    source = (ROOT / "scripts" / "train_happo_reference_parallel.py").read_text(encoding="utf-8")
+    assert '"total_env_steps_actual": total_steps' in source
+    assert '"requested_checkpoint_step": next_checkpoint_step' in source
+    assert '"checkpoint_stage": "periodic"' in source
+
+
 def test_status_helper_marks_keyboard_interrupt_not_normal(tmp_path):
     from scripts.train_happo_reference_parallel import _write_runner_status
 

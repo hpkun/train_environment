@@ -95,3 +95,28 @@ def test_main_wrapper_preserves_failure_artifacts(monkeypatch, tmp_path):
     assert status["failed_step"] == 41
     assert status["failed_episode_id"] == 2
     assert (tmp_path / "latest_failure/model.pt").exists()
+
+
+def test_keyboard_interrupt_saves_interrupted_checkpoint_and_reraises(monkeypatch, tmp_path):
+    import scripts.train_happo_reference as runner
+
+    runner._SINGLE_RUNNER_STATE.update({
+        "policy": TinyPolicy(),
+        "output_dir": tmp_path,
+        "total_steps": 50_176,
+        "iteration": 196,
+        "episode_id": 81,
+        "meta": {"policy_arch": "pure_happo"},
+    })
+    monkeypatch.setattr(runner, "_run_training_main", lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.main()
+
+    meta = json.loads((tmp_path / "latest_failure/meta.json").read_text())
+    status = json.loads((tmp_path / "runner_status.json").read_text())
+    assert meta["status"] == "interrupted"
+    assert meta["checkpoint_stage"] == "interrupted"
+    assert meta["total_env_steps_actual"] == 50_176
+    assert status["status"] == "interrupted"
+    assert status["runner_completed_normally"] is False
