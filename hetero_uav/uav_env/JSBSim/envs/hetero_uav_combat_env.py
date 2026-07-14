@@ -258,6 +258,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
             self._validate_brma_tam_scale_aligned_v2_contract()
         if self.hetero_reward_mode == "brma_tam_role_situation_v3":
             self._validate_role_situation_v3_contract()
+        if str(self.experiment_contract.get("version", "")) == "tam_happo_contract_corrected_v6":
+            self._validate_v6_action_trim_contract()
 
     # -- TAM Paper Reward v6 JSBSim-aligned v3 -------------------------------
 
@@ -3503,6 +3505,19 @@ class HeteroUavCombatEnv(UavCombatEnv):
             ]
         return trimmed
 
+    def _validate_v6_action_trim_contract(self) -> None:
+        for source_name, trim_map in (
+            ("action_trim_by_role", self.action_trim_by_role),
+            ("action_trim_by_type", self.action_trim_by_type),
+            ("action_trim_by_agent", self.action_trim_by_agent),
+        ):
+            for key, trim in trim_map.items():
+                if not np.allclose(trim, 0.0, atol=0.0, rtol=0.0):
+                    raise ValueError(
+                        "tam_happo_contract_corrected_v6 requires zero action trim; "
+                        f"{source_name}.{key}={trim.tolist()}"
+                    )
+
     def _needs_last_step_obs_cache(self) -> bool:
         return self.hetero_reward_mode in {
             "minimal_v1", "role_v1", "happo_ref_v0", "paper_role_reward_v1",
@@ -3527,8 +3542,29 @@ class HeteroUavCombatEnv(UavCombatEnv):
             self._scale_v1_alive_before_step = dict(self._brma_tam_alive_before_step)
         if self.hetero_reward_mode == "brma_tam_role_situation_v3":
             self._v3_alive_before = dict(self._brma_tam_alive_before_step)
+        policy_requested = {
+            aid: np.asarray(action, dtype=np.float32).reshape(-1).tolist()
+            for aid, action in actions.items()
+        }
         trimmed = self._apply_action_trim(actions)
         obs, rewards, terminated, truncated, info = super().step(trimmed)
+        for aid, requested in policy_requested.items():
+            if aid not in info:
+                continue
+            post_trim = list(self._last_effective_actions.get(aid, requested))
+            trim = np.asarray(self._last_action_trim_applied.get(aid, []), dtype=np.float32)
+            trim_applied = bool(trim.size and np.any(trim != 0.0))
+            overridden = bool(info[aid].get("action_overridden", False))
+            reasons = []
+            if trim_applied:
+                reasons.append("action_trim")
+            if overridden:
+                reasons.append(str(info[aid].get("action_override_reason", "override")))
+            info[aid]["requested_action"] = requested
+            info[aid]["policy_requested_action"] = requested
+            info[aid]["post_trim_action"] = post_trim
+            info[aid]["action_transformed"] = bool(trim_applied or overridden)
+            info[aid]["action_transform_reason"] = "+".join(reasons) if reasons else "none"
         if self._needs_last_step_obs_cache():
             self._last_step_obs = obs
         return obs, rewards, terminated, truncated, info

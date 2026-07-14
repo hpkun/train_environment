@@ -102,6 +102,39 @@ def _compute_grouped_gae(rewards, values, next_values, dones, env_ids, gamma, la
     return advantages, returns
 
 
+def _compute_role_local_gae(rewards, values, next_values, dones, env_ids, gamma, lam):
+    """Compute independent per-agent GAE chains with per-agent done masks."""
+    if rewards.shape != values.shape or values.shape != next_values.shape:
+        raise ValueError(
+            "role-local rewards, values, and next_values must have identical [T,N] shapes")
+    if dones.shape != rewards.shape:
+        raise ValueError("role-local dones must have shape [T,N]")
+    advantage_cols = []
+    return_cols = []
+    for i in range(rewards.shape[1]):
+        adv_i, ret_i = _compute_grouped_gae(
+            rewards[:, i], values[:, i], next_values[:, i], dones[:, i],
+            env_ids, gamma, lam)
+        advantage_cols.append(adv_i)
+        return_cols.append(ret_i)
+    return torch.stack(advantage_cols, dim=1), torch.stack(return_cols, dim=1)
+
+
+def _normalize_role_local_advantages(
+        advantages: torch.Tensor, actor_update_masks: torch.Tensor) -> torch.Tensor:
+    """Normalize each agent using only samples eligible for its actor update."""
+    normalized = torch.zeros_like(advantages)
+    for i in range(advantages.shape[1]):
+        valid = actor_update_masks[:, i] > 0.5
+        values = advantages[valid, i]
+        if values.numel() == 0:
+            continue
+        mean = values.mean()
+        std = values.std(unbiased=False) if values.numel() > 1 else values.new_tensor(0.0)
+        normalized[valid, i] = (values - mean) / (std + 1e-8)
+    return normalized
+
+
 class PureHAPPOTrainer:
     """Paper-aligned HAPPO trainer."""
 
@@ -153,26 +186,20 @@ class PureHAPPOTrainer:
             if not torch.isfinite(tensor).all():
                 raise ValueError(f"HAPPO: non-finite {name} in buffer")
 
-        team_dones = dones[:, 0].float()
         env_ids = data.get("env_ids", torch.zeros(T, dtype=torch.long, device=rewards.device))
         nv_data = data.get("next_values")
-        if nv_data is not None and not torch.isnan(nv_data).any() and nv_data.numel() == T:
-            nv = nv_data
-        else:
-            with torch.no_grad():
-                nv_single = self.policy.value(critic_state[-1:])
-            nv = nv_single.expand(T, -1) if local_credit else nv_single.expand(T)
+        if (nv_data is None or nv_data.shape != values.shape
+                or not torch.isfinite(nv_data).all()):
+            raise ValueError(
+                "HAPPO next_values must be finite and match values shape; "
+                f"got next_values={None if nv_data is None else tuple(nv_data.shape)} "
+                f"values={tuple(values.shape)}")
+        nv = nv_data
         if local_credit:
-            advantage_cols = []
-            return_cols = []
-            for i in range(N):
-                adv_i, ret_i = _compute_grouped_gae(
-                    rewards[:, i], values[:, i], nv[:, i], team_dones,
-                    env_ids, self.gamma, self.gae_lambda)
-                advantage_cols.append(adv_i); return_cols.append(ret_i)
-            advantages_raw = torch.stack(advantage_cols, dim=1)
-            returns = torch.stack(return_cols, dim=1)
+            advantages_raw, returns = _compute_role_local_gae(
+                rewards, values, nv, dones, env_ids, self.gamma, self.gae_lambda)
         else:
+            team_dones = dones[:, 0].float()
             team_reward = _alive_before_team_mean(rewards, active)
             advantages_raw, returns = _compute_grouped_gae(
                 team_reward, values, nv, team_dones, env_ids, self.gamma, self.gae_lambda)
@@ -181,8 +208,7 @@ class PureHAPPOTrainer:
         advantages = advantages_raw
         if T > 1:
             if local_credit:
-                advantages = (advantages - advantages.mean(dim=0, keepdim=True)) / (
-                    advantages.std(dim=0, keepdim=True) + 1e-8)
+                advantages = _normalize_role_local_advantages(advantages, actor_active)
             else:
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 

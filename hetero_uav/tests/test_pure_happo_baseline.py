@@ -63,7 +63,8 @@ class TestPureHAPPOTrainer:
                       out["log_prob"].numpy(),
                       np.random.randn(N).astype(np.float32) * 0.1,
                       np.zeros(N, dtype=np.float32), out["value"].item(),
-                      np.ones(N, dtype=np.float32), env_id=t % 2)
+                      np.ones(N, dtype=np.float32), next_value=out["value"].item(),
+                      env_id=t % 2)
         return buf
 
     def test_update_no_nan(self):
@@ -106,7 +107,7 @@ class TestPureHAPPOTrainer:
                       out["log_prob"].numpy(),
                       np.random.randn(3).astype(np.float32) * 0.1,
                       np.zeros(3, dtype=np.float32), out["value"].item(),
-                      active, env_id=0)
+                      active, next_value=out["value"].item(), env_id=0)
         trainer = PureHAPPOTrainer(policy, ppo_epochs=1, seed=42)
         m = trainer.update(buf)
         assert m["valid_sample_count_per_agent"][1] == 0

@@ -107,6 +107,19 @@ def _event_key(record: dict, episode_seed: int, step: int) -> tuple:
     return episode_seed, step, shooter, str(record.get("target_id", "") or "")
 
 
+def _red_missile_kill_key(event: dict, episode_seed: int) -> tuple | None:
+    """Identify only blue deaths explicitly attributed to a red missile."""
+    if str(event.get("side", "")).lower() != "blue":
+        return None
+    if not bool(event.get("killed_by_missile", False)):
+        return None
+    owner = str(event.get("missile_owner", "") or "")
+    agent_id = str(event.get("agent_id", "") or "")
+    if not owner.startswith("red_") or not agent_id:
+        return None
+    return int(episode_seed), agent_id
+
+
 def evaluate_checkpoint(
     checkpoint: Path,
     *,
@@ -144,7 +157,7 @@ def evaluate_checkpoint(
     red_wins = blue_wins = timeouts = 0
     launch_keys: set[tuple] = set()
     hit_keys: set[tuple] = set()
-    red_kills = 0.0
+    red_kill_keys: set[tuple] = set()
     gate_den = 0.0
     gates = {name: 0.0 for name in (
         "track", "range", "ata", "ta", "geometry", "lock_mature", "actual_launch"
@@ -153,6 +166,7 @@ def evaluate_checkpoint(
     reward_lock_matches = reward_launch_matches = 0.0
     action_alive = action_overridden = 0.0
     target_samples = target_valid = target_held = target_switches = 0.0
+    target_valid_decisions = target_segments = 0.0
     crash_episodes = out_of_bounds_episodes = 0.0
     finite = True
 
@@ -163,6 +177,8 @@ def evaluate_checkpoint(
         hidden = None
         episode_return = 0.0
         terminated = truncated = {}
+        episode_target_previous = {
+            rid: "" for rid in env.red_ids if env.agent_roles.get(rid) == "attack_uav"}
         try:
             for step in range(max_steps):
                 actions, hidden = _policy_actions(policy, adapter, env, obs, info, device, hidden)
@@ -195,12 +211,12 @@ def evaluate_checkpoint(
                     if str(record.get("shooter_id", "")).startswith("red_") and reason == "hit":
                         hit_keys.add(_event_key(record, episode_seed, step))
 
+                for event in info.get("death_events", []) or []:
+                    kill_key = _red_missile_kill_key(event, episode_seed)
+                    if kill_key is not None:
+                        red_kill_keys.add(kill_key)
+
                 components = info.get("reward_components", {}) or {}
-                mav_id = next((rid for rid in env.red_ids if env.agent_roles.get(rid) == "mav"), "")
-                mav_comp = components.get(mav_id, {}) if mav_id else {}
-                red_kills += sum(float(mav_comp.get(key, 0.0) or 0.0) for key in (
-                    "shared_kill_raw", "direct_kill_raw", "direct_and_shared_kill_raw"
-                ))
                 for rid in env.red_ids:
                     agent_info = info.get(rid, {}) or {}
                     if float(agent_info.get("alive", 0.0) or 0.0) > 0.5:
@@ -209,22 +225,36 @@ def evaluate_checkpoint(
                     if env.agent_roles.get(rid) != "attack_uav":
                         continue
                     comp = components.get(rid, {}) or {}
-                    if float(comp.get("alive_before", 0.0) or 0.0) <= 0.5:
+                    alive_before = agent_info.get(
+                        "alive_before", comp.get("alive_before", agent_info.get("alive", 0.0)))
+                    if float(alive_before or 0.0) <= 0.5:
                         continue
                     target_samples += 1.0
                     target_valid += float(agent_info.get("engagement_target_valid", 0.0) or 0.0)
                     target_held += float(agent_info.get("engagement_target_held_this_step", 0.0) or 0.0)
                     target_switches += float(agent_info.get("engagement_target_switched_this_step", 0.0) or 0.0)
-                    lock_comparable = float(comp.get("reward_lock_comparable", 0.0) or 0.0)
-                    launch_comparable = float(comp.get("reward_launch_comparable", 0.0) or 0.0)
+                    current_target = str(agent_info.get("engagement_target_id", "") or "")
+                    if current_target:
+                        target_valid_decisions += 1.0
+                        if episode_target_previous.get(rid, "") != current_target:
+                            target_segments += 1.0
+                        episode_target_previous[rid] = current_target
+                    else:
+                        episode_target_previous[rid] = ""
+                    lock_comparable = float(agent_info.get(
+                        "reward_lock_comparable", comp.get("reward_lock_comparable", 0.0)) or 0.0)
+                    launch_comparable = float(agent_info.get(
+                        "reward_launch_comparable", comp.get("reward_launch_comparable", 0.0)) or 0.0)
                     reward_lock_den += lock_comparable
                     reward_launch_den += launch_comparable
                     if lock_comparable:
                         reward_lock_matches += float(
-                            comp.get("reward_target_matches_lock_given_lock", 0.0) or 0.0)
+                            agent_info.get("reward_target_matches_lock_given_lock",
+                                           comp.get("reward_target_matches_lock_given_lock", 0.0)) or 0.0)
                     if launch_comparable:
                         reward_launch_matches += float(
-                            comp.get("reward_target_matches_launch_given_launch", 0.0) or 0.0)
+                            agent_info.get("reward_target_matches_launch_given_launch",
+                                           comp.get("reward_target_matches_launch_given_launch", 0.0)) or 0.0)
 
                 if _all_done(terminated) or _all_done(truncated):
                     break
@@ -261,10 +291,10 @@ def evaluate_checkpoint(
         "blue_alive_final_mean": float(np.mean(blue_alive_final)),
         "red_launch_total": float(len(launch_keys)),
         "red_hit_total": float(len(hit_keys)),
-        "red_kill_total": float(red_kills),
+        "red_kill_total": float(len(red_kill_keys)),
         "red_launch_per_episode": len(launch_keys) / episodes,
         "red_hit_per_episode": len(hit_keys) / episodes,
-        "red_kill_per_episode": red_kills / episodes,
+        "red_kill_per_episode": len(red_kill_keys) / episodes,
         "track_rate": gates["track"] / max(gate_den, 1.0),
         "range_rate": gates["range"] / max(gate_den, 1.0),
         "ata_rate": gates["ata"] / max(gate_den, 1.0),
@@ -277,7 +307,7 @@ def evaluate_checkpoint(
         "action_override_rate": action_overridden / max(action_alive, 1.0),
         "engagement_target_valid_rate": target_valid / max(target_samples, 1.0),
         "target_switches_per_episode": target_switches / episodes,
-        "target_hold_steps_mean": target_held / max(target_valid, 1.0),
+        "target_hold_steps_mean": target_valid_decisions / max(target_segments, 1.0),
         "crash_rate": crash_episodes / episodes,
         "out_of_bounds_rate": out_of_bounds_episodes / episodes,
     }

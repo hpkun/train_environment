@@ -10,8 +10,9 @@ Pure HAPPO update hyperparameters.
 ## Contract Corrections
 
 - Red scripted missile-evasion action replacement is disabled (`teams: none`).
-- Every environment step reports requested action, executed control target,
-  override status/reason, and selected incoming-missile diagnostics.
+- Every environment step separates `policy_requested_action`, `post_trim_action`,
+  the physical `executed_control_target`, and transformation/override reasons.
+  The v6 startup contract rejects any nonzero action trim.
 - Overridden active transitions remain critic samples but are excluded from
   Actor loss, entropy, KL, ratio, and clip-fraction estimates.
 - The observation adds a seven-value incoming-missile state plus a validity
@@ -20,6 +21,10 @@ Pure HAPPO update hyperparameters.
 - Reward, fire-candidate, lock, and launch diagnostics use the shared
   paper-assessment target implementation. Match rates are conditional on a
   comparable fire candidate, lock, or launch being present.
+- Launch-funnel rates use one red attack-UAV decision record as the statistical
+  unit and retain their pass counts and sample count. `target_hold_steps_mean`
+  is valid target decisions divided by contiguous target segments;
+  `target_held_decision_fraction` is reported separately.
 
 ## Incoming-Missile State
 
@@ -55,5 +60,11 @@ dead-agent active mask is retained.
 
 The default credit mode remains `shared_alive_team_mean`. The optional
 `role_local_vector_critic` uses one centralized-state value per controlled
-agent and local reward/done/GAE targets. It is an experimental credit-assignment
-comparison, not a claim that the shared mode is incorrect.
+agent, per-transition vector bootstrap values, per-agent death boundaries, and
+local reward/GAE targets. Its critic is fitted only on alive-before samples and
+each Actor is normalized and updated only on non-overridden alive-before
+samples. Checkpoint metadata labels this mode as
+`credit_ablation=true`, `critic_output_mode=per_agent_vector_value`, and
+`paper_standard_shared_team_advantage=false`. It is a diagnostic ablation, not
+the default paper HAPPO contract. Shared mode remains the paper-standard team
+advantage with `critic_output_mode=scalar_team_value`.

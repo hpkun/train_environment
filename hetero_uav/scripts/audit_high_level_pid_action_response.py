@@ -48,6 +48,13 @@ def _state(env, aid: str) -> dict[str, object]:
         sim.get_property_value("accelerations/n-pilot-z-norm"),
     ], dtype=np.float64)
     death_reason = str(getattr(env, "_death_reasons", {}).get(aid, ""))
+    def fcs_value(name: str) -> float | None:
+        try:
+            value = float(sim.get_property_value(name))
+        except Exception:
+            return None
+        return value if np.isfinite(value) else None
+
     return {
         "roll_rad": float(roll), "pitch_rad": float(pitch), "yaw_rad": float(yaw),
         "speed_mps": float(np.linalg.norm(velocity)),
@@ -57,6 +64,10 @@ def _state(env, aid: str) -> dict[str, object]:
         "crash": int(not bool(sim.is_alive)),
         "out_of_bounds": int("out_of" in death_reason.lower() or "boundary" in death_reason.lower()),
         "death_reason": death_reason,
+        "fcs_throttle_cmd_norm": fcs_value("fcs/throttle-cmd-norm"),
+        "fcs_aileron_cmd_norm": fcs_value("fcs/aileron-cmd-norm"),
+        "fcs_elevator_cmd_norm": fcs_value("fcs/elevator-cmd-norm"),
+        "fcs_rudder_cmd_norm": fcs_value("fcs/rudder-cmd-norm"),
     }
 
 
@@ -76,7 +87,7 @@ def _summarize(rows: list[dict[str, object]], values: tuple[float, ...]) -> dict
         diffs = np.diff(endpoint_values)
         monotonic = bool(np.all(diffs >= -1e-6) or np.all(diffs <= 1e-6))
         response_delays: dict[str, int | None] = {}
-        coupling: dict[str, float] = {}
+        endpoint_deltas: dict[str, dict[str, float]] = {}
         neutral_rows = {int(r["step"]): r for r in rows
                         if r["axis"] == axis and float(r["action_value"]) == 0.0}
         for value in values:
@@ -94,18 +105,36 @@ def _summarize(rows: list[dict[str, object]], values: tuple[float, ...]) -> dict
             response_delays[key] = delay
             row = by_key[(axis, value, endpoint)]
             neutral = neutral_rows[endpoint]
-            primary_delta = abs(_difference(axis, float(row[primary]), float(neutral[primary])))
-            other_fields = [field for field in ("pitch_rad", "yaw_rad", "speed_mps") if field != primary]
-            other_delta = sum(abs(_difference("heading" if field == "yaw_rad" else "linear",
-                                             float(row[field]), float(neutral[field])))
-                              for field in other_fields)
-            coupling[key] = float(other_delta / max(primary_delta, 1e-6))
+            endpoint_deltas[key] = {
+                "roll_delta_rad": float(row["roll_rad"]) - float(neutral["roll_rad"]),
+                "pitch_delta_rad": float(row["pitch_rad"]) - float(neutral["pitch_rad"]),
+                "yaw_delta_rad": _wrap_pi(float(row["yaw_rad"]) - float(neutral["yaw_rad"])),
+                "speed_delta_mps": float(row["speed_mps"]) - float(neutral["speed_mps"]),
+                "altitude_delta_m": float(row["altitude_m"]) - float(neutral["altitude_m"]),
+                "vertical_speed_delta_mps": (
+                    float(row["vertical_speed_mps"]) - float(neutral["vertical_speed_mps"])),
+            }
+        fcs_fields = (
+            "fcs_throttle_cmd_norm", "fcs_aileron_cmd_norm",
+            "fcs_elevator_cmd_norm", "fcs_rudder_cmd_norm",
+        )
+        actual_controls = [
+            abs(float(row[field]))
+            for row in rows if row["axis"] == axis
+            for field in fcs_fields if row.get(field) is not None
+        ]
         axes[axis] = {
             "monotonic_response_at_step_25": monotonic,
             "response_delay_decision_steps": response_delays,
-            "cross_axis_coupling_ratio_at_step_25": coupling,
-            "saturation_rate": float(np.mean([abs(float(r["action_value"])) >= 0.999
-                                               for r in rows if r["axis"] == axis])),
+            "endpoint_response_deltas_at_step_25": endpoint_deltas,
+            "requested_action_boundary_fraction": float(np.mean([
+                abs(float(r["action_value"])) >= 0.999
+                for r in rows if r["axis"] == axis
+            ])),
+            "actual_controller_saturation_fraction": (
+                float(np.mean(np.asarray(actual_controls) >= 0.999))
+                if actual_controls else None
+            ),
         }
     numeric_fields = (
         "roll_rad", "pitch_rad", "yaw_rad", "speed_mps", "position_n_m",

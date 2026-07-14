@@ -381,6 +381,7 @@ class UavCombatEnv(gymnasium.Env):
         self._action_contract_step: dict[str, dict] = {}
         self._engagement_target_state: dict[str, dict] = {}
         self._engagement_target_step_diag: dict[str, dict] = {}
+        self._engagement_reallocation_counts: dict[str, int] = {}
         self._fire_candidate_target_step: dict[str, str] = {}
         self._launch_quality_done_step_records: list[dict] = []
         self._evasion_step_records: list[dict] = []
@@ -438,6 +439,7 @@ class UavCombatEnv(gymnasium.Env):
         self._action_contract_step = {}
         self._engagement_target_state = {}
         self._engagement_target_step_diag = {}
+        self._engagement_reallocation_counts = {}
         self._fire_candidate_target_step = {}
         self._missile_acmi_id.clear()
         self._missile_term_reasons = {"red": {}, "blue": {}}
@@ -1338,13 +1340,26 @@ class UavCombatEnv(gymnasium.Env):
         diag: dict,
     ) -> tuple[AircraftSimulator | None, float, dict | None, dict]:
         candidates: list[tuple[AircraftSimulator, dict, dict]] = []
+        mode = "closest"
+        if aid.startswith("red") and self.red_target_selection_mode == "mav_threat_rank":
+            mode = "mav_threat_rank"
+        elif aid.startswith("red") and self.red_target_selection_mode == "paper_assessment":
+            mode = "paper_assessment"
+        paper_eligible_ids: set[str] = set()
         _a = _e = _u = _t = _r = _at = _ta = _bo = _g = 0
         for enemy_sim in enemies.values():
             if not enemy_sim.is_alive:
                 continue
             _a += 1
             diag["alive_enemy_pairs"] += 1
-            if enemy_sim.uid in self._engaged_targets:
+            engaged_blocked = enemy_sim.uid in self._engaged_targets
+            if engaged_blocked and mode == "paper_assessment":
+                from uav_env.JSBSim.envs.alignment.target_assessment import (
+                    target_reserved_by_other,
+                )
+                engaged_blocked = target_reserved_by_other(
+                    self, aid, str(enemy_sim.uid))
+            if engaged_blocked:
                 _e += 1
                 diag["engaged_blocked"] += 1
                 continue
@@ -1361,6 +1376,7 @@ class UavCombatEnv(gymnasium.Env):
                 diag["mav_shared_track_candidates"] = diag.get("mav_shared_track_candidates", 0) + 1
             else:
                 diag["direct_track_candidates"] = diag.get("direct_track_candidates", 0) + 1
+            paper_eligible_ids.add(str(enemy_sim.uid))
 
             metrics = self._missile_candidate_metrics(sim, enemy_sim)
             if metrics["range_ok"]:
@@ -1389,17 +1405,38 @@ class UavCombatEnv(gymnasium.Env):
                 score = self._score_mav_aware_target(sim, enemy_sim, metrics)
                 candidates.append((enemy_sim, metrics, score))
 
-        mode = "closest"
-        if aid.startswith("red") and self.red_target_selection_mode == "mav_threat_rank":
-            mode = "mav_threat_rank"
-        elif aid.startswith("red") and self.red_target_selection_mode == "paper_assessment":
-            mode = "paper_assessment"
+        assessment = {}
+        previous_id = str(getattr(self, "_engagement_target_state", {}).get(
+            aid, {}).get("target_id", "") or "")
+        launchable_ids = {str(item[0].uid) for item in candidates}
+        previous_target = enemies.get(previous_id)
+        previous_track_ok = bool(
+            previous_target is not None and getattr(previous_target, "is_alive", False)
+            and self._has_launch_track(aid, previous_id)[0])
+        selected_target_geometry_blocked = bool(
+            previous_id and previous_track_ok and previous_id not in launchable_ids)
+        alternate_launchable_target_exists = bool(
+            previous_id and previous_id not in launchable_ids
+            and any(target_id != previous_id for target_id in launchable_ids))
+        if mode == "paper_assessment":
             from uav_env.JSBSim.envs.alignment.target_assessment import select_paper_assessment_target
             cfg = getattr(self, "tam_happo_paper_formula_v5_config", {}) or {}
             hold_steps = int(cfg.get("target_assessment", {}).get("hold_steps", 0))
+            assessment_candidate_ids = (
+                launchable_ids if launchable_ids else paper_eligible_ids)
             engagement_id, _target, assessment = select_paper_assessment_target(
-                self, sim, cfg, hold_steps=hold_steps, require_observed=True)
-            candidates = [item for item in candidates if item[0].uid == engagement_id]
+                self, sim, cfg, hold_steps=hold_steps, require_observed=True,
+                candidate_target_ids=assessment_candidate_ids)
+            selected_target_geometry_blocked = bool(
+                engagement_id and str(engagement_id) not in launchable_ids)
+            alternate_launchable_target_exists = bool(
+                selected_target_geometry_blocked
+                and any(target_id != str(engagement_id) for target_id in launchable_ids))
+            candidates = [
+                item for item in candidates if str(item[0].uid) == str(engagement_id)]
+            step_diag = self._engagement_target_step_diag.setdefault(aid, {})
+            step_diag["selected_target_geometry_blocked"] = selected_target_geometry_blocked
+            step_diag["alternate_launchable_target_exists"] = alternate_launchable_target_exists
 
         _funnel = {
             "alive_target_pair_scans": _a,
@@ -1415,6 +1452,10 @@ class UavCombatEnv(gymnasium.Env):
         if not candidates:
             _debug = self._target_selection_debug(mode, 0, None)
             _debug.update(_funnel)
+            _debug.update({
+                "selected_target_geometry_blocked": selected_target_geometry_blocked,
+                "alternate_launchable_target_exists": alternate_launchable_target_exists,
+            })
             return None, float("inf"), None, _debug
 
         if mode == "mav_threat_rank":
@@ -1432,6 +1473,10 @@ class UavCombatEnv(gymnasium.Env):
         enemy, metrics, score = selected
         _debug = self._target_selection_debug(mode, len(candidates), score)
         _debug.update(_funnel)
+        _debug.update({
+            "selected_target_geometry_blocked": selected_target_geometry_blocked,
+            "alternate_launchable_target_exists": alternate_launchable_target_exists,
+        })
         return enemy, float(metrics["range_m"]), score, _debug
 
     def _check_missile_launch(self):
@@ -1506,9 +1551,19 @@ class UavCombatEnv(gymnasium.Env):
             # If the currently locked target becomes engaged, abandon the
             # lock immediately so the agent can start building a new lock
             # on the next-best unengaged target.
+            locked_target_reserved = False
             if (best_enemy is not None
                     and self._lock_target.get(aid) is not None
                     and self._lock_target[aid] in self._engaged_targets):
+                locked_target_reserved = True
+                if (aid.startswith("red")
+                        and self.red_target_selection_mode == "paper_assessment"):
+                    from uav_env.JSBSim.envs.alignment.target_assessment import (
+                        target_reserved_by_other,
+                    )
+                    locked_target_reserved = target_reserved_by_other(
+                        self, aid, str(self._lock_target[aid]))
+            if locked_target_reserved:
                 # Previously locked target is now engaged — force reset
                 self._lock_timer[aid] = 0
                 self._lock_target[aid] = None
@@ -2514,6 +2569,16 @@ class UavCombatEnv(gymnasium.Env):
                 "engagement_target_switch_count": int(engagement.get("switch_count", 0)),
                 "engagement_target_held_this_step": float(bool(engagement_step.get("held", False))),
                 "engagement_target_switched_this_step": float(bool(engagement_step.get("switched", False))),
+                "engagement_target_reallocated_this_step": float(bool(
+                    engagement_step.get("reallocated", False))),
+                "engagement_target_reallocation_reason": str(
+                    engagement_step.get("reallocation_reason", "") or ""),
+                "engaged_target_reallocation_count": int(
+                    getattr(self, "_engagement_reallocation_counts", {}).get(aid, 0)),
+                "selected_target_geometry_blocked": float(bool(
+                    engagement_step.get("selected_target_geometry_blocked", False))),
+                "alternate_launchable_target_exists": float(bool(
+                    engagement_step.get("alternate_launchable_target_exists", False))),
                 "fire_candidate_target_id": str(
                     getattr(self, "_fire_candidate_target_step", {}).get(aid, "") or ""
                 ),

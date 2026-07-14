@@ -75,7 +75,8 @@ def test_tanh_policy_trainer_update_no_nan():
             obs.numpy(), critic.numpy(), out["action"].numpy(), out["log_prob"].numpy(),
             np.random.randn(3).astype(np.float32) * 0.05,
             np.zeros(3, dtype=np.float32), out["value"].item(),
-            np.ones(3, dtype=np.float32), env_id=t % 2,
+            np.ones(3, dtype=np.float32), next_value=out["value"].item(),
+            env_id=t % 2,
         )
     metrics = PureHAPPOTrainer(policy, ppo_epochs=1, seed=13).update(buf)
     assert np.isfinite(metrics["actor_loss_mean"])

@@ -595,10 +595,17 @@ MARL_DYNAMICS_TRAIN_FIELDS = [
     "actor_effective_sample_fraction",
     "engagement_target_valid_rate", "target_switch_count",
     "target_switches_per_episode", "target_hold_steps_mean",
+    "target_held_decision_fraction",
+    "engagement_target_reallocation_count", "engagement_target_reallocation_rate",
+    "selected_target_geometry_blocked_count", "alternate_launchable_target_exists_count",
     "reward_target_matches_fire_candidate", "reward_target_matches_lock_given_lock",
     "reward_target_matches_launch_given_launch", "reward_fire_candidate_comparable_count",
     "reward_lock_comparable_count", "reward_launch_comparable_count",
     "mav_reward_total", "uav_reward_total_mean", "uav_reward_total_sum",
+    "track_rate", "range_rate", "ata_rate", "ta_rate", "geometry_rate",
+    "lock_mature_rate", "actual_launch_rate", "launch_gate_sample_count",
+    "track_pass_count", "range_pass_count", "ata_pass_count", "ta_pass_count",
+    "geometry_pass_count", "lock_mature_count", "actual_launch_count",
     "mav_safety_sum", "mav_support_sum", "mav_event_sum",
     "uav_height_sum", "uav_speed_sum", "uav_angle_sum", "uav_distance_sum",
     "uav_dodge_sum", "uav_event_sum", "dense_reward_signed_sum",
@@ -776,12 +783,22 @@ def _pure_happo_meta(policy, args=None) -> dict:
     if cls_name not in {"PureHAPPOPolicy", "PureHAPPOTanhPolicy",
                         "LegacyClampPureHAPPOPolicy"}:
         return {}
+    credit_mode = str(getattr(policy, "credit_mode", "shared_alive_team_mean"))
+    role_local_credit = credit_mode == "role_local_vector_critic"
     meta = {
         "num_agents": int(policy.num_agents),
         "paper_aligned_happo": True,
         "parameter_sharing": False,
         "per_agent_independent_actors": True,
-        "global_v_critic": True,
+        "global_v_critic": not role_local_credit,
+        "critic_output_mode": (
+            "per_agent_vector_value" if role_local_credit else "scalar_team_value"),
+        "paper_standard_shared_team_advantage": not role_local_credit,
+        "credit_ablation": role_local_credit,
+        "credit_contract_claim": (
+            "diagnostic_ablation_not_default_happo"
+            if role_local_credit else "paper_standard_shared_team_advantage"
+        ),
         "sequential_correction_factor": True,
         "happo_update_unit": "agent",
         "policy_arch": "pure_happo",
@@ -807,7 +824,8 @@ def _pure_happo_meta(policy, args=None) -> dict:
             policy.action_log_stds[0].detach().mean().item(),
         )),
         "algorithm": "pure_happo_baseline",
-        "credit_mode": str(getattr(policy, "credit_mode", "shared_alive_team_mean")),
+        "credit_mode": credit_mode,
+        "launch_gate_statistical_unit": "attack_uav_agent_decision",
         "has_gru": False,
         "has_attention_critic": False,
         "has_tam_module": False,
@@ -2086,6 +2104,9 @@ def _run_training_main() -> None:
         next_checkpoint_step = (
             args.checkpoint_interval_steps if args.checkpoint_interval_steps > 0 else None
         )
+        target_segment_previous: dict[tuple[int, str], str] = {}
+        target_valid_decisions_total = 0.0
+        target_segments_total = 0.0
         for iteration in range(1, iterations + 1):
             _SINGLE_RUNNER_STATE["iteration"] = iteration
             rollout_transitions = min(transitions_per_rollout, args.total_env_steps - total_steps)
@@ -2111,7 +2132,6 @@ def _run_training_main() -> None:
             rollout_reward_steps = 0
             rollout_completed_episodes = 0
             rollout_contract_counts: defaultdict[str, float] = defaultdict(float)
-            rollout_previous_targets: dict[tuple[int, str], str] = {}
             rollout_contract_reward_sums: defaultdict[str, float] = defaultdict(float)
             rollout_mav_reward_series: list[float] = []
             rollout_uav_reward_series: list[float] = []
@@ -2326,7 +2346,17 @@ def _run_training_main() -> None:
                     )
                     reward_np = np.array([float(rewards.get(rid, 0.0)) for rid in rollout_env.red_ids], dtype=np.float32)
                     done = _team_done(terminated, truncated)
-                    done_np = np.full((len(rollout_env.red_ids),), float(done), dtype=np.float32)
+                    active_after = _build_red_alive_mask(
+                        next_info, rollout_env, rollout_env.red_ids)
+                    if args.credit_mode == "role_local_vector_critic":
+                        died_this_transition = (active > 0.5) & (active_after <= 0.5)
+                        done_np = np.maximum(
+                            np.full((len(rollout_env.red_ids),), float(done), dtype=np.float32),
+                            died_this_transition.astype(np.float32),
+                        )
+                    else:
+                        done_np = np.full(
+                            (len(rollout_env.red_ids),), float(done), dtype=np.float32)
                     if done:
                         next_value = (np.zeros(len(rollout_env.red_ids), dtype=np.float32)
                                       if args.credit_mode == "role_local_vector_critic" else 0.0)
@@ -2347,8 +2377,26 @@ def _run_training_main() -> None:
                                 next_value = (next_value_array
                                               if args.credit_mode == "role_local_vector_critic"
                                               else float(next_value_array[0]))
+                    if args.credit_mode == "role_local_vector_critic":
+                        next_value = np.asarray(next_value, dtype=np.float32).reshape(-1)
+                        next_value[done_np > 0.5] = 0.0
                     actor_update_mask = _build_actor_update_mask(
                         active, next_info, rollout_env.red_ids)
+                    for gate in next_info.get("__launch_gate_diagnostics__", []):
+                        if str(gate.get("role", "")) != "attack_uav":
+                            continue
+                        rollout_contract_counts["launch_gate_samples"] += 1.0
+                        for source, target in (
+                            ("any_track_pass", "track_pass"),
+                            ("any_range_pass", "range_pass"),
+                            ("any_ata_pass", "ata_pass"),
+                            ("any_ta_pass", "ta_pass"),
+                            ("any_geometry_pass", "geometry_pass"),
+                            ("any_lock_mature", "lock_mature"),
+                            ("any_launch", "actual_launch"),
+                        ):
+                            rollout_contract_counts[target] += float(
+                                bool(gate.get(source, 0)))
                     for ridx, rid in enumerate(rollout_env.red_ids):
                         if float(active[ridx]) <= 0.5:
                             continue
@@ -2367,16 +2415,24 @@ def _run_training_main() -> None:
                             agent_info.get("engagement_target_valid", 0.0) or 0.0)
                         target_id = str(agent_info.get("engagement_target_id", "") or "")
                         target_key = (env_idx, rid)
+                        previous_target_id = target_segment_previous.get(target_key, "")
                         if target_id:
-                            if rollout_previous_targets.get(target_key) != target_id:
-                                rollout_contract_counts["target_runs"] += 1.0
-                            rollout_previous_targets[target_key] = target_id
+                            target_valid_decisions_total += 1.0
+                            if previous_target_id != target_id:
+                                target_segments_total += 1.0
+                            target_segment_previous[target_key] = target_id
                         else:
-                            rollout_previous_targets.pop(target_key, None)
+                            target_segment_previous.pop(target_key, None)
                         rollout_contract_counts["target_held"] += float(
-                            agent_info.get("engagement_target_held_this_step", 0.0) or 0.0)
+                            bool(target_id and previous_target_id == target_id))
                         rollout_contract_counts["target_switched"] += float(
                             agent_info.get("engagement_target_switched_this_step", 0.0) or 0.0)
+                        rollout_contract_counts["target_reallocated"] += float(
+                            agent_info.get("engagement_target_reallocated_this_step", 0.0) or 0.0)
+                        rollout_contract_counts["target_geometry_blocked"] += float(
+                            agent_info.get("selected_target_geometry_blocked", 0.0) or 0.0)
+                        rollout_contract_counts["alternate_launchable"] += float(
+                            agent_info.get("alternate_launchable_target_exists", 0.0) or 0.0)
                         for suffix in ("fire_candidate", "lock", "launch"):
                             comparable = float(agent_info.get(
                                 f"reward_{suffix}_comparable", 0.0) or 0.0)
@@ -2388,6 +2444,9 @@ def _run_training_main() -> None:
                             rollout_contract_counts[f"{suffix}_match"] += (
                                 float(agent_info.get(match_key, 0.0) or 0.0) if comparable else 0.0
                             )
+                    if done:
+                        for rid in rollout_env.red_ids:
+                            target_segment_previous.pop((env_idx, rid), None)
                     store_kwargs = {}
                     if rnn_hidden_pre is not None:
                         store_kwargs["rnn_hidden"] = rnn_hidden_pre
@@ -3184,9 +3243,19 @@ def _run_training_main() -> None:
                     / max(float(rollout_completed_episodes), 1.0)
                 ),
                 "target_hold_steps_mean": (
-                    rollout_contract_counts["target_valid"]
-                    / max(rollout_contract_counts["target_runs"], 1.0)
+                    target_valid_decisions_total / max(target_segments_total, 1.0)
                 ),
+                "target_held_decision_fraction": (
+                    rollout_contract_counts["target_held"]
+                    / max(rollout_contract_counts["target_valid"], 1.0)
+                ),
+                "engagement_target_reallocation_count": rollout_contract_counts["target_reallocated"],
+                "engagement_target_reallocation_rate": (
+                    rollout_contract_counts["target_reallocated"]
+                    / max(rollout_contract_counts["target_samples"], 1.0)
+                ),
+                "selected_target_geometry_blocked_count": rollout_contract_counts["target_geometry_blocked"],
+                "alternate_launchable_target_exists_count": rollout_contract_counts["alternate_launchable"],
                 "reward_target_matches_fire_candidate": (
                     rollout_contract_counts["fire_candidate_match"]
                     / max(rollout_contract_counts["fire_candidate_comparable"], 1.0)
@@ -3202,6 +3271,28 @@ def _run_training_main() -> None:
                 "reward_fire_candidate_comparable_count": rollout_contract_counts["fire_candidate_comparable"],
                 "reward_lock_comparable_count": rollout_contract_counts["lock_comparable"],
                 "reward_launch_comparable_count": rollout_contract_counts["launch_comparable"],
+                "launch_gate_sample_count": rollout_contract_counts["launch_gate_samples"],
+                "track_pass_count": rollout_contract_counts["track_pass"],
+                "range_pass_count": rollout_contract_counts["range_pass"],
+                "ata_pass_count": rollout_contract_counts["ata_pass"],
+                "ta_pass_count": rollout_contract_counts["ta_pass"],
+                "geometry_pass_count": rollout_contract_counts["geometry_pass"],
+                "lock_mature_count": rollout_contract_counts["lock_mature"],
+                "actual_launch_count": rollout_contract_counts["actual_launch"],
+                "track_rate": rollout_contract_counts["track_pass"] / max(
+                    rollout_contract_counts["launch_gate_samples"], 1.0),
+                "range_rate": rollout_contract_counts["range_pass"] / max(
+                    rollout_contract_counts["launch_gate_samples"], 1.0),
+                "ata_rate": rollout_contract_counts["ata_pass"] / max(
+                    rollout_contract_counts["launch_gate_samples"], 1.0),
+                "ta_rate": rollout_contract_counts["ta_pass"] / max(
+                    rollout_contract_counts["launch_gate_samples"], 1.0),
+                "geometry_rate": rollout_contract_counts["geometry_pass"] / max(
+                    rollout_contract_counts["launch_gate_samples"], 1.0),
+                "lock_mature_rate": rollout_contract_counts["lock_mature"] / max(
+                    rollout_contract_counts["launch_gate_samples"], 1.0),
+                "actual_launch_rate": rollout_contract_counts["actual_launch"] / max(
+                    rollout_contract_counts["launch_gate_samples"], 1.0),
                 "mav_reward_total": (
                     rollout_contract_reward_sums["mav_reward_total"]
                     / max(rollout_contract_reward_sums["samples"], 1.0)
@@ -3557,11 +3648,21 @@ def _run_training_main() -> None:
                             "gcas_override_rate", "actor_effective_sample_fraction",
                             "engagement_target_valid_rate", "target_switch_count",
                             "target_switches_per_episode", "target_hold_steps_mean",
+                            "target_held_decision_fraction",
+                            "engagement_target_reallocation_count",
+                            "engagement_target_reallocation_rate",
+                            "selected_target_geometry_blocked_count",
+                            "alternate_launchable_target_exists_count",
                             "reward_target_matches_fire_candidate",
                             "reward_target_matches_lock_given_lock",
                             "reward_target_matches_launch_given_launch",
                             "reward_fire_candidate_comparable_count",
                             "reward_lock_comparable_count", "reward_launch_comparable_count",
+                            "track_rate", "range_rate", "ata_rate", "ta_rate",
+                            "geometry_rate", "lock_mature_rate", "actual_launch_rate",
+                            "launch_gate_sample_count", "track_pass_count",
+                            "range_pass_count", "ata_pass_count", "ta_pass_count",
+                            "geometry_pass_count", "lock_mature_count", "actual_launch_count",
                             "mav_reward_total", "uav_reward_total_mean", "uav_reward_total_sum",
                             "mav_safety_sum", "mav_support_sum", "mav_event_sum",
                             "uav_height_sum", "uav_speed_sum", "uav_angle_sum",

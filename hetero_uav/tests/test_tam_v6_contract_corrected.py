@@ -10,13 +10,23 @@ import yaml
 
 from algorithms.happo.happo_buffer import HAPPORolloutBuffer
 from algorithms.pure_happo import PureHAPPOPolicy, PureHAPPOTrainer
+from algorithms.pure_happo.trainer import (
+    _compute_grouped_gae,
+    _compute_role_local_gae,
+    _normalize_role_local_advantages,
+)
 from scripts.train_happo_reference import _build_actor_update_mask, _build_policy, _pure_happo_meta
-from scripts.audit_high_level_pid_action_response import _audit_action
+from scripts.audit_high_level_pid_action_response import _audit_action, _summarize
+from scripts.run_tam_v5_fast_learnability import _red_missile_kill_key
+from scripts.run_tam_v6_contract_corrected_learnability import _json_safe
 from uav_env import make_env
 from uav_env.JSBSim.env import UavCombatEnv
 from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
 from uav_env.JSBSim.adapters.hetero_entity_set_adapter import HeteroEntitySetAdapter
-from uav_env.JSBSim.envs.alignment.target_assessment import select_paper_assessment_target
+from uav_env.JSBSim.envs.alignment.target_assessment import (
+    select_paper_assessment_target,
+    target_hold_sequence_stats,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,7 +64,38 @@ def test_v6_observation_and_action_contract_are_explicit_and_finite():
             assert info[rid]["action_overridden"] is False
             assert info[rid]["action_override_reason"] == "none"
             assert len(info[rid]["requested_action"]) == 3
+            assert info[rid]["policy_requested_action"] == [0.0, 0.0, 0.0]
+            assert info[rid]["post_trim_action"] == [0.0, 0.0, 0.0]
+            assert info[rid]["action_transformed"] is False
+            assert info[rid]["action_transform_reason"] == "none"
             assert len(info[rid]["executed_control_target"]) == 3
+    finally:
+        env.close()
+
+
+def test_v6_contract_rejects_nonzero_action_trim(tmp_path):
+    cfg = yaml.safe_load(V6.read_text(encoding="utf-8"))
+    cfg["action_trim_by_role"]["mav"]["pitch"] = 0.1
+    path = tmp_path / "v6_nonzero_trim.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    with pytest.raises(ValueError, match="requires zero action trim"):
+        make_env(str(path), suppress_jsbsim_output=True)
+
+
+def test_nonzero_trim_is_reported_as_action_transformation():
+    env = make_env(str(V6), suppress_jsbsim_output=True)
+    try:
+        env.reset(seed=3)
+        # Other experiments may opt into trim; emulate that after the v6 startup guard.
+        env.action_trim_by_role["mav"] = np.asarray([0.1, 0.0, 0.0], dtype=np.float32)
+        actions = {aid: np.zeros(3, dtype=np.float32) for aid in env.agent_ids}
+        _obs, _reward, _terminated, _truncated, info = env.step(actions)
+        red = info["red_0"]
+        assert red["policy_requested_action"] == [0.0, 0.0, 0.0]
+        np.testing.assert_allclose(red["post_trim_action"], [0.1, 0.0, 0.0])
+        assert red["action_transformed"] is True
+        assert red["action_transform_reason"] == "action_trim"
+        assert red["action_overridden"] is False
     finally:
         env.close()
 
@@ -143,6 +184,65 @@ def test_role_local_vector_critic_shape_masked_update_and_reward_isolation():
     assert stats["credit_mode"] == "role_local_vector_critic"
 
 
+def test_role_local_transition_bootstrap_and_reward_are_agent_local():
+    rewards = torch.tensor([[1.0, 10.0], [1.0, 10.0], [1.0, 10.0]])
+    values = torch.zeros_like(rewards)
+    next_values = torch.zeros_like(rewards)
+    dones = torch.zeros_like(rewards)
+    env_ids = torch.zeros(3, dtype=torch.long)
+    base, _ = _compute_role_local_gae(
+        rewards, values, next_values, dones, env_ids, gamma=1.0, lam=1.0)
+
+    changed_next = next_values.clone()
+    changed_next[1, 0] = 5.0
+    changed, _ = _compute_role_local_gae(
+        rewards, values, changed_next, dones, env_ids, gamma=1.0, lam=1.0)
+    assert not torch.equal(changed[:2, 0], base[:2, 0])
+    assert changed[2, 0] == base[2, 0]
+    torch.testing.assert_close(changed[:, 1], base[:, 1])
+
+    changed_reward = rewards.clone()
+    changed_reward[0, 0] += 7.0
+    reward_adv, _ = _compute_role_local_gae(
+        changed_reward, values, next_values, dones, env_ids, gamma=1.0, lam=1.0)
+    torch.testing.assert_close(reward_adv[:, 1], base[:, 1])
+    assert reward_adv[0, 0] == base[0, 0] + 7.0
+
+
+def test_role_local_agent_done_stops_only_that_agents_gae_chain():
+    rewards = torch.ones((3, 2))
+    values = torch.zeros_like(rewards)
+    next_values = torch.zeros_like(rewards)
+    dones = torch.zeros_like(rewards)
+    dones[1, 0] = 1.0
+    advantages, _ = _compute_role_local_gae(
+        rewards, values, next_values, dones, torch.zeros(3, dtype=torch.long),
+        gamma=1.0, lam=1.0)
+    torch.testing.assert_close(advantages[:, 0], torch.tensor([2.0, 1.0, 1.0]))
+    torch.testing.assert_close(advantages[:, 1], torch.tensor([3.0, 2.0, 1.0]))
+
+
+def test_shared_scalar_gae_keeps_per_transition_bootstrap_contract():
+    rewards = torch.tensor([1.0, 1.0, 1.0])
+    values = torch.zeros(3)
+    next_values = torch.tensor([2.0, 3.0, 4.0])
+    dones = torch.tensor([0.0, 0.0, 1.0])
+    advantages, returns = _compute_grouped_gae(
+        rewards, values, next_values, dones, torch.zeros(3, dtype=torch.long),
+        gamma=1.0, lam=0.0)
+    torch.testing.assert_close(advantages, torch.tensor([3.0, 4.0, 1.0]))
+    torch.testing.assert_close(returns, advantages)
+
+
+def test_role_local_advantage_normalization_excludes_invalid_actor_samples():
+    advantages = torch.tensor([[1.0, 10.0], [3.0, 20.0], [1000.0, 30.0]])
+    actor_masks = torch.tensor([[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    normalized = _normalize_role_local_advantages(advantages, actor_masks)
+    torch.testing.assert_close(normalized[:, 0], torch.tensor([-1.0, 1.0, 0.0]))
+    torch.testing.assert_close(normalized[:, 1], torch.tensor([0.0, -1.0, 1.0]))
+    assert torch.isfinite(normalized).all()
+
+
 def test_credit_mode_checkpoint_contract_rejects_mismatch(tmp_path):
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({"credit_mode": "role_local_vector_critic"}), encoding="utf-8")
@@ -193,6 +293,18 @@ def test_v6_pure_happo_meta_names_heterogeneity_boundaries():
         "role_heterogeneity", "sensor_heterogeneity",
         "payload_heterogeneity", "reward_heterogeneity"))
     assert meta["evasion_scripted"] is False
+    assert meta["critic_output_mode"] == "scalar_team_value"
+    assert meta["paper_standard_shared_team_advantage"] is True
+    assert meta["credit_ablation"] is False
+    assert meta["launch_gate_statistical_unit"] == "attack_uav_agent_decision"
+
+    local = PureHAPPOPolicy(148, 740, 3, 3, credit_mode="role_local_vector_critic")
+    local_meta = _pure_happo_meta(local, args)
+    assert local_meta["global_v_critic"] is False
+    assert local_meta["critic_output_mode"] == "per_agent_vector_value"
+    assert local_meta["paper_standard_shared_team_advantage"] is False
+    assert local_meta["credit_ablation"] is True
+    assert local_meta["credit_contract_claim"] == "diagnostic_ablation_not_default_happo"
 
 
 def test_v6_payload_contract_is_heterogeneous_even_before_combat():
@@ -253,6 +365,10 @@ class _AssessmentEnv:
         self.current_step = 4
         self._engagement_target_state = {}
         self._engagement_target_step_diag = {}
+        self._engagement_reallocation_counts = {}
+        self._engaged_targets = set()
+        self._lock_target = {}
+        self._missiles_in_flight = {}
         self.blue_ids = ["blue_0", "blue_1"]
         self.blue_planes = {
             "blue_0": _StateObject("blue_0", [4000, 0, 6000], [200, 0, 0]),
@@ -282,3 +398,91 @@ def test_paper_assessment_uses_shared_score_and_records_hold_diagnostics():
     assert target_id2 == "blue_1"
     assert values2["target_held"] == 1.0
     assert env._engagement_target_step_diag["red_1"]["held"] is True
+
+
+def test_paper_assessment_ranks_only_fire_control_candidates_and_reallocates():
+    env = _AssessmentEnv()
+    attacker = _StateObject("red_1", [0, 0, 6000], [200, 0, 0])
+    cfg = {"target_assessment": {"engagement_range_m": 14000.0, "hold_steps": 10}}
+    target_id, _target, _values = select_paper_assessment_target(
+        env, attacker, cfg, require_observed=True, candidate_target_ids={"blue_1"})
+    assert target_id == "blue_1"
+    env.current_step += 1
+    target_id, _target, values = select_paper_assessment_target(
+        env, attacker, cfg, require_observed=True, candidate_target_ids={"blue_0"})
+    assert target_id == "blue_0"
+    assert values["target_reallocated"] == 1.0
+    assert values["target_reallocation_reason"] == "not_fire_control_candidate"
+    assert env._engagement_reallocation_counts["red_1"] == 1
+
+
+def test_paper_assessment_deconflicts_two_attackers():
+    env = _AssessmentEnv()
+    cfg = {"target_assessment": {"engagement_range_m": 14000.0, "hold_steps": 0}}
+    first = _StateObject("red_1", [0, 0, 6000], [200, 0, 0])
+    second = _StateObject("red_2", [0, 100, 6000], [200, 0, 0])
+    first_id, _target, _values = select_paper_assessment_target(env, first, cfg)
+    assert first_id == "blue_1"
+    env._engaged_targets.add(first_id)
+    second_id, _target, _values = select_paper_assessment_target(env, second, cfg)
+    assert second_id == "blue_0"
+
+
+def test_target_hold_metric_is_mean_contiguous_segment_length():
+    valid, segments, mean = target_hold_sequence_stats(
+        ["A", "A", "A", "B", "B", None, "C", "C"])
+    assert valid == 7
+    assert segments == 3
+    assert mean == pytest.approx(7.0 / 3.0)
+
+
+def test_red_kill_attribution_uses_blue_death_event_not_reward_credit():
+    event = {
+        "side": "blue", "agent_id": "blue_0", "killed_by_missile": True,
+        "missile_owner": "red_1",
+    }
+    assert _red_missile_kill_key(event, 1002) == (1002, "blue_0")
+    assert _red_missile_kill_key({**event, "missile_owner": "blue_1"}, 1002) is None
+    assert _red_missile_kill_key({**event, "killed_by_missile": False}, 1002) is None
+
+    # A preceding MAV death is irrelevant; the later attack-UAV kill remains countable.
+    mav_death = {"side": "red", "agent_id": "red_0", "killed_by_missile": True,
+                 "missile_owner": "blue_0"}
+    keys = {
+        key for key in (
+            _red_missile_kill_key(mav_death, 1002),
+            _red_missile_kill_key(event, 1002),
+            _red_missile_kill_key(event, 1002),
+        ) if key is not None
+    }
+    assert keys == {(1002, "blue_0")}
+
+
+def test_v6_runner_json_sanitizes_nonstandard_nonfinite_values():
+    payload = _json_safe({"missing": float("nan"), "positive": float("inf"), "ok": 1.0})
+    assert payload == {"missing": None, "positive": None, "ok": 1.0}
+    assert "NaN" not in json.dumps(payload, allow_nan=False)
+
+
+def test_pid_audit_uses_unit_safe_response_deltas_and_honest_saturation_names():
+    rows = []
+    for axis in ("pitch", "heading", "speed"):
+        for value in (-1.0, 0.0, 1.0):
+            for step in (1, 5, 10, 25):
+                rows.append({
+                    "axis": axis, "action_value": value, "step": step,
+                    "roll_rad": value * 0.01, "pitch_rad": value * 0.02,
+                    "yaw_rad": value * 0.03, "speed_mps": 200.0 + value,
+                    "position_n_m": 0.0, "position_e_m": 0.0, "position_u_m": 6000.0,
+                    "altitude_m": 6000.0 + value, "vertical_speed_mps": value,
+                    "overload_g": 1.0, "crash": 0, "out_of_bounds": 0,
+                    "fcs_throttle_cmd_norm": None, "fcs_aileron_cmd_norm": None,
+                    "fcs_elevator_cmd_norm": None, "fcs_rudder_cmd_norm": None,
+                })
+    summary = _summarize(rows, (-1.0, 0.0, 1.0))
+    axis_summary = summary["axes"]["pitch"]
+    assert "saturation_rate" not in axis_summary
+    assert "cross_axis_coupling_ratio_at_step_25" not in axis_summary
+    assert axis_summary["requested_action_boundary_fraction"] == pytest.approx(2.0 / 3.0)
+    assert axis_summary["actual_controller_saturation_fraction"] is None
+    assert "speed_delta_mps" in axis_summary["endpoint_response_deltas_at_step_25"]["+1.00"]

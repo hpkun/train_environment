@@ -74,6 +74,8 @@ def test_diagnose_mav_action_trim_effect_smoke():
         [
             "python",
             "scripts/diagnose_mav_action_trim_effect.py",
+            "--config",
+            "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_happo_contract_corrected_v6.yaml",
             "--steps",
             "80",
             "--output-json",

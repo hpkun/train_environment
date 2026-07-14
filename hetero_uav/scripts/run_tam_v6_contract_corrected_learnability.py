@@ -22,6 +22,34 @@ DEFAULT_CONFIG = (
 )
 
 
+def _optional_float(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (float, np.floating)):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    return value
+
+
+def _csv_safe_rows(rows):
+    return [
+        {key: ("" if isinstance(value, (float, np.floating)) and not np.isfinite(value)
+               else value) for key, value in row.items()}
+        for row in rows
+    ]
+
+
 def training_command(args, seed: int, seed_dir: Path) -> list[str]:
     return [
         sys.executable, "-u", "scripts/train_happo_reference.py",
@@ -93,22 +121,26 @@ def main() -> None:
             for metric in (
                 "action_override_rate", "range_rate", "ata_rate", "ta_rate",
                 "geometry_rate", "lock_mature_rate", "actual_launch_rate",
+                "launch_gate_sample_count", "track_pass_count", "range_pass_count",
+                "ata_pass_count", "ta_pass_count", "geometry_pass_count",
+                "lock_mature_count", "actual_launch_count",
                 "reward_target_matches_lock_given_lock",
                 "reward_target_matches_launch_given_launch", "target_switches_per_episode",
                 "dense_event_abs_ratio", "mav_uav_sign_conflict_rate",
                 "approx_kl_mav", "approx_kl_uav", "clip_fraction_mav",
-                "clip_fraction_uav", "value_explained_variance",
+                "clip_fraction_uav", "value_explained_variance_old",
+                "value_explained_variance_new",
                 "mav_action_saturation_rate", "uav_action_saturation_rate",
                 "actor_effective_sample_fraction",
             ):
                 value = last.get(metric, "")
-                row[f"train_final_{metric}"] = float(value) if value not in ("", None) else float("nan")
+                row[f"train_final_{metric}"] = _optional_float(value)
         rows.append(row)
         status_path = seed_dir / "runner_status.json"
         status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
         completed.append(bool(status.get("runner_completed_normally", False)))
     with (output_dir / "per_seed_init_final.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(_csv_safe_rows(rows))
     aggregate = []
     for metric in METRICS:
         initial = np.asarray([row[f"init_{metric}"] for row in rows], dtype=np.float64)
@@ -121,7 +153,7 @@ def main() -> None:
             "delta_mean": float(delta.mean()), "delta_std": float(delta.std(ddof=0)),
         })
     with (output_dir / "aggregate_init_final.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(aggregate[0])); writer.writeheader(); writer.writerows(aggregate)
+        writer = csv.DictWriter(handle, fieldnames=list(aggregate[0])); writer.writeheader(); writer.writerows(_csv_safe_rows(aggregate))
     status, evidence = classify(rows, completed)
     summary = {
         "status": status,
@@ -134,7 +166,7 @@ def main() -> None:
         "rows": rows,
     }
     (output_dir / "learnability_summary.json").write_text(
-        json.dumps(summary, indent=2, allow_nan=True), encoding="utf-8")
+        json.dumps(_json_safe(summary), indent=2, allow_nan=False), encoding="utf-8")
     lines = [
         "# TAM v6 Contract-Corrected Learnability",
         "",

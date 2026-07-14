@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -127,6 +128,8 @@ def run_case(
     from uav_env import make_env
     from uav_env.JSBSim.render_tacview import TacviewLogger
 
+    random.seed(seed)
+    np.random.seed(seed)
     env = make_env(config, env_type="jsbsim_hetero", suppress_jsbsim_output=False)
     if disable_config_trim and hasattr(env, "set_action_trim_enabled"):
         env.set_action_trim_enabled(False)
