@@ -19,14 +19,23 @@ CLAIM = (
 )
 GLOBAL_REWARD_SCALE = 1.0 / 200.0
 UAV_WEIGHTS = {"height": 10.0, "speed": 10.0, "angle": 15.0, "distance": 10.0, "dodge": 30.0}
-TARGET_WEIGHTS = {"angle": 0.35, "distance": 0.25, "height": 0.20, "speed": 0.20}
+from .alignment.target_assessment import (
+    TARGET_WEIGHTS,
+    paper_target_score,
+    safe_state_vector as _safe_vec,
+    select_paper_assessment_target,
+)
 
 UAV_FIELDS = (
     "height_pv_raw", "height_ph_raw", "height_raw", "height_adaptation_active",
     "speed_own", "speed_target", "speed_target_valid", "speed_ratio", "speed_invalid", "speed_raw",
     "target_id", "target_score", "target_rank", "closest_target_id",
-    "lock_target_id", "launch_target_id", "reward_target_matches_lock",
-    "reward_target_matches_launch", "ata", "aa", "angle_raw", "distance_km",
+    "fire_candidate_target_id", "lock_target_id", "launch_target_id",
+    "reward_target_matches_fire_candidate", "reward_target_matches_lock",
+    "reward_target_matches_launch", "reward_target_matches_lock_given_lock",
+    "reward_target_matches_launch_given_launch", "reward_fire_candidate_comparable",
+    "reward_lock_comparable", "reward_launch_comparable", "target_held",
+    "target_switched", "ata", "aa", "angle_raw", "distance_km",
     "distance_raw", "dodge_lambda", "dodge_missile_speed_current",
     "dodge_missile_speed_previous", "dodge_angle_raw", "dodge_speed_raw",
     "dodge_raw", "kill_event_raw", "death_event_raw", "oob_event_raw",
@@ -72,7 +81,8 @@ V5_EPISODE_LAST_FIELDS = {
     "event_credit_cap",
 }
 V5_EPISODE_STRING_FIELDS = {
-    "target_id", "closest_target_id", "lock_target_id", "launch_target_id",
+    "target_id", "closest_target_id", "fire_candidate_target_id",
+    "lock_target_id", "launch_target_id",
     "nearest_threat_id", "brma_key_entity_id",
 }
 
@@ -235,67 +245,15 @@ def identity_error(total: float, parts: list[float]) -> float:
     return float(total) - reconstruct_total(parts)
 
 
-def _safe_vec(sim, getter: str) -> np.ndarray:
-    try:
-        value = np.asarray(getattr(sim, getter)(), dtype=np.float64).reshape(-1)
-    except Exception:
-        value = np.zeros(3, dtype=np.float64)
-    if value.size < 3:
-        value = np.pad(value, (0, 3 - value.size))
-    value = value[:3]
-    return value if np.isfinite(value).all() else np.zeros(3, dtype=np.float64)
-
-
 def _pair_geometry(env, attacker, target) -> dict[str, float]:
     return env._brma_tam_3d_geometry(attacker, target)
 
 
-def paper_target_score(env, attacker, target, cfg: dict) -> dict[str, float]:
-    """TAM-HAPPO Eq. 11-12 target-assessment score, separate from reward."""
-    geom = _pair_geometry(env, attacker, target)
-    ata = float(geom["tam_ata_rad"])
-    aa = float(geom["tam_aa_rad"])
-    distance = float(geom["target_distance_m"])
-    own_pos = _safe_vec(attacker, "get_position")
-    target_pos = _safe_vec(target, "get_position")
-    own_vel = _safe_vec(attacker, "get_velocity")
-    target_vel = _safe_vec(target, "get_velocity")
-    assessment = cfg.get("target_assessment", {})
-    hmax = float(assessment.get("relative_altitude_norm_m", 10000.0))
-    vmax = float(assessment.get("relative_speed_norm_mps", 408.0))
-    dmax = float(assessment.get("engagement_range_m", 14000.0))
-    e_angle = 1.0 - (ata + aa) / (2.0 * math.pi)
-    e_distance = 1.0 if distance <= dmax else 0.0
-    e_height = float((own_pos[2] - target_pos[2]) / max(hmax, 1e-8))
-    e_speed = float(np.linalg.norm(own_vel - target_vel) / max(vmax, 1e-8))
-    score = (TARGET_WEIGHTS["angle"] * e_angle + TARGET_WEIGHTS["distance"] * e_distance
-             + TARGET_WEIGHTS["height"] * e_height + TARGET_WEIGHTS["speed"] * e_speed)
-    return {"score": float(score), "ata": ata, "aa": aa, "distance_m": distance,
-            "target_angle_assessment": float(e_angle),
-            "target_distance_assessment": float(e_distance),
-            "target_height_assessment": float(e_height),
-            "target_speed_assessment": float(e_speed)}
-
-
 def _select_target(env, attacker, cfg: dict) -> tuple[str | None, Any | None, dict[str, float]]:
-    candidates = []
-    own_pos = _safe_vec(attacker, "get_position")
-    for bid in env.blue_ids:
-        blue = env.blue_planes.get(bid)
-        if blue is None or not getattr(blue, "is_alive", False):
-            continue
-        values = paper_target_score(env, attacker, blue, cfg)
-        values["target_id"] = bid
-        values["nearest_distance"] = float(np.linalg.norm(_safe_vec(blue, "get_position") - own_pos))
-        candidates.append(values)
-    if not candidates:
-        return None, None, {}
-    candidates.sort(key=lambda row: (-float(row["score"]), str(row["target_id"])))
-    selected = candidates[0]
-    selected["target_rank"] = 1.0
-    selected["closest_target_id"] = min(candidates, key=lambda row: row["nearest_distance"])["target_id"]
-    bid = str(selected["target_id"])
-    return bid, env.blue_planes[bid], selected
+    hold_steps = int(cfg.get("target_assessment", {}).get("hold_steps", 0))
+    require_observed = getattr(env, "red_target_selection_mode", "closest") == "paper_assessment"
+    return select_paper_assessment_target(
+        env, attacker, cfg, hold_steps=hold_steps, require_observed=require_observed)
 
 
 def _dodge(env, sim, state: dict) -> dict[str, float]:
@@ -588,10 +546,25 @@ def _uav_reward(env, aid: str, sim, state: dict, cfg: dict, alive_before: bool) 
         vals.update(tam_distance_reward(target_logs["distance_m"]))
     else:
         vals.update(no_target_speed_reward(float(np.linalg.norm(_safe_vec(sim, "get_velocity")))))
+    fire_candidate_id = str(
+        getattr(env, "_fire_candidate_target_step", {}).get(aid, "") or ""
+    )
     lock_id, launch_id = _lock_and_launch_target(env, aid)
-    vals.update({"lock_target_id": lock_id, "launch_target_id": launch_id,
+    vals.update({"fire_candidate_target_id": fire_candidate_id,
+                 "lock_target_id": lock_id, "launch_target_id": launch_id,
+                 "reward_target_matches_fire_candidate": float(
+                     bool(fire_candidate_id and target_id == fire_candidate_id)),
                  "reward_target_matches_lock": float(bool(target_id and target_id == lock_id)),
-                 "reward_target_matches_launch": float(bool(target_id and target_id == launch_id))})
+                 "reward_target_matches_launch": float(bool(target_id and target_id == launch_id)),
+                 "reward_target_matches_lock_given_lock": float(
+                     bool(lock_id and target_id == lock_id)),
+                 "reward_target_matches_launch_given_launch": float(
+                     bool(launch_id and target_id == launch_id)),
+                 "reward_fire_candidate_comparable": float(bool(fire_candidate_id)),
+                 "reward_lock_comparable": float(bool(lock_id)),
+                 "reward_launch_comparable": float(bool(launch_id)),
+                 "target_held": float(target_logs.get("target_held", 0.0)),
+                 "target_switched": float(target_logs.get("target_switched", 0.0))})
     vals.update(_dodge(env, sim, state))
     vals["kill_event_raw"] = 200.0 * int(getattr(env, "_step_kill_count", {}).get(aid, 0))
     alive_after = bool(getattr(sim, "is_alive", False))

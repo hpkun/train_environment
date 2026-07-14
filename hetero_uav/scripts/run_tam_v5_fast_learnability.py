@@ -27,7 +27,10 @@ METRICS = [
     "red_launch_per_episode", "red_hit_per_episode", "red_kill_per_episode",
     "track_rate", "range_rate", "ata_rate", "ta_rate", "geometry_rate",
     "lock_mature_rate", "actual_launch_rate", "reward_target_matches_lock_rate",
-    "reward_target_matches_launch_rate", "finite", "nan_detected",
+    "reward_target_matches_launch_rate", "action_override_rate",
+    "engagement_target_valid_rate", "target_switches_per_episode",
+    "target_hold_steps_mean", "crash_rate", "out_of_bounds_rate",
+    "finite", "nan_detected",
 ]
 
 
@@ -129,7 +132,10 @@ def evaluate_checkpoint(
     policy = _build_policy(meta, device)
     policy.load(checkpoint, map_location=device)
     policy.eval()
-    adapter = HeteroObsAdapterV2()
+    adapter = HeteroObsAdapterV2(
+        include_incoming_missile=(meta.get("observation_contract") == "mav_shared_geo_v3_incoming_missile"),
+        incoming_missile_normalization=meta.get("incoming_missile_normalization", {}),
+    )
 
     returns: list[float] = []
     red_alive_final: list[float] = []
@@ -143,8 +149,11 @@ def evaluate_checkpoint(
     gates = {name: 0.0 for name in (
         "track", "range", "ata", "ta", "geometry", "lock_mature", "actual_launch"
     )}
-    reward_match_den = 0.0
+    reward_lock_den = reward_launch_den = 0.0
     reward_lock_matches = reward_launch_matches = 0.0
+    action_alive = action_overridden = 0.0
+    target_samples = target_valid = target_held = target_switches = 0.0
+    crash_episodes = out_of_bounds_episodes = 0.0
     finite = True
 
     for episode_seed in episode_seeds:
@@ -193,14 +202,29 @@ def evaluate_checkpoint(
                     "shared_kill_raw", "direct_kill_raw", "direct_and_shared_kill_raw"
                 ))
                 for rid in env.red_ids:
+                    agent_info = info.get(rid, {}) or {}
+                    if float(agent_info.get("alive", 0.0) or 0.0) > 0.5:
+                        action_alive += 1.0
+                        action_overridden += float(bool(agent_info.get("action_overridden", False)))
                     if env.agent_roles.get(rid) != "attack_uav":
                         continue
                     comp = components.get(rid, {}) or {}
                     if float(comp.get("alive_before", 0.0) or 0.0) <= 0.5:
                         continue
-                    reward_match_den += 1.0
-                    reward_lock_matches += float(comp.get("reward_target_matches_lock", 0.0) or 0.0)
-                    reward_launch_matches += float(comp.get("reward_target_matches_launch", 0.0) or 0.0)
+                    target_samples += 1.0
+                    target_valid += float(agent_info.get("engagement_target_valid", 0.0) or 0.0)
+                    target_held += float(agent_info.get("engagement_target_held_this_step", 0.0) or 0.0)
+                    target_switches += float(agent_info.get("engagement_target_switched_this_step", 0.0) or 0.0)
+                    lock_comparable = float(comp.get("reward_lock_comparable", 0.0) or 0.0)
+                    launch_comparable = float(comp.get("reward_launch_comparable", 0.0) or 0.0)
+                    reward_lock_den += lock_comparable
+                    reward_launch_den += launch_comparable
+                    if lock_comparable:
+                        reward_lock_matches += float(
+                            comp.get("reward_target_matches_lock_given_lock", 0.0) or 0.0)
+                    if launch_comparable:
+                        reward_launch_matches += float(
+                            comp.get("reward_target_matches_launch_given_launch", 0.0) or 0.0)
 
                 if _all_done(terminated) or _all_done(truncated):
                     break
@@ -216,6 +240,13 @@ def evaluate_checkpoint(
             red_alive_final.append(float(red_alive))
             blue_alive_final.append(float(blue_alive))
             mav_alive_final.append(mav_alive)
+            death_reasons = [str(getattr(env, "_death_reasons", {}).get(rid, "") or "").lower()
+                             for rid in env.red_ids]
+            crash_episodes += float(any("crash" in reason for reason in death_reasons))
+            out_of_bounds_episodes += float(any(
+                token in reason for reason in death_reasons
+                for token in ("boundary", "out_of_zone", "outofzone")
+            ))
         finally:
             env.close()
 
@@ -241,8 +272,14 @@ def evaluate_checkpoint(
         "geometry_rate": gates["geometry"] / max(gate_den, 1.0),
         "lock_mature_rate": gates["lock_mature"] / max(gate_den, 1.0),
         "actual_launch_rate": gates["actual_launch"] / max(gate_den, 1.0),
-        "reward_target_matches_lock_rate": reward_lock_matches / max(reward_match_den, 1.0),
-        "reward_target_matches_launch_rate": reward_launch_matches / max(reward_match_den, 1.0),
+        "reward_target_matches_lock_rate": reward_lock_matches / max(reward_lock_den, 1.0),
+        "reward_target_matches_launch_rate": reward_launch_matches / max(reward_launch_den, 1.0),
+        "action_override_rate": action_overridden / max(action_alive, 1.0),
+        "engagement_target_valid_rate": target_valid / max(target_samples, 1.0),
+        "target_switches_per_episode": target_switches / episodes,
+        "target_hold_steps_mean": target_held / max(target_valid, 1.0),
+        "crash_rate": crash_episodes / episodes,
+        "out_of_bounds_rate": out_of_bounds_episodes / episodes,
     }
     numeric_finite = bool(np.isfinite(np.asarray(list(result.values()), dtype=np.float64)).all())
     result["finite"] = float(finite and numeric_finite)

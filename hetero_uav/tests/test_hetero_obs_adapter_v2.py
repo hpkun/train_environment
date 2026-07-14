@@ -9,16 +9,13 @@ from uav_env.JSBSim.adapters import HeteroObsAdapterV2
 
 CFG_3V2 = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml"
 CFG_5V4 = "uav_env/JSBSim/configs/hetero_mav_shared_geo_5v4.yaml"
-CFG_BRMA_SENSOR = "uav_env/JSBSim/configs/hetero_train_2v2_mav_attack.yaml"
-
-
 def test_adapter_v2_constants():
     adapter = HeteroObsAdapterV2()
-    assert adapter.flat_actor_obs_dim == 96
-    assert adapter.critic_state_dim == 480
+    assert adapter.flat_actor_obs_dim == 140
+    assert adapter.critic_state_dim == 700
     assert adapter.ego_feature_dim == 12
     assert adapter.ally_entity_dim == 9
-    assert adapter.enemy_entity_dim == 7
+    assert adapter.enemy_entity_dim == 18
 
 
 def test_adapter_v2_3v2_shapes():
@@ -28,9 +25,9 @@ def test_adapter_v2_3v2_shapes():
         adapter = HeteroObsAdapterV2()
         out = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
         assert np.allclose(out["red_valid_mask"], [1, 1, 1, 0, 0])
-        assert out["critic_state"].shape == (480,)
+        assert out["critic_state"].shape == (700,)
         for rid in env.red_ids:
-            assert out["actor_obs"][rid].shape == (96,)
+            assert out["actor_obs"][rid].shape == (140,)
     finally:
         env.close()
 
@@ -42,9 +39,9 @@ def test_adapter_v2_5v4_shapes():
         adapter = HeteroObsAdapterV2()
         out = adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
         assert np.allclose(out["red_valid_mask"], [1, 1, 1, 1, 1])
-        assert out["critic_state"].shape == (480,)
+        assert out["critic_state"].shape == (700,)
         for rid in env.red_ids:
-            assert out["actor_obs"][rid].shape == (96,)
+            assert out["actor_obs"][rid].shape == (140,)
     finally:
         env.close()
 
@@ -61,6 +58,11 @@ def _fake_obs(source, observed, alive=1.0):
         "enemy_alive_mask": np.array([alive], dtype=np.float32),
         "enemy_track_source": np.array([source], dtype=np.float32),
         "enemy_observed_mask": np.array([observed], dtype=np.float32),
+        "enemy_relative_pos_xyz": np.array([[0.2, 0.1, 0.0]], dtype=np.float32),
+        "enemy_relative_vel_xyz": np.array([[0.05, 0.0, 0.0]], dtype=np.float32),
+        "enemy_bearing_elevation": np.array([[0.1, 0.0]], dtype=np.float32),
+        "enemy_speed_heading": np.array([[0.6, 0.2]], dtype=np.float32),
+        "enemy_full_geo_valid_mask": np.array([observed], dtype=np.float32),
     }
 
 
@@ -70,7 +72,7 @@ def test_adapter_v2_source_preserved(source):
     out = adapter.adapt_agent(
         "red_0", _fake_obs(source, 1.0),
         red_ids=["red_0", "red_1"], blue_ids=["blue_0"])
-    np.testing.assert_array_equal(out["enemy_entities"][0, -2:], np.asarray(source, dtype=np.float32))
+    np.testing.assert_array_equal(out["enemy_entities"][0, 5:7], np.asarray(source, dtype=np.float32))
 
 
 def test_adapter_v2_alive_but_unobserved_enemy_keeps_alive_mask_and_zero_feature():
@@ -92,7 +94,7 @@ def test_adapter_v2_alive_observed_own_contains_geo_and_source():
     assert out["enemy_alive_mask"][0] == 1.0
     assert out["enemy_observed_mask"][0] == 1.0
     assert not np.allclose(out["enemy_entities"][0, :5], 0.0)
-    np.testing.assert_array_equal(out["enemy_entities"][0, -2:], np.array([1, 0], dtype=np.float32))
+    np.testing.assert_array_equal(out["enemy_entities"][0, 5:7], np.array([1, 0], dtype=np.float32))
 
 
 def test_adapter_v2_alive_observed_mav_shared_contains_geo_and_source():
@@ -103,7 +105,7 @@ def test_adapter_v2_alive_observed_mav_shared_contains_geo_and_source():
     assert out["enemy_alive_mask"][0] == 1.0
     assert out["enemy_observed_mask"][0] == 1.0
     assert not np.allclose(out["enemy_entities"][0, :5], 0.0)
-    np.testing.assert_array_equal(out["enemy_entities"][0, -2:], np.array([0, 1], dtype=np.float32))
+    np.testing.assert_array_equal(out["enemy_entities"][0, 5:7], np.array([0, 1], dtype=np.float32))
 
 
 def test_adapter_v2_dead_real_enemy_zero_feature():
@@ -129,11 +131,11 @@ def test_adapter_v2_padding_enemy_zero_masks():
 
 
 def test_adapter_v2_rejects_brma_sensor_obs():
-    env = make_env(CFG_BRMA_SENSOR)
-    try:
-        obs, info = env.reset(seed=0)
-        adapter = HeteroObsAdapterV2()
-        with pytest.raises(ValueError, match="observation_mode='mav_shared_geo'"):
-            adapter.adapt_all(obs, info=info, red_ids=env.red_ids, blue_ids=env.blue_ids)
-    finally:
-        env.close()
+    adapter = HeteroObsAdapterV2()
+    brma_sensor_obs = {
+        "red_0": {"ego_state": np.zeros(9, dtype=np.float32)},
+        "blue_0": {"ego_state": np.zeros(9, dtype=np.float32)},
+    }
+    with pytest.raises(ValueError, match="observation_mode='mav_shared_geo'"):
+        adapter.adapt_all(
+            brma_sensor_obs, red_ids=["red_0"], blue_ids=["blue_0"])

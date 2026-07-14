@@ -23,18 +23,31 @@ REQUIRED_V2_KEYS = {
 class HeteroObsAdapterV2:
     """Convert canonical ``mav_shared_geo`` raw obs to actor/critic inputs."""
 
-    def __init__(self, max_red: int = 5, max_blue: int = 4, role_dim: int = 4):
+    def __init__(self, max_red: int = 5, max_blue: int = 4, role_dim: int = 4,
+                 include_incoming_missile: bool = False,
+                 incoming_missile_normalization: dict | None = None):
         self.max_red = max_red
         self.max_blue = max_blue
         self.max_allies = max_red - 1
         self.max_enemies = max_blue
         self.role_dim = role_dim
+        self.include_incoming_missile = bool(include_incoming_missile)
+        norms = dict(incoming_missile_normalization or {})
+        self.incoming_norm = np.asarray([
+            norms.get("relative_speed_mps", 1000.0),
+            norms.get("relative_altitude_m", 10000.0),
+            norms.get("distance_m", 20000.0),
+            norms.get("aircraft_to_missile_ata_rad", np.pi),
+            norms.get("missile_to_aircraft_aa_rad", np.pi),
+            norms.get("closing_speed_mps", 1000.0),
+            norms.get("t_go_sec", 60.0),
+        ], dtype=np.float32)
 
         self.ego_geo_dim = 7
         self.relative_geo_dim = 5
         self.track_source_dim = 2
         self.enemy_full_geo_dim = 10
-        self.ego_feature_dim = 12
+        self.ego_feature_dim = 20 if self.include_incoming_missile else 12
         self.ally_entity_dim = 9
         self.enemy_entity_dim = (
             self.relative_geo_dim
@@ -143,11 +156,21 @@ class HeteroObsAdapterV2:
         ego_geo = np.asarray(obs["ego_geo_state"], dtype=np.float32).reshape(-1)
         ego_role = np.asarray(obs["ego_role"], dtype=np.float32).reshape(-1)
         missile_warning = np.asarray(obs["missile_warning"], dtype=np.float32).reshape(-1)
-        return np.concatenate([
+        parts = [
             self._pad_1d(ego_geo, self.ego_geo_dim),
             self._pad_1d(ego_role, self.role_dim),
             self._pad_1d(missile_warning, 1),
-        ]).astype(np.float32)
+        ]
+        if self.include_incoming_missile:
+            if "incoming_missile_state" not in obs or "incoming_missile_valid_mask" not in obs:
+                raise ValueError("mav_shared_geo_v3_incoming_missile observation keys are required")
+            state = self._pad_1d(obs["incoming_missile_state"], 7)
+            valid = self._pad_1d(obs["incoming_missile_valid_mask"], 1)
+            normalized = np.clip(
+                np.divide(state, np.maximum(self.incoming_norm, 1e-6)), -1.0, 1.0
+            ) * valid[0]
+            parts.extend([normalized, valid])
+        return np.concatenate(parts).astype(np.float32)
 
     def _build_ally_entities(self, obs: dict, ally_ids: list[str]) -> tuple:
         geo = self._pad_2d(obs["ally_geo_states"], self.max_allies, self.relative_geo_dim)

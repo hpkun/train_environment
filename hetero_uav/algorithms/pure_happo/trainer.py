@@ -141,16 +141,18 @@ class PureHAPPOTrainer:
         actions = data["actions"]; old_log_probs = data["old_log_probs"]
         rewards = data["rewards"]; dones = data["dones"]
         values = data["values"]; active = data["active_masks"]
+        actor_active = data.get("actor_update_masks", active)
+        local_credit = getattr(self.policy, "credit_mode", "shared_alive_team_mean") == "role_local_vector_critic"
 
         T, N = actor_obs.shape[:2]
         for name, tensor in [("actor_obs", actor_obs), ("critic_state", critic_state),
                               ("actions", actions), ("old_log_probs", old_log_probs),
                               ("rewards", rewards), ("dones", dones),
-                              ("values", values), ("active_masks", active)]:
+                              ("values", values), ("active_masks", active),
+                              ("actor_update_masks", actor_active)]:
             if not torch.isfinite(tensor).all():
                 raise ValueError(f"HAPPO: non-finite {name} in buffer")
 
-        team_reward = _alive_before_team_mean(rewards, active)
         team_dones = dones[:, 0].float()
         env_ids = data.get("env_ids", torch.zeros(T, dtype=torch.long, device=rewards.device))
         nv_data = data.get("next_values")
@@ -159,14 +161,30 @@ class PureHAPPOTrainer:
         else:
             with torch.no_grad():
                 nv_single = self.policy.value(critic_state[-1:])
-            nv = nv_single.expand(T)
-        advantages_raw, returns = _compute_grouped_gae(
-            team_reward, values, nv, team_dones, env_ids, self.gamma, self.gae_lambda)
+            nv = nv_single.expand(T, -1) if local_credit else nv_single.expand(T)
+        if local_credit:
+            advantage_cols = []
+            return_cols = []
+            for i in range(N):
+                adv_i, ret_i = _compute_grouped_gae(
+                    rewards[:, i], values[:, i], nv[:, i], team_dones,
+                    env_ids, self.gamma, self.gae_lambda)
+                advantage_cols.append(adv_i); return_cols.append(ret_i)
+            advantages_raw = torch.stack(advantage_cols, dim=1)
+            returns = torch.stack(return_cols, dim=1)
+        else:
+            team_reward = _alive_before_team_mean(rewards, active)
+            advantages_raw, returns = _compute_grouped_gae(
+                team_reward, values, nv, team_dones, env_ids, self.gamma, self.gae_lambda)
         if not torch.isfinite(advantages_raw).all() or not torch.isfinite(returns).all():
             raise ValueError("HAPPO: non-finite GAE output")
         advantages = advantages_raw
         if T > 1:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            if local_credit:
+                advantages = (advantages - advantages.mean(dim=0, keepdim=True)) / (
+                    advantages.std(dim=0, keepdim=True) + 1e-8)
+            else:
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         metrics = {
             "actor_loss_per_agent": [0.0]*N, "entropy_per_agent": [0.0]*N,
@@ -187,7 +205,7 @@ class PureHAPPOTrainer:
             "m_std_after_each_agent": [],
             "m_abs_max_after_each_agent": [],
             "valid_sample_count_per_agent": [
-                int((active[:, i] > 0.5).sum().item()) for i in range(N)],
+                int((actor_active[:, i] > 0.5).sum().item()) for i in range(N)],
         }
 
         # Save initial actor params for post-update delta computation
@@ -200,9 +218,10 @@ class PureHAPPOTrainer:
             order = list(self.rng.permutation(N))
             metrics["last_update_order"] = order
             M = advantages.detach().clone()
+            correction = torch.ones(T, dtype=advantages.dtype, device=advantages.device)
 
             for idx_in_order, i in enumerate(order):
-                valid_i = active[:, i] > 0.5
+                valid_i = actor_active[:, i] > 0.5
                 n_valid = metrics["valid_sample_count_per_agent"][i]
                 if n_valid < 1:
                     metrics["ratio_after_mean_per_agent"][i] = 0.0
@@ -221,8 +240,9 @@ class PureHAPPOTrainer:
                     ratio_i, valid_i, self.clip_param, old_lp_i, new_lp_i)
 
                 valid_f = valid_i.float()
-                surr1 = ratio_i * M
-                surr2 = torch.clamp(ratio_i, 1 - self.clip_param, 1 + self.clip_param) * M
+                actor_advantage = (advantages[:, i] * correction).detach() if local_credit else M
+                surr1 = ratio_i * actor_advantage
+                surr2 = torch.clamp(ratio_i, 1 - self.clip_param, 1 + self.clip_param) * actor_advantage
                 policy_loss = -(torch.min(surr1, surr2) * valid_f).sum() / valid_f.sum().clamp(min=1)
                 ent_mean = (entropy_i * valid_f).sum() / valid_f.sum().clamp(min=1)
                 loss = policy_loss - self.entropy_coef * ent_mean
@@ -265,12 +285,17 @@ class PureHAPPOTrainer:
                     ratio_after = (after_lp_i - old_lp_i).exp()
                     ratio_after = torch.where(valid_i, ratio_after, torch.ones_like(ratio_after))
                     metrics["ratio_after_mean_per_agent"][i] = float(ratio_after[valid_i].mean().item())
-                    M = (M * ratio_after).detach()
-                metrics["m_abs_mean_after_each_agent"].append(float(M.abs().mean().item()))
-                metrics["m_mean_after_each_agent"].append(float(M.mean().item()))
+                    if local_credit:
+                        correction = (correction * ratio_after).detach()
+                        diagnostic_m = advantages[:, i] * correction
+                    else:
+                        M = (M * ratio_after).detach()
+                        diagnostic_m = M
+                metrics["m_abs_mean_after_each_agent"].append(float(diagnostic_m.abs().mean().item()))
+                metrics["m_mean_after_each_agent"].append(float(diagnostic_m.mean().item()))
                 metrics["m_std_after_each_agent"].append(
-                    float(M.float().std(unbiased=False).item()) if M.numel() > 1 else 0.0)
-                metrics["m_abs_max_after_each_agent"].append(float(M.abs().max().item()))
+                    float(diagnostic_m.float().std(unbiased=False).item()) if diagnostic_m.numel() > 1 else 0.0)
+                metrics["m_abs_max_after_each_agent"].append(float(diagnostic_m.abs().max().item()))
 
         critic_params = list(self.policy.critic.parameters())
         with torch.no_grad():
@@ -282,7 +307,11 @@ class PureHAPPOTrainer:
         for critic_epoch in range(self.critic_epochs):
             self.critic_opt.zero_grad()
             new_values = self.policy.value(critic_state)
-            critic_loss_unscaled = F.mse_loss(new_values, returns)
+            if local_credit:
+                critic_mask = active.float()
+                critic_loss_unscaled = (((new_values - returns) ** 2) * critic_mask).sum() / critic_mask.sum().clamp(min=1)
+            else:
+                critic_loss_unscaled = F.mse_loss(new_values, returns)
             critic_loss = critic_loss_unscaled * self.value_coef
             if not torch.isfinite(critic_loss):
                 raise ValueError(f"HAPPO: non-finite critic_loss epoch {critic_epoch}")
@@ -310,7 +339,7 @@ class PureHAPPOTrainer:
         with torch.no_grad():
             final_lp, final_ent, _, _ = self.policy.evaluate_actions(actor_obs, critic_state, actions)
             for i in range(N):
-                valid_i = active[:, i] > 0.5
+                valid_i = actor_active[:, i] > 0.5
                 nv = int(valid_i.sum().item())
                 if nv < 1:
                     continue
@@ -338,6 +367,7 @@ class PureHAPPOTrainer:
 
         log_std_vals = torch.stack([p.data for p in self.policy.action_log_stds])
         v = metrics["valid_sample_count_per_agent"]
+        alive_counts = [int((active[:, i] > 0.5).sum().item()) for i in range(N)]
         active_sample_ratio = [float(count) / float(max(T, 1)) for count in v]
         ls_mav = log_std_vals[0] if N > 0 else torch.zeros(3)
         ls_uav = log_std_vals[1:].flatten() if N > 1 else torch.zeros(3)
@@ -470,6 +500,11 @@ class PureHAPPOTrainer:
             "policy_update_norm_uav": _mean_for_indices(metrics["policy_update_norm_per_agent"], uav_indices),
             "mav_active_sample_count": v[0] if N > 0 else 0,
             "uav_active_sample_count": sum(v[1:]) if N > 1 else 0,
+            "mav_alive_sample_count": alive_counts[0] if N > 0 else 0,
+            "uav_alive_sample_count": sum(alive_counts[1:]) if N > 1 else 0,
+            "mav_actor_effective_fraction": float(v[0]) / max(float(alive_counts[0]), 1.0) if N > 0 else 0.0,
+            "uav_actor_effective_fraction": float(sum(v[1:])) / max(float(sum(alive_counts[1:])), 1.0) if N > 1 else 0.0,
+            "credit_mode": getattr(self.policy, "credit_mode", "shared_alive_team_mean"),
             "entropy_mav_valid_count": v[0] if N > 0 else 0,
             "entropy_uav_valid_count": sum(v[1:]) if N > 1 else 0,
             "mav_action_saturation_rate": mav_sat,

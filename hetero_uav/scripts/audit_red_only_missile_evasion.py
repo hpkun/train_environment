@@ -21,7 +21,10 @@ if str(ROOT) not in sys.path:
 from uav_env import make_env
 
 ENV_PATH = ROOT / "uav_env" / "JSBSim" / "env.py"
-CONFIG_3V2 = "uav_env/JSBSim/configs/hetero_mav_shared_geo_3v2.yaml"
+CONFIG_3V2 = (
+    "uav_env/JSBSim/configs/"
+    "hetero_mav_shared_geo_3v2_f16_mav_surrogate_tam_happo_paper_formula_v5.yaml"
+)
 
 
 def _parse_action_block() -> str:
@@ -75,10 +78,17 @@ def _short_smoke() -> dict[str, Any]:
 def build_audit() -> dict[str, Any]:
     text = ENV_PATH.read_text(encoding="utf-8", errors="replace")
     action_block = _parse_action_block()
-    red_guard = "if not is_blue" in action_block and "sim.check_missile_warning()" in action_block
+    configurable_guard = "self._missile_evasion_enabled_for(aid)" in action_block
+    env = make_env(CONFIG_3V2, env_type="jsbsim_hetero")
+    try:
+        red_enabled = bool(env._missile_evasion_enabled_for("red_1"))
+        blue_enabled = bool(env._missile_evasion_enabled_for("blue_0"))
+    finally:
+        env.close()
+    red_guard = configurable_guard and red_enabled and not blue_enabled
     no_both_comment = "BOTH teams" not in action_block
-    red_comment = "RED team only" in action_block
-    blue_comment = "blue\n            #  rule-based opponent" in action_block or "blue rule-based opponent" in action_block
+    red_comment = "red_only" in action_block
+    blue_comment = "blue" in action_block
     blue_gcas = "if is_blue and self.enable_gcas_for_blue" in text
     launch_contract_unchanged = all(token in text for token in [
         "MISSILE_LAUNCH_AO_THRESH",

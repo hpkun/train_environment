@@ -19,10 +19,9 @@ def test_env_static_red_only_missile_evasion_guard():
     start = text.index("Missile Evasion Script")
     missile_block = text[start : text.index("Layer 2", start)]
     assert "BOTH teams" not in missile_block
-    assert "RED team only" in missile_block
-    assert "rule-based opponent" in missile_block
-    assert "if not is_blue" in missile_block
-    assert "sim.check_missile_warning()" in missile_block
+    assert "red_only" in missile_block
+    assert "self._missile_evasion_enabled_for(aid)" in missile_block
+    assert "self._select_incoming_missile_threat(aid, sim)" in missile_block
 
 
 def test_red_only_missile_evasion_audit_script(tmp_path):

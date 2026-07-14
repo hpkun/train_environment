@@ -1,0 +1,80 @@
+action_trim_by_role:
+  mav: {heading: 0.0, pitch: 0.0, speed: 0.0}
+agent_interaction_steps: 12
+aircraft_type_params:
+  attack_uav: {aircraft_model: f16, role: attack_uav, num_missiles: 2}
+  interceptor_uav: {aircraft_model: f16, role: interceptor_uav, num_missiles: 2}
+  mav: {aircraft_model: f16, role: mav, num_missiles: 0}
+  scout_uav: {aircraft_model: f16, role: scout_uav, num_missiles: 0}
+blue_agent_types: [attack_uav, attack_uav]
+enable_gcas_for_blue: true
+env_type: jsbsim_hetero
+hetero_reward_mode: tam_happo_paper_formula_v5
+missile_evasion: {mode: brma_scripted, teams: none}
+red_target_selection_mode: paper_assessment
+initial_states:
+  blue_0: {altitude_m: 6000, lat: 60.2, lon: 120.0, speed_mps: 250, yaw_deg: 180.0}
+  blue_1: {altitude_m: 6000, lat: 60.2, lon: 120.04, speed_mps: 250, yaw_deg: 180.0}
+  red_0: {altitude_m: 6500, lat: 59.98, lon: 120.02, speed_mps: 230, yaw_deg: 0.0}
+  red_1: {altitude_m: 6000, lat: 60.0, lon: 120.0, speed_mps: 250, yaw_deg: 0.0}
+  red_2: {altitude_m: 6000, lat: 60.0, lon: 120.04, speed_mps: 250, yaw_deg: 0.0}
+mav_observation_range_m: 80000.0
+max_num_blue: 2
+max_num_red: 3
+max_steps: 1000
+observation_mode: mav_shared_geo
+incoming_missile_observation:
+  enabled: true
+  contract: mav_shared_geo_v3_incoming_missile
+  normalization:
+    relative_speed_mps: 1000.0
+    relative_altitude_m: 10000.0
+    distance_m: 20000.0
+    aircraft_to_missile_ata_rad: 3.141592653589793
+    missile_to_aircraft_aa_rad: 3.141592653589793
+    closing_speed_mps: 1000.0
+    t_go_sec: 60.0
+red_agent_types: [mav, attack_uav, attack_uav]
+sim_freq: 60
+suppress_jsbsim_output: true
+uav_direct_observation_range_m: 10000.0
+pid_profile_by_role: {mav: f16_default, attack_uav: f16_default, interceptor_uav: f16_default}
+acmi_visual_by_role: {mav: f22, attack_uav: f16}
+tam_happo_paper_formula_v5:
+  claim: TAM-HAPPO paper-formula implementation with documented JSBSim adaptations; not an exact reproduction of unpublished constants
+  brma_overlay_enabled: false
+  global_reward_scale: 0.005
+  uav: {altitude_min_m: 2500.0, altitude_max_m: 10000.0, vertical_speed_limit_mps: 150.0, dodge_speed_norm_mps: 1000.0, height_formula_status: jsbsim_height_adaptation}
+  target_assessment:
+    weights: {angle: 0.35, distance: 0.25, height: 0.20, speed: 0.20}
+    engagement_range_m: 14000.0
+    relative_altitude_norm_m: 10000.0
+    relative_speed_norm_mps: 408.0
+    hold_steps: 0
+    normalization_status: not specified by the paper; project assumptions
+  mav:
+    safety: {weights: {distance: 0.5, missile_threat: 0.3, aspect: 0.2}, d_danger_m: 8000.0, d_safe_m: 15000.0}
+    support: {weights: {position: 0.6, awareness: 0.4}}
+    support_position_adaptation: {status: paper trajectory semantics JSBSim adaptation; not specified by the paper, rear_offset_m: 8000.0, d_opt_m: 8000.0, d_max_m: 25000.0}
+  unknown_constants: {status: project_assumption_pending_constraint_calibration, mav_death_penalty: 200.0, mav_team_credit_per_kill: 100.0, mav_team_credit_cap: 200.0}
+missile_launch_range_m: 14000.0
+missile_attack_interval_sec: 25.0
+missile_guidance: {mode: pn, navigation_gain: 3.0, max_overload_g: 30.0}
+missile_protocol:
+  missile_protocol_version: tam_paper_protocol_v1
+  missile_alignment_claim: paper-aligned kinematic approximation, not exact missile reproduction
+  missile_attack_range_m: 14000.0
+  missile_attack_interval_sec: 25.0
+  missile_navigation_gain: 3.0
+  missile_max_overload_g: 30.0
+  missile_mass_kg: 84.0
+  missile_length_m: 2.87
+  missile_diameter_m: 0.127
+  missile_unmodeled_parameters: [missile_mass_kg, missile_length_m, missile_diameter_m]
+experiment_contract:
+  version: tam_happo_contract_corrected_v6
+  claim: contract-corrected learnability profile; adds incoming-missile observability, removes red scripted action override, and unifies engagement target selection; not an exact reproduction of the paper action space or dynamics heterogeneity
+  historical_v5_unchanged: true
+  control_interface: high_level_pid_3d
+  paper_action_space_exact: false
+  paper_action_space_reference: multidiscrete_4d_40_bins

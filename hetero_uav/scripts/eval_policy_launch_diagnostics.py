@@ -203,6 +203,7 @@ def _build_policy(meta: dict[str, Any], device: torch.device):
             critic_state_dim=int(meta.get("critic_state_dim", 480)),
             action_dim=3,
             num_agents=int(meta.get("num_agents", meta.get("max_num_red", 3))),
+            credit_mode=str(meta.get("credit_mode", "shared_alive_team_mean")),
         ).to(device)
     if arch == "entity_attention":
         return EntityHAPPOReferencePolicy(
@@ -710,7 +711,11 @@ def run_diagnostics(args) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     policy = _build_policy(meta, device)
     policy.load(model_path, map_location=device)
     policy.eval()
-    adapter = HeteroObsAdapterV2()
+    incoming_enabled = meta.get("observation_contract") == "mav_shared_geo_v3_incoming_missile"
+    adapter = HeteroObsAdapterV2(
+        include_incoming_missile=incoming_enabled,
+        incoming_missile_normalization=meta.get("incoming_missile_normalization", {}),
+    )
     config = args.config or SCENARIO_CONFIGS[args.scenario]
     label = args.label or (
         Path(args.output_dir).name if args.output_dir else model_path.parent.parent.name

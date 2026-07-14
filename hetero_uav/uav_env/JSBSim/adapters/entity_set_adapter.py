@@ -26,8 +26,13 @@ class EntitySetAdapter:
     bearing/elevation(2), speed/heading(2), full-geometry valid mask(1).
     """
 
-    def __init__(self, max_red: int = 5, max_blue: int = 4, role_dim: int = 4):
-        self.v2 = HeteroObsAdapterV2(max_red=max_red, max_blue=max_blue, role_dim=role_dim)
+    def __init__(self, max_red: int = 5, max_blue: int = 4, role_dim: int = 4,
+                 include_incoming_missile: bool = False,
+                 incoming_missile_normalization: dict | None = None):
+        self.v2 = HeteroObsAdapterV2(
+            max_red=max_red, max_blue=max_blue, role_dim=role_dim,
+            include_incoming_missile=include_incoming_missile,
+            incoming_missile_normalization=incoming_missile_normalization)
         self.max_red = self.v2.max_red
         self.max_blue = self.v2.max_blue
         self.max_allies = self.v2.max_allies
@@ -87,10 +92,13 @@ class EntitySetAdapter:
         role_id = self._role_id(role_onehot)
         role_name = ROLE_NAMES[role_id] if role_id < len(ROLE_NAMES) else "uav"
 
+        self_features = list(np.asarray(structured["ego_feature"][:7], dtype=np.float32))
+        if self.v2.include_incoming_missile:
+            self_features.extend(np.asarray(structured["ego_feature"][12:20], dtype=np.float32))
         self_entity = self._token(
             kind=0,
             role=role_onehot,
-            features=structured["ego_feature"][:7],
+            features=np.asarray(self_features, dtype=np.float32),
             side=0,
             missile_warning=float(structured["ego_feature"][11]),
         )

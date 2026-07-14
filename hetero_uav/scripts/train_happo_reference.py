@@ -547,6 +547,8 @@ from uav_env.JSBSim.envs.role_situation_v3 import (
 )
 from uav_env.JSBSim.envs.paper_calibrated_v4 import V4_COMPONENT_FIELDS
 from uav_env.JSBSim.envs.paper_formula_v5 import (
+    GLOBAL_REWARD_SCALE,
+    UAV_WEIGHTS,
     V5_COMPONENT_FIELDS,
     V5_TRAIN_FIELDS,
     accumulate_v5_episode_step,
@@ -589,6 +591,22 @@ PURE_HAPPO_DEFAULTS = {
 
 MARL_DYNAMICS_TRAIN_FIELDS = [
     "actor_loss_mean", "entropy_mean",
+    "action_override_rate", "missile_evasion_override_rate", "gcas_override_rate",
+    "actor_effective_sample_fraction",
+    "engagement_target_valid_rate", "target_switch_count",
+    "target_switches_per_episode", "target_hold_steps_mean",
+    "reward_target_matches_fire_candidate", "reward_target_matches_lock_given_lock",
+    "reward_target_matches_launch_given_launch", "reward_fire_candidate_comparable_count",
+    "reward_lock_comparable_count", "reward_launch_comparable_count",
+    "mav_reward_total", "uav_reward_total_mean", "uav_reward_total_sum",
+    "mav_safety_sum", "mav_support_sum", "mav_event_sum",
+    "uav_height_sum", "uav_speed_sum", "uav_angle_sum", "uav_distance_sum",
+    "uav_dodge_sum", "uav_event_sum", "dense_reward_signed_sum",
+    "dense_reward_abs_sum", "event_reward_signed_sum", "event_reward_abs_sum",
+    "dense_event_abs_ratio", "mav_uav_reward_correlation",
+    "mav_uav_correlation_sample_count", "mav_uav_sign_conflict_rate",
+    "mav_uav_sign_comparable_count", "mav_team_reward_contribution_fraction",
+    "uav_team_reward_contribution_fraction", "alive_reward_denominator_mean",
     "clip_fraction_mav", "clip_fraction_uav",
     "approx_kl_abs_mav", "approx_kl_abs_uav",
     "ratio_mean_mav", "ratio_mean_uav",
@@ -788,6 +806,17 @@ def _pure_happo_meta(policy, args=None) -> dict:
             "initial_action_log_std",
             policy.action_log_stds[0].detach().mean().item(),
         )),
+        "algorithm": "pure_happo_baseline",
+        "credit_mode": str(getattr(policy, "credit_mode", "shared_alive_team_mean")),
+        "has_gru": False,
+        "has_attention_critic": False,
+        "has_tam_module": False,
+        "has_network_failure_mask": False,
+        "has_dead_agent_active_mask": True,
+        "control_interface": "high_level_pid_3d",
+        "action_distribution": "tanh_squashed_gaussian",
+        "paper_action_space_exact": False,
+        "paper_action_space_reference": "multidiscrete_4d_40_bins",
     }
     if args is not None:
         for key in (
@@ -797,6 +826,19 @@ def _pure_happo_meta(policy, args=None) -> dict:
         ):
             meta[key] = getattr(args, key)
         meta["transitions_per_rollout"] = int(args.rollout_length) * int(args.num_envs)
+        meta["observation_contract"] = getattr(args, "observation_contract", "mav_shared_geo_v2")
+        meta["incoming_missile_normalization"] = getattr(args, "incoming_missile_normalization", {})
+        meta["aircraft_dynamics_homogeneous"] = getattr(args, "aircraft_dynamics_homogeneous", None)
+        meta["roles_heterogeneous"] = getattr(args, "roles_heterogeneous", None)
+        meta["mav_has_missiles"] = getattr(args, "mav_has_missiles", None)
+        meta["mav_aircraft_model"] = getattr(args, "mav_aircraft_model", None)
+        meta["attack_uav_aircraft_model"] = getattr(args, "attack_uav_aircraft_model", None)
+        meta["dynamics_heterogeneity"] = getattr(args, "dynamics_heterogeneity", None)
+        meta["role_heterogeneity"] = getattr(args, "role_heterogeneity", None)
+        meta["sensor_heterogeneity"] = getattr(args, "sensor_heterogeneity", None)
+        meta["payload_heterogeneity"] = getattr(args, "payload_heterogeneity", None)
+        meta["reward_heterogeneity"] = getattr(args, "reward_heterogeneity", None)
+        meta["evasion_scripted"] = getattr(args, "evasion_scripted", None)
     return meta
 
 
@@ -1028,6 +1070,17 @@ def _build_red_alive_mask(info: dict, env, red_ids: list[str]) -> np.ndarray:
     return mask
 
 
+def _build_actor_update_mask(active_mask: np.ndarray, info: dict,
+                             red_ids: list[str]) -> np.ndarray:
+    """Exclude alive transitions whose requested red action was overridden."""
+    mask = np.asarray(active_mask, dtype=np.float32).copy()
+    for i, rid in enumerate(red_ids):
+        agent_info = info.get(rid, {}) if isinstance(info, dict) else {}
+        if isinstance(agent_info, dict) and bool(agent_info.get("action_overridden", False)):
+            mask[i] = 0.0
+    return mask
+
+
 def _team_done(terminated: dict, truncated: dict) -> bool:
     return bool(all(terminated.values()) or all(truncated.values()))
 
@@ -1088,6 +1141,7 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
                   brma_random_scale_mask: bool = False,
                   brma_biased_mask: bool = False,
                   brma_random_mask_prob: float = 0.25,
+                  credit_mode: str = "shared_alive_team_mean",
                   max_allies: int | None = None,
                   max_enemies: int | None = None):
     if policy_arch == "hetero_entity_recurrent":
@@ -1109,9 +1163,25 @@ def _build_policy(policy_arch: str, actor_dim: int, critic_dim: int,
             num_attention_heads=int(meta.get("num_attention_heads", 4)),
         ).to(device)
     if policy_arch in ("pure_happo", "pure_happo_tanh"):
+        if init_checkpoint_meta is not None and Path(init_checkpoint_meta).exists():
+            checkpoint_meta = json.loads(Path(init_checkpoint_meta).read_text(encoding="utf-8"))
+            saved_credit = str(checkpoint_meta.get("credit_mode", "shared_alive_team_mean"))
+            if saved_credit != credit_mode:
+                raise ValueError(
+                    f"checkpoint credit_mode={saved_credit!r} is incompatible with {credit_mode!r}")
+            for field, current in (
+                ("actor_obs_dim", actor_dim), ("critic_state_dim", critic_dim),
+                ("action_dim", action_dim), ("num_agents", num_agents),
+            ):
+                if field in checkpoint_meta and int(checkpoint_meta[field]) != int(current):
+                    raise ValueError(
+                        f"checkpoint {field}={checkpoint_meta[field]} is incompatible with "
+                        f"current {field}={current}; v6 incoming-missile observation checkpoints "
+                        "are not compatible with legacy observation contracts"
+                    )
         return PureHAPPOPolicy(
             actor_obs_dim=actor_dim, critic_state_dim=critic_dim,
-            action_dim=action_dim, num_agents=num_agents,
+            action_dim=action_dim, num_agents=num_agents, credit_mode=credit_mode,
         ).to(device)
     if policy_arch == "flat":
         return HAPPOReferencePolicy(actor_dim, critic_dim, action_dim=action_dim).to(device)
@@ -1579,6 +1649,11 @@ def _run_training_main() -> None:
     parser.add_argument("--actor-lr", type=float, default=None)
     parser.add_argument("--critic-lr", type=float, default=None)
     parser.add_argument("--critic-epochs", type=int, default=None)
+    parser.add_argument(
+        "--credit-mode", default="shared_alive_team_mean",
+        choices=["shared_alive_team_mean", "role_local_vector_critic"],
+        help="Pure HAPPO reward/value credit contract.",
+    )
     parser.add_argument("--clip-param", type=float, default=None)
     parser.add_argument("--value-coef", type=float, default=None)
     parser.add_argument("--gamma", type=float, default=None)
@@ -1719,8 +1794,51 @@ def _run_training_main() -> None:
             flush=True,
         )
     _SINGLE_RUNNER_STATE["envs"] = envs
+    config_path = _rel(args.config)
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    incoming_cfg = dict(config_data.get("incoming_missile_observation", {}) or {})
+    incoming_enabled = bool(incoming_cfg.get("enabled", False))
+    incoming_norm = dict(incoming_cfg.get("normalization", {}) or {})
+    args.observation_contract = (
+        "mav_shared_geo_v3_incoming_missile" if incoming_enabled else "mav_shared_geo_v2")
+    args.incoming_missile_normalization = incoming_norm if incoming_enabled else {}
+    args.aircraft_dynamics_homogeneous = len(set(getattr(env, "agent_models", {}).values())) <= 1
+    args.roles_heterogeneous = len(set(getattr(env, "agent_roles", {}).values())) > 1
+    args.mav_has_missiles = bool(env._num_missiles_for("red_0") > 0)
+    red_models = getattr(env, "agent_models", {}) or {}
+    args.mav_aircraft_model = str(red_models.get("red_0", ""))
+    attack_ids = [
+        rid for rid in env.red_ids if getattr(env, "agent_roles", {}).get(rid) == "attack_uav"
+    ]
+    args.attack_uav_aircraft_model = str(red_models.get(attack_ids[0], "")) if attack_ids else ""
+    args.dynamics_heterogeneity = not bool(args.aircraft_dynamics_homogeneous)
+    args.role_heterogeneity = bool(args.roles_heterogeneous)
+    args.sensor_heterogeneity = bool(
+        getattr(env, "observation_mode", "") == "mav_shared_geo" and args.role_heterogeneity
+    )
+    # Payload heterogeneity is an environment contract, not a snapshot of
+    # ammunition remaining after reset or combat.
+    red_payloads = [int(env._num_missiles_for(rid)) for rid in env.red_ids]
+    args.payload_heterogeneity = len(set(red_payloads)) > 1
+    evasion_cfg = dict(config_data.get("missile_evasion", {}) or {})
+    evasion_mode = str(evasion_cfg.get("mode", "brma_scripted")).strip().lower()
+    evasion_teams = str(evasion_cfg.get("teams", "red_only")).strip().lower()
+    args.evasion_scripted = (
+        evasion_mode not in {"", "none", "off", "disabled"}
+        and evasion_teams not in {"", "none", "off", "disabled"}
+    )
+    args.reward_heterogeneity = bool(
+        actual_reward_mode == "tam_happo_paper_formula_v5" and args.role_heterogeneity
+    )
     entity_mode = args.policy_arch == "hetero_entity_recurrent"
-    adapter = HeteroEntitySetAdapter() if entity_mode else HeteroObsAdapterV2()
+    adapter = (
+        HeteroEntitySetAdapter(
+            include_incoming_missile=incoming_enabled,
+            incoming_missile_normalization=incoming_norm)
+        if entity_mode else HeteroObsAdapterV2(
+            include_incoming_missile=incoming_enabled,
+            incoming_missile_normalization=incoming_norm)
+    )
     actor_dim = 0 if entity_mode else adapter.flat_actor_obs_dim
     critic_dim = 0 if entity_mode else adapter.critic_state_dim
     init_meta_path = None
@@ -1737,6 +1855,7 @@ def _run_training_main() -> None:
                            brma_random_scale_mask=args.brma_random_scale_mask,
                            brma_biased_mask=args.brma_biased_mask,
                            brma_random_mask_prob=args.brma_random_mask_prob,
+                           credit_mode=args.credit_mode,
                            num_agents=len(env.red_ids),
                            action_dim=action_dim,
                            max_allies=getattr(adapter, "max_allies", None),
@@ -1750,6 +1869,12 @@ def _run_training_main() -> None:
         "actor_obs_dim": actor_dim,
         "critic_state_dim": critic_dim,
         "action_dim": action_dim,
+        "observation_contract": (
+            "mav_shared_geo_v3_incoming_missile" if incoming_enabled else "mav_shared_geo_v2"),
+        "incoming_missile_normalization": incoming_norm if incoming_enabled else {},
+        "aircraft_dynamics_homogeneous": len(set(getattr(env, "agent_models", {}).values())) <= 1,
+        "roles_heterogeneous": len(set(getattr(env, "agent_roles", {}).values())) > 1,
+        "mav_has_missiles": bool(getattr(env.red_planes.get("red_0"), "num_left_missiles", 0) > 0),
         **_entity_policy_meta(policy),
         **_pure_happo_meta(policy, args),
     }
@@ -1905,6 +2030,8 @@ def _run_training_main() -> None:
             "uav_imitation_loss",
             "entropy_mav_valid_count", "entropy_uav_valid_count",
             "mav_active_sample_count", "uav_active_sample_count",
+            "mav_action_override_rate", "uav_action_override_rate",
+            "mav_actor_effective_fraction", "uav_actor_effective_fraction",
             "action_log_std_mav_min", "action_log_std_mav_max",
             "action_log_std_mav_mean", "action_log_std_uav_min",
             "action_log_std_uav_max", "action_log_std_uav_mean",
@@ -1974,11 +2101,20 @@ def _run_training_main() -> None:
             buffer = HAPPORolloutBuffer(rollout_transitions, len(env.red_ids), actor_dim,
                                         critic_dim, action_dim, roles,
                                         rnn_hidden_size=getattr(policy, 'rnn_hidden_size', 0),
+                                        value_dim=(len(env.red_ids)
+                                                   if args.credit_mode == "role_local_vector_critic"
+                                                   else 1),
                                         **buffer_kwargs)
             red_fired = blue_fired = red_hits = blue_hits = 0
             rollout_reward_sums: defaultdict[str, float] = defaultdict(float)
             rollout_reward_counts: defaultdict[str, float] = defaultdict(float)
             rollout_reward_steps = 0
+            rollout_completed_episodes = 0
+            rollout_contract_counts: defaultdict[str, float] = defaultdict(float)
+            rollout_previous_targets: dict[tuple[int, str], str] = {}
+            rollout_contract_reward_sums: defaultdict[str, float] = defaultdict(float)
+            rollout_mav_reward_series: list[float] = []
+            rollout_uav_reward_series: list[float] = []
             rollout_target_distance_sum = 0.0
             rollout_target_valid_count = 0
             rollout_target_zone_counts = [0, 0, 0, 0]
@@ -2104,7 +2240,9 @@ def _run_training_main() -> None:
                     )
                     actions = out["action"].cpu().numpy()
                     log_probs = out["log_prob"].cpu().numpy()
-                    value = float(out["value"].item())
+                    value_array = out["value"].detach().cpu().numpy().reshape(-1)
+                    value = (value_array if args.credit_mode == "role_local_vector_critic"
+                             else float(value_array[0]))
                     # Check finite for active agents only (inactive were zeroed)
                     active_mask_np = active > 0.5
                     if active_mask_np.any():
@@ -2113,7 +2251,7 @@ def _run_training_main() -> None:
                                 f"Non-finite action for active agent: "
                                 f"iter={iteration} env={env_idx} step={total_steps}"
                             )
-                        if not np.isfinite(value):
+                        if not np.isfinite(np.asarray(value)).all():
                             raise ValueError(
                                 f"Non-finite value: "
                                 f"iter={iteration} env={env_idx} step={total_steps} value={value}"
@@ -2190,7 +2328,8 @@ def _run_training_main() -> None:
                     done = _team_done(terminated, truncated)
                     done_np = np.full((len(rollout_env.red_ids),), float(done), dtype=np.float32)
                     if done:
-                        next_value = 0.0
+                        next_value = (np.zeros(len(rollout_env.red_ids), dtype=np.float32)
+                                      if args.credit_mode == "role_local_vector_critic" else 0.0)
                     else:
                         next_adapted = adapter.adapt_all(
                             next_obs, info=next_info, red_ids=rollout_env.red_ids, blue_ids=rollout_env.blue_ids)
@@ -2202,9 +2341,53 @@ def _run_training_main() -> None:
                                     critic_counts=next_adapted.get("critic_counts"),
                                 ).item())
                             else:
-                                next_value = float(policy.value(
+                                next_value_array = policy.value(
                                     torch.as_tensor(next_adapted["critic_state"], device=device).unsqueeze(0)
-                                ).item())
+                                ).detach().cpu().numpy().reshape(-1)
+                                next_value = (next_value_array
+                                              if args.credit_mode == "role_local_vector_critic"
+                                              else float(next_value_array[0]))
+                    actor_update_mask = _build_actor_update_mask(
+                        active, next_info, rollout_env.red_ids)
+                    for ridx, rid in enumerate(rollout_env.red_ids):
+                        if float(active[ridx]) <= 0.5:
+                            continue
+                        rollout_contract_counts["alive"] += 1.0
+                        rollout_contract_counts["actor_effective"] += float(actor_update_mask[ridx])
+                        agent_info = next_info.get(rid, {}) if isinstance(next_info, dict) else {}
+                        overridden = bool(agent_info.get("action_overridden", False))
+                        rollout_contract_counts["overridden"] += float(overridden)
+                        reason = str(agent_info.get("action_override_reason", "none") or "none")
+                        rollout_contract_counts["missile_evasion"] += float(reason == "missile_evasion")
+                        rollout_contract_counts["gcas"] += float(reason == "blue_gcas")
+                        if rollout_env.agent_roles.get(rid) != "attack_uav":
+                            continue
+                        rollout_contract_counts["target_samples"] += 1.0
+                        rollout_contract_counts["target_valid"] += float(
+                            agent_info.get("engagement_target_valid", 0.0) or 0.0)
+                        target_id = str(agent_info.get("engagement_target_id", "") or "")
+                        target_key = (env_idx, rid)
+                        if target_id:
+                            if rollout_previous_targets.get(target_key) != target_id:
+                                rollout_contract_counts["target_runs"] += 1.0
+                            rollout_previous_targets[target_key] = target_id
+                        else:
+                            rollout_previous_targets.pop(target_key, None)
+                        rollout_contract_counts["target_held"] += float(
+                            agent_info.get("engagement_target_held_this_step", 0.0) or 0.0)
+                        rollout_contract_counts["target_switched"] += float(
+                            agent_info.get("engagement_target_switched_this_step", 0.0) or 0.0)
+                        for suffix in ("fire_candidate", "lock", "launch"):
+                            comparable = float(agent_info.get(
+                                f"reward_{suffix}_comparable", 0.0) or 0.0)
+                            rollout_contract_counts[f"{suffix}_comparable"] += comparable
+                            if suffix == "fire_candidate":
+                                match_key = "reward_target_matches_fire_candidate"
+                            else:
+                                match_key = f"reward_target_matches_{suffix}_given_{suffix}"
+                            rollout_contract_counts[f"{suffix}_match"] += (
+                                float(agent_info.get(match_key, 0.0) or 0.0) if comparable else 0.0
+                            )
                     store_kwargs = {}
                     if rnn_hidden_pre is not None:
                         store_kwargs["rnn_hidden"] = rnn_hidden_pre
@@ -2218,7 +2401,8 @@ def _run_training_main() -> None:
                         })
                     buffer.store(
                         actor_obs, critic, actions, log_probs, reward_np, done_np,
-                        value, active, next_value=next_value, env_id=env_idx,
+                        value, active, actor_update_masks=actor_update_mask,
+                        next_value=next_value, env_id=env_idx,
                         **store_kwargs)
                     current_ep_return[env_idx] += reward_np
                     current_ep_len[env_idx] += 1
@@ -2241,6 +2425,78 @@ def _run_training_main() -> None:
                             else:
                                 rollout_reward_sums[key] += value
                             rollout_reward_counts[key] += v5_counts[key]
+                        active_components = [
+                            (aid, comp) for aid, comp in (rc or {}).items()
+                            if isinstance(comp, dict) and float(comp.get("alive_before", 0.0)) > 0.5
+                        ]
+                        mav_components = [
+                            comp for aid, comp in active_components
+                            if rollout_env.agent_roles.get(aid) == "mav"
+                        ]
+                        uav_components = [
+                            comp for aid, comp in active_components
+                            if rollout_env.agent_roles.get(aid) != "mav"
+                        ]
+                        mav_total = float(mav_components[0].get("mav_scaled_total", 0.0)) if mav_components else 0.0
+                        uav_totals = [float(comp.get("uav_scaled_total", 0.0)) for comp in uav_components]
+                        uav_sum = float(sum(uav_totals))
+                        uav_mean = uav_sum / max(len(uav_totals), 1)
+                        rollout_contract_reward_sums["mav_reward_total"] += mav_total
+                        rollout_contract_reward_sums["uav_reward_total_mean"] += uav_mean
+                        rollout_contract_reward_sums["uav_reward_total_sum"] += uav_sum
+                        if mav_components:
+                            mav_comp = mav_components[0]
+                            rollout_contract_reward_sums["mav_safety_sum"] += float(mav_comp.get("safety_raw", 0.0))
+                            rollout_contract_reward_sums["mav_support_sum"] += float(mav_comp.get("support_raw", 0.0))
+                            rollout_contract_reward_sums["mav_event_sum"] += float(mav_comp.get("mav_event_raw", 0.0))
+                        for comp in uav_components:
+                            for field, source in (
+                                ("uav_height_sum", "height_raw"), ("uav_speed_sum", "speed_raw"),
+                                ("uav_angle_sum", "angle_raw"), ("uav_distance_sum", "distance_raw"),
+                                ("uav_dodge_sum", "dodge_raw"),
+                            ):
+                                rollout_contract_reward_sums[field] += float(comp.get(source, 0.0))
+                            rollout_contract_reward_sums["uav_event_sum"] += (
+                                float(comp.get("kill_event_raw", 0.0))
+                                + float(comp.get("death_event_raw", 0.0))
+                                + float(comp.get("oob_event_raw", 0.0))
+                            )
+                        mav_dense_scaled = GLOBAL_REWARD_SCALE * sum(
+                            float(comp.get("safety_raw", 0.0)) + float(comp.get("support_raw", 0.0))
+                            for comp in mav_components
+                        )
+                        uav_dense_scaled = GLOBAL_REWARD_SCALE * sum(
+                            UAV_WEIGHTS["height"] * float(comp.get("height_raw", 0.0))
+                            + UAV_WEIGHTS["speed"] * float(comp.get("speed_raw", 0.0))
+                            + UAV_WEIGHTS["angle"] * float(comp.get("angle_raw", 0.0))
+                            + UAV_WEIGHTS["distance"] * float(comp.get("distance_raw", 0.0))
+                            + UAV_WEIGHTS["dodge"] * float(comp.get("dodge_raw", 0.0))
+                            for comp in uav_components
+                        )
+                        event_scaled = GLOBAL_REWARD_SCALE * (
+                            sum(float(comp.get("mav_event_raw", 0.0)) for comp in mav_components)
+                            + sum(
+                                float(comp.get("kill_event_raw", 0.0))
+                                + float(comp.get("death_event_raw", 0.0))
+                                + float(comp.get("oob_event_raw", 0.0))
+                                for comp in uav_components
+                            )
+                        )
+                        dense_scaled = mav_dense_scaled + uav_dense_scaled
+                        rollout_contract_reward_sums["dense_reward_signed_sum"] += dense_scaled
+                        rollout_contract_reward_sums["dense_reward_abs_sum"] += abs(dense_scaled)
+                        rollout_contract_reward_sums["event_reward_signed_sum"] += event_scaled
+                        rollout_contract_reward_sums["event_reward_abs_sum"] += abs(event_scaled)
+                        rollout_contract_reward_sums["mav_abs"] += abs(mav_total)
+                        rollout_contract_reward_sums["uav_abs"] += abs(uav_sum)
+                        rollout_contract_reward_sums["alive_reward_denominator_mean"] += len(active_components)
+                        rollout_contract_reward_sums["samples"] += 1.0
+                        if mav_components and uav_components:
+                            rollout_mav_reward_series.append(mav_total)
+                            rollout_uav_reward_series.append(uav_mean)
+                            rollout_contract_reward_sums["sign_comparable"] += 1.0
+                            rollout_contract_reward_sums["sign_conflict"] += float(
+                                mav_total * uav_mean < 0.0)
                     for aid in rollout_env.red_ids:
                         comp = rc.get(aid, {}) if isinstance(rc, dict) else {}
                         if not isinstance(comp, dict):
@@ -2724,6 +2980,7 @@ def _run_training_main() -> None:
                         prev_hit_totals[env_idx]["red"] = red_hit_total
                         prev_hit_totals[env_idx]["blue"] = blue_hit_total
                     if done:
+                        rollout_completed_episodes += 1
                         current_ep_reward_comp[env_idx]["initial_red_count"] = float(len(rollout_env.red_ids))
                         outcome = _episode_outcome(rollout_env, truncated, current_ep_len[env_idx])
                         ra, ba = _alive_counts(rollout_env)
@@ -2901,6 +3158,100 @@ def _run_training_main() -> None:
                     count = rollout_reward_counts[key]
                     stats[key] = rollout_reward_sums[key] / count if count > 0.0 else 0.0
             stats.update({
+                "action_override_rate": (
+                    rollout_contract_counts["overridden"]
+                    / max(rollout_contract_counts["alive"], 1.0)
+                ),
+                "missile_evasion_override_rate": (
+                    rollout_contract_counts["missile_evasion"]
+                    / max(rollout_contract_counts["alive"], 1.0)
+                ),
+                "gcas_override_rate": (
+                    rollout_contract_counts["gcas"]
+                    / max(rollout_contract_counts["alive"], 1.0)
+                ),
+                "actor_effective_sample_fraction": (
+                    rollout_contract_counts["actor_effective"]
+                    / max(rollout_contract_counts["alive"], 1.0)
+                ),
+                "engagement_target_valid_rate": (
+                    rollout_contract_counts["target_valid"]
+                    / max(rollout_contract_counts["target_samples"], 1.0)
+                ),
+                "target_switch_count": rollout_contract_counts["target_switched"],
+                "target_switches_per_episode": (
+                    rollout_contract_counts["target_switched"]
+                    / max(float(rollout_completed_episodes), 1.0)
+                ),
+                "target_hold_steps_mean": (
+                    rollout_contract_counts["target_valid"]
+                    / max(rollout_contract_counts["target_runs"], 1.0)
+                ),
+                "reward_target_matches_fire_candidate": (
+                    rollout_contract_counts["fire_candidate_match"]
+                    / max(rollout_contract_counts["fire_candidate_comparable"], 1.0)
+                ),
+                "reward_target_matches_lock_given_lock": (
+                    rollout_contract_counts["lock_match"]
+                    / max(rollout_contract_counts["lock_comparable"], 1.0)
+                ),
+                "reward_target_matches_launch_given_launch": (
+                    rollout_contract_counts["launch_match"]
+                    / max(rollout_contract_counts["launch_comparable"], 1.0)
+                ),
+                "reward_fire_candidate_comparable_count": rollout_contract_counts["fire_candidate_comparable"],
+                "reward_lock_comparable_count": rollout_contract_counts["lock_comparable"],
+                "reward_launch_comparable_count": rollout_contract_counts["launch_comparable"],
+                "mav_reward_total": (
+                    rollout_contract_reward_sums["mav_reward_total"]
+                    / max(rollout_contract_reward_sums["samples"], 1.0)
+                ),
+                "uav_reward_total_mean": (
+                    rollout_contract_reward_sums["uav_reward_total_mean"]
+                    / max(rollout_contract_reward_sums["samples"], 1.0)
+                ),
+                "uav_reward_total_sum": (
+                    rollout_contract_reward_sums["uav_reward_total_sum"]
+                    / max(rollout_contract_reward_sums["samples"], 1.0)
+                ),
+                **{
+                    key: rollout_contract_reward_sums[key]
+                    for key in (
+                        "mav_safety_sum", "mav_support_sum", "mav_event_sum",
+                        "uav_height_sum", "uav_speed_sum", "uav_angle_sum",
+                        "uav_distance_sum", "uav_dodge_sum", "uav_event_sum",
+                        "dense_reward_signed_sum", "dense_reward_abs_sum",
+                        "event_reward_signed_sum", "event_reward_abs_sum",
+                    )
+                },
+                "dense_event_abs_ratio": (
+                    rollout_contract_reward_sums["dense_reward_abs_sum"]
+                    / max(rollout_contract_reward_sums["event_reward_abs_sum"], 1e-6)
+                ),
+                "mav_uav_reward_correlation": (
+                    float(np.corrcoef(rollout_mav_reward_series, rollout_uav_reward_series)[0, 1])
+                    if len(rollout_mav_reward_series) > 1
+                    and np.std(rollout_mav_reward_series) > 0.0
+                    and np.std(rollout_uav_reward_series) > 0.0 else 0.0
+                ),
+                "mav_uav_correlation_sample_count": float(len(rollout_mav_reward_series)),
+                "mav_uav_sign_conflict_rate": (
+                    rollout_contract_reward_sums["sign_conflict"]
+                    / max(rollout_contract_reward_sums["sign_comparable"], 1.0)
+                ),
+                "mav_uav_sign_comparable_count": rollout_contract_reward_sums["sign_comparable"],
+                "mav_team_reward_contribution_fraction": (
+                    rollout_contract_reward_sums["mav_abs"]
+                    / max(rollout_contract_reward_sums["mav_abs"] + rollout_contract_reward_sums["uav_abs"], 1e-6)
+                ),
+                "uav_team_reward_contribution_fraction": (
+                    rollout_contract_reward_sums["uav_abs"]
+                    / max(rollout_contract_reward_sums["mav_abs"] + rollout_contract_reward_sums["uav_abs"], 1e-6)
+                ),
+                "alive_reward_denominator_mean": (
+                    rollout_contract_reward_sums["alive_reward_denominator_mean"]
+                    / max(rollout_contract_reward_sums["samples"], 1.0)
+                ),
                 "initial_red_count": float(len(env.red_ids)),
                 "attack_uav_reward_target_distance_mean": (
                     rollout_target_distance_sum / max(rollout_target_valid_count, 1)
@@ -3016,6 +3367,10 @@ def _run_training_main() -> None:
                 f"{stats.get('entropy_uav_valid_count', 0.0):.1f}",
                 f"{stats.get('mav_active_sample_count', 0.0):.1f}",
                 f"{stats.get('uav_active_sample_count', 0.0):.1f}",
+                f"{1.0 - stats.get('mav_actor_effective_fraction', 1.0):.6f}",
+                f"{1.0 - stats.get('uav_actor_effective_fraction', 1.0):.6f}",
+                f"{stats.get('mav_actor_effective_fraction', 1.0):.6f}",
+                f"{stats.get('uav_actor_effective_fraction', 1.0):.6f}",
                 f"{stats.get('action_log_std_mav_min', 0.0):.6f}",
                 f"{stats.get('action_log_std_mav_max', 0.0):.6f}",
                 f"{stats.get('action_log_std_mav_mean', 0.0):.6f}",
@@ -3195,6 +3550,32 @@ def _run_training_main() -> None:
                     },
                     **{key: stats.get(key, 0.0) for key in V3_EFFECTIVE_FIELDS},
                     **{key: stats.get(key, 0.0) for key in V5_TRAIN_FIELDS},
+                    **{
+                        key: stats.get(key, 0.0)
+                        for key in (
+                            "action_override_rate", "missile_evasion_override_rate",
+                            "gcas_override_rate", "actor_effective_sample_fraction",
+                            "engagement_target_valid_rate", "target_switch_count",
+                            "target_switches_per_episode", "target_hold_steps_mean",
+                            "reward_target_matches_fire_candidate",
+                            "reward_target_matches_lock_given_lock",
+                            "reward_target_matches_launch_given_launch",
+                            "reward_fire_candidate_comparable_count",
+                            "reward_lock_comparable_count", "reward_launch_comparable_count",
+                            "mav_reward_total", "uav_reward_total_mean", "uav_reward_total_sum",
+                            "mav_safety_sum", "mav_support_sum", "mav_event_sum",
+                            "uav_height_sum", "uav_speed_sum", "uav_angle_sum",
+                            "uav_distance_sum", "uav_dodge_sum", "uav_event_sum",
+                            "dense_reward_signed_sum", "dense_reward_abs_sum",
+                            "event_reward_signed_sum", "event_reward_abs_sum",
+                            "dense_event_abs_ratio", "mav_uav_reward_correlation",
+                            "mav_uav_correlation_sample_count", "mav_uav_sign_conflict_rate",
+                            "mav_uav_sign_comparable_count",
+                            "mav_team_reward_contribution_fraction",
+                            "uav_team_reward_contribution_fraction",
+                            "alive_reward_denominator_mean",
+                        )
+                    },
                     "nan_detected": int(nan_detected),
                 })
             if not f.closed:
@@ -3247,6 +3628,7 @@ def _run_training_main() -> None:
                         "action_dim": action_dim,
                         "entity_dim": getattr(policy, "entity_dim", None),
                         "num_agents": len(env.red_ids),
+                        **_pure_happo_meta(policy, args),
                     },
                 )
             if total_steps - last_eval >= args.eval_interval_steps and args.eval_during_training:
@@ -3419,7 +3801,7 @@ def _run_training_main() -> None:
         "biased_mask": bool(getattr(policy, "biased_mask", False)),
         "random_mask_prob": float(getattr(policy, "random_mask_prob", 0.0)),
         "missile_scripted": True,
-        "evasion_scripted": True,
+        "evasion_scripted": bool(getattr(args, "evasion_scripted", False)),
         "num_envs": args.num_envs,
         "rollout_length_per_env": args.rollout_length,
         "transitions_per_rollout": transitions_per_rollout,

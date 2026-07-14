@@ -135,6 +135,7 @@ class HeteroUavCombatEnv(UavCombatEnv):
         **kwargs,
     ):
         self._initial_states = kwargs.pop("initial_states", None) or {}
+        self.experiment_contract = deepcopy(kwargs.pop("experiment_contract", None) or {})
         if hetero_reward_mode not in {"brma_legacy", "minimal_v1", "role_v1", "happo_ref_v0", "happo_ref_v1_mav_support", "paper_role_reward_v1", "tam_paper_reward_v2", "tam_paper_reward_v3", "tam_paper_reward_v4", "tam_paper_reward_v6_jsbsim_aligned_v3", "tam_paper_reward_v7_role_aligned", "tam_brma_scripted_reward_v1", "brma_paper_homogeneous_v1", "brma_role_no_missile_reward_v8", "tam_brma_paper_aligned_v1", "tam_happo_table1_v1", "brma_tam_scripted_composite_v1", "brma_tam_scale_aligned_v1", "brma_tam_scale_aligned_v2", "brma_tam_role_situation_v3", "brma_tam_paper_calibrated_v4", "tam_happo_paper_formula_v5"}:
             raise ValueError(f"unknown hetero_reward_mode: {hetero_reward_mode}")
         self.hetero_reward_mode = hetero_reward_mode
@@ -3639,6 +3640,11 @@ class HeteroUavCombatEnv(UavCombatEnv):
             low=-np.inf, high=np.inf, shape=(max_enemies, 2), dtype=np.float32)
         spaces["enemy_full_geo_valid_mask"] = gymnasium.spaces.Box(
             low=0.0, high=1.0, shape=(max_enemies,), dtype=np.float32)
+        if self.incoming_missile_observation_enabled:
+            spaces["incoming_missile_state"] = gymnasium.spaces.Box(
+                low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32)
+            spaces["incoming_missile_valid_mask"] = gymnasium.spaces.Box(
+                low=0.0, high=1.0, shape=(1,), dtype=np.float32)
 
     @staticmethod
     def _fit_agent_types(values: list[str] | None, count: int, default: list[str]) -> list[str]:
@@ -3701,6 +3707,8 @@ class HeteroUavCombatEnv(UavCombatEnv):
         enemy_bearing_elevation = np.zeros((max_enemies, 2), dtype=np.float32)
         enemy_speed_heading = np.zeros((max_enemies, 2), dtype=np.float32)
         enemy_full_geo_valid_mask = np.zeros(max_enemies, dtype=np.float32)
+        incoming_missile_state = np.zeros(7, dtype=np.float32)
+        incoming_missile_valid_mask = np.zeros(1, dtype=np.float32)
 
         if not ego_alive:
             out = {
@@ -3719,9 +3727,17 @@ class HeteroUavCombatEnv(UavCombatEnv):
                 "enemy_speed_heading": enemy_speed_heading,
                 "enemy_full_geo_valid_mask": enemy_full_geo_valid_mask,
             })
+            if self.incoming_missile_observation_enabled:
+                out.update({
+                    "incoming_missile_state": incoming_missile_state,
+                    "incoming_missile_valid_mask": incoming_missile_valid_mask,
+                })
             return out
 
         ego_geo_state = self._ego_geo_state(ego_sim)
+        if self.incoming_missile_observation_enabled:
+            incoming_missile_state, valid, _diag = self._incoming_missile_state(agent_id, ego_sim)
+            incoming_missile_valid_mask[0] = valid
 
         for i, ally_id in enumerate(ally_ids):
             ally_sim = self._get_sim(ally_id)
@@ -3766,6 +3782,11 @@ class HeteroUavCombatEnv(UavCombatEnv):
             "enemy_speed_heading": enemy_speed_heading,
             "enemy_full_geo_valid_mask": enemy_full_geo_valid_mask,
         })
+        if self.incoming_missile_observation_enabled:
+            out.update({
+                "incoming_missile_state": incoming_missile_state,
+                "incoming_missile_valid_mask": incoming_missile_valid_mask,
+            })
         return out
 
     @staticmethod

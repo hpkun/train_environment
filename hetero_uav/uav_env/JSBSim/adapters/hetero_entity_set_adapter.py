@@ -58,6 +58,23 @@ class HeteroEntitySetAdapter:
     ALIVE_IDX = 19
     OBSERVED_IDX = 20
 
+    def __init__(self, include_incoming_missile: bool = False,
+                 incoming_missile_normalization: dict | None = None):
+        self.include_incoming_missile = bool(include_incoming_missile)
+        norms = dict(incoming_missile_normalization or {})
+        self.incoming_norm = np.asarray([
+            norms.get("relative_speed_mps", 1000.0),
+            norms.get("relative_altitude_m", 10000.0),
+            norms.get("distance_m", 20000.0),
+            norms.get("aircraft_to_missile_ata_rad", np.pi),
+            norms.get("missile_to_aircraft_aa_rad", np.pi),
+            norms.get("closing_speed_mps", 1000.0),
+            norms.get("t_go_sec", 60.0),
+        ], dtype=np.float32)
+        if self.include_incoming_missile:
+            self.entity_dim = ENTITY_DIM + 8
+            self.feature_schema_version = "hetero_entity_set_v3_incoming_missile"
+
     def adapt_all(
         self,
         obs_dict: dict,
@@ -174,6 +191,15 @@ class HeteroEntitySetAdapter:
         token[16] = float(self._vector(obs.get("missile_warning", []), 1)[0])
         token[self.ALIVE_IDX] = 1.0
         token[self.OBSERVED_IDX] = 1.0
+        if self.include_incoming_missile:
+            if "incoming_missile_state" not in obs or "incoming_missile_valid_mask" not in obs:
+                raise ValueError("mav_shared_geo_v3_incoming_missile observation keys are required")
+            state = self._vector(obs["incoming_missile_state"], 7)
+            valid = float(self._vector(obs["incoming_missile_valid_mask"], 1)[0])
+            token[21:28] = np.clip(
+                state / np.maximum(self.incoming_norm, 1e-6), -1.0, 1.0
+            ) * valid
+            token[28] = valid
         return token
 
     def _global_token(self, obs: dict, side: int) -> np.ndarray:

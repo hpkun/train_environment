@@ -31,12 +31,16 @@ class LegacyClampPureHAPPOPolicy(nn.Module):
 
     def __init__(self, actor_obs_dim: int = 96, critic_state_dim: int = 480,
                  action_dim: int = 3, num_agents: int = 3,
-                 init_log_std: float = -1.204):
+                 init_log_std: float = -1.204,
+                 credit_mode: str = "shared_alive_team_mean"):
         super().__init__()
         self.actor_obs_dim = int(actor_obs_dim)
         self.critic_state_dim = int(critic_state_dim)
         self.action_dim = int(action_dim)
         self.num_agents = int(num_agents)
+        if credit_mode not in {"shared_alive_team_mean", "role_local_vector_critic"}:
+            raise ValueError(f"unsupported credit_mode: {credit_mode}")
+        self.credit_mode = str(credit_mode)
 
         initial = float(init_log_std)
         self.initial_action_log_std = initial
@@ -49,7 +53,8 @@ class LegacyClampPureHAPPOPolicy(nn.Module):
             nn.Parameter(torch.full((self.action_dim,), initial))
             for _ in range(self.num_agents)
         ])
-        self.critic = _mlp(self.critic_state_dim, 1)
+        critic_out = self.num_agents if self.credit_mode == "role_local_vector_critic" else 1
+        self.critic = _mlp(self.critic_state_dim, critic_out)
 
     def _check_agent_count(self, N: int):
         if N != self.num_agents:

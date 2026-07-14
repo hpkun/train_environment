@@ -236,12 +236,14 @@ class UavCombatEnv(gymnasium.Env):
                  missile_guidance: dict | None = None,
                  missile_protocol: dict | None = None,
                  missile_evasion: dict | None = None,
+                 incoming_missile_observation: dict | None = None,
                  use_boresight_launch_gate: bool = False,
                  render_mode=None):
         super().__init__()
-        if red_target_selection_mode not in {"closest", "mav_threat_rank"}:
+        if red_target_selection_mode not in {"closest", "mav_threat_rank", "paper_assessment"}:
             raise ValueError(
-                "red_target_selection_mode must be 'closest' or 'mav_threat_rank'"
+                "red_target_selection_mode must be 'closest', 'mav_threat_rank', "
+                "or 'paper_assessment'"
             )
         if red_uav_track_policy not in {
             "direct_or_mav_shared",
@@ -283,6 +285,9 @@ class UavCombatEnv(gymnasium.Env):
         self.missile_guidance_config = dict(missile_guidance or {"mode": "legacy"})
         self.missile_protocol_meta = dict(missile_protocol or {})
         self.missile_evasion_config = dict(missile_evasion or {"mode": "brma_scripted", "teams": "red_only"})
+        self.incoming_missile_observation_config = dict(incoming_missile_observation or {})
+        self.incoming_missile_observation_enabled = bool(
+            self.incoming_missile_observation_config.get("enabled", False))
         self.physics_dt = 1.0 / sim_freq
         self.env_dt = agent_interaction_steps * self.physics_dt
         # missile_attack_interval_sec: configurable cooldown (TAM-HAPPO paper: 25s)
@@ -373,6 +378,10 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_diag_step = make_empty_launch_diag()
         self._launch_quality_records: dict[str, dict] = {}
         self._launch_quality_step_records: list[dict] = []
+        self._action_contract_step: dict[str, dict] = {}
+        self._engagement_target_state: dict[str, dict] = {}
+        self._engagement_target_step_diag: dict[str, dict] = {}
+        self._fire_candidate_target_step: dict[str, str] = {}
         self._launch_quality_done_step_records: list[dict] = []
         self._evasion_step_records: list[dict] = []
         self._physics_frame = 0
@@ -426,6 +435,10 @@ class UavCombatEnv(gymnasium.Env):
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
         self._evasion_step_records = []
+        self._action_contract_step = {}
+        self._engagement_target_state = {}
+        self._engagement_target_step_diag = {}
+        self._fire_candidate_target_step = {}
         self._missile_acmi_id.clear()
         self._missile_term_reasons = {"red": {}, "blue": {}}
         self._next_missile_acmi_id = 1001
@@ -577,6 +590,9 @@ class UavCombatEnv(gymnasium.Env):
 
     def step(self, actions: dict):
         self.current_step += 1
+        self._action_contract_step = {}
+        self._engagement_target_step_diag = {}
+        self._fire_candidate_target_step = {}
         self._crashed_this_step.clear()
         self._death_events_step = []
         self._launch_diag_step = make_empty_launch_diag()
@@ -693,6 +709,36 @@ class UavCombatEnv(gymnasium.Env):
                 }
         return best, best_diag
 
+    @staticmethod
+    def _safe_angle(a: np.ndarray, b: np.ndarray) -> float:
+        an = float(np.linalg.norm(a)); bn = float(np.linalg.norm(b))
+        if an <= 1e-8 or bn <= 1e-8:
+            return 0.0
+        return float(np.arccos(np.clip(float(np.dot(a, b)) / (an * bn), -1.0, 1.0)))
+
+    def _incoming_missile_state(self, aid: str, sim: AircraftSimulator) -> tuple[np.ndarray, float, dict]:
+        missile, diag = self._select_incoming_missile_threat(aid, sim)
+        if missile is None:
+            return np.zeros(7, dtype=np.float32), 0.0, {}
+        aircraft_pos = np.asarray(sim.get_position(), dtype=np.float64)
+        aircraft_vel = np.asarray(sim.get_velocity(), dtype=np.float64)
+        missile_pos = np.asarray(missile.get_position(), dtype=np.float64)
+        missile_vel = np.asarray(missile.get_velocity(), dtype=np.float64)
+        rel = missile_pos - aircraft_pos
+        reverse_rel = -rel
+        state = np.asarray([
+            float(np.linalg.norm(missile_vel - aircraft_vel)),
+            float(missile_pos[2] - aircraft_pos[2]),
+            float(diag["incoming_range_m"]),
+            self._safe_angle(aircraft_vel, rel),
+            self._safe_angle(missile_vel, reverse_rel),
+            float(diag["incoming_closing_speed_mps"]),
+            float(diag["incoming_t_go_sec"]),
+        ], dtype=np.float32)
+        if not np.isfinite(state).all():
+            return np.zeros(7, dtype=np.float32), 0.0, {}
+        return state, 1.0, diag
+
     def _parse_actions(self, actions: dict) -> dict:
         """Convert normalised actor outputs ∈ [-1, 1] to physical setpoints.
 
@@ -702,9 +748,11 @@ class UavCombatEnv(gymnasium.Env):
                                          teams controlled by missile_evasion.teams
                                          (both/red_only/blue_only/none).
           Layer 2 — GCAS safety net:     BLUE only   (hard-coded baseline)
-          Layer 3 — Agent action:        BOTH teams  (identical §2.4 mapping)
+          Layer 3 — Agent action:        BOTH teams  (project PID adaptation)
 
-        Paper §2.4 mapping — IDENTICAL for both teams (ABSOLUTE targets):
+        Current three-dimensional continuous high-level PID control adaptation
+        (absolute targets, not the paper's exact four-dimensional binned action
+        space):
           act[0] ∈ [-1, 1]  →  target_pitch   ∈ [-π/2, +π/2]     [rad]  (±90°)
           act[1] ∈ [-1, 1]  →  target_heading ∈ [-π,   +π]       [rad]  (±180° absolute)
           act[2] ∈ [-1, 1]  →  target_velocity ∈ [102, 408]      [m/s]  (M0.3–M1.2)
@@ -714,8 +762,16 @@ class UavCombatEnv(gymnasium.Env):
         targets = {}
         for aid, act in actions.items():
             sim = self._get_sim(aid)
+            requested = np.asarray(act, dtype=np.float32).reshape(-1)
             if sim is None or not sim.is_alive:
                 targets[aid] = None
+                self._action_contract_step[aid] = {
+                    "action_overridden": False,
+                    "action_override_reason": "inactive",
+                    "requested_action": requested.tolist(),
+                    "executed_control_target": None,
+                    "executed_control_mode": self._control_mode_for(aid),
+                }
                 continue
 
             is_blue = aid.startswith("blue")
@@ -772,6 +828,14 @@ class UavCombatEnv(gymnasium.Env):
                     aileron_cmd = float(np.clip(turn_dir * 0.5, -1.0, 1.0))
                     throttle_cmd = 0.9
                     targets[aid] = (elevator_cmd, aileron_cmd, throttle_cmd)
+                    self._action_contract_step[aid] = {
+                        "action_overridden": True,
+                        "action_override_reason": "missile_evasion",
+                        "requested_action": requested.tolist(),
+                        "executed_control_target": [elevator_cmd, aileron_cmd, throttle_cmd],
+                        "executed_control_mode": "direct_fcs_3d",
+                        **incoming_diag,
+                    }
                     continue
 
                 if alt_m > float(evasion_cfg.get("high_altitude_threshold_m", 5000.0)):
@@ -797,6 +861,14 @@ class UavCombatEnv(gymnasium.Env):
                 if str(evasion_cfg.get("target_velocity", "max")).lower() != "max":
                     target_velocity = float(evasion_cfg.get("target_velocity", self.VELOCITY_MAX))
                 targets[aid] = (target_pitch, target_heading, target_velocity)
+                self._action_contract_step[aid] = {
+                    "action_overridden": True,
+                    "action_override_reason": "missile_evasion",
+                    "requested_action": requested.tolist(),
+                    "executed_control_target": [float(target_pitch), float(target_heading), float(target_velocity)],
+                    "executed_control_mode": self._control_mode_for(aid),
+                    **incoming_diag,
+                }
                 continue
 
             # =================================================================
@@ -829,6 +901,14 @@ class UavCombatEnv(gymnasium.Env):
                         target_heading = current_heading
                     targets[aid] = (np.deg2rad(self.GCAS_MAX_PITCH_DEG),
                                     target_heading, self.VELOCITY_MAX)
+                    self._action_contract_step[aid] = {
+                        "action_overridden": True,
+                        "action_override_reason": "blue_gcas",
+                        "requested_action": requested.tolist(),
+                        "executed_control_target": [float(np.deg2rad(self.GCAS_MAX_PITCH_DEG)),
+                                                    float(target_heading), float(self.VELOCITY_MAX)],
+                        "executed_control_mode": self._control_mode_for(aid),
+                    }
                     continue
 
             # =================================================================
@@ -846,6 +926,12 @@ class UavCombatEnv(gymnasium.Env):
                 throttle_cmd = 0.4 + (float(act[2]) + 1.0) / 2.0 * 0.5
                 throttle_cmd = float(np.clip(throttle_cmd, 0.4, 0.9))
                 targets[aid] = (elevator_cmd, aileron_cmd, throttle_cmd)
+                self._action_contract_step[aid] = {
+                    "action_overridden": False, "action_override_reason": "none",
+                    "requested_action": requested.tolist(),
+                    "executed_control_target": [elevator_cmd, aileron_cmd, throttle_cmd],
+                    "executed_control_mode": "direct_fcs_3d",
+                }
                 continue
 
             target_velocity = self.VELOCITY_MIN + (float(act[2]) + 1.0) / 2.0 * (
@@ -854,6 +940,12 @@ class UavCombatEnv(gymnasium.Env):
             target_heading = float(act[1]) * np.pi
 
             targets[aid] = (target_pitch, target_heading, target_velocity)
+            self._action_contract_step[aid] = {
+                "action_overridden": False, "action_override_reason": "none",
+                "requested_action": requested.tolist(),
+                "executed_control_target": [target_pitch, target_heading, target_velocity],
+                "executed_control_mode": self._control_mode_for(aid),
+            }
         return targets
 
     # ------------------------------------------------------------------
@@ -1300,6 +1392,14 @@ class UavCombatEnv(gymnasium.Env):
         mode = "closest"
         if aid.startswith("red") and self.red_target_selection_mode == "mav_threat_rank":
             mode = "mav_threat_rank"
+        elif aid.startswith("red") and self.red_target_selection_mode == "paper_assessment":
+            mode = "paper_assessment"
+            from uav_env.JSBSim.envs.alignment.target_assessment import select_paper_assessment_target
+            cfg = getattr(self, "tam_happo_paper_formula_v5_config", {}) or {}
+            hold_steps = int(cfg.get("target_assessment", {}).get("hold_steps", 0))
+            engagement_id, _target, assessment = select_paper_assessment_target(
+                self, sim, cfg, hold_steps=hold_steps, require_observed=True)
+            candidates = [item for item in candidates if item[0].uid == engagement_id]
 
         _funnel = {
             "alive_target_pair_scans": _a,
@@ -1319,6 +1419,13 @@ class UavCombatEnv(gymnasium.Env):
 
         if mode == "mav_threat_rank":
             selected = max(candidates, key=lambda item: (item[2]["score"], -item[2]["range_m"]))
+        elif mode == "paper_assessment":
+            selected = candidates[0]
+            selected[2].update({
+                "score": float(assessment.get("score", 0.0)),
+                "target_held": float(assessment.get("target_held", 0.0)),
+                "target_switched": float(assessment.get("target_switched", 0.0)),
+            })
         else:
             selected = min(candidates, key=lambda item: item[1]["range_m"])
 
@@ -1390,6 +1497,9 @@ class UavCombatEnv(gymnasium.Env):
             enemies = self.red_planes if sim.color == "Blue" else self.blue_planes
             best_enemy, best_distance, _best_metrics, selection_debug = self._select_missile_target(
                 aid, sim, enemies, diag
+            )
+            self._fire_candidate_target_step[aid] = (
+                str(best_enemy.uid) if best_enemy is not None else ""
             )
 
             # ---- Lock-delay state machine ----
@@ -2381,6 +2491,34 @@ class UavCombatEnv(gymnasium.Env):
                 "missiles_left": sim.num_left_missiles if sim is not None else 0,
                 "death_reason": self._death_reasons.get(aid, None),
             }
+            contract = dict(getattr(self, "_action_contract_step", {}).get(aid, {}))
+            if sim is not None and sim.is_alive:
+                _incoming_state, incoming_valid, incoming_diag = self._incoming_missile_state(aid, sim)
+                contract.setdefault("incoming_missile_id", incoming_diag.get("incoming_missile_id", ""))
+                contract.setdefault("incoming_range_m", incoming_diag.get("incoming_range_m", 0.0))
+                contract.setdefault("incoming_closing_speed_mps", incoming_diag.get("incoming_closing_speed_mps", 0.0))
+                contract.setdefault("incoming_t_go_sec", incoming_diag.get("incoming_t_go_sec", 0.0))
+                contract["incoming_missile_valid"] = float(incoming_valid)
+            info[aid].update(contract)
+            engagement = dict(getattr(self, "_engagement_target_state", {}).get(aid, {}))
+            engagement_step = dict(
+                getattr(self, "_engagement_target_step_diag", {}).get(aid, {})
+            )
+            engagement_id = str(engagement.get("target_id", "") or "")
+            engagement_sim = getattr(self, "blue_planes", {}).get(engagement_id)
+            info[aid].update({
+                "engagement_target_id": engagement_id,
+                "engagement_target_valid": float(
+                    engagement_sim is not None and getattr(engagement_sim, "is_alive", False)),
+                "engagement_target_selected_step": engagement.get("selected_step", ""),
+                "engagement_target_switch_count": int(engagement.get("switch_count", 0)),
+                "engagement_target_held_this_step": float(bool(engagement_step.get("held", False))),
+                "engagement_target_switched_this_step": float(bool(engagement_step.get("switched", False))),
+                "fire_candidate_target_id": str(
+                    getattr(self, "_fire_candidate_target_step", {}).get(aid, "") or ""
+                ),
+                "lock_target_id": str(getattr(self, "_lock_target", {}).get(aid, "") or ""),
+            })
             # Merge weighted reward-component breakdown for diagnostics
             if reward_components and aid in reward_components:
                 info[aid].update(reward_components[aid])

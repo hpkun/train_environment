@@ -9,7 +9,8 @@ class HAPPORolloutBuffer:
     def __init__(self, max_len: int, num_red: int, actor_dim: int,
                  critic_dim: int, action_dim: int, role_ids,
                  rnn_hidden_size: int = 0, actor_token_count: int = 0,
-                 critic_token_count: int = 0, entity_dim: int = 0):
+                 critic_token_count: int = 0, entity_dim: int = 0,
+                 value_dim: int = 1):
         self.max_len = int(max_len)
         self.num_red = int(num_red)
         self.pos = 0
@@ -20,9 +21,12 @@ class HAPPORolloutBuffer:
         self.log_probs = np.zeros((max_len, num_red), dtype=np.float32)
         self.rewards = np.zeros((max_len, num_red), dtype=np.float32)
         self.dones = np.zeros((max_len, num_red), dtype=np.float32)
-        self.values = np.zeros(max_len, dtype=np.float32)
-        self.next_values = np.full(max_len, np.nan, dtype=np.float32)
+        self.value_dim = int(value_dim)
+        value_shape = (max_len,) if self.value_dim == 1 else (max_len, self.value_dim)
+        self.values = np.zeros(value_shape, dtype=np.float32)
+        self.next_values = np.full(value_shape, np.nan, dtype=np.float32)
         self.active_masks = np.zeros((max_len, num_red), dtype=np.float32)
+        self.actor_update_masks = np.zeros((max_len, num_red), dtype=np.float32)
         self.env_ids = np.zeros(max_len, dtype=np.int64)
         self.role_ids = np.asarray(role_ids, dtype=np.int64)
         if self.rnn_hidden_size > 0:
@@ -42,7 +46,8 @@ class HAPPORolloutBuffer:
             self.critic_counts = np.zeros((max_len, 4), dtype=np.float32)
 
     def store(self, actor_obs, critic_state, actions, log_probs,
-              rewards, dones, value, active_masks, next_value=None, env_id=0,
+              rewards, dones, value, active_masks, actor_update_masks=None,
+              next_value=None, env_id=0,
               rnn_hidden=None, actor_entity_tokens=None, actor_keep_mask=None,
               critic_entity_tokens=None, critic_keep_mask=None,
               critic_counts=None):
@@ -55,10 +60,18 @@ class HAPPORolloutBuffer:
         self.log_probs[idx] = log_probs
         self.rewards[idx] = rewards
         self.dones[idx] = dones
-        self.values[idx] = float(value)
+        if self.value_dim == 1:
+            self.values[idx] = float(np.asarray(value).reshape(-1)[0])
+        else:
+            self.values[idx] = np.asarray(value, dtype=np.float32).reshape(self.value_dim)
         if next_value is not None:
-            self.next_values[idx] = float(next_value)
+            if self.value_dim == 1:
+                self.next_values[idx] = float(np.asarray(next_value).reshape(-1)[0])
+            else:
+                self.next_values[idx] = np.asarray(next_value, dtype=np.float32).reshape(self.value_dim)
         self.active_masks[idx] = active_masks
+        self.actor_update_masks[idx] = (
+            active_masks if actor_update_masks is None else actor_update_masks)
         self.env_ids[idx] = int(env_id)
         if self.rnn_hidden_size > 0 and rnn_hidden is not None:
             self.rnn_hidden[idx] = np.asarray(rnn_hidden, dtype=np.float32)
@@ -86,6 +99,7 @@ class HAPPORolloutBuffer:
             "values": torch.as_tensor(self.values[:n], device=device),
             "next_values": torch.as_tensor(self.next_values[:n], device=device),
             "active_masks": torch.as_tensor(self.active_masks[:n], device=device),
+            "actor_update_masks": torch.as_tensor(self.actor_update_masks[:n], device=device),
             "env_ids": torch.as_tensor(self.env_ids[:n], device=device),
             "role_ids": torch.as_tensor(self.role_ids, device=device),
         }
