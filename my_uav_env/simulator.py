@@ -574,9 +574,11 @@ class MissileSimulator(BaseSimulator):
     def __init__(self, uid="A0101", color="Red", model="AIM-9L", dt=1 / 12,
                  guidance_mode: str = "paper_eq9", config=None, rng=None):
         super().__init__(uid, color, dt)
-        if guidance_mode not in ("paper_eq9", "legacy_simplified"):
+        if guidance_mode not in (
+                "paper_eq9", "legacy_simplified", "paper_minimal_point_mass_v1"):
             raise ValueError(
-                "guidance_mode must be 'paper_eq9' or 'legacy_simplified'")
+                "guidance_mode must be 'paper_eq9', 'legacy_simplified', or "
+                "'paper_minimal_point_mass_v1'")
         self.guidance_mode = guidance_mode
         self._status = MissileSimulator.INACTIVE
         from configs.brma_mappo_paper_spec import MissileConfig
@@ -673,8 +675,9 @@ class MissileSimulator(BaseSimulator):
         self._distance_increment.append(distance > self._distance_pre)
         self._distance_pre = distance
 
-        if (distance < self._Rc and self.target_aircraft.is_alive
-                and self._t > self._t_arm):  # warhead must be armed before detonation
+        armed = (self.guidance_mode == "paper_minimal_point_mass_v1"
+                 or self._t > self._t_arm)
+        if distance < self._Rc and self.target_aircraft.is_alive and armed:
             # Paper: P_hit = 0.05 + 0.95 · dir_match — probabilistic kill filter
             # even when the physical missile reaches the target.
             if self._roll_hit_probability():
@@ -687,10 +690,12 @@ class MissileSimulator(BaseSimulator):
         elif self._t > self._t_max:
             self._status = MissileSimulator.MISS
             self._termination_reason = "timeout"
-        elif np.linalg.norm(self.get_velocity()) < self._v_min:
+        elif (self.guidance_mode != "paper_minimal_point_mass_v1"
+              and np.linalg.norm(self.get_velocity()) < self._v_min):
             self._status = MissileSimulator.MISS
             self._termination_reason = "low_speed"
-        elif np.sum(self._distance_increment) >= self._distance_increment.maxlen:
+        elif (self.guidance_mode != "paper_minimal_point_mass_v1"
+              and np.sum(self._distance_increment) >= self._distance_increment.maxlen):
             self._status = MissileSimulator.MISS
             self._termination_reason = "overshoot"
         elif not self.target_aircraft.is_alive:
@@ -760,7 +765,7 @@ class MissileSimulator(BaseSimulator):
         Rxy = np.linalg.norm([x_m - x_t, y_m - y_t])
         Rxyz = max(np.linalg.norm([x_m - x_t, y_m - y_t, z_t - z_m]), 1e-8)
 
-        if self.guidance_mode == "paper_eq9":
+        if self.guidance_mode in ("paper_eq9", "paper_minimal_point_mass_v1"):
             relative_position = np.array([x_t - x_m, y_t - y_m, z_t - z_m])
             relative_velocity = np.array([dx_t - dx_m, dy_t - dy_m, dz_t - dz_m])
             ny, nz = compute_paper_eq9_overloads(
@@ -776,6 +781,9 @@ class MissileSimulator(BaseSimulator):
 
     def _state_trans(self, action):
         """Update missile position, velocity, and attitude."""
+        if self.guidance_mode == "paper_minimal_point_mass_v1":
+            self._state_trans_minimal_point_mass(action)
+            return
         self._position[:] += self.dt * self.get_velocity()
         self._geodetic[:] = NEU2LLA(*self.get_position(), self.lon0, self.lat0, self.alt0)
         v = np.linalg.norm(self.get_velocity())
@@ -800,3 +808,24 @@ class MissileSimulator(BaseSimulator):
         self._posture[:] = np.array([0, theta, phi])
         if self._t < self._t_thrust:
             self._m = self._m - self.dt * self._dm
+
+    def _state_trans_minimal_point_mass(self, action):
+        """Constant-speed point mass with the published PN steering command."""
+        self._position[:] += self.dt * self.get_velocity()
+        self._geodetic[:] = NEU2LLA(
+            *self.get_position(), self.lon0, self.lat0, self.alt0)
+        speed = float(np.linalg.norm(self.get_velocity()))
+        if speed <= 1e-9:
+            return
+        theta, heading = self.get_rpy()[1:]
+        ny, nz = action
+        heading_rate = self._g * ny / max(speed * np.cos(theta), 1e-8)
+        pitch_rate = self._g * (nz - np.cos(theta)) / speed
+        heading += self.dt * heading_rate
+        theta += self.dt * pitch_rate
+        self._velocity[:] = np.array([
+            speed * np.cos(theta) * np.cos(heading),
+            speed * np.cos(theta) * np.sin(heading),
+            speed * np.sin(theta),
+        ])
+        self._posture[:] = np.array([0.0, theta, heading])

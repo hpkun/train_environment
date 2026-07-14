@@ -34,12 +34,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from my_uav_env.alignment.reward_utils import (
+    AltitudeRewardConfig,
     DEFAULT_ALTITUDE_REWARD_CONFIG,
     REWARD_VERSION,
 )
 from configs.brma_mappo_paper_spec import (
     DEFAULT_PAPER_ENVIRONMENT_CONFIG,
     environment_config_snapshot,
+)
+from configs.paper_minimal_3v3_spec import (
+    PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+    REFERENCE_ENVIRONMENT_PROFILE,
+    minimal_environment_snapshot,
 )
 
 torch.set_num_threads(1)
@@ -104,6 +110,7 @@ class Config:
     action_dim: int = 3
     algorithm_type: str = "mappo_mlp"
     environment_version: str = "brma_paper_profile_v1"
+    environment_profile: str = REFERENCE_ENVIRONMENT_PROFILE
     blue_policy_profile: str = "paper_pursuit"
 
     # ---- PPO (论文 Table 3) ----
@@ -484,6 +491,14 @@ CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v4"
 ACTION_DISTRIBUTION_VERSION = "diag_gaussian_env_clip_v1"
 
 
+def _minimal_altitude_reward_config() -> AltitudeRewardConfig:
+    return AltitudeRewardConfig(
+        version="eq17_minimal_finite_tail_v1",
+        h_min_m=0.0, h_att_m=2000.0, h_adv_m=5000.0,
+        h_max_m=10000.0, d_att_max_m=10000.000001,
+        high_altitude_tail=0.0)
+
+
 def _rollout_layout(replay_buffer_size: int, num_envs: int) -> dict:
     requested = int(replay_buffer_size)
     envs = int(num_envs)
@@ -503,17 +518,27 @@ def _rollout_layout(replay_buffer_size: int, num_envs: int) -> dict:
 
 
 def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
-    environment_snapshot = environment_config_snapshot(
-        DEFAULT_PAPER_ENVIRONMENT_CONFIG,
-        num_red=config.num_red, num_blue=config.num_blue,
-        sim_freq=60, agent_interaction_steps=12, seed=config.seed,
-        blue_policy_profile=config.blue_policy_profile)
+    if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
+        environment_snapshot = minimal_environment_snapshot(
+            num_red=config.num_red, num_blue=config.num_blue,
+            sim_freq=60, agent_interaction_steps=12,
+            max_episode_length=config.max_episode_length, seed=config.seed,
+            blue_policy_profile=config.blue_policy_profile)
+    else:
+        environment_snapshot = environment_config_snapshot(
+            DEFAULT_PAPER_ENVIRONMENT_CONFIG,
+            num_red=config.num_red, num_blue=config.num_blue,
+            sim_freq=60, agent_interaction_steps=12, seed=config.seed,
+            blue_policy_profile=config.blue_policy_profile)
     rollout_layout = _rollout_layout(config.replay_buffer_size, config.num_envs)
-    return {
+    metadata = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": config.obs_mode,
         "obs_normalization": config.obs_normalization,
-        "reward_version": REWARD_VERSION,
+        "reward_version": (
+            "paper_literal_minimal_unspecified_v1"
+            if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+            else REWARD_VERSION),
         "reward_mode": config.reward_mode,
         "pid_profile": config.pid_profile,
         "pid_throttle_base": float(config.pid_throttle_base),
@@ -522,6 +547,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
         "algorithm_type": str(config.algorithm_type),
         "environment_version": str(config.environment_version),
+        "environment_profile": str(config.environment_profile),
         "blue_policy_profile": str(config.blue_policy_profile),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
         "altitude_reward_interpretation": "pairwise_sum_all_alive_enemies_v1",
@@ -547,6 +573,27 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "environment_config_fingerprint": environment_snapshot[
             "environment_config_fingerprint"],
     }
+    if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
+        sourced_keys = (
+            "initial_condition_profile", "sensor_profile", "mws_evasion_profile",
+            "missile_profile", "reward_version", "altitude_pair_aggregation",
+            "altitude_high_tail", "aircraft_model", "constant_rcs",
+            "radar_range_constant", "initial_altitude_m", "initial_speed_mps",
+            "formation_spacing_m")
+        provenance = {}
+        for key in sourced_keys:
+            sourced = environment_snapshot[key]
+            metadata[key] = sourced["value"]
+            provenance[key] = sourced["source"]
+        provenance.update({
+            "environment_profile": environment_snapshot[
+                "environment_profile"]["source"],
+            "blue_policy_profile": environment_snapshot[
+                "blue_policy_profile"]["source"],
+            "pid_profile": environment_snapshot["pid_profile"]["source"],
+        })
+        metadata["profile_provenance"] = provenance
+    return metadata
 
 
 def _save_model_checkpoint(path: str, model: nn.Module, metadata: dict,
@@ -1389,6 +1436,11 @@ def _episode_outcome(red_alive: int, blue_alive: int) -> str:
     return "draw"
 
 
+def _episode_is_invalid(info: dict) -> bool:
+    return bool(info.get("__episode__", {}).get(
+        "invalid_numerical_episode", False))
+
+
 def _joint_team_reward_once(rewards: dict, team_ids: list[str]) -> float:
     """Read a replicated team reward once and reject inconsistent values."""
     values = [float(rewards[aid]) for aid in team_ids if aid in rewards]
@@ -1962,8 +2014,12 @@ def parse_args():
                         default=defaults.enable_blue_gcas)
     parser.add_argument("--blue-policy-profile", choices=(
         "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
-        "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1"),
+        "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1",
+        "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1"),
         default=defaults.blue_policy_profile)
+    parser.add_argument("--environment-profile", choices=(
+        REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE),
+        default=defaults.environment_profile)
     parser.add_argument("--obs-mode", type=str,
                         choices=("paper_strict", "engineering"),
                         default=defaults.obs_mode)
@@ -1971,15 +2027,16 @@ def parse_args():
                         choices=("paper_fixed_v1", "none"),
                         default=defaults.obs_normalization)
     parser.add_argument("--pid-profile", type=str,
-                        choices=("paper", "engineering_safe"),
+                        choices=("paper", "engineering_safe", "paper_minimal_shared_v1"),
                         default=defaults.pid_profile)
     parser.add_argument("--pid-throttle-base", type=float,
                         default=defaults.pid_throttle_base)
     parser.add_argument("--reward-mode", type=str,
-                        choices=("paper_joint", "engineering_local"),
+                        choices=("paper_joint", "engineering_local", "paper_minimal_joint_v1"),
                         default=defaults.reward_mode)
     parser.add_argument("--missile-guidance-mode", type=str,
-                        choices=("paper_eq9", "legacy_simplified"),
+                        choices=("paper_eq9", "legacy_simplified",
+                                 "paper_minimal_point_mass_v1"),
                         default=defaults.missile_guidance_mode)
     parser.add_argument("--resume-from-best", action="store_true",
                         default=defaults.resume_from_best)
@@ -2000,7 +2057,8 @@ _VANILLA_PRESET_CLI_FLAGS = {
     "num_red", "num_blue", "num_envs", "total_env_steps",
     "max_episode_length", "replay_buffer_size", "n_minibatches",
     "actor_lr", "critic_lr", "entropy_coef", "mlp_hidden", "rnn_hidden_size",
-    "enable_blue_gcas", "blue_policy_profile", "obs_mode", "obs_normalization", "pid_profile",
+    "enable_blue_gcas", "blue_policy_profile", "environment_profile",
+    "obs_mode", "obs_normalization", "pid_profile",
     "pid_throttle_base",
     "reward_mode", "missile_guidance_mode", "resume_from_best",
     "log_file", "results_file", "launch_quality_file",
@@ -2042,6 +2100,10 @@ def make_config_from_args(args) -> Config:
     config.rnn_hidden_size = args.rnn_hidden_size
     config.enable_blue_gcas = args.enable_blue_gcas
     config.blue_policy_profile = args.blue_policy_profile
+    config.environment_profile = args.environment_profile
+    config.environment_version = args.environment_profile
+    if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
+        config.altitude_reward_config = _minimal_altitude_reward_config()
     config.obs_mode = args.obs_mode
     config.obs_normalization = args.obs_normalization
     config.pid_profile = args.pid_profile
@@ -2134,7 +2196,8 @@ def main():
                          "RedRewardStd", "WinRateRecent",
                          "RedMissiles", "BlueMissiles",
                          *ROLLOUT_LAYOUT_CSV_FIELDS,
-                         "Episodes", "RedWins", "BlueWins", "Draws",
+                         "Episodes", "InvalidNumericalEpisodes",
+                         "RedWins", "BlueWins", "Draws",
                          "RedAliveMean", "BlueAliveMean",
                           "RedDeathsMissile", "RedDeathsCrash",
                           "BlueDeathsMissile", "BlueDeathsCrash",
@@ -2142,7 +2205,7 @@ def main():
                           "RedMissileHitRate", "BlueMissileHitRate",
                           "KD_Red_AllDeaths", "KD_Red_MissileOnly",
                           "RWR", "RWRDenominatorZero",
-                          "RewardVersion", "RewardMode",
+                          "RewardVersion", "RewardMode", "EnvironmentProfile",
                           "ObsNormalization", "PIDProfile", "PIDThrottleBase",
                           "MissileGuidanceMode", "CheckpointSchema",
                           "ActionDistribution",
@@ -2189,7 +2252,11 @@ def main():
     print(f"  checkpoint_dir: {config.checkpoint_dir}")
     print(f"  seed: {config.seed}")
     print(f"  device: {device}")
-    print(f"  reward_version: {REWARD_VERSION}")
+    print("  reward_version: " + (
+        "paper_literal_minimal_unspecified_v1"
+        if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+        else REWARD_VERSION))
+    print(f"  environment_profile: {config.environment_profile}")
     print(f"  obs_mode: {config.obs_mode}")
     print(f"  obs_normalization: {config.obs_normalization}")
     print(f"  pid_profile: {config.pid_profile}")
@@ -2216,6 +2283,7 @@ def main():
     num_steps = rollout_layout["rollout_horizon_per_env"]
     env_kwargs = dict(max_num_blue=config.num_blue, max_num_red=config.num_red,
                       max_steps=config.max_episode_length,
+                      environment_profile=config.environment_profile,
                       obs_mode=config.obs_mode,
                       pid_profile=config.pid_profile,
                       pid_throttle_base=config.pid_throttle_base,
@@ -2282,6 +2350,7 @@ def main():
     red_wins = 0
     blue_wins = 0
     draws = 0
+    invalid_numerical_episodes = 0
     death_stats = {"red": Counter(), "blue": Counter()}
     red_missiles_total = 0.0
     blue_missiles_total = 0.0
@@ -2536,43 +2605,48 @@ def main():
 
                 # ---- episodic settlement AFTER accumulation (terminal r_end is included) ----
                 if all(don.values()):
-                    blue_diag = info.get("__blue_policy_diag__", {})
+                    invalid_episode = _episode_is_invalid(inf)
+                    blue_diag = inf.get("__blue_policy_diag__", {})
                     for field in BLUE_POLICY_DIAG_CSV_FIELDS:
                         iter_blue_policy_diag[field] += int(blue_diag.get(field, 0))
-                    total_episodes += 1
-                    iter_episodes += 1
                     blue_alive = sum(
                         1 for bid in blue_ids
-                        if info.get(bid, {}).get("alive", False))
+                        if inf.get(bid, {}).get("alive", False))
                     red_alive = sum(
                         1 for rid in red_ids
-                        if info.get(rid, {}).get("alive", False))
-                    outcome = _episode_outcome(red_alive, blue_alive)
-                    if outcome == "red":
-                        red_wins += 1
-                        iter_red_wins += 1
-                    elif outcome == "blue":
-                        blue_wins += 1
+                        if inf.get(rid, {}).get("alive", False))
+                    if invalid_episode:
+                        invalid_numerical_episodes += 1
                     else:
-                        draws += 1
-                    # Accumulate death reasons
-                    for bid in blue_ids:
-                        dr = info.get(bid, {}).get("death_reason")
-                        if dr:
-                            death_stats["blue"][dr] += 1
-                    for rid in red_ids:
-                        dr = info.get(rid, {}).get("death_reason")
-                        if dr:
-                            death_stats["red"][dr] += 1
-
-                    recent_ep_rewards_red.append(float(current_ep_reward_red[env_idx]))
-                    # Persist component breakdown
-                    recent_ep_comps_red.append(
-                        {k: float(current_ep_comp_red[k][env_idx]) for k in COMP_KEYS})
-                    recent_ep_missiles_red.append(float(current_ep_missiles_red[env_idx]))
-                    recent_ep_missiles_blue.append(float(current_ep_missiles_blue[env_idx]))
-                    recent_ep_red_alive.append(float(red_alive))
-                    recent_ep_blue_alive.append(float(blue_alive))
+                        total_episodes += 1
+                        iter_episodes += 1
+                        outcome = _episode_outcome(red_alive, blue_alive)
+                        if outcome == "red":
+                            red_wins += 1
+                            iter_red_wins += 1
+                        elif outcome == "blue":
+                            blue_wins += 1
+                        else:
+                            draws += 1
+                        for bid in blue_ids:
+                            dr = inf.get(bid, {}).get("death_reason")
+                            if dr:
+                                death_stats["blue"][dr] += 1
+                        for rid in red_ids:
+                            dr = inf.get(rid, {}).get("death_reason")
+                            if dr:
+                                death_stats["red"][dr] += 1
+                        recent_ep_rewards_red.append(
+                            float(current_ep_reward_red[env_idx]))
+                        recent_ep_comps_red.append(
+                            {k: float(current_ep_comp_red[k][env_idx])
+                             for k in COMP_KEYS})
+                        recent_ep_missiles_red.append(
+                            float(current_ep_missiles_red[env_idx]))
+                        recent_ep_missiles_blue.append(
+                            float(current_ep_missiles_blue[env_idx]))
+                        recent_ep_red_alive.append(float(red_alive))
+                        recent_ep_blue_alive.append(float(blue_alive))
                     current_ep_reward_red[env_idx] = 0.0
                     for k in COMP_KEYS:
                         current_ep_comp_red[k][env_idx] = 0.0
@@ -2699,7 +2773,8 @@ def main():
                                  rollout_layout[field]
                                  for field in ROLLOUT_LAYOUT_CSV_FIELDS
                              ],
-                             total_episodes, red_wins, blue_wins, draws,
+                             total_episodes, invalid_numerical_episodes,
+                             red_wins, blue_wins, draws,
                              f"{red_alive_mean:.4f}",
                              f"{blue_alive_mean:.4f}",
                              red_deaths_missile,
@@ -2714,8 +2789,11 @@ def main():
                              f"{kd_red_missile:.6f}",
                              f"{rwr:.6f}",
                              int(rwr_denominator_zero),
-                             REWARD_VERSION,
+                             ("paper_literal_minimal_unspecified_v1"
+                              if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+                              else REWARD_VERSION),
                              config.reward_mode,
+                             config.environment_profile,
                              config.obs_normalization,
                              config.pid_profile,
                              f"{config.pid_throttle_base:.6f}",
@@ -2764,6 +2842,7 @@ def main():
             "transitions_per_update": rollout_layout["transitions_per_update"],
             "unused_replay_slots": rollout_layout["unused_replay_slots"],
             "Episodes":       total_episodes,
+            "InvalidNumericalEpisodes": invalid_numerical_episodes,
             "RedWins":        red_wins,
             "BlueWins":       blue_wins,
             "Draws":          draws,
@@ -2781,8 +2860,12 @@ def main():
             "KD_Red_MissileOnly": kd_red_missile,
             "RWR":            rwr,
             "RWRDenominatorZero": rwr_denominator_zero,
-            "RewardVersion":  REWARD_VERSION,
+            "RewardVersion":  (
+                "paper_literal_minimal_unspecified_v1"
+                if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+                else REWARD_VERSION),
             "RewardMode": config.reward_mode,
+            "EnvironmentProfile": config.environment_profile,
             "ObsNormalization": config.obs_normalization,
             "PIDProfile": config.pid_profile,
             "PIDThrottleBase": config.pid_throttle_base,

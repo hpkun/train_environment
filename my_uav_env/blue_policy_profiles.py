@@ -27,6 +27,8 @@ BLUE_POLICY_PROFILES = (
     "fixed_pair_no_mws_v1",
     "fixed_pair_hold_after_kill_v1",
     "frozen_route_blue_v1",
+    "paper_minimal_fixed_pair_v1",
+    "paper_minimal_straight_patrol_v1",
 )
 
 
@@ -79,7 +81,9 @@ class BluePolicyController:
         self.episode_generation += 1
         for index, blue_id in enumerate(blue_ids):
             target = red_ids[index % len(red_ids)] if red_ids else None
-            if self.profile in ("paper_pursuit", "frozen_route_blue_v1"):
+            if self.profile in (
+                    "paper_pursuit", "frozen_route_blue_v1",
+                    "paper_minimal_straight_patrol_v1"):
                 target = None
             self.initial_targets[blue_id] = target
             self.current_targets[blue_id] = target
@@ -298,6 +302,13 @@ class BluePolicyController:
                     assignment_reasons[blue_id] = "dead_ownship_ignored"
                     continue
                 obs = blue_obs.get(blue_id, {})
+                if self.profile == "paper_minimal_straight_patrol_v1":
+                    heading = self.initial_headings.get(blue_id, 0.0)
+                    actions[blue_id] = _paper_absolute_action(
+                        0.0, heading, speed_mps=300.0)
+                    assignments[blue_id] = None
+                    assignment_reasons[blue_id] = "straight_patrol"
+                    continue
                 if self.profile == "frozen_route_blue_v1":
                     action, _meta = self._frozen_action(
                         blue_id, blue_index, obs, current_step)
@@ -307,6 +318,33 @@ class BluePolicyController:
                     continue
 
                 target_id = self.current_targets.get(blue_id)
+                if self.profile == "paper_minimal_fixed_pair_v1":
+                    assignments[blue_id] = target_id
+                    target_index = self._target_index(target_id)
+                    if not self._target_alive(
+                            obs, target_id, num_blue, num_red):
+                        heading = _wrap_pi(float(own_headings.get(blue_id, 0.0)))
+                        actions[blue_id] = _paper_absolute_action(
+                            0.0, heading, speed_mps=300.0)
+                        assignment_reasons[blue_id] = "target_dead_hold"
+                    else:
+                        _idx, target_state, _range = _simple_target_by_index(
+                            obs, num_blue, num_red, int(target_index))
+                        action = _blue_simple_pursuit_action_impl(
+                            obs, num_blue, num_red, blue_index,
+                            forced_target_idx=target_index,
+                            own_position=own_positions.get(blue_id),
+                            own_heading=own_headings.get(blue_id),
+                            paper_profile=True)
+                        action[0] = np.clip(
+                            action[0], -10.0 / 90.0, 10.0 / 90.0)
+                        action[2] = _paper_absolute_action(
+                            0.0, 0.0, speed_mps=300.0)[2]
+                        actions[blue_id] = action
+                        assignment_reasons[blue_id] = (
+                            "fixed_pair" if target_state is not None
+                            else "track_unavailable_hold")
+                    continue
                 if not self._target_alive(obs, target_id, num_blue, num_red):
                     if self.profile == "fixed_pair_hold_after_kill_v1":
                         self.current_targets[blue_id] = None
@@ -354,7 +392,8 @@ class BluePolicyController:
             obs = blue_obs.get(blue_id, {})
             action = np.asarray(actions.get(blue_id, np.zeros(3)), dtype=np.float32)
             detected = False
-            if self.profile != "frozen_route_blue_v1":
+            if self.profile not in (
+                    "frozen_route_blue_v1", "paper_minimal_straight_patrol_v1"):
                 warning = np.asarray(obs.get("missile_warning", [0.0])).reshape(-1)
                 detected = bool(mws_detected.get(
                     blue_id, warning[0] > 0.5 if warning.size else False))
@@ -362,13 +401,20 @@ class BluePolicyController:
             self.mws_detected_agent_decisions += int(detected)
             heading = _wrap_pi(float(action[1]) * np.pi)
             pitch = float(action[0]) * (np.pi / 2.0)
-            phase = self._route_phase(current_step) if self.profile == "frozen_route_blue_v1" else "pursuit"
+            phase = (self._route_phase(current_step)
+                     if self.profile == "frozen_route_blue_v1"
+                     else "straight" if self.profile == "paper_minimal_straight_patrol_v1"
+                     else "pursuit")
             recovery = False
             if self.profile == "frozen_route_blue_v1":
                 _unused, meta = self._frozen_action(blue_id, blue_index, obs, current_step)
                 heading, pitch = meta["heading"], meta["pitch"]
                 recovery = bool(meta["altitude_recovery"])
-            delta = self._record_command(blue_id, heading, pitch, 250.0, phase, recovery)
+            commanded_speed = (300.0 if self.profile in (
+                "paper_minimal_fixed_pair_v1",
+                "paper_minimal_straight_patrol_v1") else 250.0)
+            delta = self._record_command(
+                blue_id, heading, pitch, commanded_speed, phase, recovery)
             assigned = assignments.get(blue_id)
             previous = self.current_targets.get(blue_id)
             assignment_reason = assignment_reasons.get(blue_id, "fixed_pair")
@@ -391,7 +437,7 @@ class BluePolicyController:
                 "base_heading_command_rad": float(heading),
                 "pursuit_heading_cmd_rad": float(heading),
                 "pursuit_pitch_cmd_rad": float(pitch),
-                "target_speed_cmd_mps": 250.0,
+                "target_speed_cmd_mps": commanded_speed,
                 "mws_detected": detected,
                 "mws_action_override": override,
                 "selected_missile_id": (

@@ -20,6 +20,10 @@ from my_uav_env.alignment.reward_utils import (
     DEFAULT_ALTITUDE_REWARD_CONFIG,
     REWARD_VERSION,
 )
+from configs.paper_minimal_3v3_spec import (
+    PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+    REFERENCE_ENVIRONMENT_PROFILE,
+)
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     CHECKPOINT_SCHEMA_VERSION,
@@ -32,6 +36,7 @@ from train_vanilla_mappo import (
     _episode_outcome,
     _flatten_obs,
     _joint_team_reward_once,
+    _minimal_altitude_reward_config,
     _ratio_with_denominator_zero,
     _safe_div,
     _unpack_and_validate_checkpoint,
@@ -39,7 +44,8 @@ from train_vanilla_mappo import (
 
 
 EVALUATION_FIELDNAMES = [
-    "Episode", "Outcome", "RedWin", "BlueWin", "Draw", "Steps",
+    "Episode", "Outcome", "InvalidNumericalEpisode",
+    "RedWin", "BlueWin", "Draw", "Steps",
     "EpisodeRewardRed", "RedAlive", "BlueAlive",
     "RedMissilesFired", "BlueMissilesFired",
     "RedMissileHits", "BlueMissileHits",
@@ -50,7 +56,8 @@ EVALUATION_FIELDNAMES = [
     "EnableBlueGCAS", "RewardVersion", "RewardMode", "ObsNormalization",
     "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
     "ActionDistribution", "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
-    "BluePolicyProfile", "RedGeometry", "RedLockMature", "BlueGeometry",
+    "BluePolicyProfile", "EnvironmentProfile",
+    "RedGeometry", "RedLockMature", "BlueGeometry",
     "BlueLockMature", "RedTerminalReward", "NaNInfCount",
     "blue_target_switches_total", "blue_target_dead_switches",
     "blue_distance_triggered_switches", "blue_engaged_triggered_switches",
@@ -61,7 +68,7 @@ EVALUATION_FIELDNAMES = [
 ]
 
 EVALUATION_SUMMARY_FIELDNAMES = [
-    "Episodes", "RedWins", "BlueWins", "Draws",
+    "Episodes", "InvalidNumericalEpisodes", "RedWins", "BlueWins", "Draws",
     "RedWinRate", "BlueWinRate", "RWR", "RWRDenominatorZero",
     "RedDeathsAll", "BlueDeathsAll",
     "RedDeathsMissile", "BlueDeathsMissile",
@@ -75,6 +82,7 @@ EVALUATION_SUMMARY_FIELDNAMES = [
     "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
     "ActionDistribution", "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
     "BluePolicyProfile",
+    "EnvironmentProfile",
 ]
 
 
@@ -93,21 +101,28 @@ def parse_args():
     parser.add_argument("--enable-blue-gcas", action="store_true", default=False)
     parser.add_argument("--blue-policy-profile", choices=(
         "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
-        "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1"),
+        "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1",
+        "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1"),
         default="paper_pursuit")
+    parser.add_argument("--environment-profile", choices=(
+        REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE),
+        default=REFERENCE_ENVIRONMENT_PROFILE)
     parser.add_argument("--obs-mode", type=str,
                         choices=("paper_strict", "engineering"),
                         default="paper_strict")
     parser.add_argument("--obs-normalization", type=str,
                         choices=("paper_fixed_v1", "none"),
                         default="paper_fixed_v1")
-    parser.add_argument("--pid-profile", choices=("paper", "engineering_safe"),
+    parser.add_argument("--pid-profile", choices=(
+        "paper", "engineering_safe", "paper_minimal_shared_v1"),
                         default="paper")
     parser.add_argument("--pid-throttle-base", type=float, default=0.0)
-    parser.add_argument("--reward-mode", choices=("paper_joint", "engineering_local"),
+    parser.add_argument("--reward-mode", choices=(
+        "paper_joint", "engineering_local", "paper_minimal_joint_v1"),
                         default="paper_joint")
     parser.add_argument("--missile-guidance-mode",
-                        choices=("paper_eq9", "legacy_simplified"),
+                        choices=("paper_eq9", "legacy_simplified",
+                                 "paper_minimal_point_mass_v1"),
                         default="paper_eq9")
     parser.add_argument("--output", type=str,
                         default="results/eval_vanilla_mappo.csv")
@@ -181,18 +196,25 @@ def _load_actor(args, device: torch.device):
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": args.obs_mode,
         "obs_normalization": args.obs_normalization,
-        "reward_version": REWARD_VERSION,
+        "reward_version": (
+            "paper_literal_minimal_unspecified_v1"
+            if args.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+            else REWARD_VERSION),
         "reward_mode": args.reward_mode,
         "pid_profile": args.pid_profile,
         "pid_throttle_base": float(args.pid_throttle_base),
         "missile_guidance_mode": args.missile_guidance_mode,
-        "altitude_reward_config": asdict(DEFAULT_ALTITUDE_REWARD_CONFIG),
+        "altitude_reward_config": asdict(
+            _minimal_altitude_reward_config()
+            if args.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+            else DEFAULT_ALTITUDE_REWARD_CONFIG),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
         "action_log_std_init": ACTION_LOG_STD_INIT,
         "actor_hidden_sizes": [128, 128],
         "actor_rnn_hidden_size": 128,
         "recurrent_n": 1,
         "blue_policy_profile": args.blue_policy_profile,
+        "environment_profile": args.environment_profile,
         "num_red": args.num_red,
         "num_blue": args.num_blue,
         "global_state_dim": _compute_global_state_dim(args.num_red, args.obs_mode),
@@ -241,6 +263,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                     reward_mode: str = "paper_joint",
                     missile_guidance_mode: str = "paper_eq9",
                     blue_policy_profile: str = "paper_pursuit",
+                    environment_profile: str = REFERENCE_ENVIRONMENT_PROFILE,
                     seed: int | None = None,
                     deterministic: bool = True):
     env = UavCombatEnv(
@@ -253,6 +276,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         reward_mode=reward_mode,
         missile_guidance_mode=missile_guidance_mode,
         blue_policy_profile=blue_policy_profile,
+        environment_profile=environment_profile,
         enable_gcas_for_blue=enable_blue_gcas,
         suppress_jsbsim_output=True,
     )
@@ -358,7 +382,10 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
 
         red_alive = sum(1 for rid in red_ids if info.get(rid, {}).get("alive", False))
         blue_alive = sum(1 for bid in blue_ids if info.get(bid, {}).get("alive", False))
-        outcome = _episode_outcome(red_alive, blue_alive)
+        invalid_episode = bool(info.get("__episode__", {}).get(
+            "invalid_numerical_episode", False))
+        outcome = "invalid" if invalid_episode else _episode_outcome(
+            red_alive, blue_alive)
 
         red_deaths = _death_counts(death_reasons, red_ids)
         blue_deaths = _death_counts(death_reasons, blue_ids)
@@ -372,9 +399,13 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         blue_missile_hits = red_deaths_missile
         blue_diag = info.get("__blue_policy_diag__", {})
 
+        altitude_config = (_minimal_altitude_reward_config()
+                           if environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+                           else DEFAULT_ALTITUDE_REWARD_CONFIG)
         return {
             "Episode": episode_idx,
             "Outcome": outcome,
+            "InvalidNumericalEpisode": int(invalid_episode),
             "RedWin": 1 if outcome == "red" else 0,
             "BlueWin": 1 if outcome == "blue" else 0,
             "Draw": 1 if outcome == "draw" else 0,
@@ -399,18 +430,22 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "NumBlue": num_blue,
             "MaxSteps": max_steps,
             "EnableBlueGCAS": bool(enable_blue_gcas),
-            "RewardVersion": REWARD_VERSION,
+            "RewardVersion": (
+                "paper_literal_minimal_unspecified_v1"
+                if environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+                else REWARD_VERSION),
             "RewardMode": reward_mode,
             "ObsNormalization": obs_normalization,
             "PIDProfile": pid_profile,
             "PIDThrottleBase": float(pid_throttle_base),
             "MissileGuidanceMode": missile_guidance_mode,
             "ActionDistribution": ACTION_DISTRIBUTION_VERSION,
-            "AltitudeRewardConfigVersion": DEFAULT_ALTITUDE_REWARD_CONFIG.version,
+            "AltitudeRewardConfigVersion": altitude_config.version,
             "AltitudeRewardConfig": json.dumps(
-                asdict(DEFAULT_ALTITUDE_REWARD_CONFIG), sort_keys=True,
+                asdict(altitude_config), sort_keys=True,
                 separators=(",", ":")),
             "BluePolicyProfile": blue_policy_profile,
+            "EnvironmentProfile": environment_profile,
             "RedGeometry": int(launch_diag_totals["red"]["geometry_ok_pairs"]),
             "RedLockMature": int(launch_diag_totals["red"]["lock_mature_pairs"]),
             "BlueGeometry": int(launch_diag_totals["blue"]["geometry_ok_pairs"]),
@@ -432,29 +467,33 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
 
 
 def _aggregate_evaluation_summary(rows: list[dict]) -> dict:
-    episodes = len(rows)
-    red_wins = sum(int(row["RedWin"]) for row in rows)
-    blue_wins = sum(int(row["BlueWin"]) for row in rows)
-    draws = sum(int(row["Draw"]) for row in rows)
+    valid_rows = [row for row in rows
+                  if not int(row.get("InvalidNumericalEpisode", 0))]
+    invalid_episodes = len(rows) - len(valid_rows)
+    episodes = len(valid_rows)
+    red_wins = sum(int(row["RedWin"]) for row in valid_rows)
+    blue_wins = sum(int(row["BlueWin"]) for row in valid_rows)
+    draws = sum(int(row["Draw"]) for row in valid_rows)
     rwr, rwr_zero = _ratio_with_denominator_zero(red_wins, blue_wins)
-    red_deaths_missile = sum(int(row["RedDeathsMissile"]) for row in rows)
-    blue_deaths_missile = sum(int(row["BlueDeathsMissile"]) for row in rows)
+    red_deaths_missile = sum(int(row["RedDeathsMissile"]) for row in valid_rows)
+    blue_deaths_missile = sum(int(row["BlueDeathsMissile"]) for row in valid_rows)
     red_deaths_all = sum(
-        int(row[key]) for row in rows
+        int(row[key]) for row in valid_rows
         for key in ("RedDeathsMissile", "RedDeathsCrash", "RedDeathsOther"))
     blue_deaths_all = sum(
-        int(row[key]) for row in rows
+        int(row[key]) for row in valid_rows
         for key in ("BlueDeathsMissile", "BlueDeathsCrash", "BlueDeathsOther"))
     kd_all, _ = _ratio_with_denominator_zero(blue_deaths_all, red_deaths_all)
     kd_missile, _ = _ratio_with_denominator_zero(
         blue_deaths_missile, red_deaths_missile)
-    red_fired = sum(float(row["RedMissilesFired"]) for row in rows)
-    blue_fired = sum(float(row["BlueMissilesFired"]) for row in rows)
-    red_hits = sum(float(row["RedMissileHits"]) for row in rows)
-    blue_hits = sum(float(row["BlueMissileHits"]) for row in rows)
+    red_fired = sum(float(row["RedMissilesFired"]) for row in valid_rows)
+    blue_fired = sum(float(row["BlueMissilesFired"]) for row in valid_rows)
+    red_hits = sum(float(row["RedMissileHits"]) for row in valid_rows)
+    blue_hits = sum(float(row["BlueMissileHits"]) for row in valid_rows)
     semantics = rows[0] if rows else {}
     return {
         "Episodes": episodes,
+        "InvalidNumericalEpisodes": invalid_episodes,
         "RedWins": red_wins,
         "BlueWins": blue_wins,
         "Draws": draws,
@@ -468,8 +507,8 @@ def _aggregate_evaluation_summary(rows: list[dict]) -> dict:
         "BlueDeathsMissile": blue_deaths_missile,
         "KD_Red_AllDeaths": kd_all,
         "KD_Red_MissileOnly": kd_missile,
-        "MeanRedAlive": float(np.mean([r["RedAlive"] for r in rows])) if rows else 0.0,
-        "MeanBlueAlive": float(np.mean([r["BlueAlive"] for r in rows])) if rows else 0.0,
+        "MeanRedAlive": float(np.mean([r["RedAlive"] for r in valid_rows])) if valid_rows else 0.0,
+        "MeanBlueAlive": float(np.mean([r["BlueAlive"] for r in valid_rows])) if valid_rows else 0.0,
         "RedMissilesFired": red_fired,
         "BlueMissilesFired": blue_fired,
         "RedMissileHits": red_hits,
@@ -482,7 +521,7 @@ def _aggregate_evaluation_summary(rows: list[dict]) -> dict:
                 "EnableBlueGCAS", "RewardVersion", "RewardMode", "ObsNormalization",
                 "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
                 "ActionDistribution", "AltitudeRewardConfigVersion",
-                "AltitudeRewardConfig", "BluePolicyProfile",
+                "AltitudeRewardConfig", "BluePolicyProfile", "EnvironmentProfile",
             )
         },
     }
@@ -502,7 +541,7 @@ def _write_and_print_summary(rows: list[dict], output_path: str,
     print("=" * 70)
     print("Summary")
     print(f"Episodes: {summary['Episodes']}")
-    print(f"Reward version: {REWARD_VERSION}")
+    print(f"Reward version: {summary['RewardVersion']}")
     print(f"Red / Blue win rate: {summary['RedWinRate']:.6f} / "
           f"{summary['BlueWinRate']:.6f}")
     print(f"RWR: {summary['RWR']} "
@@ -520,11 +559,17 @@ def main():
     device = _select_device(args.device)
     actor, rnn_hidden_size, _checkpoint = _load_actor(args, device)
     print(f"enable_blue_gcas: {args.enable_blue_gcas}", flush=True)
-    print(f"reward_version: {REWARD_VERSION}", flush=True)
+    minimal = args.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+    print("reward_version: " + (
+        "paper_literal_minimal_unspecified_v1" if minimal else REWARD_VERSION),
+        flush=True)
+    print(f"environment_profile: {args.environment_profile}", flush=True)
     print(f"pid_throttle_base: {args.pid_throttle_base}", flush=True)
     print(f"action_distribution: {ACTION_DISTRIBUTION_VERSION}", flush=True)
+    altitude_config = (_minimal_altitude_reward_config()
+                       if minimal else DEFAULT_ALTITUDE_REWARD_CONFIG)
     print("altitude_reward_config: "
-          f"{json.dumps(asdict(DEFAULT_ALTITUDE_REWARD_CONFIG), sort_keys=True)}",
+          f"{json.dumps(asdict(altitude_config), sort_keys=True)}",
           flush=True)
 
     output_dir = os.path.dirname(args.output)
@@ -553,6 +598,7 @@ def main():
                 reward_mode=args.reward_mode,
                 missile_guidance_mode=args.missile_guidance_mode,
                 blue_policy_profile=args.blue_policy_profile,
+                environment_profile=args.environment_profile,
                 seed=None if args.seed is None else args.seed + ep - 1,
             )
             rows.append(row)

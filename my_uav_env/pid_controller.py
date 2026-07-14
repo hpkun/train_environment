@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Bank-to-Turn PID controller for the paper environment.
 
 Eq.12 constructs the desired direction in NED. Eq.13 converts it to the
@@ -99,8 +100,10 @@ class PIDController:
                  throttle_base: float = 0.0, config=None):
         from configs.brma_mappo_paper_spec import PIDConfig
         self.config = config or PIDConfig()
-        if profile not in ("paper", "engineering_safe"):
-            raise ValueError("profile must be 'paper' or 'engineering_safe'")
+        if profile not in ("paper", "engineering_safe", "paper_minimal_shared_v1"):
+            raise ValueError(
+                "profile must be 'paper', 'engineering_safe', or "
+                "'paper_minimal_shared_v1'")
         self.dt = dt
         self.profile = profile
         self._debug = debug
@@ -299,7 +302,7 @@ class PIDController:
             self.reset()
             return 0.0, 0.0, 0.0, 0.0
 
-        if self.profile == "paper":
+        if self.profile in ("paper", "paper_minimal_shared_v1"):
             roll_error, pitch_error, *_geometry = self.paper_direction_errors(
                 current_rpy, target_pitch, target_heading)
             aileron = self._roll_pid.step(roll_error, self.dt)
