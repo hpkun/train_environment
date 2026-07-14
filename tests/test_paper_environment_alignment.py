@@ -40,19 +40,23 @@ from rule_based_agent import (
     reset_rule_memory,
 )
 from train_vanilla_mappo import (
+    ACTION_DISTRIBUTION_VERSION,
+    ACTION_LOG_STD_INIT,
     Config,
     CentralizedCritic,
-    SquashedNormal,
     REWARD_COMPONENT_LOG_FIELDS,
     RolloutBuffer,
     VanillaActor,
     _build_actor_segments,
+    _accumulate_action_bound_totals,
+    _action_bound_metrics,
     _checkpoint_metadata,
     _classify_death_reason,
     _compute_global_state_dim,
     _compute_joint_gae_by_env,
     _compute_obs_dim,
     _episode_outcome,
+    _empty_action_bound_totals,
     _flatten_obs,
     _global_state_from_local_obs_flats,
     _joint_team_reward_once,
@@ -312,7 +316,7 @@ def test_evaluation_and_acmi_use_shared_joint_reward_reader():
         assert "_joint_team_reward_once" in called_names
 
 
-def test_evaluation_executes_squashed_distribution_mode(monkeypatch):
+def test_evaluation_executes_clipped_normal_mean(monkeypatch):
     import evaluate_vanilla_mappo as evaluation
 
     def observation():
@@ -325,14 +329,14 @@ def test_evaluation_executes_squashed_distribution_mode(monkeypatch):
             "death_mask": np.ones(2, dtype=np.int64),
         }
 
-    class ModeOnlyDistribution:
+    class MeanOnlyDistribution:
         @property
-        def mode(self):
-            return torch.tensor([[0.25, -0.5, 0.75]], dtype=torch.float32)
+        def mean(self):
+            return torch.tensor([[1.25, -1.5, 0.75]], dtype=torch.float32)
 
     class FakeActor:
         def __call__(self, obs, hidden):
-            return ModeOnlyDistribution(), hidden
+            return MeanOnlyDistribution(), hidden
 
     class FakeEnv:
         last_red_action = None
@@ -374,7 +378,7 @@ def test_evaluation_executes_squashed_distribution_mode(monkeypatch):
         max_steps=1, device=torch.device("cpu"), episode_idx=1,
         enable_blue_gcas=False, obs_mode="paper_strict")
 
-    assert np.allclose(FakeEnv.last_red_action, [0.25, -0.5, 0.75])
+    assert np.allclose(FakeEnv.last_red_action, [1.0, -1.0, 0.75])
 
 
 def test_formal_evaluation_defaults_to_100_episodes(monkeypatch):
@@ -448,6 +452,8 @@ def test_flatten_obs_dim_matches_compute_obs_dim_for_paper_strict():
 
     flat = _flatten_obs(obs, obs_mode="paper_strict")
     assert flat.shape == (_compute_obs_dim(1, 1, is_red=True, obs_mode="paper_strict"),)
+    assert flat.shape == (20,)
+    assert not np.any(flat == 1.0)
 
 
 def test_flatten_obs_dim_matches_compute_obs_dim_for_engineering():
@@ -727,7 +733,8 @@ def test_standard_mappo_actor_critic_shapes_for_paper_6v6():
     )
     values = critic(torch.zeros((2, global_dim), dtype=torch.float32))
 
-    assert distribution.mode.shape == (6, 3)
+    assert distribution.mean.shape == (6, 3)
+    assert isinstance(distribution, torch.distributions.Normal)
     assert hidden.shape == (6, 8)
     assert values.shape == (2, 1)
 
@@ -1136,19 +1143,34 @@ def test_joint_gae_is_one_trajectory_per_env_and_terminal_bootstrap_is_zeroed():
     assert torch.allclose(returns[0], torch.tensor([6.0, 5.0, 3.0]))
 
 
-def test_squashed_normal_samples_and_boundary_log_probs_are_finite():
-    distribution = SquashedNormal(
-        torch.zeros(10000, 3), torch.ones(10000, 3))
-    samples = distribution.sample()
-    assert torch.all(samples > -1.0)
-    assert torch.all(samples < 1.0)
-    boundary_actions = torch.tensor([
-        [-1.0, -0.9999999, 0.0], [1.0, 0.9999999, 0.5]
-    ])
-    boundary_dist = SquashedNormal(
-        torch.zeros_like(boundary_actions), torch.ones_like(boundary_actions))
-    assert torch.isfinite(boundary_dist.log_prob(boundary_actions)).all()
-    assert torch.allclose(boundary_dist.mode, torch.zeros_like(boundary_actions))
+def test_vanilla_actor_matches_paper_mlp_gru_normal_layout():
+    actor = VanillaActor(obs_dim=60)
+    distribution, hidden = actor(torch.zeros(2, 60), torch.zeros(2, 128))
+
+    assert actor.fc_in.in_features == 60 and actor.fc_in.out_features == 128
+    assert actor.fc_hidden.in_features == 128 and actor.fc_hidden.out_features == 128
+    assert actor.rnn.input_size == 128 and actor.rnn.hidden_size == 128
+    assert actor.action_head.in_features == 128 and actor.action_head.out_features == 3
+    assert isinstance(distribution, torch.distributions.Normal)
+    assert distribution.mean.shape == (2, 3) and hidden.shape == (2, 128)
+    assert torch.allclose(distribution.scale, torch.full((2, 3), 0.3))
+    assert torch.allclose(actor.action_log_std, torch.full((3,), ACTION_LOG_STD_INIT))
+
+
+def test_raw_action_is_buffered_while_environment_action_is_clipped():
+    raw = np.array([[1.4, -1.2, 0.25]], dtype=np.float32)
+    env_action = np.clip(raw, -1.0, 1.0)
+    buffer = RolloutBuffer(1, 1, 1, 3, 4)
+    buffer.store_step(0, 0, 0, np.zeros(2, dtype=np.float32), raw[0], 0.0,
+                      True, np.zeros(4, dtype=np.float32), True)
+    totals = _empty_action_bound_totals()
+    _accumulate_action_bound_totals(totals, raw, env_action)
+    metrics = _action_bound_metrics(totals)
+
+    assert np.array_equal(buffer.actions[0, 0, 0], raw[0])
+    assert np.array_equal(env_action[0], [1.0, -1.0, 0.25])
+    assert math.isclose(metrics["RawActionOutOfBoundsFrac"], 2.0 / 3.0)
+    assert math.isclose(metrics["EnvActionNearBoundFrac"], 2.0 / 3.0)
 
 
 def _fill_actor_step(buffer, actor, step, obs, hidden, sequence_start):
@@ -1156,7 +1178,7 @@ def _fill_actor_step(buffer, actor, step, obs, hidden, sequence_start):
     hidden_t = torch.as_tensor(hidden, dtype=torch.float32).unsqueeze(0)
     with torch.no_grad():
         distribution, next_hidden = actor(obs_t, hidden_t)
-        action = distribution.mode
+        action = distribution.mean
         log_prob = distribution.log_prob(action).sum(dim=-1)
     buffer.store_step(
         step, 0, 0, obs, action[0].numpy(), float(log_prob.item()), True,
@@ -1292,12 +1314,17 @@ def test_missile_probability_failure_terminates_with_raw_reason():
 
 def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     cfg = Config()
-    obs_dim = _compute_obs_dim(6, 6, is_red=True, obs_mode="paper_strict")
-    global_dim = _compute_global_state_dim(6, "paper_strict")
+    obs_dim = _compute_obs_dim(3, 3, is_red=True, obs_mode="paper_strict")
+    global_dim = _compute_global_state_dim(3, "paper_strict")
     metadata = _checkpoint_metadata(cfg, obs_dim, global_dim)
-    state = VanillaActor(obs_dim, hidden=16, rnn_hidden=8).state_dict()
-    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v2"
-    assert metadata["action_distribution"] == "tanh_squashed_normal_v1"
+    state = VanillaActor(obs_dim).state_dict()
+    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v3"
+    assert metadata["action_distribution"] == ACTION_DISTRIBUTION_VERSION
+    assert metadata["actor_obs_dim"] == 60
+    assert metadata["global_state_dim"] == 30
+    assert metadata["actor_hidden_sizes"] == [128, 128]
+    assert metadata["actor_rnn_hidden_size"] == 128
+    assert metadata["recurrent_n"] == 1
     assert metadata["pid_throttle_base"] == 0.0
 
     with np.testing.assert_raises(ValueError):
@@ -1310,6 +1337,11 @@ def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     payload = {"state_dict": state, "metadata": dict(metadata), "model_kind": "actor"}
     payload["metadata"]["schema_version"] = "vanilla_mappo_paper_env_v1"
     with np.testing.assert_raises_regex(ValueError, "schema_version"):
+        _unpack_and_validate_checkpoint(payload, metadata, "actor")
+
+    payload = {"state_dict": state, "metadata": dict(metadata), "model_kind": "actor"}
+    payload["metadata"]["action_distribution"] = "tanh_squashed_normal_v1"
+    with np.testing.assert_raises_regex(ValueError, "action_distribution"):
         _unpack_and_validate_checkpoint(payload, metadata, "actor")
 
     payload = {"state_dict": state, "metadata": dict(metadata), "model_kind": "actor"}

@@ -114,5 +114,5 @@ def test_main_defaults_are_strict_3v3_dimensions():
     assert cfg.obs_mode == "paper_strict"
     assert cfg.reward_mode == "paper_joint"
     assert cfg.pid_profile == "paper"
-    assert _compute_obs_dim(3, 3, True, "paper_strict") == 66
+    assert _compute_obs_dim(3, 3, True, "paper_strict") == 60
     assert _compute_global_state_dim(3, "paper_strict") == 30

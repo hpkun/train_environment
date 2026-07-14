@@ -24,6 +24,7 @@ from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     CHECKPOINT_SCHEMA_VERSION,
     ACTION_DISTRIBUTION_VERSION,
+    ACTION_LOG_STD_INIT,
     VanillaActor,
     _classify_death_reason,
     _compute_global_state_dim,
@@ -187,6 +188,10 @@ def _load_actor(args, device: torch.device):
         "missile_guidance_mode": args.missile_guidance_mode,
         "altitude_reward_config": asdict(DEFAULT_ALTITUDE_REWARD_CONFIG),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
+        "action_log_std_init": ACTION_LOG_STD_INIT,
+        "actor_hidden_sizes": [128, 128],
+        "actor_rnn_hidden_size": 128,
+        "recurrent_n": 1,
         "blue_policy_profile": args.blue_policy_profile,
         "num_red": args.num_red,
         "num_blue": args.num_blue,
@@ -306,7 +311,9 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                                             dtype=torch.float32, device=device)
                     with torch.no_grad():
                         action_dist, new_rnn = actor(obs_t, rnn_t)
-                        act = action_dist.mode if deterministic else action_dist.sample()
+                        raw_act = (action_dist.mean if deterministic
+                                   else action_dist.sample())
+                        act = raw_act.clamp(-1.0, 1.0)
                     for k, i in enumerate(alive_indices):
                         actions[red_ids[i]] = act[k].cpu().numpy().astype(np.float32)
                         rnn_a[i] = new_rnn[k].cpu().numpy()

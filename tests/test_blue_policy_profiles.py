@@ -295,7 +295,7 @@ def test_eight_controller_instances_are_isolated_and_reproducible():
 
 
 def test_dimensions_and_training_diagnostic_fields_are_unchanged_or_present():
-    assert _compute_obs_dim(3, 3, True, obs_mode="paper_strict") == 66
+    assert _compute_obs_dim(3, 3, True, obs_mode="paper_strict") == 60
     assert _compute_global_state_dim(3, "paper_strict") == 30
     assert "blue_mws_override_agent_decisions" in BLUE_POLICY_DIAG_CSV_FIELDS
     assert "blue_mws_detected_agent_decisions" in BLUE_POLICY_DIAG_CSV_FIELDS

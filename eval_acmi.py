@@ -57,6 +57,7 @@ from my_uav_env.alignment.reward_utils import (
 )
 from train_vanilla_mappo import (
     ACTION_DISTRIBUTION_VERSION,
+    ACTION_LOG_STD_INIT,
     CHECKPOINT_SCHEMA_VERSION,
     VanillaActor,
     _classify_death_reason,
@@ -233,6 +234,10 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                 "missile_guidance_mode": missile_guidance_mode,
                 "altitude_reward_config": asdict(DEFAULT_ALTITUDE_REWARD_CONFIG),
                 "action_distribution": ACTION_DISTRIBUTION_VERSION,
+                "action_log_std_init": ACTION_LOG_STD_INIT,
+                "actor_hidden_sizes": [128, 128],
+                "actor_rnn_hidden_size": 128,
+                "recurrent_n": 1,
                 "blue_policy_profile": blue_policy_profile,
                 "num_red": num_red,
                 "num_blue": num_blue,
@@ -367,7 +372,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                     rnn_t = torch.as_tensor(rnn_a[alive_indices], device=device)
                     with torch.no_grad():
                         action_dist, new_rnn = actor(obs_t, rnn_t)
-                        act = action_dist.mode  # deterministic squashed action
+                        act = action_dist.mean.clamp(-1.0, 1.0)
                     for k, i in enumerate(alive_indices):
                         actions[red_ids[i]] = act[k].cpu().numpy()
                         rnn_a[i] = new_rnn[k].cpu().numpy()

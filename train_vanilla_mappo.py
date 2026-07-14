@@ -160,7 +160,9 @@ def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool,
         n_enemy = num_red
     total_entities = 1 + max(n_ally, 0) + n_enemy
     entity_dim = 10 if obs_mode == "paper_strict" else 11
-    dim = entity_dim * total_entities + (num_red + num_blue)
+    dim = entity_dim * total_entities
+    if obs_mode != "paper_strict":
+        dim += num_red + num_blue
     if _include_aux_obs_default(obs_mode, include_aux_obs):
         dim += 1 + 1 + 3
     return dim
@@ -184,8 +186,11 @@ def _global_state_from_local_obs_flats(
     ]).astype(np.float32)
 
 
+ACTION_LOG_STD_INIT = float(np.log(0.3))
+
+
 class SquashedNormal:
-    """Tanh-squashed diagonal Gaussian with stable transformed log density."""
+    """Compatibility distribution used by the separate attention/BRMA path."""
 
     def __init__(self, loc: torch.Tensor, scale: torch.Tensor, eps: float = 1e-6):
         self.loc = loc
@@ -215,24 +220,21 @@ class SquashedNormal:
         return self.base_dist.log_prob(latent) - log_det
 
     def base_entropy(self) -> torch.Tensor:
-        """Latent Gaussian entropy; not exact squashed-action entropy."""
         return self.base_dist.entropy()
 
 
 class VanillaActor(nn.Module):
-    """Flattened observation -> GRU -> tanh-squashed diagonal Gaussian."""
+    """Two-layer MLP -> GRU -> diagonal Gaussian mean."""
 
     def __init__(self, obs_dim: int, action_dim: int = 3,
                  hidden: int = 128, rnn_hidden: int = 128):
         super().__init__()
         self.fc_in = nn.Linear(obs_dim, hidden)
+        self.fc_hidden = nn.Linear(hidden, hidden)
         self.rnn = nn.GRUCell(hidden, rnn_hidden)
-        self.action_head = nn.Sequential(
-            nn.Linear(rnn_hidden, 64),
-            nn.ReLU(),
-            nn.Linear(64, action_dim),
-        )
-        self.action_log_std = nn.Parameter(torch.full((action_dim,), -1.204))  # ln(0.3)
+        self.action_head = nn.Linear(rnn_hidden, action_dim)
+        self.action_log_std = nn.Parameter(torch.full(
+            (action_dim,), ACTION_LOG_STD_INIT))
 
     def forward(self, obs_flat: torch.Tensor, rnn_hidden: torch.Tensor):
         """
@@ -240,17 +242,18 @@ class VanillaActor(nn.Module):
             obs_flat:   (B, obs_dim)  展平观测
             rnn_hidden: (B, rnn_hidden)  GRU 隐藏状态
         Returns:
-            action_dist: SquashedNormal
+            action_dist: torch.distributions.Normal
             rnn_hidden:  (B, rnn_hidden)
         """
-        x = F.relu(self.fc_in(obs_flat))          # (B, hidden)
+        x = F.relu(self.fc_in(obs_flat))
+        x = F.relu(self.fc_hidden(x))
         rnn_hidden_new = self.rnn(x, rnn_hidden)  # (B, rnn_hidden)
-        latent_mu = self.action_head(rnn_hidden_new)
-        latent_mu = torch.nan_to_num(
-            latent_mu, nan=0.0, posinf=20.0, neginf=-20.0)
+        action_mean = self.action_head(rnn_hidden_new)
+        action_mean = torch.nan_to_num(
+            action_mean, nan=0.0, posinf=20.0, neginf=-20.0)
         sigma = torch.exp(self.action_log_std).clamp(min=1e-4)
-        sigma = sigma.unsqueeze(0).expand_as(latent_mu)
-        return SquashedNormal(latent_mu, sigma), rnn_hidden_new
+        sigma = sigma.unsqueeze(0).expand_as(action_mean)
+        return torch.distributions.Normal(action_mean, sigma), rnn_hidden_new
 
 
 class CentralizedCritic(nn.Module):
@@ -260,7 +263,7 @@ class CentralizedCritic(nn.Module):
     UAVs. It therefore excludes repeated enemy portions of local observations.
     """
 
-    def __init__(self, global_obs_dim: int, hidden: int = 256):
+    def __init__(self, global_obs_dim: int, hidden: int = 128):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(global_obs_dim, hidden),
@@ -313,8 +316,10 @@ def _flatten_obs(obs_np: dict, obs_mode: str = "paper_strict",
         np.asarray(ego, dtype=np.float32).ravel(),
         np.asarray(allies, dtype=np.float32).ravel(),
         np.asarray(enemies, dtype=np.float32).ravel(),
-        obs_np.get("alive_mask", obs_np["death_mask"]).astype(np.float32).ravel(),
     ]
+    if obs_mode != "paper_strict":
+        parts.append(obs_np.get(
+            "alive_mask", obs_np["death_mask"]).astype(np.float32).ravel())
     if _include_aux_obs_default(obs_mode, include_aux_obs):
         parts.extend([
             obs_np["missile_warning"].ravel(),
@@ -428,11 +433,18 @@ LAUNCH_QUALITY_AGG_CSV_FIELDS = (
 )
 
 ACTION_BOUND_CSV_FIELDS = (
-    "RedActionAbsMean",
-    "RedActionNearBoundFrac",
-    "RedActionNearBoundFracPitch",
-    "RedActionNearBoundFracHeading",
-    "RedActionNearBoundFracVelocity",
+    "RawActionAbsMean",
+    "RawActionAbsMeanPitch",
+    "RawActionAbsMeanHeading",
+    "RawActionAbsMeanVelocity",
+    "RawActionOutOfBoundsFrac",
+    "RawActionOutOfBoundsFracPitch",
+    "RawActionOutOfBoundsFracHeading",
+    "RawActionOutOfBoundsFracVelocity",
+    "EnvActionNearBoundFrac",
+    "EnvActionNearBoundFracPitch",
+    "EnvActionNearBoundFracHeading",
+    "EnvActionNearBoundFracVelocity",
 )
 
 BLUE_POLICY_DIAG_CSV_FIELDS = (
@@ -448,8 +460,8 @@ BLUE_POLICY_DIAG_CSV_FIELDS = (
     "blue_altitude_recovery_frames",
 )
 
-CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v2"
-ACTION_DISTRIBUTION_VERSION = "tanh_squashed_normal_v1"
+CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v3"
+ACTION_DISTRIBUTION_VERSION = "diag_gaussian_env_clip_v1"
 
 
 def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
@@ -478,6 +490,10 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "num_blue": int(config.num_blue),
         "global_state_dim": int(global_state_dim),
         "actor_obs_dim": int(obs_dim),
+        "actor_hidden_sizes": [int(config.mlp_hidden), int(config.mlp_hidden)],
+        "actor_rnn_hidden_size": int(config.rnn_hidden_size),
+        "recurrent_n": 1,
+        "action_log_std_init": ACTION_LOG_STD_INIT,
         "environment_config": environment_snapshot,
         "environment_config_fingerprint": environment_snapshot[
             "environment_config_fingerprint"],
@@ -639,47 +655,66 @@ def _launch_quality_metrics(
 
 def _empty_action_bound_totals() -> dict:
     return {
-        "abs_sum": 0.0,
+        "raw_abs_sum": 0.0,
+        "raw_dim_abs_sum": np.zeros(3, dtype=np.float64),
         "element_count": 0,
-        "near_bound_count": 0,
-        "dim_near_bound_count": np.zeros(3, dtype=np.int64),
+        "raw_out_of_bounds_count": 0,
+        "raw_dim_out_of_bounds_count": np.zeros(3, dtype=np.int64),
+        "env_near_bound_count": 0,
+        "env_dim_near_bound_count": np.zeros(3, dtype=np.int64),
         "dim_count": np.zeros(3, dtype=np.int64),
     }
 
 
 def _accumulate_action_bound_totals(
     totals: dict,
-    actions,
+    raw_actions,
+    env_actions,
     threshold: float = 0.999,
 ) -> None:
-    values = np.asarray(actions, dtype=np.float64)
-    if values.size == 0:
+    raw_values = np.asarray(raw_actions, dtype=np.float64)
+    env_values = np.asarray(env_actions, dtype=np.float64)
+    if raw_values.size == 0:
         return
-    values = values.reshape(-1, values.shape[-1])
-    near_bound = np.abs(values) >= threshold
-    totals["abs_sum"] += float(np.abs(values).sum())
-    totals["element_count"] += int(values.size)
-    totals["near_bound_count"] += int(near_bound.sum())
-    dims = min(3, values.shape[-1])
-    totals["dim_near_bound_count"][:dims] += near_bound[:, :dims].sum(
+    raw_values = raw_values.reshape(-1, raw_values.shape[-1])
+    env_values = env_values.reshape(-1, env_values.shape[-1])
+    raw_abs = np.abs(raw_values)
+    raw_out_of_bounds = raw_abs > 1.0
+    env_near_bound = np.abs(env_values) >= threshold
+    totals["raw_abs_sum"] += float(raw_abs.sum())
+    totals["element_count"] += int(raw_values.size)
+    totals["raw_out_of_bounds_count"] += int(raw_out_of_bounds.sum())
+    totals["env_near_bound_count"] += int(env_near_bound.sum())
+    dims = min(3, raw_values.shape[-1])
+    totals["raw_dim_abs_sum"][:dims] += raw_abs[:, :dims].sum(axis=0)
+    totals["raw_dim_out_of_bounds_count"][:dims] += raw_out_of_bounds[:, :dims].sum(
         axis=0).astype(np.int64)
-    totals["dim_count"][:dims] += values.shape[0]
+    totals["env_dim_near_bound_count"][:dims] += env_near_bound[:, :dims].sum(
+        axis=0).astype(np.int64)
+    totals["dim_count"][:dims] += raw_values.shape[0]
 
 
 def _action_bound_metrics(totals: dict) -> dict:
     elem_count = int(totals["element_count"])
     dim_count = totals["dim_count"]
-    dim_near_bound = totals["dim_near_bound_count"]
+    raw_dim_abs = totals["raw_dim_abs_sum"]
+    raw_dim_oob = totals["raw_dim_out_of_bounds_count"]
+    env_dim_near = totals["env_dim_near_bound_count"]
     return {
-        "RedActionAbsMean": _safe_div(totals["abs_sum"], elem_count),
-        "RedActionNearBoundFrac": _safe_div(
-            totals["near_bound_count"], elem_count),
-        "RedActionNearBoundFracPitch": _safe_div(
-            int(dim_near_bound[0]), int(dim_count[0])),
-        "RedActionNearBoundFracHeading": _safe_div(
-            int(dim_near_bound[1]), int(dim_count[1])),
-        "RedActionNearBoundFracVelocity": _safe_div(
-            int(dim_near_bound[2]), int(dim_count[2])),
+        "RawActionAbsMean": _safe_div(totals["raw_abs_sum"], elem_count),
+        "RawActionAbsMeanPitch": _safe_div(raw_dim_abs[0], dim_count[0]),
+        "RawActionAbsMeanHeading": _safe_div(raw_dim_abs[1], dim_count[1]),
+        "RawActionAbsMeanVelocity": _safe_div(raw_dim_abs[2], dim_count[2]),
+        "RawActionOutOfBoundsFrac": _safe_div(
+            totals["raw_out_of_bounds_count"], elem_count),
+        "RawActionOutOfBoundsFracPitch": _safe_div(raw_dim_oob[0], dim_count[0]),
+        "RawActionOutOfBoundsFracHeading": _safe_div(raw_dim_oob[1], dim_count[1]),
+        "RawActionOutOfBoundsFracVelocity": _safe_div(raw_dim_oob[2], dim_count[2]),
+        "EnvActionNearBoundFrac": _safe_div(
+            totals["env_near_bound_count"], elem_count),
+        "EnvActionNearBoundFracPitch": _safe_div(env_dim_near[0], dim_count[0]),
+        "EnvActionNearBoundFracHeading": _safe_div(env_dim_near[1], dim_count[1]),
+        "EnvActionNearBoundFracVelocity": _safe_div(env_dim_near[2], dim_count[2]),
     }
 
 
@@ -1443,7 +1478,7 @@ def _ppo_update_legacy(actor, critic, actor_opt, critic_opt, buffer, config, dev
 
                 new_lp = action_dist.log_prob(act_t.unsqueeze(0)).sum(dim=-1)
                 new_lps.append(new_lp)
-                entropies.append(action_dist.base_entropy().mean())
+                entropies.append(action_dist.entropy().sum(dim=-1).mean())
 
             new_lp = torch.cat(new_lps)
             old_lp = torch.tensor(t_lp, device=device)
@@ -1548,7 +1583,7 @@ def _build_actor_segments(
 def _recompute_segment_log_probs(
     actor: VanillaActor, segment: dict, device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Recompute transformed log-probs from the segment's true start hidden."""
+    """Recompute raw Normal log-probs from the segment's true start hidden."""
     rnn = torch.as_tensor(
         segment["initial_hidden"], dtype=torch.float32,
         device=device).unsqueeze(0)
@@ -1556,13 +1591,13 @@ def _recompute_segment_log_probs(
     actions = torch.as_tensor(
         segment["actions"], dtype=torch.float32, device=device)
     log_probs = []
-    base_entropies = []
+    policy_entropies = []
     for step in range(obs.shape[0]):
         distribution, rnn = actor(obs[step].unsqueeze(0), rnn)
         log_probs.append(
             distribution.log_prob(actions[step].unsqueeze(0)).sum(dim=-1))
-        base_entropies.append(distribution.base_entropy().sum(dim=-1))
-    return torch.cat(log_probs), torch.cat(base_entropies)
+        policy_entropies.append(distribution.entropy().sum(dim=-1))
+    return torch.cat(log_probs), torch.cat(policy_entropies)
 
 
 # ==============================================================================
@@ -1614,7 +1649,7 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
                 traj = actor_trajectories[int(traj_idx)]
                 old_log_probs = torch.as_tensor(
                     traj["old_log_probs"], dtype=torch.float32, device=device)
-                new_log_probs, base_entropies = _recompute_segment_log_probs(
+                new_log_probs, policy_entropies = _recompute_segment_log_probs(
                     actor, traj, device)
                 ratio = torch.exp(new_log_probs - old_log_probs)
                 advantage = traj["advantages"].to(device)
@@ -1623,16 +1658,16 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
                     torch.clamp(ratio, 1.0 - config.clip_epsilon,
                                 1.0 + config.clip_epsilon) * advantage)
                 sample_losses.append(-surrogate)
-                sample_entropies.append(base_entropies)
+                sample_entropies.append(policy_entropies)
             policy_loss = torch.cat(sample_losses).mean()
-            latent_entropy = torch.cat(sample_entropies).mean()
-            actor_loss = policy_loss - entropy_coef * latent_entropy
+            policy_entropy = torch.cat(sample_entropies).mean()
+            actor_loss = policy_loss - entropy_coef * policy_entropy
             actor_loss.backward()
             if not _grad_has_nan(actor):
                 nn.utils.clip_grad_norm_(actor.parameters(), config.max_grad_norm)
                 actor_opt.step()
                 actor_loss_log.append(float(actor_loss.item()))
-                entropy_log.append(float(latent_entropy.item()))
+                entropy_log.append(float(policy_entropy.item()))
 
         critic_opt.zero_grad()
         critic_values = critic(critic_states).squeeze(-1)
@@ -1758,7 +1793,8 @@ def _ppo_update_agent_legacy(actor, critic, actor_opt, critic_opt, buffer, confi
                     action_dist, rnn_a = actor(obs[t].unsqueeze(0), rnn_a)
                     new_lps.append(
                         action_dist.log_prob(acts[t].unsqueeze(0)).sum(dim=-1))
-                    traj_entropies.append(action_dist.base_entropy().mean())
+                    traj_entropies.append(
+                        action_dist.entropy().sum(dim=-1).mean())
 
                 new_lp = torch.cat(new_lps)
                 ent_avg = torch.stack(traj_entropies).mean()
@@ -1831,6 +1867,9 @@ def parse_args():
     parser.add_argument("--critic-lr", type=float, default=defaults.critic_lr)
     parser.add_argument("--entropy-coef", type=float,
                         default=defaults.entropy_coef)
+    parser.add_argument("--mlp-hidden", type=int, default=defaults.mlp_hidden)
+    parser.add_argument("--rnn-hidden-size", type=int,
+                        default=defaults.rnn_hidden_size)
     parser.add_argument("--enable-blue-gcas", action="store_true",
                         default=defaults.enable_blue_gcas)
     parser.add_argument("--blue-policy-profile", choices=(
@@ -1872,7 +1911,7 @@ def parse_args():
 _VANILLA_PRESET_CLI_FLAGS = {
     "num_red", "num_blue", "num_envs", "total_env_steps",
     "max_episode_length", "replay_buffer_size", "n_minibatches",
-    "actor_lr", "critic_lr", "entropy_coef",
+    "actor_lr", "critic_lr", "entropy_coef", "mlp_hidden", "rnn_hidden_size",
     "enable_blue_gcas", "blue_policy_profile", "obs_mode", "obs_normalization", "pid_profile",
     "pid_throttle_base",
     "reward_mode", "missile_guidance_mode", "resume_from_best",
@@ -1911,6 +1950,8 @@ def make_config_from_args(args) -> Config:
     config.actor_lr = args.actor_lr
     config.critic_lr = args.critic_lr
     config.entropy_coef = args.entropy_coef
+    config.mlp_hidden = args.mlp_hidden
+    config.rnn_hidden_size = args.rnn_hidden_size
     config.enable_blue_gcas = args.enable_blue_gcas
     config.blue_policy_profile = args.blue_policy_profile
     config.obs_mode = args.obs_mode
@@ -1999,7 +2040,7 @@ def main():
     csv_file = open(config.log_file, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["Iteration", "Step", "ActorLoss", "CriticLoss",
-                         "LatentEntropy", "RedMeanReward", "RedWinRate",
+                         "PolicyEntropy", "RedMeanReward", "RedWinRate",
                          "RedRewardStd", "WinRateRecent",
                          "RedMissiles", "BlueMissiles",
                          "Episodes", "RedWins", "BlueWins", "Draws",
@@ -2266,13 +2307,15 @@ def main():
                     action = action_dist.sample()
                     log_prob = action_dist.log_prob(action).sum(dim=-1)
 
-                _accumulate_action_bound_totals(
-                    iter_action_bound, action.cpu().numpy())
                 actions_np = action.cpu().numpy()
+                env_actions_np = np.clip(actions_np, -1.0, 1.0)
+                _accumulate_action_bound_totals(
+                    iter_action_bound, actions_np, env_actions_np)
                 log_probs_np = log_prob.cpu().numpy()
                 new_rnn_np = new_rnn_a.cpu().numpy()
             else:
                 actions_np = np.array([])
+                env_actions_np = np.array([])
                 log_probs_np = np.array([])
                 new_rnn_np = np.array([])
 
@@ -2315,7 +2358,7 @@ def main():
                     if batch_env != env_idx:
                         continue
                     rid = red_ids[agent_idx_i]
-                    env_actions[rid] = actions_np[k]
+                    env_actions[rid] = env_actions_np[k]
                     rnn_hidden_actor[env_idx, agent_idx_i] = new_rnn_np[k]
                     # Get obs_flat for buffer storage
                     obs_flat = all_red_obs_flat[k]
@@ -2634,7 +2677,7 @@ def main():
             "ActionLogStdMean": std_stats["action_log_std_mean"],
             "ActorLoss":      stats["actor_loss"],
             "CriticLoss":     stats["critic_loss"],
-            "LatentEntropy":  stats["entropy"],
+            "PolicyEntropy":  stats["entropy"],
             "r_pitch":        avg_comps.get("r_pitch", 0.0),
             "r_roll":         avg_comps.get("r_roll", 0.0),
             "r_alt":          avg_comps.get("r_alt", 0.0),
@@ -2683,7 +2726,7 @@ def main():
               f"ActorLoss={stats['actor_loss']:+.4f} "
               f"CriticLoss={stats['critic_loss']:+.4f} "
               f"EntCoef={_current_entropy_coef(config, total_steps):.4f} "
-              f"LatentEntropy={stats['entropy']:.4f} "
+              f"PolicyEntropy={stats['entropy']:.4f} "
               f"Std={std_stats['action_std_mean']:.4f} | "
               f"LaunchDiag R={launch_diag_metrics['LaunchDiagRedGeometryOk']}/"
               f"{launch_diag_metrics['LaunchDiagRedLaunches']} "
