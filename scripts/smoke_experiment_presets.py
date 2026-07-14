@@ -35,17 +35,20 @@ def main() -> None:
     assert pb["brma_mode"] == "train"
     assert pb["critic_state"] == "attention-entities"
 
-    paper = get_preset("attention_2v2_brma_paper_main")
-    assert paper["num_red"] == 2
-    assert paper["num_blue"] == 2
+    paper = get_preset("attention_6v6_brma_paper_main")
+    assert paper["num_red"] == 6
+    assert paper["num_blue"] == 6
     assert paper["total_env_steps"] == 10_000_000
     assert paper["brma_mode"] == "train"
     assert paper["obs_adapter"] == "strict"
     assert paper["critic_state"] == "attention-entities"
     assert paper["encoder_mode"] == "paper-eq33"
-    assert get_preset("attention_2v2_attn_nobrma_paper_baseline")["brma_mode"] == "off"
+    assert get_preset("attention_6v6_attn_nobrma_paper_baseline")["brma_mode"] == "off"
     assert get_preset("attention_2v2_brma_paper_500k_probe")["total_env_steps"] == 500_000
     assert get_preset("attention_2v2_attn_nobrma_paper_500k_probe")["total_env_steps"] == 500_000
+    vanilla_main = get_preset("vanilla_3v3_paper_main")
+    assert vanilla_main["total_env_steps"] == 15_000_000
+    assert get_preset("vanilla_3v3_paper_100k_diag")["total_env_steps"] == 100_000
 
     # unknown preset raises KeyError
     try:
@@ -59,8 +62,9 @@ def main() -> None:
         p = EXPERIMENT_PRESETS[name]
         obs = p.get("obs_adapter", "")
         via = f"  via --obs-adapter {obs}" if obs else ""
-        print(f"  {name} ({p['num_red']}v{p['num_blue']}, "
-              f"{p['num_envs']} envs, {p['total_env_steps']} steps){via}")
+        print(f"  {name} ({p.get('num_red')}v{p.get('num_blue')}, "
+              f"{p.get('num_envs', 'n/a')} envs, "
+              f"{p.get('total_env_steps', 'n/a')} steps){via}")
 
     print("experiment presets smoke test passed")
 

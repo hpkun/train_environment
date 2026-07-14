@@ -447,6 +447,26 @@ ACTION_BOUND_CSV_FIELDS = (
     "EnvActionNearBoundFracVelocity",
 )
 
+ROLLOUT_LAYOUT_CSV_FIELDS = (
+    "requested_replay_buffer_size",
+    "rollout_horizon_per_env",
+    "transitions_per_update",
+    "unused_replay_slots",
+)
+
+PPO_DIAG_CSV_FIELDS = (
+    "PolicyLoss",
+    "EntropyBonus",
+    "ActorUpdateAttempts",
+    "ActorUpdatesApplied",
+    "ActorUpdatesSkipped",
+    "CriticUpdateAttempts",
+    "CriticUpdatesApplied",
+    "CriticUpdatesSkipped",
+    "ActionStdDeltaFromInit",
+    "ActionStdGrowthRatio",
+)
+
 BLUE_POLICY_DIAG_CSV_FIELDS = (
     "blue_target_switches_total",
     "blue_target_dead_switches",
@@ -460,8 +480,26 @@ BLUE_POLICY_DIAG_CSV_FIELDS = (
     "blue_altitude_recovery_frames",
 )
 
-CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v3"
+CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v4"
 ACTION_DISTRIBUTION_VERSION = "diag_gaussian_env_clip_v1"
+
+
+def _rollout_layout(replay_buffer_size: int, num_envs: int) -> dict:
+    requested = int(replay_buffer_size)
+    envs = int(num_envs)
+    if requested < envs:
+        raise ValueError(
+            "replay_buffer_size must be >= num_envs for at least one "
+            f"rollout step per environment: replay_buffer_size={requested}, "
+            f"num_envs={envs}")
+    horizon = requested // envs
+    transitions = horizon * envs
+    return {
+        "requested_replay_buffer_size": requested,
+        "rollout_horizon_per_env": horizon,
+        "transitions_per_update": transitions,
+        "unused_replay_slots": requested - transitions,
+    }
 
 
 def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
@@ -470,6 +508,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         num_red=config.num_red, num_blue=config.num_blue,
         sim_freq=60, agent_interaction_steps=12, seed=config.seed,
         blue_policy_profile=config.blue_policy_profile)
+    rollout_layout = _rollout_layout(config.replay_buffer_size, config.num_envs)
     return {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": config.obs_mode,
@@ -488,6 +527,16 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "altitude_reward_interpretation": "pairwise_sum_all_alive_enemies_v1",
         "num_red": int(config.num_red),
         "num_blue": int(config.num_blue),
+        "total_env_steps": int(config.total_env_steps),
+        "entropy_coef": float(config.entropy_coef),
+        "actor_lr": float(config.actor_lr),
+        "critic_lr": float(config.critic_lr),
+        "n_update_epochs": int(config.n_update_epochs),
+        "n_minibatches": int(config.n_minibatches),
+        "gamma": float(config.gamma),
+        "gae_lambda": float(config.gae_lambda),
+        "clip_epsilon": float(config.clip_epsilon),
+        **rollout_layout,
         "global_state_dim": int(global_state_dim),
         "actor_obs_dim": int(obs_dim),
         "actor_hidden_sizes": [int(config.mlp_hidden), int(config.mlp_hidden)],
@@ -1622,7 +1671,19 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
     actor_trajectories = _build_actor_segments(buffer, team_advantages)
 
     if not actor_trajectories:
-        return {"actor_loss": 0.0, "critic_loss": 0.0, "entropy": 0.0}
+        return {
+            "policy_loss": 0.0,
+            "entropy_bonus": 0.0,
+            "actor_loss": 0.0,
+            "critic_loss": 0.0,
+            "entropy": 0.0,
+            "ActorUpdateAttempts": 0,
+            "ActorUpdatesApplied": 0,
+            "ActorUpdatesSkipped": 0,
+            "CriticUpdateAttempts": 0,
+            "CriticUpdatesApplied": 0,
+            "CriticUpdatesSkipped": 0,
+        }
 
     critic_states = torch.as_tensor(np.stack([
         buffer.global_states[t][env_idx]
@@ -1631,9 +1692,17 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
     ]), dtype=torch.float32, device=device)
     critic_targets = torch.cat(team_returns).detach()
     entropy_coef = _current_entropy_coef(config, total_steps)
+    policy_loss_log = []
     actor_loss_log = []
     critic_loss_log = []
     entropy_log = []
+    entropy_bonus_log = []
+    actor_update_attempts = 0
+    actor_updates_applied = 0
+    actor_updates_skipped = 0
+    critic_update_attempts = 0
+    critic_updates_applied = 0
+    critic_updates_skipped = 0
 
     for _epoch in range(config.n_update_epochs):
         order = np.random.permutation(len(actor_trajectories))
@@ -1661,27 +1730,46 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
                 sample_entropies.append(policy_entropies)
             policy_loss = torch.cat(sample_losses).mean()
             policy_entropy = torch.cat(sample_entropies).mean()
-            actor_loss = policy_loss - entropy_coef * policy_entropy
+            entropy_bonus = entropy_coef * policy_entropy
+            actor_loss = policy_loss - entropy_bonus
+            actor_update_attempts += 1
             actor_loss.backward()
             if not _grad_has_nan(actor):
                 nn.utils.clip_grad_norm_(actor.parameters(), config.max_grad_norm)
                 actor_opt.step()
+                actor_updates_applied += 1
+                policy_loss_log.append(float(policy_loss.item()))
                 actor_loss_log.append(float(actor_loss.item()))
                 entropy_log.append(float(policy_entropy.item()))
+                entropy_bonus_log.append(float(entropy_bonus.item()))
+            else:
+                actor_updates_skipped += 1
 
         critic_opt.zero_grad()
         critic_values = critic(critic_states).squeeze(-1)
         critic_loss = F.mse_loss(critic_values, critic_targets)
+        critic_update_attempts += 1
         critic_loss.backward()
         if not _grad_has_nan(critic):
             nn.utils.clip_grad_norm_(critic.parameters(), config.max_grad_norm)
             critic_opt.step()
+            critic_updates_applied += 1
             critic_loss_log.append(float(critic_loss.item()))
+        else:
+            critic_updates_skipped += 1
 
     return {
+        "policy_loss": float(np.mean(policy_loss_log)) if policy_loss_log else float("nan"),
+        "entropy_bonus": float(np.mean(entropy_bonus_log)) if entropy_bonus_log else float("nan"),
         "actor_loss": float(np.mean(actor_loss_log)) if actor_loss_log else float("nan"),
         "critic_loss": float(np.mean(critic_loss_log)) if critic_loss_log else float("nan"),
         "entropy": float(np.mean(entropy_log)) if entropy_log else 0.0,
+        "ActorUpdateAttempts": actor_update_attempts,
+        "ActorUpdatesApplied": actor_updates_applied,
+        "ActorUpdatesSkipped": actor_updates_skipped,
+        "CriticUpdateAttempts": critic_update_attempts,
+        "CriticUpdatesApplied": critic_updates_applied,
+        "CriticUpdatesSkipped": critic_updates_skipped,
     }
 
 
@@ -2030,6 +2118,7 @@ def main():
         config.num_red, config.num_blue, is_red=True,
         obs_mode=config.obs_mode)
     global_obs_dim = _compute_global_state_dim(config.num_red, config.obs_mode)
+    rollout_layout = _rollout_layout(config.replay_buffer_size, config.num_envs)
     checkpoint_meta = _checkpoint_metadata(config, obs_dim, global_obs_dim)
 
     # ---- 持久化：创建 checkpoint 目录 ----
@@ -2040,9 +2129,11 @@ def main():
     csv_file = open(config.log_file, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["Iteration", "Step", "ActorLoss", "CriticLoss",
-                         "PolicyEntropy", "RedMeanReward", "RedWinRate",
+                         "PolicyEntropy", *PPO_DIAG_CSV_FIELDS,
+                         "RedMeanReward", "RedWinRate",
                          "RedRewardStd", "WinRateRecent",
                          "RedMissiles", "BlueMissiles",
+                         *ROLLOUT_LAYOUT_CSV_FIELDS,
                          "Episodes", "RedWins", "BlueWins", "Draws",
                          "RedAliveMean", "BlueAliveMean",
                           "RedDeathsMissile", "RedDeathsCrash",
@@ -2083,6 +2174,15 @@ def main():
     print(f"  total_env_steps: {config.total_env_steps}")
     print(f"  max_episode_length: {config.max_episode_length}")
     print(f"  replay_buffer_size: {config.replay_buffer_size}")
+    print(f"  requested_replay_buffer_size: {rollout_layout['requested_replay_buffer_size']}")
+    print(f"  rollout_horizon_per_env: {rollout_layout['rollout_horizon_per_env']}")
+    print(f"  transitions_per_update: {rollout_layout['transitions_per_update']}")
+    print(f"  unused_replay_slots: {rollout_layout['unused_replay_slots']}")
+    if rollout_layout["unused_replay_slots"] > 0:
+        print("[WARN] replay_buffer_size is not divisible by num_envs; "
+              f"{rollout_layout['unused_replay_slots']} requested slots are unused "
+              "because rollout_horizon_per_env uses integer division.",
+              flush=True)
     print(f"  log_file: {config.log_file}")
     print(f"  results_file: {config.results_file}")
     print(f"  launch_quality_file: {launch_quality_file}")
@@ -2113,7 +2213,7 @@ def main():
     MIN_EPISODES_TO_EVAL = 50  # 最少完成 50 局后才允许覆盖 best 模型
 
     # ---- 1. 创建并行环境 ----
-    num_steps = config.replay_buffer_size // config.num_envs
+    num_steps = rollout_layout["rollout_horizon_per_env"]
     env_kwargs = dict(max_num_blue=config.num_blue, max_num_red=config.num_red,
                       max_steps=config.max_episode_length,
                       obs_mode=config.obs_mode,
@@ -2548,6 +2648,8 @@ def main():
             red_wins, blue_wins)
 
         std_stats = _actor_std_stats(actor)
+        action_std_delta = std_stats["action_std_mean"] - 0.3
+        action_std_growth = _safe_div(std_stats["action_std_mean"], 0.3)
         launch_diag_metrics = _launch_diag_metrics(iter_launch_diag)
         launch_quality_metrics = _launch_quality_metrics(
             iter_launch_quality_records,
@@ -2577,12 +2679,26 @@ def main():
                              f"{stats['actor_loss']:.6f}",
                              f"{stats['critic_loss']:.6f}",
                              f"{stats['entropy']:.6f}",
+                             f"{stats['policy_loss']:.6f}",
+                             f"{stats['entropy_bonus']:.6f}",
+                             stats["ActorUpdateAttempts"],
+                             stats["ActorUpdatesApplied"],
+                             stats["ActorUpdatesSkipped"],
+                             stats["CriticUpdateAttempts"],
+                             stats["CriticUpdatesApplied"],
+                             stats["CriticUpdatesSkipped"],
+                             f"{action_std_delta:.6f}",
+                             f"{action_std_growth:.6f}",
                              f"{avg_r_red:.4f}",
                              f"{red_win_rate:.6f}",
                              f"{std_r_red:.4f}",
                              f"{iter_win_rate:.6f}",
                              f"{avg_m_red:.1f}",
                              f"{avg_m_blue:.1f}",
+                             *[
+                                 rollout_layout[field]
+                                 for field in ROLLOUT_LAYOUT_CSV_FIELDS
+                             ],
                              total_episodes, red_wins, blue_wins, draws,
                              f"{red_alive_mean:.4f}",
                              f"{blue_alive_mean:.4f}",
@@ -2643,6 +2759,10 @@ def main():
             "WinRateCumul":   red_win_rate,
             "RedMissiles":    avg_m_red,
             "BlueMissiles":   avg_m_blue,
+            "requested_replay_buffer_size": rollout_layout["requested_replay_buffer_size"],
+            "rollout_horizon_per_env": rollout_layout["rollout_horizon_per_env"],
+            "transitions_per_update": rollout_layout["transitions_per_update"],
+            "unused_replay_slots": rollout_layout["unused_replay_slots"],
             "Episodes":       total_episodes,
             "RedWins":        red_wins,
             "BlueWins":       blue_wins,
@@ -2675,9 +2795,19 @@ def main():
             "ActionStdMin":   std_stats["action_std_min"],
             "ActionStdMax":   std_stats["action_std_max"],
             "ActionLogStdMean": std_stats["action_log_std_mean"],
+            "ActionStdDeltaFromInit": action_std_delta,
+            "ActionStdGrowthRatio": action_std_growth,
             "ActorLoss":      stats["actor_loss"],
             "CriticLoss":     stats["critic_loss"],
             "PolicyEntropy":  stats["entropy"],
+            "PolicyLoss":     stats["policy_loss"],
+            "EntropyBonus":   stats["entropy_bonus"],
+            "ActorUpdateAttempts": stats["ActorUpdateAttempts"],
+            "ActorUpdatesApplied": stats["ActorUpdatesApplied"],
+            "ActorUpdatesSkipped": stats["ActorUpdatesSkipped"],
+            "CriticUpdateAttempts": stats["CriticUpdateAttempts"],
+            "CriticUpdatesApplied": stats["CriticUpdatesApplied"],
+            "CriticUpdatesSkipped": stats["CriticUpdatesSkipped"],
             "r_pitch":        avg_comps.get("r_pitch", 0.0),
             "r_roll":         avg_comps.get("r_roll", 0.0),
             "r_alt":          avg_comps.get("r_alt", 0.0),
@@ -2723,6 +2853,8 @@ def main():
               f"t={t_elapsed:5.1f}s | "
               f"R_red={avg_r_red:+8.1f} [{comp_str}] | "
               f"M_red={avg_m_red:.0f} M_blue={avg_m_blue:.0f} | "
+              f"PolicyLoss={stats['policy_loss']:+.4f} "
+              f"EntropyBonus={stats['entropy_bonus']:+.4f} "
               f"ActorLoss={stats['actor_loss']:+.4f} "
               f"CriticLoss={stats['critic_loss']:+.4f} "
               f"EntCoef={_current_entropy_coef(config, total_steps):.4f} "

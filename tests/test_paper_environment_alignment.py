@@ -1,9 +1,11 @@
 import math
 import ast
+import csv
 from collections import deque
 from pathlib import Path
 
 import numpy as np
+import pytest
 import rule_based_agent as rule_agent
 
 from my_uav_env import UavCombatEnv
@@ -42,6 +44,7 @@ from rule_based_agent import (
 from train_vanilla_mappo import (
     ACTION_DISTRIBUTION_VERSION,
     ACTION_LOG_STD_INIT,
+    CHECKPOINT_SCHEMA_VERSION,
     Config,
     CentralizedCritic,
     REWARD_COMPONENT_LOG_FIELDS,
@@ -64,9 +67,11 @@ from train_vanilla_mappo import (
     _reward_component_log_metrics,
     _recompute_segment_log_probs,
     _ratio_with_denominator_zero,
+    _rollout_layout,
     _unpack_and_validate_checkpoint,
     ppo_update,
 )
+import train_vanilla_mappo as tvm
 import torch
 
 
@@ -1318,7 +1323,8 @@ def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     global_dim = _compute_global_state_dim(3, "paper_strict")
     metadata = _checkpoint_metadata(cfg, obs_dim, global_dim)
     state = VanillaActor(obs_dim).state_dict()
-    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v3"
+    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v4"
+    assert metadata["schema_version"] == CHECKPOINT_SCHEMA_VERSION
     assert metadata["action_distribution"] == ACTION_DISTRIBUTION_VERSION
     assert metadata["actor_obs_dim"] == 60
     assert metadata["global_state_dim"] == 30
@@ -1326,6 +1332,19 @@ def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     assert metadata["actor_rnn_hidden_size"] == 128
     assert metadata["recurrent_n"] == 1
     assert metadata["pid_throttle_base"] == 0.0
+    assert metadata["requested_replay_buffer_size"] == cfg.replay_buffer_size
+    assert metadata["rollout_horizon_per_env"] == cfg.replay_buffer_size // cfg.num_envs
+    assert metadata["transitions_per_update"] == metadata["rollout_horizon_per_env"] * cfg.num_envs
+    assert metadata["unused_replay_slots"] == cfg.replay_buffer_size - metadata["transitions_per_update"]
+    assert metadata["total_env_steps"] == cfg.total_env_steps
+    assert metadata["entropy_coef"] == cfg.entropy_coef
+    assert metadata["actor_lr"] == cfg.actor_lr
+    assert metadata["critic_lr"] == cfg.critic_lr
+    assert metadata["n_update_epochs"] == cfg.n_update_epochs
+    assert metadata["n_minibatches"] == cfg.n_minibatches
+    assert metadata["gamma"] == cfg.gamma
+    assert metadata["gae_lambda"] == cfg.gae_lambda
+    assert metadata["clip_epsilon"] == cfg.clip_epsilon
 
     with np.testing.assert_raises(ValueError):
         _unpack_and_validate_checkpoint(state, metadata, "actor")
@@ -1350,6 +1369,47 @@ def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     payload["metadata"]["altitude_reward_config"]["h_max_m"] += 1.0
     with np.testing.assert_raises_regex(ValueError, "altitude_reward_config"):
         _unpack_and_validate_checkpoint(payload, metadata, "actor")
+
+
+def test_vanilla_3v3_paper_presets_and_rollout_layout():
+    from configs.experiment_presets import EXPERIMENT_PRESETS
+
+    main = EXPERIMENT_PRESETS["vanilla_3v3_paper_main"]
+    diag = EXPERIMENT_PRESETS["vanilla_3v3_paper_100k_diag"]
+    assert main["total_env_steps"] == 15_000_000
+    for preset in (main, diag):
+        assert preset["num_red"] == preset["num_blue"] == 3
+        assert preset["num_envs"] == 32
+        assert preset["replay_buffer_size"] == 2_000
+        assert preset["max_episode_length"] == 1_400
+        assert preset["actor_lr"] == 2e-4
+        assert preset["critic_lr"] == 5e-4
+        assert preset["entropy_coef"] == 0.05
+        assert preset["mlp_hidden"] == 128
+        assert preset["rnn_hidden_size"] == 128
+        assert preset["obs_mode"] == "paper_strict"
+        assert preset["obs_normalization"] == "paper_fixed_v1"
+        assert preset["pid_profile"] == "paper"
+        assert preset["pid_throttle_base"] == 0.0
+        assert preset["reward_mode"] == "paper_joint"
+        assert preset["missile_guidance_mode"] == "paper_eq9"
+        assert preset["blue_policy_profile"] == "paper_pursuit"
+        assert preset["enable_blue_gcas"] is False
+    assert diag["total_env_steps"] == 100_000
+    assert diag["device"] == "auto"
+    assert diag["checkpoint_dir"] == "checkpoints/vanilla_3v3_paper_100k_diag"
+    assert diag["log_file"] == "logs/vanilla_3v3_paper_100k_diag.csv"
+    assert diag["results_file"] == "results/vanilla_3v3_paper_100k_diag.csv"
+
+    layout = _rollout_layout(2_000, 32)
+    assert layout == {
+        "requested_replay_buffer_size": 2_000,
+        "rollout_horizon_per_env": 62,
+        "transitions_per_update": 1_984,
+        "unused_replay_slots": 16,
+    }
+    with pytest.raises(ValueError):
+        _rollout_layout(31, 32)
 
 
 def _evaluation_row(**overrides):
@@ -1440,9 +1500,169 @@ def test_joint_mappo_short_buffer_forward_and_backward_is_finite():
 
     stats = ppo_update(
         actor, critic, actor_opt, critic_opt, buffer, cfg, torch.device("cpu"))
+    assert np.isfinite(stats["policy_loss"])
+    assert np.isfinite(stats["entropy_bonus"])
     assert np.isfinite(stats["actor_loss"])
     assert np.isfinite(stats["critic_loss"])
     assert np.isfinite(stats["entropy"])
+    assert stats["ActorUpdateAttempts"] == 1
+    assert stats["ActorUpdatesApplied"] == 1
+    assert stats["ActorUpdatesSkipped"] == 0
+    assert stats["CriticUpdateAttempts"] == 1
+    assert stats["CriticUpdatesApplied"] == 1
+    assert stats["CriticUpdatesSkipped"] == 0
+
+
+def test_ppo_update_records_skipped_actor_and_critic_updates(monkeypatch):
+    cfg = Config()
+    cfg.n_update_epochs = 1
+    cfg.n_minibatches = 1
+    cfg.num_red = 1
+    cfg.num_blue = 1
+    obs_dim = _compute_obs_dim(1, 1, is_red=True, obs_mode="paper_strict")
+    global_dim = _compute_global_state_dim(1, "paper_strict")
+    actor = VanillaActor(obs_dim, hidden=16, rnn_hidden=8)
+    critic = CentralizedCritic(global_dim, hidden=16)
+    actor_opt = torch.optim.Adam(actor.parameters(), lr=1e-3)
+    critic_opt = torch.optim.Adam(critic.parameters(), lr=1e-3)
+    buffer = RolloutBuffer(2, 1, 1, 3, 8)
+    for t in range(2):
+        buffer.global_states[t][0] = np.zeros(global_dim, dtype=np.float32)
+        buffer.joint_rewards[t, 0] = 1.0
+        buffer.team_values[t, 0] = 0.0
+        buffer.obs[t][0][0] = np.zeros(obs_dim, dtype=np.float32)
+        buffer.actions[t, 0, 0] = 0.0
+        buffer.log_probs[t, 0, 0] = 0.0
+        buffer.alive[t, 0, 0] = True
+    buffer.episode_dones[-1, 0] = 1.0
+    buffer.bootstrap_value[0] = 0.0
+
+    calls = {"count": 0}
+
+    def always_skip(_module):
+        calls["count"] += 1
+        return True
+
+    monkeypatch.setattr(tvm, "_grad_has_nan", always_skip)
+    stats = ppo_update(
+        actor, critic, actor_opt, critic_opt, buffer, cfg, torch.device("cpu"))
+    assert stats["ActorUpdateAttempts"] == 1
+    assert stats["ActorUpdatesApplied"] == 0
+    assert stats["ActorUpdatesSkipped"] == 1
+    assert stats["CriticUpdateAttempts"] == 1
+    assert stats["CriticUpdatesApplied"] == 0
+    assert stats["CriticUpdatesSkipped"] == 1
+
+
+def _write_diag_csv(path: Path, rows: list[dict]) -> None:
+    fieldnames = list(rows[0].keys())
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _diag_rows(**overrides):
+    base = []
+    for step in (100, 200, 300, 400, 500):
+        row = {
+            "Step": step,
+            "ActorLoss": 0.1,
+            "PolicyLoss": 0.2,
+            "EntropyBonus": 0.1,
+            "PolicyEntropy": 3.5 - step * 0.0001,
+            "CriticLoss": 10.0 - step * 0.01,
+            "ActionStdMean": 0.3,
+            "ActionStdMin": 0.3,
+            "ActionStdMax": 0.3,
+            "ActionLogStdMean": math.log(0.3),
+            "ActionStdDeltaFromInit": 0.0,
+            "ActionStdGrowthRatio": 1.0,
+            "RawActionOutOfBoundsFrac": 0.0,
+            "RawActionOutOfBoundsFracPitch": 0.0,
+            "RawActionOutOfBoundsFracHeading": 0.0,
+            "RawActionOutOfBoundsFracVelocity": 0.0,
+            "EnvActionNearBoundFrac": 0.0,
+            "EnvActionNearBoundFracPitch": 0.0,
+            "EnvActionNearBoundFracHeading": 0.0,
+            "EnvActionNearBoundFracVelocity": 0.0,
+            "ActorUpdatesSkipped": 0,
+            "CriticUpdatesSkipped": 0,
+            "RedMeanReward": float(step) * 0.01,
+            "WinRateRecent": 0.5,
+            "WinRateCumul": 0.5,
+            "Episodes": step // 100,
+            "RedWins": step // 200,
+            "BlueWins": step // 300,
+            "Draws": 0,
+            "RedMissiles": 1,
+            "BlueMissiles": 1,
+            "LaunchDiagRedGeometryOk": 1,
+            "LaunchDiagBlueGeometryOk": 1,
+            "LaunchDiagRedLockMature": 1,
+            "LaunchDiagBlueLockMature": 1,
+            "LaunchDiagRedLaunches": 1,
+            "LaunchDiagBlueLaunches": 1,
+            "RedMissileHitRate": 0.1,
+            "BlueMissileHitRate": 0.1,
+            "RedDeathsMissile": 0,
+            "RedDeathsCrash": 0,
+            "BlueDeathsMissile": 0,
+            "BlueDeathsCrash": 0,
+        }
+        row.update(overrides)
+        base.append(row)
+    return base
+
+
+def test_diagnostic_report_generates_pass_review_and_fail(tmp_path):
+    from scripts.report_vanilla_mappo_diagnostic import (
+        analyze,
+        load_training_csv,
+        write_plots,
+        write_report,
+    )
+
+    pass_csv = tmp_path / "pass.csv"
+    _write_diag_csv(pass_csv, _diag_rows())
+    rows = load_training_csv(pass_csv)
+    status, fail, review, summaries = analyze(rows, expected_steps=500)
+    assert status == "PASS"
+    assert not fail and not review
+    plot_dir = tmp_path / "plots"
+    write_plots(rows, plot_dir)
+    assert (plot_dir / "action_std.png").exists()
+
+    report_md = tmp_path / "report.md"
+    write_report(report_md, status, fail, review, summaries, rows, {}, {})
+    text = report_md.read_text(encoding="utf-8")
+    assert text.startswith("# PASS")
+    assert "- Episodes: 5" in text
+    assert "- Episodes: 15" not in text
+
+    review_csv = tmp_path / "review.csv"
+    _write_diag_csv(review_csv, _diag_rows(
+        ActionStdMean=0.39,
+        ActionStdDeltaFromInit=0.09,
+        ActionStdGrowthRatio=1.3,
+    ))
+    status, fail, review, _summaries = analyze(
+        load_training_csv(review_csv), expected_steps=500)
+    assert status == "REVIEW"
+    assert not fail
+    assert any("ActionStdGrowthRatio" in item for item in review)
+
+    fail_csv = tmp_path / "fail.csv"
+    _write_diag_csv(fail_csv, _diag_rows(
+        ActorLoss="NaN",
+        ActorUpdatesSkipped=1,
+        RawActionOutOfBoundsFrac=0.06,
+    ))
+    status, fail, _review, _summaries = analyze(
+        load_training_csv(fail_csv), expected_steps=500)
+    assert status == "FAIL"
+    assert any("NaN" in item or "Inf" in item for item in fail)
+    assert any("ActorUpdatesSkipped" in item for item in fail)
 
 
 def test_short_jsbsim_paper_pid_steps_reduce_heading_pitch_and_speed_error():
