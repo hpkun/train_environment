@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .aircraft import JSBSimAircraftPlatform, SimpleKinematicAircraftPlatform
 from .aircraft_types import build_aircraft_types
+from .geo import lla_to_local
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -45,13 +46,21 @@ class ScenarioBuilder:
                 raise KeyError(f"unknown aircraft type {type_name!r}")
             type_spec = self.aircraft_types[type_name]
             agent_id = str(entry.get("id", f"{side}_{idx}"))
-            position = np.array([
-                float(entry.get("x", rng.uniform(*x_range))),
-                float(entry.get("y", rng.uniform(*y_range))),
-                float(entry.get("altitude", rng.uniform(*alt_range))),
-            ], dtype=np.float32)
-            speed = float(entry.get("speed", rng.uniform(*vel_range)))
-            heading = np.deg2rad(float(entry.get("heading_deg", heading_default)))
+            perturb = self._perturbation(rng)
+            if "lon_deg" in entry and "lat_deg" in entry:
+                position = lla_to_local(
+                    float(entry["lon_deg"]) + perturb["longitude_deg"],
+                    float(entry["lat_deg"]) + perturb["latitude_deg"],
+                    float(entry.get("altitude_m", 6000.0)) + perturb["altitude_m"],
+                    self.reference_lat, self.reference_lon, self.reference_alt)
+            else:
+                position = np.array([
+                    float(entry.get("x", rng.uniform(*x_range))),
+                    float(entry.get("y", rng.uniform(*y_range))),
+                    float(entry.get("altitude", rng.uniform(*alt_range))),
+                ], dtype=np.float32)
+            speed = float(entry.get("speed_mps", entry.get("speed", rng.uniform(*vel_range)))) + perturb["speed_mps"]
+            heading = np.deg2rad(float(entry.get("heading_deg", heading_default)) + perturb["heading_deg"])
             velocity = np.array([np.cos(heading) * speed, np.sin(heading) * speed, 0.0],
                                 dtype=np.float32)
             if self.dynamics_backend == "jsbsim":
@@ -64,6 +73,11 @@ class ScenarioBuilder:
                     reference_alt=self.reference_alt,
                     simulation_frequency=self.simulation_frequency,
                 )
+                platform.warmup_and_recenter(
+                    float(self.config.get("inferred_parameters", {}).get(
+                        "reset_warmup_seconds", 0.0)),
+                    float(self.config.get("inferred_parameters", {}).get(
+                        "reset_warmup_throttle", 0.9)))
             elif self.dynamics_backend == "simple":
                 platform = SimpleKinematicAircraftPlatform(
                     agent_id, side, type_spec, position, velocity, heading)
@@ -72,3 +86,12 @@ class ScenarioBuilder:
             platform.reset_runtime()
             result.append(platform)
         return result
+
+    def _perturbation(self, rng: np.random.Generator) -> dict[str, float]:
+        level = str(self.config.get("initial_perturbation", "none"))
+        bounds = self.config.get("initial_perturbation_levels", {}).get(level)
+        if not bounds:
+            return {key: 0.0 for key in ("altitude_m", "longitude_deg", "latitude_deg",
+                                         "heading_deg", "speed_mps")}
+        return {key: float(rng.uniform(-float(value), float(value)))
+                for key, value in bounds.items()}

@@ -28,6 +28,10 @@ def make_env(config_path: str | None = None, **kwargs):
         from .JSBSim.envs.hetero_uav_combat_env import HeteroUavCombatEnv
 
         return HeteroUavCombatEnv(**config)
+    if env_type == "jsbsim_tam_paper":
+        from .JSBSim.paper.env import TAMPaperEnv
+
+        return TAMPaperEnv(**config)
     if env_type == "brma_original":
         from .brma_env.make_brma_env import make_brma_env
 
