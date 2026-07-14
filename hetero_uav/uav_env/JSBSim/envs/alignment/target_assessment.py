@@ -19,15 +19,21 @@ def target_reserved_by_other(env, shooter_id: str, target_id: str) -> bool:
     """Return whether an engaged target is unavailable to this shooter."""
     if target_id not in getattr(env, "_engaged_targets", set()):
         return False
-    if str(getattr(env, "_lock_target", {}).get(shooter_id, "") or "") == target_id:
-        return False
+    own_missile_targets_target = False
     for missile in getattr(env, "_missiles_in_flight", {}).values():
         missile_target = str(getattr(missile, "_target_id", "") or getattr(
             getattr(missile, "target_aircraft", None), "uid", "") or "")
         missile_shooter = str(getattr(getattr(missile, "parent_aircraft", None), "uid", "")
                               or getattr(missile, "_parent_id", "") or "")
-        if missile_target == target_id and missile_shooter == shooter_id:
-            return False
+        if missile_target != target_id:
+            continue
+        if missile_shooter != shooter_id:
+            return True
+        own_missile_targets_target = True
+    if str(getattr(env, "_lock_target", {}).get(shooter_id, "") or "") == target_id:
+        return False
+    if own_missile_targets_target:
+        return False
     return True
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -20,7 +21,7 @@ from scripts.audit_high_level_pid_action_response import _audit_action, _summari
 from scripts.run_tam_v5_fast_learnability import _red_missile_kill_key
 from scripts.run_tam_v6_contract_corrected_learnability import _json_safe
 from uav_env import make_env
-from uav_env.JSBSim.env import UavCombatEnv
+from uav_env.JSBSim.env import UavCombatEnv, make_empty_launch_diag
 from uav_env.JSBSim.adapters.hetero_obs_adapter_v2 import HeteroObsAdapterV2
 from uav_env.JSBSim.adapters.hetero_entity_set_adapter import HeteroEntitySetAdapter
 from uav_env.JSBSim.envs.alignment.target_assessment import (
@@ -426,6 +427,109 @@ def test_paper_assessment_deconflicts_two_attackers():
     env._engaged_targets.add(first_id)
     second_id, _target, _values = select_paper_assessment_target(env, second, cfg)
     assert second_id == "blue_0"
+
+
+def _fire_control_env(*, include_alternate: bool = True, agent_ids=None):
+    env = object.__new__(UavCombatEnv)
+    env.agent_ids = list(agent_ids or ["red_1", "red_2"])
+    env.red_planes = {
+        aid: SimpleNamespace(
+            uid=aid, color="Red", is_alive=True, num_left_missiles=2,
+            get_position=lambda: np.asarray([0.0, 0.0, 6000.0]),
+            get_velocity=lambda: np.asarray([250.0, 0.0, 0.0]),
+        )
+        for aid in env.agent_ids
+    }
+    env.blue_planes = {
+        "blue_0": _StateObject("blue_0", [5000, 0, 6000], [200, 0, 0]),
+    }
+    if include_alternate:
+        env.blue_planes["blue_1"] = _StateObject(
+            "blue_1", [6000, 0, 6000], [200, 0, 0])
+    env.blue_ids = list(env.blue_planes)
+    env.agent_roles = {aid: "attack_uav" for aid in env.agent_ids}
+    env.red_target_selection_mode = "paper_assessment"
+    env.tam_happo_paper_formula_v5_config = {
+        "target_assessment": {"engagement_range_m": 14000.0, "hold_steps": 0}
+    }
+    env.current_step = 10
+    env._engagement_target_state = {
+        aid: {"target_id": "blue_0", "selected_step": 9, "switch_count": 0}
+        for aid in env.agent_ids
+    }
+    env._engagement_target_step_diag = {}
+    env._engagement_reallocation_counts = {}
+    env._engaged_targets = set()
+    env._missiles_in_flight = {}
+    env._lock_target = {aid: "blue_0" for aid in env.agent_ids}
+    env._lock_timer = {aid: 1 for aid in env.agent_ids}
+    env._missile_cooldown = {aid: 0 for aid in env.agent_ids}
+    env.missile_lock_delay_frames = 2
+    env._agents_deny_kill = set()
+    env.use_boresight_launch_gate = False
+    env._launch_diag_step = make_empty_launch_diag()
+    env._fire_candidate_target_step = {}
+    env._launch_gate_accum = {}
+    env._get_sim = lambda aid: env.red_planes.get(aid)
+    env._has_launch_track = lambda _aid, _bid: (True, "direct")
+    env._missile_candidate_metrics = lambda _shooter, target: {
+        "range_m": 5000.0 if target.uid == "blue_0" else 6000.0,
+        "range_ok": True, "ao_ok": True, "ta_ok": True,
+        "boresight_ok_3d": True, "launch_geometry_ok_3d": True,
+    }
+    env._score_mav_aware_target = lambda _shooter, target, metrics: {
+        "score": 1.0 if target.uid == "blue_0" else 0.0,
+        "range_m": metrics["range_m"],
+    }
+    env._brma_tam_3d_geometry = lambda _shooter, target: {
+        "tam_ata_rad": 0.0 if target.uid == "blue_0" else np.pi,
+        "tam_aa_rad": 0.0 if target.uid == "blue_0" else np.pi,
+        "target_distance_m": 5000.0 if target.uid == "blue_0" else 6000.0,
+    }
+    env._build_launch_quality_record = lambda *_args, **_kwargs: {}
+    launches = []
+
+    def launch(parent, target, _quality):
+        launches.append((parent.uid, target.uid))
+        parent.num_left_missiles -= 1
+        env._missiles_in_flight[f"m{len(launches)}"] = SimpleNamespace(
+            parent_aircraft=parent, target_aircraft=target,
+            _parent_id=parent.uid, _target_id=target.uid,
+        )
+
+    env._launch_missile = launch
+    return env, launches
+
+
+def test_fire_control_reallocates_second_shooter_after_same_frame_launch():
+    env, launches = _fire_control_env(include_alternate=True)
+    UavCombatEnv._check_missile_launch(env)
+    assert launches == [("red_1", "blue_0")]
+    assert env._lock_target["red_2"] == "blue_1"
+    assert env._lock_timer["red_2"] == 1
+
+
+def test_fire_control_clears_second_shooter_lock_without_alternate_target():
+    env, launches = _fire_control_env(include_alternate=False)
+    UavCombatEnv._check_missile_launch(env)
+    assert launches == [("red_1", "blue_0")]
+    assert env._lock_target["red_2"] is None
+    assert env._lock_timer["red_2"] == 0
+
+
+def test_fire_control_preserves_own_lock_when_only_own_missile_occupies_target():
+    env, launches = _fire_control_env(include_alternate=False, agent_ids=["red_2"])
+    env._engaged_targets.add("blue_0")
+    env._missiles_in_flight["own"] = SimpleNamespace(
+        parent_aircraft=env.red_planes["red_2"],
+        target_aircraft=env.blue_planes["blue_0"],
+        _parent_id="red_2", _target_id="blue_0",
+    )
+    env._missile_cooldown["red_2"] = 2
+    UavCombatEnv._check_missile_launch(env)
+    assert launches == []
+    assert env._lock_target["red_2"] == "blue_0"
+    assert env._lock_timer["red_2"] == 2
 
 
 def test_target_hold_metric_is_mean_contiguous_segment_length():
