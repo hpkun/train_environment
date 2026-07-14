@@ -1539,6 +1539,16 @@ def _run_training_main() -> None:
     parser.add_argument("--keep-eval-checkpoints", type=int, default=20,
                         help="Maximum number of per-eval checkpoint directories to keep when enabled.")
     parser.add_argument("--init-checkpoint", default=None)
+    parser.add_argument(
+        "--save-initial-checkpoint-dir",
+        default=None,
+        help="Save the policy before any PPO update to this directory.",
+    )
+    parser.add_argument(
+        "--initial-checkpoint-only",
+        action="store_true",
+        help="Exit normally after saving --save-initial-checkpoint-dir.",
+    )
     parser.add_argument("--checkpoint-interval-steps", type=int, default=0,
                         help="Save a periodic checkpoint every N env steps (0=disabled)")
     parser.add_argument("--keep-checkpoints", type=int, default=5,
@@ -1573,6 +1583,8 @@ def _run_training_main() -> None:
         raise ValueError("--num-envs must be >= 1")
     if args.critic_epochs < 1:
         raise ValueError("--critic-epochs must be >= 1")
+    if args.initial_checkpoint_only and not args.save_initial_checkpoint_dir:
+        raise ValueError("--initial-checkpoint-only requires --save-initial-checkpoint-dir")
     if args.policy_arch == "pure_happo":
         if args.init_checkpoint:
             raise ValueError("pure_happo formal training must start from scratch; --init-checkpoint is not allowed")
@@ -1689,6 +1701,26 @@ def _run_training_main() -> None:
             init_path = ROOT / init_path
         policy.load(init_path, map_location=device)
         print(f"Loaded init_checkpoint: {init_path}", flush=True)
+    if args.save_initial_checkpoint_dir:
+        initial_dir = _rel(args.save_initial_checkpoint_dir)
+        initial_meta = {
+            **_SINGLE_RUNNER_STATE["meta"],
+            "opponent_policy": args.opponent_policy,
+            "total_env_steps_actual": 0,
+            "checkpoint_stage": "before_first_ppo_update",
+            "seed": args.seed,
+        }
+        _save_policy_checkpoint(policy, initial_dir, initial_meta)
+        print(f"Saved initial checkpoint: {initial_dir / 'model.pt'}", flush=True)
+        if args.initial_checkpoint_only:
+            _write_runner_status(
+                out_dir,
+                status="normal",
+                total_steps=0,
+                iteration=0,
+                extra={**base_v2_meta, "initial_checkpoint_only": True},
+            )
+            return
     if args.policy_arch in {"pure_happo"}:
         trainer = PureHAPPOTrainer(
             policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
