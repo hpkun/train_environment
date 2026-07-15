@@ -25,3 +25,5 @@ __all__ = [
     "HAPPOReferenceTrainer",
     "TAMCategoricalRecurrentHAPPOPolicy",
 ]
+from .vanilla_happo import (VanillaHAPPOPolicy, VanillaHAPPORolloutBuffer,
+                            VanillaHAPPOTrainer)
