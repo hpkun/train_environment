@@ -164,13 +164,20 @@ def test_action_authority_and_mav_death_not_team_done():
 
 
 def test_reward_is_finite_and_death_event_is_once():
-    env=fake_env(); env.newly_dead={"red_1"}; env.death_reasons={"red_1":"missile_hit"}
+    env=fake_env(); env.aircraft["red_1"].is_alive=False
+    env.newly_dead={"red_1"}; env.death_reasons={"red_1":"missile_hit"}
+    env.previous_missile_risk["red_1"]=0.9
     reward,detail=compute_role_rewards(env,{"red_1":"blue_0","red_2":"blue_0"},[])
     assert all(np.isfinite(list(reward.values())))
+    dead=detail["per_agent"]["red_1"]
+    assert dead["event"]==reward_module.EVENT_REWARDS["uav_death"]
+    assert all(dead[key]==0 for key in (
+        "flight","speed","angle","distance","dodge","missile_risk","dense"))
     first=reward["red_1"]
     env.newly_dead=set()
     second,_=compute_role_rewards(env,{"red_1":"blue_0","red_2":"blue_0"},[])
-    assert first < second["red_1"]
+    assert first==reward_module.EVENT_REWARDS["uav_death"]
+    assert second["red_1"]==0
 
 
 def test_reward_component_directions_and_bands():
@@ -185,16 +192,25 @@ def test_reward_component_directions_and_bands():
     assert dodge_score(.8,.4)>0 and dodge_score(.2,.6)<0
 
 
-def test_shared_information_is_only_shared_only_and_dies_with_mav():
+def test_shared_information_uses_all_live_uav_target_pairs():
     env=fake_env()
+    env.aircraft["red_2"]._position=np.array([6000.,0,6000.])
     env.aircraft["blue_0"]._position=np.array([15000.,0,6000.])
-    env.aircraft["blue_1"]._position=np.array([9000.,0,6000.])
-    score=shared_information_score(env)
-    assert score==1.0
+    env.aircraft["blue_1"]._position=np.array([5000.,0,6000.])
+    assert shared_information_score(env)==pytest.approx(0.25)
+    env.aircraft["red_2"]._position=np.array([0.,500.,6000.])
+    assert shared_information_score(env)==pytest.approx(0.5)
+    env.aircraft["blue_1"]._position=np.array([20000.,0,6000.])
+    assert shared_information_score(env)==1.0
+    env.aircraft["blue_0"]._position=np.array([9000.,0,6000.])
+    assert shared_information_score(env)==pytest.approx(0.5)
     env.aircraft["red_0"].is_alive=False
     assert shared_information_score(env)==0
     env.aircraft["red_0"].is_alive=True
-    env.aircraft["blue_0"]._position=np.array([9000.,0,6000.])
+    env.aircraft["red_1"].is_alive=env.aircraft["red_2"].is_alive=False
+    assert shared_information_score(env)==0
+    env.aircraft["red_1"].is_alive=True
+    env.aircraft["blue_0"].is_alive=env.aircraft["blue_1"].is_alive=False
     assert shared_information_score(env)==0
 
 
@@ -232,10 +248,39 @@ def test_target_score_prefers_better_smooth_geometry():
 def test_paper_greedy_returns_exhaustive_maximum():
     env=fake_env(); policy=PaperGreedyOpponent()
     rows=policy.scored_candidates(env,"blue_0")
-    action=policy.actions(env,"blue")["blue_0"]
+    decision=policy.decisions(env,"blue")["blue_0"]
     best=max(rows,key=lambda row:row["score"])
     assert len(rows)==len(env.red_ids)*18
-    assert np.allclose(action,best["action"])
+    assert np.allclose(decision["action"],best["action"])
+    assert decision["target_id"]==best["target_id"]
+    assert decision["score"]==pytest.approx(best["score"])
+
+
+def test_environment_uses_blue_greedy_target_for_motion_and_fire(monkeypatch):
+    env=make_env(CFG); env.reset(seed=12)
+    old_target=select_target(env,"blue_0")
+    forced_target=next(aid for aid in env.red_ids if aid!=old_target)
+    original=env.blue_policy.decisions(env)
+    original["blue_0"]={**original["blue_0"],"target_id":forced_target,"score":2.0}
+    monkeypatch.setattr(env.blue_policy,"decisions",lambda _env,team="blue":original)
+    _,_,_,_,info=env.step({aid:np.zeros(3,np.float32) for aid in env.red_ids})
+    assert old_target!=forced_target
+    assert info["selected_targets"]["blue_0"]==forced_target
+    assert info["fire_gates"]["blue_0"]["target_id"]==forced_target
+    env.close()
+
+
+def test_blue_without_live_red_target_is_stable_and_does_not_fire():
+    env=make_env(CFG); env.reset(seed=13)
+    for aid in env.red_ids:
+        env.aircraft[aid].shotdown()
+    decisions=env.blue_policy.decisions(env)
+    assert all(row["target_id"] is None for row in decisions.values())
+    _,_,_,_,info=env.step({aid:np.zeros(3,np.float32) for aid in env.red_ids})
+    assert all(info["selected_targets"][aid] is None for aid in env.blue_ids)
+    assert not any(event["event"]=="launch" and event["shooter_id"].startswith("blue")
+                   for event in info["step_events"])
+    env.close()
 
 
 def test_greedy_avoidance_has_no_world_heading_sign_bonus_and_tracks_missile_direction():

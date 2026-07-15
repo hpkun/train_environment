@@ -75,6 +75,7 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.last_control_targets: dict[str, tuple[float, float, float] | None] = {}
         self.last_critic_state = np.zeros(CRITIC_STATE_DIM, np.float32)
         self.previous_missile_risk = {aid: 0.0 for aid in self.red_ids}
+        self.last_fire_gates: dict[str, dict] = {}
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
@@ -106,6 +107,7 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.selected_targets = {aid: None for aid in self.aircraft}
         self.last_control_targets = {aid: None for aid in self.aircraft}
         self.previous_missile_risk = {aid: 0.0 for aid in self.red_ids}
+        self.last_fire_gates = {}
         self.audit_initial_perturbation = perturbation
         obs, self.last_critic_state = build_team_observations(self)
         return obs, self._info([], {})
@@ -114,11 +116,15 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         if set(actions) != set(self.red_ids):
             raise ValueError(f"formal actions require exactly {self.red_ids}")
         red_actions = {aid: require_action(actions[aid], aid) for aid in self.red_ids}
-        blue_actions = self.blue_policy.actions(self)
+        blue_decisions = self.blue_policy.decisions(self)
+        blue_actions = {aid: row["action"] for aid, row in blue_decisions.items()}
         all_actions = {**red_actions, **blue_actions}
         self.newly_dead = set()
         alive_before = {aid: self.aircraft[aid].is_alive for aid in self.aircraft}
-        self.selected_targets = {aid: select_target(self, aid) for aid in self.aircraft}
+        self.selected_targets = {
+            **{aid: select_target(self, aid) for aid in self.red_ids},
+            **{aid: blue_decisions[aid]["target_id"] for aid in self.blue_ids},
+        }
         launch_records = self._automatic_fire()
 
         numeric_anomaly = False
@@ -195,9 +201,11 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
 
     def _automatic_fire(self) -> list[dict]:
         records = []
+        self.last_fire_gates = {}
         for aid in (*self.red_ids, *self.blue_ids):
             target_id = self.selected_targets[aid]
             allowed, gate = fire_gate(self, aid, target_id)
+            self.last_fire_gates[aid] = {"target_id": target_id, **gate}
             if not allowed:
                 continue
             shooter = self.aircraft[aid]
@@ -239,6 +247,7 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
                 (alive_before or {}).get(aid, self.aircraft[aid].is_alive) for aid in self.red_ids
             ], np.float32),
             "selected_targets": dict(self.selected_targets),
+            "fire_gates": {aid: dict(gate) for aid, gate in self.last_fire_gates.items()},
             "control_targets": dict(self.last_control_targets),
             "step_events": list(step_events),
             "reward_components": reward_components,

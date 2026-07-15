@@ -35,6 +35,7 @@ def _args():
     parser.add_argument("--rollout-length", type=int, default=256)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--checkpoint-steps", type=int, nargs="*", default=[])
     return parser.parse_args()
 
 
@@ -46,6 +47,14 @@ def _save(policy, directory: Path, meta: dict):
     directory.mkdir(parents=True, exist_ok=True)
     torch.save(policy.state_dict(), directory / "model.pt")
     (directory / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
+def _finite_float(value) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return result if np.isfinite(result) else 0.0
 
 
 def main():
@@ -86,12 +95,27 @@ def main():
         "mutual_elimination", "timeout", "mav_survival", "red_alive_final",
         "blue_alive_final", "flight_failures", "out_of_zone_deaths", "missile_deaths",
         "actor_loss", "entropy", "approx_kl", "critic_loss", "value_explained_variance",
-        "action_saturation", "finite",
+        "approx_kl_abs", "approx_kl_mav", "approx_kl_uav",
+        "approx_kl_abs_mav", "approx_kl_abs_uav",
+        "final_approx_kl_abs_mav", "final_approx_kl_abs_uav",
+        "clip_fraction_mav", "clip_fraction_uav", "ratio_p95_mav", "ratio_p95_uav",
+        "ratio_p99_mav", "ratio_p99_uav", "policy_update_norm_mav",
+        "policy_update_norm_uav", "actor_grad_norm_mav", "actor_grad_norm_uav",
+        "red_geometry_samples", "red_range_rate", "red_ata_rate", "red_ta_rate",
+        "red_geometry_rate", "action_saturation", "finite",
     ]
+    for role in ("mav", "uav"):
+        for dimension in ("pitch", "heading", "speed"):
+            fields.extend((f"{role}_action_mean_{dimension}",
+                           f"{role}_action_std_{dimension}",
+                           f"{role}_action_saturation_{dimension}"))
     with log_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader()
         obs, info = env.reset(seed=args.seed)
         total_steps = 0; iteration = 0
+        pending_checkpoints = sorted(set(
+            step for step in args.checkpoint_steps if 0 < step <= args.total_env_steps))
+        saved_checkpoint_steps: set[int] = set()
         while total_steps < args.total_env_steps:
             length = min(args.rollout_length, args.total_env_steps - total_steps)
             buffer = HAPPORolloutBuffer(length, len(env.red_ids), env.actor_obs_dim,
@@ -140,6 +164,14 @@ def main():
                         reason = next_info["death_reasons"].get(aid, "")
                         counts["out_of_zone_deaths" if reason == "out_of_zone" else
                                ("missile_deaths" if reason == "missile_hit" else "flight_failures")] += 1
+                for i, aid in enumerate(("red_1", "red_2"), start=1):
+                    gate = next_info.get("fire_gates", {}).get(aid, {})
+                    if active[i] > 0.5 and gate.get("observable", False):
+                        counts["red_geometry_samples"] += 1
+                        counts["red_range_ok"] += int(gate.get("range_ok", False))
+                        counts["red_ata_ok"] += int(gate.get("ata_ok", False))
+                        counts["red_ta_ok"] += int(gate.get("ta_ok", False))
+                        counts["red_geometry_ok"] += int(gate.get("geometry_ok", False))
                 obs, info = next_obs, next_info
                 total_steps += 1
                 if done:
@@ -152,7 +184,10 @@ def main():
             iteration += 1
             mean = lambda key: float(np.mean(stats[key])) if stats[key] else 0.0
             episode_mean = lambda key: (float(np.mean([x[key] for x in completed]))
-                                        if completed else "")
+                                        if completed else 0.0)
+            metric = lambda key: _finite_float(metrics.get(key, 0.0))
+            geometry_samples = max(counts["red_geometry_samples"], 1)
+            kl_abs_values = metrics.get("approx_kl_abs_per_agent", [])
             row = {"iteration": iteration, "total_steps": total_steps,
                    "episodes_completed": len(completed),
                    "avg_role_reward_mav": mean("role_mav"), "avg_role_reward_uav": mean("role_uav"),
@@ -177,10 +212,44 @@ def main():
                    "approx_kl": float(metrics.get("approx_kl_mean", 0.0)),
                    "critic_loss": float(metrics.get("critic_loss", 0.0)),
                    "value_explained_variance": float(metrics.get("value_explained_variance", 0.0)),
+                   "approx_kl_abs": _finite_float(np.mean(kl_abs_values) if kl_abs_values else 0.0),
+                   **{key: metric(key) for key in (
+                       "approx_kl_mav", "approx_kl_uav", "approx_kl_abs_mav",
+                       "approx_kl_abs_uav", "final_approx_kl_abs_mav",
+                       "final_approx_kl_abs_uav", "clip_fraction_mav",
+                       "clip_fraction_uav", "ratio_p95_mav", "ratio_p95_uav",
+                       "ratio_p99_mav", "ratio_p99_uav", "policy_update_norm_mav",
+                       "policy_update_norm_uav", "actor_grad_norm_mav", "actor_grad_norm_uav")},
+                   "red_geometry_samples": counts["red_geometry_samples"],
+                   "red_range_rate": counts["red_range_ok"] / geometry_samples,
+                   "red_ata_rate": counts["red_ata_ok"] / geometry_samples,
+                   "red_ta_rate": counts["red_ta_ok"] / geometry_samples,
+                   "red_geometry_rate": counts["red_geometry_ok"] / geometry_samples,
                    "action_saturation": mean("saturation"),
                    "finite": int(all(torch.isfinite(parameter).all().item()
                                      for parameter in policy.parameters()))}
+            for role in ("mav", "uav"):
+                for dimension in ("pitch", "heading", "speed"):
+                    row[f"{role}_action_mean_{dimension}"] = metric(
+                        f"{role}_action_mean_{dimension}_active")
+                    row[f"{role}_action_std_{dimension}"] = metric(
+                        f"{role}_action_std_{dimension}_active")
+                    row[f"{role}_action_saturation_{dimension}"] = metric(
+                        f"{role}_action_saturation_{dimension}_active")
+            if not all(np.isfinite(float(value)) for value in row.values()):
+                raise ValueError(f"non-finite formal training log row at step {total_steps}")
             writer.writerow(row); handle.flush()
+            for requested_step in pending_checkpoints:
+                if requested_step <= total_steps and requested_step not in saved_checkpoint_steps:
+                    checkpoint_meta = {
+                        **meta, "checkpoint_stage": "periodic",
+                        "requested_checkpoint_step": requested_step,
+                        "total_env_steps_actual": total_steps,
+                        "iteration": iteration,
+                    }
+                    _save(policy, output / "checkpoints" / f"step_{requested_step:06d}",
+                          checkpoint_meta)
+                    saved_checkpoint_steps.add(requested_step)
             print(f"[formal-v1] it={iteration:04d} steps={total_steps}/{args.total_env_steps} "
                   f"reward:M/U={row['avg_role_reward_mav']:+.3f}/{row['avg_role_reward_uav']:+.3f} "
                   f"launch:R/B={row['red_launches']}/{row['blue_launches']}", flush=True)

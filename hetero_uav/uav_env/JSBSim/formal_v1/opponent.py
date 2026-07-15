@@ -9,9 +9,12 @@ from .reward import missile_risk, uav_dense_components
 class PaperGreedyOpponent:
     """Exhaustively score every visible target x fixed basic maneuver pair."""
 
-    def actions(self, env, team: str = "blue") -> dict[str, np.ndarray]:
+    def decisions(self, env, team: str = "blue") -> dict[str, dict]:
         ids = env.blue_ids if team == "blue" else env.red_ids
-        return {aid: self._action(env, aid) for aid in ids}
+        return {aid: self._decision(env, aid) for aid in ids}
+
+    def actions(self, env, team: str = "blue") -> dict[str, np.ndarray]:
+        return {aid: row["action"] for aid, row in self.decisions(env, team).items()}
 
     def scored_candidates(self, env, aid: str) -> list[dict]:
         aircraft = env.aircraft[aid]
@@ -32,16 +35,18 @@ class PaperGreedyOpponent:
                              "score": components["dense"], "components": components})
         return rows
 
-    def _action(self, env, aid: str) -> np.ndarray:
+    def _decision(self, env, aid: str) -> dict:
         aircraft = env.aircraft[aid]
         if not aircraft.is_alive:
-            return np.zeros(3, np.float32)
+            return {"action": np.zeros(3, np.float32), "target_id": None, "score": 0.0}
         rows = self.scored_candidates(env, aid)
         if not rows:
             yaw = _wrap(float(aircraft.get_rpy()[2]))
-            return np.asarray([0.0, yaw / np.pi, 0.0], np.float32)
+            return {"action": np.asarray([0.0, yaw / np.pi, 0.0], np.float32),
+                    "target_id": None, "score": 0.0}
         best = max(rows, key=lambda row: row["score"])
-        return np.clip(best["action"], -1.0, 1.0).astype(np.float32)
+        return {"action": np.clip(best["action"], -1.0, 1.0).astype(np.float32),
+                "target_id": best["target_id"], "score": float(best["score"])}
 
     @staticmethod
     def _candidate_actions(aircraft) -> list[np.ndarray]:

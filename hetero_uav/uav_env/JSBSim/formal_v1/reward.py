@@ -120,18 +120,21 @@ def shared_information_score(env) -> float:
     mav = env.aircraft["red_0"]
     if not mav.is_alive:
         return 0.0
-    needed = shared = 0
+    total_pairs = shared_only_pairs = 0
     for aid in ("red_1", "red_2"):
         uav = env.aircraft[aid]
         if not uav.is_alive:
             continue
         tracks = red_track_sources(env, aid)
         for bid in env.blue_ids:
-            if not env.aircraft[bid].is_alive or tracks[bid]["direct"]:
+            if not env.aircraft[bid].is_alive:
                 continue
-            needed += 1
-            shared += int(tracks[bid]["mav_shared"])
-    return float(shared / needed) if needed else 0.0
+            total_pairs += 1
+            shared_only_pairs += int(
+                not tracks[bid]["direct"] and tracks[bid]["mav_shared"])
+    if not total_pairs:
+        return 0.0
+    return float(np.clip(shared_only_pairs / total_pairs, 0.0, 1.0))
 
 
 def support_position_score(env) -> float:
@@ -182,8 +185,18 @@ def compute_role_rewards(env, selected_targets: dict, step_events: list[dict]) -
                    if e.get("event") == "hit" and str(e.get("shooter_id", "")).startswith("red")]
     for aid in env.red_ids:
         aircraft = env.aircraft[aid]
-        if not aircraft.is_alive and aid not in env.newly_dead:
-            dense_components = {"dense": 0.0, "missile_risk": 0.0}
+        if not aircraft.is_alive:
+            if env.roles[aid] == "mav":
+                dense_components = {
+                    "safety": 0.0, "support_position": 0.0,
+                    "shared_information": 0.0, "missile_risk": 0.0, "dense": 0.0,
+                }
+            else:
+                dense_components = {
+                    "flight": 0.0, "speed": 0.0, "angle": 0.0,
+                    "distance": 0.0, "dodge": 0.0,
+                    "missile_risk": 0.0, "dense": 0.0,
+                }
         elif env.roles[aid] == "mav":
             dense_components = mav_dense_components(env, env.previous_missile_risk[aid])
         else:

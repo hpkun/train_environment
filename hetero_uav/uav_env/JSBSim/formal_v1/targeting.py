@@ -56,13 +56,17 @@ def fire_gate(env, shooter_id: str, target_id: str | None) -> tuple[bool, dict]:
         "range_m": np.inf, "ata_rad": np.pi, "ta_rad": 0.0}
     duplicate = bool(target_id and any(m.is_launched and m.target_id == target_id for m in env.missiles))
     cooldown = env.sim_time_sec - env.last_launch_time[shooter_id] >= env.attack_interval_sec
+    range_ok = bool(geom["range_m"] <= env.attack_range_m)
+    ata_ok = bool(geom["ata_rad"] <= env.launch_ata_rad)
+    ta_ok = bool(geom["ta_rad"] >= env.launch_ta_rad)
     allowed = bool(
         env.roles[shooter_id] == "attack_uav" and shooter.is_alive and observable
-        and shooter.num_left_missiles > 0 and geom["range_m"] <= env.attack_range_m
-        and geom["ata_rad"] <= env.launch_ata_rad and geom["ta_rad"] >= env.launch_ta_rad
+        and shooter.num_left_missiles > 0 and range_ok and ata_ok and ta_ok
         and cooldown and not duplicate
     )
     return allowed, {"range_m": geom["range_m"], "ata_rad": geom["ata_rad"],
                      "ta_rad": geom["ta_rad"], "observable": observable,
+                     "range_ok": range_ok, "ata_ok": ata_ok, "ta_ok": ta_ok,
+                     "geometry_ok": range_ok and ata_ok and ta_ok,
                      "cooldown_ready": cooldown, "duplicate_target_blocked": duplicate,
                      "allowed": allowed}
