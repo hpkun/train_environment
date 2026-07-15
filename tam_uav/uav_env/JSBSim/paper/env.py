@@ -14,16 +14,6 @@ class TAMPaperEnv:
         if config.get("paper_environment_mode") != "tam_paper_env_v1":
             raise ValueError("jsbsim_tam_paper requires paper_environment_mode=tam_paper_env_v1")
         self.config = dict(config)
-        published = dict(self.config["published_parameters"])
-        for key in tuple(published):
-            if key in self.config:
-                published[key] = self.config[key]
-        self.config["published_parameters"] = published
-        inferred = dict(self.config["inferred_parameters"])
-        for key in tuple(inferred):
-            if key in self.config:
-                inferred[key] = self.config[key]
-        self.config["inferred_parameters"] = inferred
         self.task = TAMPaperTask(self.config)
         self.rng = np.random.default_rng(config.get("seed"))
         self.agent_ids = self.task.controlled_agent_ids_from_config()

@@ -46,8 +46,8 @@ def assess_pair(ego_position: np.ndarray, ego_velocity: np.ndarray,
     aa = _angle(target_v, los)
     e_angle = 1.0 - (ata + aa) / (2.0 * np.pi)
     e_distance = 1.0 if distance <= maximum_attack_range_m else 0.0
-    e_height = float(np.clip(rel_alt / height_norm_m, -1.0, 1.0))
-    e_speed = float(np.clip(np.linalg.norm(rel_v) / speed_norm_mps, 0.0, 1.0))
+    e_height = float(rel_alt / height_norm_m)
+    e_speed = float(np.linalg.norm(rel_v) / speed_norm_mps)
     score = 0.35 * e_angle + 0.25 * e_distance + 0.20 * e_height + 0.20 * e_speed
     return SituationScore(float(np.linalg.norm(rel_v)), rel_alt, distance, ata, aa,
                           e_angle, e_distance, e_height, e_speed, float(score))

@@ -1,59 +1,110 @@
-"""Observation-only greedy candidate-manoeuvre blue opponent."""
+"""Observation-consistent greedy opponent using formal UAV dense reward."""
 
 from __future__ import annotations
 
 import numpy as np
 
+from .reward import (paper_height_reward, uav_angle_reward, uav_distance_reward,
+                     uav_speed_reward)
+from .situation import assess_pair
+
 
 MANOEUVRES = {
     "level": (24, 20, 20, 20),
-    "accelerate_level": (39, 20, 20, 20),
-    "left_turn": (28, 8, 20, 12),
-    "right_turn": (28, 31, 20, 27),
-    "climb": (30, 20, 8, 20),
-    "dive": (25, 20, 31, 20),
-    "left_climb": (30, 8, 8, 12),
-    "right_climb": (30, 31, 8, 27),
-    "left_dive": (27, 8, 31, 12),
-    "right_dive": (27, 31, 31, 27),
+    "accelerate_level": (34, 20, 20, 20),
+    "left_turn": (27, 10, 20, 14),
+    "right_turn": (27, 29, 20, 25),
+    "climb": (27, 20, 14, 20),
+    "dive": (24, 20, 25, 20),
+    "left_climb": (27, 10, 14, 14),
+    "right_climb": (27, 29, 14, 25),
+    "left_dive": (25, 10, 25, 14),
+    "right_dive": (25, 29, 25, 25),
 }
 
 
-class GreedyPaperOpponent:
-    """Scores ten fixed 4D commands using only the formal local observation."""
+def map_indices(indices) -> np.ndarray:
+    values = np.asarray(indices, dtype=np.float64)
+    return np.array([0.4 + values[0] / 39.0 * 0.5,
+                     -1.0 + values[1] / 39.0 * 2.0,
+                     -1.0 + values[2] / 39.0 * 2.0,
+                     -1.0 + values[3] / 39.0 * 2.0])
 
-    def act(self, agent_id: str, observation: dict) -> tuple[np.ndarray, dict]:
-        visible = np.flatnonzero(observation["enemy_mask"] > 0.5)
-        if not len(visible):
+
+class GreedyPaperOpponent:
+    """Argmax over ten 0.2 s predictions scored by the formal dense reward."""
+
+    def __init__(self, published: dict, inferred: dict):
+        self.published = published
+        self.inferred = inferred
+
+    def act(self, agent, current_target, incoming_missiles) -> tuple[np.ndarray, dict]:
+        if not agent.alive or current_target is None or not current_target.alive:
             action = np.asarray(MANOEUVRES["level"], dtype=np.int64)
-            return action, {"target_slot": None, "scores": {}, "manoeuvre": "level",
-                            "action_indices": action.tolist()}
-        # Formal enemy slots are stable IDs. The highest geometric proxy wins.
-        rows = observation["enemy_states"][visible]
-        target_offset = int(np.argmax(1.0 - rows[:, 2] - 0.35 * rows[:, 3] - 0.15 * rows[:, 4]))
-        slot = int(visible[target_offset])
-        row = observation["enemy_states"][slot]
-        relative_altitude = float(row[1])
-        ata = float(row[3])
-        scores = {}
-        for name, action in MANOEUVRES.items():
-            _, aileron, elevator, rudder = action
-            turn_strength = (abs(aileron - 19.5) + abs(rudder - 19.5)) / 39.0
-            climb_direction = (elevator - 19.5) / 19.5
-            alignment_need = float(np.clip(ata, 0.0, 1.0))
-            scores[name] = float(-ata + (0.6 * alignment_need - 0.4 * (1.0 - alignment_need)) * turn_strength
-                                 + 0.2 * np.sign(relative_altitude) * climb_direction
-                                 + 0.25 * (1.0 - alignment_need) * action[0] / 39.0)
-        if ata < 0.5 and abs(relative_altitude) < 0.2:
-            scores["accelerate_level"] += 2.0
-        manoeuvre = max(sorted(scores), key=scores.get)
-        action = np.asarray(MANOEUVRES[manoeuvre], dtype=np.float64)
-        # Minimal self-state stabilization permitted by the paper environment:
-        # it uses only formal ego pitch/roll and does not alter target selection.
-        pitch_norm = float(observation["ego_state"][4])
-        roll_norm = float(observation["ego_state"][6])
-        action[1] -= 14.0 * roll_norm
-        action[2] += 14.0 * pitch_norm
-        action = np.clip(np.rint(action), 0, 39).astype(np.int64)
-        return action, {"agent_id": agent_id, "target_slot": slot, "scores": scores,
-                        "manoeuvre": manoeuvre, "action_indices": action.tolist()}
+            return action, {"current_target": None, "candidates": {},
+                            "manoeuvre": "level", "action_indices": action.tolist()}
+        candidates = {}
+        for name, indices in MANOEUVRES.items():
+            position, velocity, pitch, heading, speed = self._predict(agent, indices)
+            pair = assess_pair(position, velocity, current_target.position,
+                               current_target.velocity,
+                               self.published["maximum_attack_range_m"],
+                               self.inferred["situation_height_norm_m"],
+                               self.published["maximum_speed_mps"])
+            r_height = paper_height_reward(
+                position[2], self.published["minimum_safe_altitude_m"],
+                self.inferred["optimal_altitude_m"], self.inferred["maximum_altitude_m"])
+            r_speed = uav_speed_reward(speed, current_target.speed)
+            r_angle = uav_angle_reward(pair.ata_rad, pair.aa_rad)
+            r_distance = uav_distance_reward(pair.distance_m)
+            r_dodge = self._predicted_dodge(position, velocity, incoming_missiles)
+            total = (10.0 * r_height + 10.0 * r_speed + 15.0 * r_angle
+                     + 10.0 * r_distance + 30.0 * r_dodge)
+            candidates[name] = {
+                "predicted_position_m": position.tolist(),
+                "predicted_velocity_mps": velocity.tolist(),
+                "predicted_pitch_rad": pitch, "predicted_heading_rad": heading,
+                "reward_components": {"r_height": r_height, "r_speed": r_speed,
+                                      "r_angle": r_angle, "r_distance": r_distance,
+                                      "r_dodge": r_dodge},
+                "total_dense_reward": float(total),
+                "action_indices": list(indices),
+            }
+        manoeuvre = max(MANOEUVRES, key=lambda name: (candidates[name]["total_dense_reward"],
+                                                       -list(MANOEUVRES).index(name)))
+        action = np.asarray(MANOEUVRES[manoeuvre], dtype=np.int64)
+        return action, {"current_target": current_target.agent_id,
+                        "candidates": candidates, "manoeuvre": manoeuvre,
+                        "action_indices": action.tolist()}
+
+    def _predict(self, agent, indices):
+        throttle, aileron, elevator, rudder = map_indices(indices)
+        dt = (float(self.published["physics_frames_per_action"])
+              / float(self.published["simulation_frequency_hz"]))
+        speed = max(1.0, agent.speed + (55.0 * (throttle - 0.4) - 10.0) * dt)
+        roll = float(np.clip(agent.roll + aileron * np.deg2rad(70.0) * dt,
+                             -np.deg2rad(75.0), np.deg2rad(75.0)))
+        pitch = float(np.clip(agent.pitch - elevator * np.deg2rad(25.0) * dt,
+                              -np.deg2rad(40.0), np.deg2rad(40.0)))
+        heading = float((agent.heading + (np.sin(roll) * np.deg2rad(100.0)
+                                          + rudder * np.deg2rad(40.0)) * dt
+                         + np.pi) % (2.0 * np.pi) - np.pi)
+        cp = np.cos(pitch)
+        velocity = np.array([cp * np.cos(heading), cp * np.sin(heading), np.sin(pitch)]) * speed
+        position = np.asarray(agent.position, dtype=np.float64) + velocity * dt
+        return position, velocity, pitch, heading, float(speed)
+
+    def _predicted_dodge(self, position, velocity, incoming_missiles):
+        active = [m for m in incoming_missiles if m.alive]
+        if not active:
+            return 0.0
+        threat = min(active, key=lambda m: np.linalg.norm(m.position - position)
+                     / max(m.speed_mps, 1.0))
+        los = position - threat.position
+        denom = max(float(np.linalg.norm(los) * np.linalg.norm(threat.velocity)), 1e-8)
+        lam = float(np.arccos(np.clip(np.dot(los, threat.velocity) / denom, -1.0, 1.0)))
+        angle = -float(np.cos(lam))
+        speed = ((threat.decision_start_speed_mps - threat.speed_mps)
+                 / float(self.inferred["missile_speed_reward_norm_mps"]))
+        del velocity
+        return angle + speed

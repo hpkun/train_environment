@@ -51,15 +51,14 @@ class PaperReward:
         self.published = published
         self.inferred = inferred
         self.global_scale = float(inferred.get("reward_global_scale", 1.0))
-        self._dead_seen: set[str] = set()
         self._team_kill_bonus_paid: dict[str, float] = {}
 
     def reset(self):
-        self._dead_seen.clear()
         self._team_kill_bonus_paid.clear()
 
     def compute(self, agents, targets: dict[str, str | None], scores: dict,
-                missiles, step_events: list[dict], out_of_zone_step: set[str]):
+                missiles, step_events: list[dict], out_of_zone_step: set[str],
+                alive_at_step_start: dict[str, bool]):
         by_id = {a.agent_id: a for a in agents}
         kill_by_side = {"red": 0, "blue": 0}
         killed_by: dict[str, int] = {}
@@ -71,22 +70,39 @@ class PaperReward:
                     killed_by[shooter.agent_id] = killed_by.get(shooter.agent_id, 0) + 1
         rewards, components = {}, {}
         for agent in agents:
+            if not alive_at_step_start.get(agent.agent_id, False):
+                components[agent.agent_id] = self._zero_components(agent)
+                rewards[agent.agent_id] = 0.0
+                continue
+            just_died = not agent.alive
             if agent.aircraft_type.role == "mav":
-                total, comp = self._mav(agent, agents, missiles, kill_by_side[agent.side])
+                total, comp = self._mav(
+                    agent, agents, missiles,
+                    kill_by_side[agent.side] if agent.alive else 0,
+                    just_died)
             else:
                 target = by_id.get(targets.get(agent.agent_id))
                 pair = scores.get(agent.agent_id, {}).get(getattr(target, "agent_id", None))
                 total, comp = self._uav(agent, target, pair, missiles,
                                         killed_by.get(agent.agent_id, 0),
-                                        agent.agent_id in out_of_zone_step)
+                                        agent.agent_id in out_of_zone_step,
+                                        just_died)
             rewards[agent.agent_id] = float(total * self.global_scale)
             comp["total"] = rewards[agent.agent_id]
             components[agent.agent_id] = comp
-            if not agent.alive:
-                self._dead_seen.add(agent.agent_id)
         return rewards, components
 
-    def _mav(self, mav, agents, missiles, team_kills: int):
+    @staticmethod
+    def _zero_components(agent):
+        if agent.aircraft_type.role == "mav":
+            keys = ("r_dist", "r_threat", "r_aspect", "r_safety", "r_pos",
+                    "r_aware", "r_support", "r_event", "total")
+        else:
+            keys = ("r_height", "r_speed", "r_angle", "r_distance",
+                    "r_dodge_angle", "r_dodge_speed", "r_dodge", "r_event", "total")
+        return {key: 0.0 for key in keys}
+
+    def _mav(self, mav, agents, missiles, team_kills: int, just_died: bool):
         enemies = [a for a in agents if a.side != mav.side and a.alive]
         distances = [float(np.linalg.norm(a.position - mav.position)) for a in enemies]
         nearest = min(distances, default=float(self.inferred["mav_d_max_m"]))
@@ -128,8 +144,7 @@ class PaperReward:
             if ao < np.pi / 2.0:
                 r_aware += 0.3 * (1.0 - ao / (np.pi / 2.0))
         r_support = 0.6 * r_pos + 0.4 * r_aware
-        death = (-float(self.inferred["mav_death_penalty"])
-                 if not mav.alive and mav.agent_id not in self._dead_seen else 0.0)
+        death = -float(self.inferred["mav_death_penalty"]) if just_died else 0.0
         paid = self._team_kill_bonus_paid.get(mav.agent_id, 0.0)
         cap = float(self.inferred["mav_team_kill_bonus_cap"])
         bonus = min(cap, paid + team_kills * float(self.inferred["mav_team_kill_bonus"])) - paid
@@ -142,7 +157,7 @@ class PaperReward:
         }
 
     def _uav(self, agent, target, pair: SituationScore | None, missiles,
-             kills: int, out_of_zone: bool):
+             kills: int, out_of_zone: bool, just_died: bool):
         r_height = paper_height_reward(agent.position[2],
                                        self.published["minimum_safe_altitude_m"],
                                        self.inferred["optimal_altitude_m"],
@@ -162,12 +177,11 @@ class PaperReward:
             denom = max(float(np.linalg.norm(los) * np.linalg.norm(threat.velocity)), 1e-8)
             lam = float(np.arccos(np.clip(np.dot(los, threat.velocity) / denom, -1.0, 1.0)))
             r_dodge_angle = -float(np.cos(lam))
-            r_dodge_speed = ((threat.previous_speed_mps - threat.speed_mps)
+            r_dodge_speed = ((threat.decision_start_speed_mps - threat.speed_mps)
                              / float(self.inferred["missile_speed_reward_norm_mps"]))
         r_dodge = r_dodge_angle + r_dodge_speed
         event = 200.0 * kills
-        if (not agent.alive and not agent.out_of_boundary
-                and agent.agent_id not in self._dead_seen):
+        if just_died and not agent.out_of_boundary:
             event -= 200.0
         if out_of_zone:
             event -= 100.0

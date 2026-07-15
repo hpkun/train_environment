@@ -71,7 +71,7 @@ def test_out_of_zone_event_is_minus_100_without_death_double_count():
     uav.kill("boundary")
     rewards, components = env.task.reward.compute(
         env.task.agents, env.task.current_targets, env.task.target_scores,
-        [], [], {uav.agent_id})
+        [], [], {uav.agent_id}, {a.agent_id: True for a in env.task.agents})
     assert components[uav.agent_id]["r_event"] == pytest.approx(-100.0)
     assert np.isfinite(rewards[uav.agent_id])
     env.close()

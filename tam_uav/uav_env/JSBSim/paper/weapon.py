@@ -16,11 +16,17 @@ class PaperWeaponManager:
         self.counter = 0
         self.total_fired = 0
         self.total_hits = 0
+        self._reported_terminations: set[str] = set()
 
     def reset(self):
         self.missiles.clear()
         self.last_launch_time_s.clear()
         self.counter = self.total_fired = self.total_hits = 0
+        self._reported_terminations.clear()
+
+    def begin_decision_step(self) -> None:
+        for missile in self.missiles:
+            missile.mark_decision_start()
 
     def try_launch(self, shooter, target, visible: bool, simulation_time_s: float) -> dict | None:
         if (not shooter.alive or shooter.aircraft_type.role == "mav"
@@ -48,7 +54,7 @@ class PaperWeaponManager:
                 "target_id": target.agent_id, "reason": "launched", "distance_m": distance,
                 "missiles_left": shooter.missile_left}
 
-    def step(self, by_id: dict, physics_dt: float, physics_steps: int) -> list[dict]:
+    def step_physics_once(self, by_id: dict, physics_dt: float) -> list[dict]:
         events = []
         for missile in self.missiles:
             if not missile.alive:
@@ -57,15 +63,14 @@ class PaperWeaponManager:
             if target is None or not target.alive:
                 missile.status, missile.termination_reason = "miss", "target_dead"
             else:
-                for _ in range(physics_steps):
-                    reason = missile.step(target.position, target.velocity, physics_dt)
-                    if reason:
-                        break
-            if missile.termination_reason:
+                missile.step(target.position, target.velocity, physics_dt)
+            if (missile.termination_reason
+                    and missile.missile_id not in self._reported_terminations):
                 hit = missile.termination_reason == "hit" and target is not None and target.alive
                 if hit:
                     target.kill("shotdown")
                     self.total_hits += 1
+                self._reported_terminations.add(missile.missile_id)
                 events.append({"missile_id": missile.missile_id,
                                "shooter_id": missile.shooter_id,
                                "target_id": missile.target_id,

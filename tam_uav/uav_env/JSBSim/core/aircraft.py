@@ -35,6 +35,14 @@ class SimpleKinematicAircraftPlatform:
         self.launch_missiles = []
         self.under_missiles = []
         self._geodetic = np.zeros(3, dtype=np.float32)
+        self._direct_fcs_command = np.array([0.4, 0.0, 0.0, 0.0], dtype=np.float64)
+        self.death_reason = None
+        self.speed_violation_time_s = 0.0
+        self.overload_violation_time_s = 0.0
+        self.max_speed_observed_mps = self.speed
+        self.max_abs_load_factor_g = 1.0
+        self.speed_violation_count = 0
+        self.overload_violation_count = 0
 
     def reset_runtime(self) -> None:
         self.alive = True
@@ -42,6 +50,13 @@ class SimpleKinematicAircraftPlatform:
         self.out_of_boundary = False
         self.missile_left = self.aircraft_type.missile_num
         self.missile_cooldown = 0
+        self.death_reason = None
+        self.speed_violation_time_s = 0.0
+        self.overload_violation_time_s = 0.0
+        self.max_speed_observed_mps = self.speed
+        self.max_abs_load_factor_g = 1.0
+        self.speed_violation_count = 0
+        self.overload_violation_count = 0
         self.launch_missiles.clear()
         self.under_missiles.clear()
 
@@ -94,12 +109,22 @@ class SimpleKinematicAircraftPlatform:
         The simple backend is a deterministic test approximation. The JSBSim
         subclass below writes the same command directly to the four FCS inputs.
         """
+        del max_speed_mps
+        self.apply_direct_fcs_command(command)
+        for _ in range(physics_steps):
+            self.step_physics_once(1.0 / float(simulation_frequency))
+
+    def apply_direct_fcs_command(self, command: np.ndarray) -> None:
+        values = np.asarray(command, dtype=np.float64).reshape(4).copy()
+        values[0] = np.clip(values[0], 0.4, 0.9)
+        values[1:] = np.clip(values[1:], -1.0, 1.0)
+        self._direct_fcs_command = values
+
+    def step_physics_once(self, dt: float) -> bool:
         if not self.alive:
-            return
-        throttle, aileron, elevator, rudder = np.asarray(command, dtype=float)
-        dt = physics_steps / float(simulation_frequency)
-        speed = float(np.clip(self.speed + (90.0 * (throttle - 0.4) - 12.0) * dt,
-                              80.0, max_speed_mps))
+            return False
+        throttle, aileron, elevator, rudder = self._direct_fcs_command
+        speed = max(1.0, self.speed + (90.0 * (throttle - 0.4) - 12.0) * dt)
         self.roll = float(np.clip(self.roll + aileron * np.deg2rad(90.0) * dt,
                                   -np.deg2rad(80.0), np.deg2rad(80.0)))
         self.pitch = float(np.clip(self.pitch - elevator * np.deg2rad(30.0) * dt,
@@ -109,10 +134,22 @@ class SimpleKinematicAircraftPlatform:
                                 rudder * np.deg2rad(12.0)) * dt)
         self.velocity = heading_to_unit(self.heading, self.pitch) * speed
         self.position = self.position + self.velocity * dt
+        self.max_speed_observed_mps = max(self.max_speed_observed_mps, self.speed)
+        self.max_abs_load_factor_g = max(self.max_abs_load_factor_g, self.load_factor_g)
+        return True
+
+    @property
+    def load_factor_g(self) -> float:
+        return float(1.0 + 8.0 * min(1.0, abs(self._direct_fcs_command[2])))
+
+    @property
+    def direct_fcs_command(self) -> np.ndarray:
+        return self._direct_fcs_command.copy()
 
     def kill(self, reason: str = "killed") -> None:
         self.alive = False
-        if reason == "crash":
+        self.death_reason = reason
+        if reason in {"crash", "nonfinite", "structural_speed", "structural_overload"}:
             self.crashed = True
         if reason == "boundary":
             self.out_of_boundary = True
@@ -199,7 +236,6 @@ class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
         ok = self.jsbsim_exec.load_model(self.model_name)
         if not ok:
             raise RuntimeError(f"JSBSim failed to load model {self.model_name!r}")
-        self._reset_fdm()
 
     def reset_runtime(self) -> None:
         super().reset_runtime()
@@ -275,41 +311,46 @@ class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
     def step_direct_fcs(self, command: np.ndarray, physics_steps: int,
                         simulation_frequency: int, max_speed_mps: float) -> None:
         del simulation_frequency, max_speed_mps
-        if not self.alive:
-            return
-        throttle, aileron, elevator, rudder = np.asarray(command, dtype=float)
-        values = {
-            "fcs/throttle-cmd-norm": np.clip(throttle, 0.0, 1.0),
-            "fcs/throttle-pos-norm": np.clip(throttle, 0.0, 1.0),
-            "fcs/aileron-cmd-norm": np.clip(aileron, -1.0, 1.0),
-            "fcs/elevator-cmd-norm": np.clip(elevator, -1.0, 1.0),
-            "fcs/rudder-cmd-norm": np.clip(rudder, -1.0, 1.0),
-        }
+        self.apply_direct_fcs_command(command)
         for _ in range(physics_steps):
-            for name, value in values.items():
-                self._set_property(name, float(value))
-            if not self.jsbsim_exec.run():
-                self.kill("nonfinite")
-                break
-            self._update_from_jsbsim()
-            if not np.isfinite(np.concatenate([self.position, self.velocity])).all():
-                self.kill("nonfinite")
-                break
-            if self.position[2] <= 0.0:
-                self.kill("crash")
+            if not self.step_physics_once(self.physics_dt):
                 break
 
-    def warmup_and_recenter(self, warmup_seconds: float, throttle: float = 0.9) -> None:
-        """Warm engines outside episode time, then restore the exact initial state."""
-        command = np.array([throttle, 0.0, 0.0, 0.0], dtype=np.float64)
-        self.step_direct_fcs(command, int(round(warmup_seconds * self.simulation_frequency)),
-                             self.simulation_frequency, float("inf"))
-        self.alive = True
-        self.position = self._initial_position.copy()
-        self.velocity = self._initial_velocity.copy()
-        self.heading = self._initial_heading
-        self.pitch = self.roll = 0.0
-        self._reset_fdm()
+    def apply_direct_fcs_command(self, command: np.ndarray) -> None:
+        super().apply_direct_fcs_command(command)
+        throttle, aileron, elevator, rudder = self._direct_fcs_command
+        values = {
+            "fcs/throttle-cmd-norm": throttle,
+            "fcs/throttle-pos-norm": throttle,
+            "fcs/aileron-cmd-norm": aileron,
+            "fcs/elevator-cmd-norm": elevator,
+            "fcs/rudder-cmd-norm": rudder,
+        }
+        for name, value in values.items():
+            self._set_property(name, float(value))
+
+    def step_physics_once(self, dt: float | None = None) -> bool:
+        del dt
+        if not self.alive:
+            return False
+        self.apply_direct_fcs_command(self._direct_fcs_command)
+        if not self.jsbsim_exec.run():
+            self.kill("nonfinite")
+            return False
+        self._update_from_jsbsim()
+        if not np.isfinite(np.concatenate([self.position, self.velocity])).all():
+            self.kill("nonfinite")
+            return False
+        if self.position[2] <= 0.0:
+            self.kill("crash")
+            return False
+        self.max_speed_observed_mps = max(self.max_speed_observed_mps, self.speed)
+        self.max_abs_load_factor_g = max(self.max_abs_load_factor_g, self.load_factor_g)
+        return True
+
+    @property
+    def load_factor_g(self) -> float:
+        return abs(self._get_property("accelerations/Nz"))
 
     def _update_from_jsbsim(self) -> None:
         lon = self._get_property("position/long-gc-deg")

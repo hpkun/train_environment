@@ -23,7 +23,8 @@ class ScenarioBuilder:
         self.reference_lat = float(config.get("reference_lat", 60.0))
         self.reference_lon = float(config.get("reference_lon", 120.0))
         self.reference_alt = float(config.get("reference_alt", 0.0))
-        self.simulation_frequency = int(config.get("simulation_frequency", 60))
+        self.simulation_frequency = int(
+            config.get("published_parameters", {}).get("simulation_frequency_hz", 60))
 
     def build(self, rng: np.random.Generator) -> list[AircraftPlatform]:
         agents: list[AircraftPlatform] = []
@@ -73,17 +74,13 @@ class ScenarioBuilder:
                     reference_alt=self.reference_alt,
                     simulation_frequency=self.simulation_frequency,
                 )
-                platform.warmup_and_recenter(
-                    float(self.config.get("inferred_parameters", {}).get(
-                        "reset_warmup_seconds", 0.0)),
-                    float(self.config.get("inferred_parameters", {}).get(
-                        "reset_warmup_throttle", 0.9)))
             elif self.dynamics_backend == "simple":
                 platform = SimpleKinematicAircraftPlatform(
                     agent_id, side, type_spec, position, velocity, heading)
             else:
                 raise ValueError(f"unknown dynamics_backend {self.dynamics_backend!r}")
-            platform.reset_runtime()
+            if self.dynamics_backend == "simple":
+                platform.reset_runtime()
             result.append(platform)
         return result
 

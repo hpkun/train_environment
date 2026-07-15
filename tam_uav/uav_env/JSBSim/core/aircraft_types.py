@@ -39,6 +39,7 @@ class AircraftType:
 
 def build_aircraft_types(config: dict) -> dict[str, AircraftType]:
     raw_types = config.get("aircraft_type_params", {})
+    inferred = config.get("inferred_parameters", {})
     result = {}
     for name, raw in raw_types.items():
         raw_control = raw.get("control", {})
@@ -47,7 +48,10 @@ def build_aircraft_types(config: dict) -> dict[str, AircraftType]:
             aircraft_model=str(raw.get("aircraft_model", "F-16")),
             model_path=str(raw.get("model_path", "")),
             role=str(raw.get("role", name)),
-            radar_range=float(raw.get("radar_range", 90000.0)),
+            radar_range=float(raw.get(
+                "radar_range",
+                inferred.get("mav_detection_range_m" if raw.get("role", name) == "mav"
+                             else "uav_direct_detection_range_m", 90000.0))),
             missile_num=int(raw.get("missile_num", 2)),
             max_speed_scale=float(raw.get("max_speed_scale", 1.0)),
             max_g=float(raw.get("max_g", 9.0)),
