@@ -18,6 +18,8 @@ from scripts.audit_tam_paper_vanilla_happo import audit, environment_contract_un
 from scripts.tam_output_paths import resolve_tam_output
 from scripts.vanilla_happo_runtime import update_side_timing
 from scripts.vanilla_happo_runtime import seed_all
+from scripts.train_tam_paper_vanilla_happo import (
+    agent_update_contract, is_episode_boundary, resume_seed_state)
 
 
 def make_policy(n=3, hidden=16, sharing="independent"):
@@ -78,6 +80,36 @@ def test_one_order_per_update_with_multiple_epochs_and_one_factor_initialization
     assert sorted(result.update_orders[0]) == sorted(policy.agent_ids)
     assert result.metrics["agent_order_count"] == 1
     assert result.metrics["factor_initialization_count"] == 1
+    assert result.metrics["policy_version"] == 0
+
+
+@pytest.mark.parametrize(("terminated", "truncated", "expected"), [
+    ([1, 1, 1], [0, 0, 0], True),
+    ([0, 0, 0], [1, 1, 1], True),
+    ([1, 0, 0], [0, 1, 1], True),
+    ([0, 0, 0], [0, 0, 0], False),
+])
+def test_episode_boundary_handles_termination_truncation_mixtures(
+        terminated, truncated, expected):
+    assert is_episode_boundary(terminated, truncated) is expected
+
+
+def test_mixed_policy_versions_are_rejected_but_unused_tail_is_ignored():
+    policy = make_policy(2)
+    buffer = make_buffer(policy, length=4)
+    buffer.policy_versions[1] = 7
+    with pytest.raises(ValueError, match="mixes policy versions"):
+        VanillaHAPPOTrainer(policy).update(buffer)
+    tail_buffer = VanillaHAPPORolloutBuffer(6, 2, 5, 8)
+    source = make_buffer(policy, length=3)
+    for name in vars(source):
+        value = getattr(source, name)
+        target = getattr(tail_buffer, name, None)
+        if isinstance(value, np.ndarray) and isinstance(target, np.ndarray):
+            target[:3] = value[:3]
+    tail_buffer.pos = 3
+    tail_buffer.policy_versions[3:] = 99
+    assert tail_buffer.validated_policy_version() == 0
 
 
 def test_factor_after_each_agent_uses_final_policy_on_full_rollout():
@@ -150,6 +182,48 @@ def test_fully_inactive_agent_head_receives_no_critic_gradient():
         torch.testing.assert_close(value, before[key])
 
 
+def test_inactive_agent_is_not_expected_to_change_and_optimization_contract_passes():
+    policy = make_policy(2)
+    buffer = make_buffer(policy, inactive_agent=1)
+    actor_before = {aid: copy.deepcopy(policy.actors[aid].state_dict())
+                    for aid in policy.agent_ids}
+    head_before = {aid: copy.deepcopy(policy.critic.heads[aid].state_dict())
+                   for aid in policy.agent_ids}
+    result = VanillaHAPPOTrainer(policy, ppo_epochs=2).update(buffer)
+    actor_changed = {aid: any(not torch.equal(value, actor_before[aid][key])
+                              for key, value in policy.actors[aid].state_dict().items())
+                     for aid in policy.agent_ids}
+    head_changed = {aid: any(not torch.equal(value, head_before[aid][key])
+                             for key, value in policy.critic.heads[aid].state_dict().items())
+                    for aid in policy.agent_ids}
+    assert result.metrics["active_sample_count/red_0"] == buffer.pos
+    assert result.metrics["active_sample_count/red_1"] == 0
+    assert actor_changed == {"red_0": True, "red_1": False}
+    assert head_changed == {"red_0": True, "red_1": False}
+    contracts = [agent_update_contract(
+        result.metrics[f"active_sample_count/{aid}"], actor_changed[aid], head_changed[aid])
+        for aid in policy.agent_ids]
+    assert contracts == [(True, True), (False, True)]
+    assert agent_update_contract(0, True, False) == (False, False)
+
+
+def test_approximate_kl_uses_active_joint_log_probability_and_is_finite():
+    policy = make_policy(2)
+    buffer = make_buffer(policy)
+    result = VanillaHAPPOTrainer(policy, ppo_epochs=2).update(buffer)
+    data = buffer.tensors("cpu")
+    with torch.no_grad():
+        for index, aid in enumerate(policy.agent_ids):
+            active = data["active_masks"][:, index] > 0.5
+            final_logp, _, _ = policy.evaluate_agent(
+                aid, data["obs"][:, index], data["actions"][:, index],
+                data["available_actions"][:, index])
+            expected = (data["old_log_probs"][active, index]
+                        - final_logp[active]).mean().item()
+            assert np.isfinite(result.metrics[f"approx_kl/{aid}"])
+            assert result.metrics[f"approx_kl/{aid}"] == pytest.approx(expected)
+
+
 def test_formal_happo_rejects_shared_actor_and_ablation_has_no_factor():
     policy = make_policy(3, sharing="parameter_sharing_ppo_ablation")
     with pytest.raises(ValueError, match="independent"):
@@ -210,6 +284,25 @@ def test_checkpoint_restores_next_order_permutations_optimizer_and_update(tmp_pa
             policy.state_dict().items(), restored_policy.state_dict().items()):
         assert name_a == name_b
         torch.testing.assert_close(value_a, value_b, rtol=1e-6, atol=1e-7)
+
+
+def test_strict_resume_uses_checkpoint_seed_schedule_despite_different_requested_seed(tmp_path):
+    policy = make_policy(2); trainer = VanillaHAPPOTrainer(policy)
+    path = tmp_path / "seed_resume.pt"
+    save_vanilla_happo_checkpoint(
+        path, policy, trainer, environment_steps=10, episodes=4,
+        config={"scenario": "2v2"}, numpy_rng=np.random.default_rng(11),
+        checkpoint_type="resumable", at_episode_boundary=True,
+        seed_schedule={"episode_seed_base": 11, "next_episode": 4,
+                       "next_episode_seed": 15})
+    loaded = load_vanilla_happo_checkpoint(
+        path, policy, trainer, for_resume=True, restore_rng=False,
+        expected_scenario="2v2")
+    restored_seed, next_seed = resume_seed_state(999, loaded["episodes"], loaded)
+    assert restored_seed == 11
+    assert next_seed == 15
+    restart = dict(loaded, resume_semantics="episode_restart")
+    assert resume_seed_state(999, loaded["episodes"], restart) == (999, 1003)
 
 
 def test_checkpoint_metadata_reconstructs_hidden_mode_heads_and_mappings(tmp_path):

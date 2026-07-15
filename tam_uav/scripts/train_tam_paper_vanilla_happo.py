@@ -21,6 +21,37 @@ from scripts.vanilla_happo_runtime import (deterministic_evaluate, flattened_obs
 from scripts.tam_output_paths import resolve_tam_output
 
 
+def is_episode_boundary(terminated, truncated):
+    terminated = np.asarray(terminated, dtype=bool)
+    truncated = np.asarray(truncated, dtype=bool)
+    if terminated.shape != truncated.shape:
+        raise ValueError("terminated and truncated shapes must match")
+    return bool(np.logical_or(terminated, truncated).all())
+
+
+def resume_seed_state(requested_seed, episodes, loaded):
+    if loaded.get("resume_semantics") == "episode_boundary":
+        schedule = loaded.get("seed_schedule") or {}
+        if "episode_seed_base" not in schedule:
+            raise ValueError("strict resume checkpoint is missing episode seed schedule")
+        base = int(schedule["episode_seed_base"])
+        next_seed = int(schedule.get("next_episode_seed", base + int(episodes)))
+        return base, next_seed
+    base = int(requested_seed)
+    return base, base + int(episodes)
+
+
+def agent_update_contract(active_count, actor_changed, critic_head_changed,
+                          actor_zero_gradient=False,
+                          critic_head_zero_gradient=False):
+    expected = int(active_count) > 0
+    if not expected:
+        return False, bool(not actor_changed and not critic_head_changed)
+    actor_valid = actor_changed or actor_zero_gradient
+    critic_valid = critic_head_changed or critic_head_zero_gradient
+    return expected, bool(actor_valid and critic_valid)
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--scenario", choices=("2v2", "3v2", "5v4"), default="2v2")
@@ -80,6 +111,8 @@ def main():
             ppo_epochs=args.ppo_epochs, minibatch_size=args.minibatch_size,
             gamma=args.gamma, gae_lambda=args.gae_lambda, seed=args.seed)
     steps = episodes = policy_version = 0
+    episode_seed_base = int(args.seed)
+    next_episode_seed = episode_seed_base
     resumed_from_semantics = None
     if args.resume_checkpoint:
         loaded = load_vanilla_happo_checkpoint(
@@ -90,6 +123,8 @@ def main():
         steps, episodes = loaded["environment_steps"], loaded["episodes"]
         policy_version = trainer.update_count
         resumed_from_semantics = loaded["resume_semantics"]
+        episode_seed_base, next_episode_seed = resume_seed_state(
+            args.seed, episodes, loaded)
     try:
         jsbsim_version = importlib.metadata.version("jsbsim")
     except importlib.metadata.PackageNotFoundError:
@@ -110,6 +145,9 @@ def main():
         "reward_semantics": "heterogeneous_per_agent",
         "theoretical_team_reward_monotonic_guarantee_claimed": False,
         "resumed_from_semantics": resumed_from_semantics,
+        "requested_seed": int(args.seed),
+        "restored_seed": episode_seed_base,
+        "next_episode_reset_seed": next_episode_seed,
         "actor_sharing_label": ("formal_independent" if args.actor_sharing == "independent"
                                 else "parameter_sharing_ablation"),
     }
@@ -124,7 +162,7 @@ def main():
     (output / "config_snapshot.json").write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
     print(json.dumps(snapshot, indent=2))
     csv_path = output / "training.csv"
-    obs, _ = env.reset(seed=args.seed + episodes)
+    obs, _ = env.reset(seed=next_episode_seed)
     episode_return = np.zeros(env.num_agents)
     episode_id = episodes
     rows, latest_eval = [], None
@@ -139,6 +177,7 @@ def main():
         episode_returns, winners, episode_lengths = [], [], []
         launches, hits, structural, boundary, survivors, terminal_agents = 0, 0, 0, 0, 0, 0
         target_violations = nonfinite = 0
+        rollout_ended_at_episode_boundary = False
         reward_component_sums, reward_component_count = {}, 0
         for local_step in range(horizon):
             actor_obs, state = flattened_obs(env, obs), env.get_state()
@@ -176,7 +215,9 @@ def main():
                 for key, value in components.items():
                     reward_component_sums[key] = reward_component_sums.get(key, 0.0) + float(value)
                 reward_component_count += 1
-            if all(term.values()) or all(trunc.values()):
+            episode_done = all(bool(term[aid] or trunc[aid]) for aid in env.agent_ids)
+            if episode_done:
+                rollout_ended_at_episode_boundary = True
                 episode_returns.append(episode_return.copy()); winners.append(info["winner"])
                 episode_lengths.append(info["episode_step"])
                 launches += info["missiles_fired"]; hits += info["missile_hits"]
@@ -184,7 +225,8 @@ def main():
                 survivors += sum(info["alive_at_step_end"].values())
                 terminal_agents += env.num_agents
                 episodes += 1; episode_id += 1; episode_return.fill(0)
-                obs, _ = env.reset(seed=args.seed + episodes)
+                next_episode_seed = episode_seed_base + episodes
+                obs, _ = env.reset(seed=next_episode_seed)
                 break
         before = {name: value.detach().clone() for name, value in policy.named_parameters()}
         result = trainer.update(buffer); policy_version += 1
@@ -202,6 +244,15 @@ def main():
                 before[f"critic.heads.{aid}.{name}"], value)
                 for name, value in policy.critic.heads[aid].named_parameters())
             for aid in policy.agent_ids}
+        update_expected, update_contract_valid = {}, {}
+        for index, aid in enumerate(policy.agent_ids):
+            active_count = result.metrics.get(
+                f"active_sample_count/{aid}",
+                int(buffer.active_masks[:buffer.pos, index].sum()))
+            update_expected[aid], update_contract_valid[aid] = agent_update_contract(
+                active_count, actor_changed[aid], critic_head_changed[aid],
+                result.metrics.get(f"actor_zero_gradient/{aid}", False),
+                result.metrics.get(f"critic_head_zero_gradient/{aid}", False))
         actions_all = buffer.actions[:buffer.pos]
         row = {"environment_steps": steps, "episodes": episodes,
                "mean_episode_return": float(np.mean([x.sum() for x in episode_returns])) if episode_returns else 0.0,
@@ -220,7 +271,15 @@ def main():
                "all_actors_changed": all(actor_changed.values()),
                "critic_changed": critic_changed,
                "critic_head_changed": json.dumps(critic_head_changed),
-               "all_critic_heads_changed": all(critic_head_changed.values())} | result.metrics
+               "all_critic_heads_changed": all(critic_head_changed.values()),
+               "update_expected": json.dumps(update_expected),
+               "update_contract_valid": json.dumps(update_contract_valid),
+               "optimization_update_contract_valid": all(update_contract_valid.values())} | result.metrics
+        for aid in policy.agent_ids:
+            row[f"update_expected/{aid}"] = update_expected[aid]
+            row[f"actor_changed/{aid}"] = actor_changed[aid]
+            row[f"critic_head_changed/{aid}"] = critic_head_changed[aid]
+            row[f"update_contract_valid/{aid}"] = update_contract_valid[aid]
         for key, value in reward_component_sums.items():
             row[f"reward_component/{key}"] = value / max(reward_component_count, 1)
         for head in range(4):
@@ -236,9 +295,7 @@ def main():
         with csv_path.open("w", newline="", encoding="utf-8") as handle:
             csv_writer = csv.DictWriter(handle, fieldnames=sorted({k for item in rows for k in item}))
             csv_writer.writeheader(); csv_writer.writerows(rows)
-        at_episode_boundary = bool(buffer.pos and (
-            buffer.terminated[buffer.pos - 1].all()
-            or buffer.truncated[buffer.pos - 1].all()))
+        at_episode_boundary = rollout_ended_at_episode_boundary
         if args.checkpoint_interval and (steps % args.checkpoint_interval == 0
                                          or steps == args.total_environment_steps):
             save_vanilla_happo_checkpoint(output / f"checkpoint_{steps}.pt", policy, trainer,
@@ -248,8 +305,9 @@ def main():
                                                            else "evaluation_weights"),
                                           at_episode_boundary=at_episode_boundary,
                                           policy_version=policy_version,
-                                          seed_schedule={"episode_seed_base": args.seed,
-                                                         "next_episode": episodes})
+                                          seed_schedule={"episode_seed_base": episode_seed_base,
+                                                         "next_episode": episodes,
+                                                         "next_episode_seed": episode_seed_base + episodes})
         if args.evaluation_interval and (steps % args.evaluation_interval == 0
                                          or steps == args.total_environment_steps):
             eval_env = make_paper_env(ROOT, args.scenario)
@@ -273,13 +331,13 @@ def main():
                                                    else "evaluation_weights"),
                                   at_episode_boundary=at_episode_boundary,
                                   policy_version=policy_version,
-                                  seed_schedule={"episode_seed_base": args.seed,
-                                                 "next_episode": episodes})
+                                  seed_schedule={"episode_seed_base": episode_seed_base,
+                                                 "next_episode": episodes,
+                                                 "next_episode_seed": episode_seed_base + episodes})
     numeric_metrics = [value for row in rows for value in row.values()
                        if isinstance(value, (int, float, bool))]
     optimization_active = bool(rows and np.isfinite(numeric_metrics).all()
-                               and all(row["all_actors_changed"] and row["critic_changed"]
-                                       and row["all_critic_heads_changed"]
+                               and all(row["optimization_update_contract_valid"]
                                        and row["nan_inf_count"] == 0 for row in rows))
     runtime_valid = bool(rows and all(
         row.get("agent_order_count") == 1
@@ -293,6 +351,8 @@ def main():
                "resume_semantics": ("episode_boundary" if at_episode_boundary
                                     else "evaluation_only"),
                "resumed_from_semantics": resumed_from_semantics,
+               "requested_seed": int(args.seed),
+               "restored_seed": episode_seed_base,
                "OPTIMIZATION_PIPELINE_ACTIVE": optimization_active,
                "HAPPO_RUNTIME_INVARIANTS_VALID": runtime_valid,
                "EARLY_PERFORMANCE_SIGNAL_OBSERVED": False,

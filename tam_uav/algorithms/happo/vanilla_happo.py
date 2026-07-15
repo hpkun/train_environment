@@ -169,6 +169,18 @@ class VanillaHAPPORolloutBuffer:
             advantages[t] = last
         return advantages, advantages + self.values[:n]
 
+    def validated_policy_version(self):
+        """Return the sole policy version among used rows with active samples."""
+        used = self.policy_versions[:self.pos]
+        valid_rows = self.active_masks[:self.pos].any(axis=1)
+        versions = np.unique(used[valid_rows])
+        if len(versions) == 0:
+            raise ValueError("rollout contains no active samples")
+        if len(versions) != 1:
+            raise ValueError(
+                f"rollout mixes policy versions: {versions.tolist()}")
+        return int(versions[0])
+
     def tensors(self, device):
         n = self.pos
         return {name: torch.as_tensor(getattr(self, name)[:n], device=device)
@@ -246,6 +258,7 @@ class VanillaHAPPOTrainer:
         return indices[torch.as_tensor(order, device=device)]
 
     def update(self, buffer):
+        policy_version = buffer.validated_policy_version()
         device = next(self.policy.parameters()).device
         data = buffer.tensors(device)
         advantages_np, returns_np = buffer.compute_gae(self.gamma, self.gae_lambda)
@@ -265,7 +278,8 @@ class VanillaHAPPOTrainer:
         clip_fractions = {aid: [] for aid in self.policy.agent_ids}
         metrics = {"agent_order": ",".join(order_names),
                    "agent_order_count": 1,
-                   "factor_initialization_count": 1}
+                   "factor_initialization_count": 1,
+                   "policy_version": policy_version}
 
         for index in order:
             aid = self.policy.agent_ids[index]
@@ -306,6 +320,14 @@ class VanillaHAPPOTrainer:
                 final_logp, _, _ = self.policy.evaluate_agent(
                     aid, data["obs"][:, index], data["actions"][:, index],
                     data["available_actions"][:, index])
+            if valid.any():
+                approx_kl = (data["old_log_probs"][valid, index]
+                             - final_logp[valid]).mean()
+                if not torch.isfinite(approx_kl):
+                    raise FloatingPointError(f"non-finite approximate KL for {aid}")
+                metrics[f"approx_kl/{aid}"] = float(approx_kl)
+            else:
+                metrics[f"approx_kl/{aid}"] = 0.0
             log_factor = self.update_log_factor(
                 log_factor, final_logp, data["old_log_probs"][:, index], active[:, index])
             factor_after = torch.exp(log_factor)
@@ -316,6 +338,7 @@ class VanillaHAPPOTrainer:
             metrics[f"factor_after_max/{aid}"] = float(factor_after.max())
 
         critic_losses = {aid: [] for aid in self.policy.agent_ids}
+        critic_head_grad_norms = {aid: [] for aid in self.policy.agent_ids}
         critic_grad_norms = []
         all_indices = torch.arange(buffer.pos, device=device)
         for _ in range(self.ppo_epochs):
@@ -341,6 +364,13 @@ class VanillaHAPPOTrainer:
                     self.critic_optimizer.zero_grad()
                     loss = torch.stack(losses).mean()
                     (self.value_coef * loss).backward()
+                    for aid in self.policy.agent_ids:
+                        squared = [parameter.grad.detach().pow(2).sum()
+                                   for parameter in self.policy.critic.heads[aid].parameters()
+                                   if parameter.grad is not None]
+                        if squared:
+                            critic_head_grad_norms[aid].append(
+                                float(torch.sqrt(torch.stack(squared).sum())))
                     grad = torch.nn.utils.clip_grad_norm_(
                         self.policy.critic.parameters(), self.max_grad_norm)
                     self.critic_optimizer.step()
@@ -358,6 +388,14 @@ class VanillaHAPPOTrainer:
             metrics[f"gradient_norm/{aid}"] = float(np.mean(grad_norms[aid])) if grad_norms[aid] else 0.0
             metrics[f"clip_fraction/{aid}"] = float(np.mean(clip_fractions[aid])) if clip_fractions[aid] else 0.0
             metrics[f"critic_loss/{aid}"] = float(np.mean(critic_losses[aid])) if critic_losses[aid] else 0.0
+            metrics[f"active_sample_count/{aid}"] = int(valid.sum())
+            metrics[f"actor_zero_gradient/{aid}"] = bool(
+                valid.any() and grad_norms[aid] and max(grad_norms[aid]) == 0.0)
+            metrics[f"critic_head_gradient_norm/{aid}"] = float(
+                np.mean(critic_head_grad_norms[aid])) if critic_head_grad_norms[aid] else 0.0
+            metrics[f"critic_head_zero_gradient/{aid}"] = bool(
+                valid.any() and critic_head_grad_norms[aid]
+                and max(critic_head_grad_norms[aid]) == 0.0)
             for label, tensor in (("value", value), ("return", target), ("advantage", adv)):
                 metrics[f"{label}_mean/{aid}"] = float(tensor.mean()) if tensor.numel() else 0.0
                 metrics[f"{label}_std/{aid}"] = float(tensor.std()) if tensor.numel() > 1 else 0.0
