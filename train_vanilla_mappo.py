@@ -14,6 +14,7 @@ import csv
 import json
 import os
 import random
+import signal
 import sys
 from dataclasses import asdict
 
@@ -33,6 +34,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+if __name__ == "__main__":
+    sys.modules.setdefault("train_vanilla_mappo", sys.modules[__name__])
+
 from my_uav_env.alignment.reward_utils import (
     AltitudeRewardConfig,
     DEFAULT_ALTITUDE_REWARD_CONFIG,
@@ -46,6 +50,12 @@ from configs.paper_minimal_3v3_spec import (
     PAPER_MINIMAL_ENVIRONMENT_PROFILE,
     REFERENCE_ENVIRONMENT_PROFILE,
     minimal_environment_snapshot,
+)
+from configs.paper_learnable_3v3_spec import (
+    LEARNABLE_INITIALIZATION_MODES,
+    LEARNABLE_MISSILE_GUIDANCE_MODE,
+    PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
+    learnable_environment_snapshot,
 )
 
 torch.set_num_threads(1)
@@ -112,6 +122,7 @@ class Config:
     environment_version: str = "brma_paper_profile_v1"
     environment_profile: str = REFERENCE_ENVIRONMENT_PROFILE
     blue_policy_profile: str = "paper_pursuit"
+    initial_condition_randomization_mode: str = "deterministic_v1"
 
     # ---- PPO (论文 Table 3) ----
     replay_buffer_size: int = 2000  
@@ -141,6 +152,13 @@ class Config:
     results_file: str = "results/vanilla_mappo_results.csv"
     launch_quality_file: str | None = None
     checkpoint_dir: str = "checkpoints"
+    resume_latest: bool = False
+    resume_state: str | None = None
+    overwrite_existing: bool = False
+    eval_during_training: bool = False
+    eval_interval_steps: int = 50_000
+    eval_episodes: int = 20
+    eval_log_file: str | None = None
     seed = None
     device: str = "auto"
 
@@ -359,6 +377,8 @@ LAUNCH_DIAG_BASE_KEYS = (
     "cooldown_blocked",
     "kill_cooldown_blocked",
     "engaged_blocked",
+    "range_low_blocked",
+    "range_high_blocked",
     "launches",
 )
 
@@ -385,6 +405,10 @@ LAUNCH_DIAG_CSV_FIELDS = (
     "BlueGeometryToLaunchRate",
     "RedRangeToGeometryRate",
     "BlueRangeToGeometryRate",
+    "LaunchDiagRedRangeLowBlocked",
+    "LaunchDiagBlueRangeLowBlocked",
+    "LaunchDiagRedRangeHighBlocked",
+    "LaunchDiagBlueRangeHighBlocked",
 )
 
 LOCAL_REWARD_COMPONENT_KEYS = (
@@ -426,6 +450,9 @@ LAUNCH_QUALITY_DETAIL_FIELDS = (
     "termination_step",
     "step_delta",
     "target_alive_at_termination",
+    "pn_guidance_frames",
+    "pn_nonzero_command_frames",
+    "maximum_command_g",
 )
 
 LAUNCH_QUALITY_AGG_CSV_FIELDS = (
@@ -509,10 +536,87 @@ BLUE_POLICY_DIAG_CSV_FIELDS = (
     "blue_base_heading_command_discontinuities",
     "blue_executed_heading_command_discontinuities",
     "blue_altitude_recovery_frames",
+    "blue_target_reallocations",
+    "blue_target_reallocations_after_death",
+    "blue_target_switches_while_alive",
+    "blue_engaged_wait_agent_decisions",
+    "blue_no_alive_target_agent_decisions",
+)
+
+LEARNABILITY_DIAG_CSV_FIELDS = (
+    "RedMissileTermHit", "RedMissileTermPHitFail",
+    "RedMissileTermOvershoot", "RedMissileTermTimeout",
+    "RedMissileTermTargetDead", "BlueMissileTermHit",
+    "BlueMissileTermPHitFail", "BlueMissileTermOvershoot",
+    "BlueMissileTermTimeout", "BlueMissileTermTargetDead",
+    "MissileLifetimeMeanS", "MissileLifetimeP50S",
+    "MissileOneFrameTerminations", "MissileLifetimeOverPoint2S",
+    "MissilePNGuidanceFrames", "MissilePNNonzeroCommandFrames",
+    "MissileMaximumCommandG", "TargetReallocations",
+    "TargetReallocationsAfterDeath", "TargetSwitchesWhileAlive",
+    "TargetEngagedWaitFrames", "TargetNoAliveFrames",
+    "RedMWSDetectedAgentDecisions", "RedMWSOverrideAgentDecisions",
+    "BlueMWSDetectedAgentDecisions", "BlueMWSOverrideAgentDecisions",
+    "RedWarningToTerminalMeanS", "RedWarningToTerminalP50S",
+    "RedWarningToHitMeanS", "BlueWarningToTerminalMeanS",
+    "BlueWarningToTerminalP50S", "BlueWarningToHitMeanS",
+    "CompletedEpisodesThisIteration", "NoCompletedEpisodeThisIteration",
+    "IterationWallTimeS", "EnvironmentStepsPerSecond",
+    "RedMissileLaunches", "RedMissileHits", "RedMissilePHitFail",
+    "RedMissileOvershoot", "RedMissileTimeout", "RedMissileTargetDead",
+    "RedMissileUnknownTermination", "BlueMissileLaunches",
+    "BlueMissileHits", "BlueMissilePHitFail", "BlueMissileOvershoot",
+    "BlueMissileTimeout", "BlueMissileTargetDead",
+    "BlueMissileUnknownTermination", "RedMissileLifetimeMeanSec",
+    "RedMissileLifetimeMedianSec", "RedMissileLifetimeP90Sec",
+    "RedMissileLifetimeMinSec", "RedMissileLifetimeMaxSec",
+    "BlueMissileLifetimeMeanSec", "BlueMissileLifetimeMedianSec",
+    "BlueMissileLifetimeP90Sec", "BlueMissileLifetimeMinSec",
+    "BlueMissileLifetimeMaxSec", "RedLaunchInsideHitRadiusCount",
+    "RedLaunchInsideHitRadiusFrac", "BlueLaunchInsideHitRadiusCount",
+    "BlueLaunchInsideHitRadiusFrac", "RedOnePhysicsFrameHitCount",
+    "RedOnePhysicsFrameHitFrac", "BlueOnePhysicsFrameHitCount",
+    "BlueOnePhysicsFrameHitFrac", "RedMissileSurvivedOneDecisionCount",
+    "RedMissileSurvivedOneDecisionFrac",
+    "BlueMissileSurvivedOneDecisionCount",
+    "BlueMissileSurvivedOneDecisionFrac", "RedPNFramesMean",
+    "RedPNNonZeroCommandFrac", "BluePNFramesMean",
+    "BluePNNonZeroCommandFrac", "FirstLaunchStepMean",
+    "FirstHitStepMean", "FirstKillStepMean", "EpisodeLengthMean",
+    "EpisodeLengthP50", "EpisodeLengthP90", "EstimatedRemainingTimeSec",
+    "WorkerRestartCount", "ResumeCount",
 )
 
 CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v5"
+TRAINING_STATE_SCHEMA_VERSION = "vanilla_mappo_training_state_v1"
 ACTION_DISTRIBUTION_VERSION = "state_dependent_diag_gaussian_env_clip_v2"
+
+
+def _training_log_fields() -> list[str]:
+    return [
+        "Iteration", "Step", "ActorLoss", "CriticLoss", "PolicyEntropy",
+        *PPO_DIAG_CSV_FIELDS, "RedMeanReward", "RedWinRate", "RedRewardStd",
+        "WinRateRecent", "RedMissiles", "BlueMissiles",
+        *ROLLOUT_LAYOUT_CSV_FIELDS, "Episodes", "InvalidNumericalEpisodes",
+        "InvalidTransitionsDropped", "InvalidEpisodesDropped", "UpdateSkipReason",
+        "RedWins", "BlueWins", "Draws", "RedAliveMean", "BlueAliveMean",
+        "RedDeathsMissile", "RedDeathsCrash", "BlueDeathsMissile",
+        "BlueDeathsCrash", "RedMissileHits", "BlueMissileHits",
+        "RedMissileHitRate", "BlueMissileHitRate", "KD_Red_AllDeaths",
+        "KD_Red_MissileOnly", "RWR", "RWRDenominatorZero", "RewardVersion",
+        "RewardMode", "EnvironmentProfile", "ObsNormalization", "PIDProfile",
+        "PIDThrottleBase", "MissileGuidanceMode", "CheckpointSchema",
+        "ActionDistribution", "EnvironmentConfigFingerprint", "BluePolicyProfile",
+        "RedMWSMode", "BlueMWSMode", "NumRed", "NumBlue", "MaxSteps",
+        "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
+        *REWARD_COMPONENT_LOG_FIELDS, "ActionStdMean", "ActionStdMin",
+        "ActionStdMax", "ActionLogStdMean", "StateDependentStdMean",
+        "StateDependentStdMin", "StateDependentStdMax",
+        "StateDependentStdLowerBoundFrac", "StateDependentStdUpperBoundFrac",
+        *LAUNCH_DIAG_CSV_FIELDS, *LAUNCH_QUALITY_AGG_CSV_FIELDS,
+        *ACTION_BOUND_CSV_FIELDS, *AIRCRAFT_ENVELOPE_CSV_FIELDS,
+        *BLUE_POLICY_DIAG_CSV_FIELDS, *LEARNABILITY_DIAG_CSV_FIELDS,
+    ]
 
 
 def _minimal_altitude_reward_config() -> AltitudeRewardConfig:
@@ -548,6 +652,14 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             sim_freq=60, agent_interaction_steps=12,
             max_episode_length=config.max_episode_length, seed=config.seed,
             blue_policy_profile=config.blue_policy_profile)
+    elif config.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
+        environment_snapshot = learnable_environment_snapshot(
+            num_red=config.num_red, num_blue=config.num_blue,
+            sim_freq=60, agent_interaction_steps=12,
+            max_episode_length=config.max_episode_length, seed=config.seed,
+            blue_policy_profile=config.blue_policy_profile,
+            initial_condition_randomization_mode=(
+                config.initial_condition_randomization_mode))
     else:
         environment_snapshot = environment_config_snapshot(
             DEFAULT_PAPER_ENVIRONMENT_CONFIG,
@@ -561,7 +673,9 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "obs_normalization": config.obs_normalization,
         "reward_version": (
             "paper_literal_minimal_unspecified_v1"
-            if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+            if config.environment_profile in (
+                PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+                PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
             else REWARD_VERSION),
         "reward_mode": config.reward_mode,
         "pid_profile": config.pid_profile,
@@ -573,10 +687,14 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "environment_version": str(config.environment_version),
         "environment_profile": str(config.environment_profile),
         "blue_policy_profile": str(config.blue_policy_profile),
+        "initial_condition_randomization_mode": str(
+            config.initial_condition_randomization_mode),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
         "altitude_reward_interpretation": (
             "pairwise_mean_all_alive_enemies_v1"
-            if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+            if config.environment_profile in (
+                PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+                PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
             else "pairwise_sum_all_alive_enemies_v1"),
         "num_red": int(config.num_red),
         "num_blue": int(config.num_blue),
@@ -634,6 +752,25 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             "pid_profile": environment_snapshot["pid_profile"]["source"],
         })
         metadata["profile_provenance"] = provenance
+    elif config.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
+        sourced_keys = (
+            "profile_provenance", "initial_condition_profile",
+            "initial_condition_randomization_mode", "blue_policy_profile",
+            "red_mws_mode", "blue_mws_mode", "missile_profile",
+            "initial_missile_direction_mode", "initial_missile_speed_mps",
+            "missile_hit_radius_m", "missile_arming_time_s",
+            "missile_overshoot_window_s",
+            "missile_overshoot_distance_hysteresis_m",
+            "missile_positive_closing_threshold_mps", "launch_range_m",
+            "fire_control_profile", "reward_version", "target_assignment_mode",
+            "observation_mode", "actor_input_dim",
+            "critic_input_dim")
+        provenance = {}
+        for key in sourced_keys:
+            sourced = environment_snapshot[key]
+            metadata[key] = sourced["value"]
+            provenance[key] = sourced["source"]
+        metadata["profile_provenance_fields"] = provenance
     return metadata
 
 
@@ -644,6 +781,125 @@ def _save_model_checkpoint(path: str, model: nn.Module, metadata: dict,
         "metadata": dict(metadata),
         "model_kind": model_kind,
     }, path)
+
+
+def _capture_rng_state() -> dict:
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None),
+    }
+
+
+def _restore_rng_state(state: dict) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
+    if torch.cuda.is_available() and state.get("torch_cuda") is not None:
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+
+def _atomic_torch_save(payload: dict, path: str) -> None:
+    _ensure_parent_dir(path)
+    temporary = f"{path}.tmp"
+    torch.save(payload, temporary)
+    os.replace(temporary, path)
+
+
+def _training_core_config(config, checkpoint_meta: dict) -> dict:
+    fields = (
+        "num_red", "num_blue", "num_envs", "max_episode_length",
+        "replay_buffer_size", "n_update_epochs", "n_minibatches", "gamma",
+        "gae_lambda", "clip_epsilon", "max_grad_norm", "actor_lr",
+        "critic_lr", "entropy_coef", "mlp_hidden", "rnn_hidden_size",
+        "action_dim", "obs_mode", "obs_normalization", "pid_profile",
+        "pid_throttle_base", "reward_mode", "missile_guidance_mode",
+        "environment_profile", "blue_policy_profile",
+        "initial_condition_randomization_mode")
+    return {
+        **{field: getattr(config, field) for field in fields},
+        "environment_config_fingerprint": checkpoint_meta[
+            "environment_config_fingerprint"],
+        "training_log_schema": _training_log_fields(),
+    }
+
+
+def _build_training_state(
+    actor, critic, actor_opt, critic_opt, config, checkpoint_meta: dict,
+    runtime: dict,
+) -> dict:
+    return {
+        "schema_version": TRAINING_STATE_SCHEMA_VERSION,
+        "actor_state_dict": actor.state_dict(),
+        "critic_state_dict": critic.state_dict(),
+        "actor_optimizer_state_dict": actor_opt.state_dict(),
+        "critic_optimizer_state_dict": critic_opt.state_dict(),
+        "runtime": runtime,
+        "rng_state": _capture_rng_state(),
+        "checkpoint_metadata": dict(checkpoint_meta),
+        "core_config": _training_core_config(config, checkpoint_meta),
+        "run_id": runtime.get("run_id"),
+        "log_schema_version": CHECKPOINT_SCHEMA_VERSION,
+    }
+
+
+def _validate_training_state(payload: dict, config, checkpoint_meta: dict) -> None:
+    if payload.get("schema_version") != TRAINING_STATE_SCHEMA_VERSION:
+        raise ValueError("training-state schema mismatch")
+    expected = _training_core_config(config, checkpoint_meta)
+    if payload.get("core_config") != expected:
+        raise ValueError("training-state core configuration mismatch")
+    completed_steps = int(payload.get("runtime", {}).get("total_steps", -1))
+    if int(config.total_env_steps) < completed_steps:
+        raise ValueError(
+            "total_env_steps may only stay equal or increase when resuming")
+
+
+def _validate_resume_csv(path: str, expected_header: list[str], step: int) -> None:
+    if not os.path.exists(path):
+        raise ValueError(f"resume log does not exist: {path}")
+    with open(path, newline="") as handle:
+        rows = list(csv.reader(handle))
+    if not rows or rows[0] != expected_header:
+        raise ValueError(f"resume log header mismatch: {path}")
+    if len(rows) < 2 or int(rows[-1][expected_header.index("Step")]) != int(step):
+        raise ValueError(
+            f"resume log last Step does not match checkpoint total_steps: {path}")
+
+
+def _validate_resume_csv_header(path: str, expected_header: list[str]) -> None:
+    if not os.path.exists(path):
+        raise ValueError(f"resume log does not exist: {path}")
+    with open(path, newline="") as handle:
+        header = next(csv.reader(handle), None)
+    if header != expected_header:
+        raise ValueError(f"resume log header mismatch: {path}")
+
+
+def _flush_and_periodic_fsync(handle, iteration: int) -> None:
+    handle.flush()
+    if iteration % 10 == 0:
+        os.fsync(handle.fileno())
+
+
+def _atomic_json_save(payload: dict, path: str) -> None:
+    _ensure_parent_dir(path)
+    temporary = f"{path}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+_STOP_REQUESTED = False
+
+
+def _request_safe_stop(_signum, _frame) -> None:
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
 
 
 def _unpack_and_validate_checkpoint(payload, expected_metadata: dict,
@@ -735,7 +991,141 @@ def _launch_diag_metrics(totals: dict) -> dict:
         "BlueGeometryToLaunchRate": _safe_div(blue_launches, blue_geometry),
         "RedRangeToGeometryRate": _safe_div(red_geometry, red["range_ok_pairs"]),
         "BlueRangeToGeometryRate": _safe_div(blue_geometry, blue["range_ok_pairs"]),
+        "LaunchDiagRedRangeLowBlocked": red["range_low_blocked"],
+        "LaunchDiagBlueRangeLowBlocked": blue["range_low_blocked"],
+        "LaunchDiagRedRangeHighBlocked": red["range_high_blocked"],
+        "LaunchDiagBlueRangeHighBlocked": blue["range_high_blocked"],
     }
+
+
+def _learnability_iteration_metrics(
+    launch_records: list[dict], done_records: list[dict],
+    environment_diag: Counter, episode_lengths: list[int],
+    iter_episodes: int, wall_time_s: float, environment_steps: int,
+    remaining_steps: int, resume_count: int,
+) -> dict:
+    term = Counter((str(row.get("team", "")),
+                    str(row.get("raw_termination_reason", "unknown")))
+                   for row in done_records)
+    lifetimes = _numeric_values(done_records, "flight_time_sec")
+    pn_frames = [int(row.get("pn_guidance_frames", 0)) for row in done_records]
+    pn_nonzero = [int(row.get("pn_nonzero_command_frames", 0))
+                  for row in done_records]
+    max_commands = _numeric_values(done_records, "maximum_command_g")
+    result = {}
+    for team, prefix in (("red", "Red"), ("blue", "Blue")):
+        for reason, suffix in (
+                ("hit", "Hit"), ("p_hit_fail", "PHitFail"),
+                ("overshoot", "Overshoot"), ("timeout", "Timeout"),
+                ("target_dead", "TargetDead")):
+            result[f"{prefix}MissileTerm{suffix}"] = int(term[(team, reason)])
+        launches = [row for row in launch_records if row.get("team") == team]
+        dones = [row for row in done_records if row.get("team") == team]
+        lifetimes_team = _numeric_values(dones, "flight_time_sec")
+        hits = [row for row in dones if row.get("raw_termination_reason") == "hit"]
+        known = {"hit", "p_hit_fail", "overshoot", "timeout", "target_dead"}
+        inside = sum(float(row.get("range_m", float("inf"))) < 100.0
+                     for row in launches)
+        one_frame_hits = sum(
+            float(row.get("flight_time_sec", float("inf"))) <= 1.0 / 60.0 + 1e-9
+            for row in hits)
+        survived = sum(value > 0.2 for value in lifetimes_team)
+        team_pn_frames = [int(row.get("pn_guidance_frames", 0)) for row in dones]
+        team_pn_nonzero = [
+            int(row.get("pn_nonzero_command_frames", 0)) for row in dones]
+        result.update({
+            f"{prefix}MissileLaunches": len(launches),
+            f"{prefix}MissileHits": len(hits),
+            f"{prefix}MissilePHitFail": int(term[(team, "p_hit_fail")]),
+            f"{prefix}MissileOvershoot": int(term[(team, "overshoot")]),
+            f"{prefix}MissileTimeout": int(term[(team, "timeout")]),
+            f"{prefix}MissileTargetDead": int(term[(team, "target_dead")]),
+            f"{prefix}MissileUnknownTermination": sum(
+                1 for row in dones
+                if row.get("raw_termination_reason") not in known),
+            f"{prefix}MissileLifetimeMeanSec": _mean_or_zero(lifetimes_team),
+            f"{prefix}MissileLifetimeMedianSec": _percentile_or_zero(
+                lifetimes_team, 50),
+            f"{prefix}MissileLifetimeP90Sec": _percentile_or_zero(
+                lifetimes_team, 90),
+            f"{prefix}MissileLifetimeMinSec": (
+                min(lifetimes_team) if lifetimes_team else 0.0),
+            f"{prefix}MissileLifetimeMaxSec": (
+                max(lifetimes_team) if lifetimes_team else 0.0),
+            f"{prefix}LaunchInsideHitRadiusCount": inside,
+            f"{prefix}LaunchInsideHitRadiusFrac": _safe_div(inside, len(launches)),
+            f"{prefix}OnePhysicsFrameHitCount": one_frame_hits,
+            f"{prefix}OnePhysicsFrameHitFrac": _safe_div(
+                one_frame_hits, len(hits)),
+            f"{prefix}MissileSurvivedOneDecisionCount": survived,
+            f"{prefix}MissileSurvivedOneDecisionFrac": _safe_div(
+                survived, len(dones)),
+            f"{prefix}PNFramesMean": _mean_or_zero(team_pn_frames),
+            f"{prefix}PNNonZeroCommandFrac": _safe_div(
+                sum(team_pn_nonzero), sum(team_pn_frames)),
+        })
+    first_launch = _numeric_values(launch_records, "current_step")
+    hit_records = [
+        row for row in done_records if row.get("raw_termination_reason") == "hit"]
+    first_hit = _numeric_values(hit_records, "termination_step")
+    result.update({
+        "MissileLifetimeMeanS": _mean_or_zero(lifetimes),
+        "MissileLifetimeP50S": _percentile_or_zero(lifetimes, 50),
+        "MissileOneFrameTerminations": sum(value <= 1.0 / 60.0 + 1e-9
+                                             for value in lifetimes),
+        "MissileLifetimeOverPoint2S": sum(value > 0.2 for value in lifetimes),
+        "MissilePNGuidanceFrames": sum(pn_frames),
+        "MissilePNNonzeroCommandFrames": sum(pn_nonzero),
+        "MissileMaximumCommandG": max(max_commands) if max_commands else 0.0,
+        "TargetReallocations": int(environment_diag["target_reallocations"]),
+        "TargetReallocationsAfterDeath": int(
+            environment_diag["target_reallocations_after_death"]),
+        "TargetSwitchesWhileAlive": int(
+            environment_diag["target_switches_while_alive"]),
+        "TargetEngagedWaitFrames": int(environment_diag["engaged_wait_frames"]),
+        "TargetNoAliveFrames": int(environment_diag["no_alive_target_frames"]),
+        "RedMWSDetectedAgentDecisions": int(
+            environment_diag["red_detected_agent_decisions"]),
+        "RedMWSOverrideAgentDecisions": int(
+            environment_diag["red_override_agent_decisions"]),
+        "BlueMWSDetectedAgentDecisions": int(
+            environment_diag["blue_detected_agent_decisions"]),
+        "BlueMWSOverrideAgentDecisions": int(
+            environment_diag["blue_override_agent_decisions"]),
+        **{
+            f"{prefix}{suffix}": _safe_div(
+                environment_diag[field], environment_diag[f"{field}_count"])
+            for prefix, field, suffix in (
+                ("Red", "red_warning_to_terminal_mean_s", "WarningToTerminalMeanS"),
+                ("Red", "red_warning_to_terminal_p50_s", "WarningToTerminalP50S"),
+                ("Red", "red_warning_to_hit_mean_s", "WarningToHitMeanS"),
+                ("Blue", "blue_warning_to_terminal_mean_s", "WarningToTerminalMeanS"),
+                ("Blue", "blue_warning_to_terminal_p50_s", "WarningToTerminalP50S"),
+                ("Blue", "blue_warning_to_hit_mean_s", "WarningToHitMeanS"),
+            )},
+        "CompletedEpisodesThisIteration": int(iter_episodes),
+        "NoCompletedEpisodeThisIteration": int(iter_episodes == 0),
+        "IterationWallTimeS": float(wall_time_s),
+        "EnvironmentStepsPerSecond": (
+            float(environment_steps / wall_time_s) if wall_time_s > 0 else 0.0),
+        "FirstLaunchStepMean": _mean_or_zero(first_launch),
+        "FirstHitStepMean": _mean_or_zero(first_hit),
+        "FirstKillStepMean": _mean_or_zero(first_hit),
+        "EpisodeLengthMean": (
+            float(np.mean(episode_lengths)) if episode_lengths else float("nan")),
+        "EpisodeLengthP50": (
+            float(np.percentile(episode_lengths, 50))
+            if episode_lengths else float("nan")),
+        "EpisodeLengthP90": (
+            float(np.percentile(episode_lengths, 90))
+            if episode_lengths else float("nan")),
+        "EstimatedRemainingTimeSec": (
+            float(remaining_steps * wall_time_s / environment_steps)
+            if environment_steps > 0 else 0.0),
+        "WorkerRestartCount": 0,
+        "ResumeCount": int(resume_count),
+    })
+    return result
 
 
 def _numeric_values(records: list[dict], key: str, abs_value: bool = False) -> list[float]:
@@ -2158,10 +2548,12 @@ def parse_args():
     parser.add_argument("--blue-policy-profile", choices=(
         "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
         "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1",
-        "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1"),
+        "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1",
+        "paper_learnable_fixed_pair_v1"),
         default=defaults.blue_policy_profile)
     parser.add_argument("--environment-profile", choices=(
-        REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE),
+        REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+        PAPER_LEARNABLE_ENVIRONMENT_PROFILE),
         default=defaults.environment_profile)
     parser.add_argument("--obs-mode", type=str,
                         choices=("paper_strict", "engineering"),
@@ -2179,10 +2571,29 @@ def parse_args():
                         default=defaults.reward_mode)
     parser.add_argument("--missile-guidance-mode", type=str,
                         choices=("paper_eq9", "legacy_simplified",
-                                 "paper_minimal_point_mass_v1"),
+                                 "paper_minimal_point_mass_v1",
+                                 LEARNABLE_MISSILE_GUIDANCE_MODE),
                         default=defaults.missile_guidance_mode)
+    parser.add_argument("--initial-condition-randomization-mode",
+                        choices=LEARNABLE_INITIALIZATION_MODES,
+                        default=defaults.initial_condition_randomization_mode)
     parser.add_argument("--resume-from-best", action="store_true",
                         default=defaults.resume_from_best)
+    parser.add_argument("--resume-latest", action="store_true",
+                        default=defaults.resume_latest)
+    parser.add_argument("--resume-state", type=str, default=defaults.resume_state)
+    parser.add_argument("--overwrite-existing", action="store_true",
+                        default=defaults.overwrite_existing)
+    parser.add_argument("--eval-during-training", action="store_true",
+                        default=defaults.eval_during_training)
+    parser.add_argument("--no-eval-during-training", action="store_false",
+                        dest="eval_during_training")
+    parser.add_argument("--eval-interval-steps", type=int,
+                        default=defaults.eval_interval_steps)
+    parser.add_argument("--eval-episodes", type=int,
+                        default=defaults.eval_episodes)
+    parser.add_argument("--eval-log-file", type=str,
+                        default=defaults.eval_log_file)
     parser.add_argument("--log-file", type=str, default=defaults.log_file)
     parser.add_argument("--results-file", type=str,
                         default=defaults.results_file)
@@ -2204,8 +2615,11 @@ _VANILLA_PRESET_CLI_FLAGS = {
     "obs_mode", "obs_normalization", "pid_profile",
     "pid_throttle_base",
     "reward_mode", "missile_guidance_mode", "resume_from_best",
+    "initial_condition_randomization_mode", "resume_latest", "resume_state",
+    "overwrite_existing", "eval_during_training", "eval_interval_steps",
+    "eval_episodes", "eval_log_file",
     "log_file", "results_file", "launch_quality_file",
-    "checkpoint_dir", "device",
+    "checkpoint_dir", "seed", "device",
 }
 
 
@@ -2245,7 +2659,9 @@ def make_config_from_args(args) -> Config:
     config.blue_policy_profile = args.blue_policy_profile
     config.environment_profile = args.environment_profile
     config.environment_version = args.environment_profile
-    if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
+    if config.environment_profile in (
+            PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+            PAPER_LEARNABLE_ENVIRONMENT_PROFILE):
         config.altitude_reward_config = _minimal_altitude_reward_config()
     config.obs_mode = args.obs_mode
     config.obs_normalization = args.obs_normalization
@@ -2253,7 +2669,16 @@ def make_config_from_args(args) -> Config:
     config.pid_throttle_base = args.pid_throttle_base
     config.reward_mode = args.reward_mode
     config.missile_guidance_mode = args.missile_guidance_mode
+    config.initial_condition_randomization_mode = (
+        args.initial_condition_randomization_mode)
     config.resume_from_best = args.resume_from_best
+    config.resume_latest = args.resume_latest
+    config.resume_state = args.resume_state
+    config.overwrite_existing = args.overwrite_existing
+    config.eval_during_training = args.eval_during_training
+    config.eval_interval_steps = args.eval_interval_steps
+    config.eval_episodes = args.eval_episodes
+    config.eval_log_file = args.eval_log_file
     config.log_file = args.log_file
     config.results_file = args.results_file
     config.launch_quality_file = args.launch_quality_file
@@ -2297,7 +2722,117 @@ def _default_launch_quality_file(results_file: str) -> str:
     return os.path.join(results_dir, f"{stem}_launch_quality.csv")
 
 
+def _default_eval_log_file(results_file: str) -> str:
+    results_dir = os.path.dirname(results_file) or "results"
+    stem = os.path.splitext(os.path.basename(results_file))[0]
+    return os.path.join(results_dir, f"{stem}_eval.csv")
+
+
+EVAL_LOG_FIELDS = (
+    "Iteration", "Step", "FinalCheckpoint", "Episodes", "RedWins",
+    "BlueWins", "Draws", "RedWinRate", "MeanRedReward",
+    "EnvironmentProfile", "EnvironmentConfigFingerprint",
+    "MeanRedAlive", "MeanBlueAlive", "RedMissilesFired",
+    "BlueMissilesFired", "RedMissileHits", "BlueMissileHits",
+    "MissileLifetimeMeanS", "RedMWSDetectedAgentDecisions",
+    "RedMWSOverrideAgentDecisions", "BlueMWSDetectedAgentDecisions",
+    "BlueMWSOverrideAgentDecisions", "InvalidEpisodes",
+)
+
+
+def _run_periodic_evaluation(
+    actor, config, device, checkpoint_meta: dict, iteration: int,
+    total_steps: int, final_checkpoint: bool,
+) -> dict:
+    from evaluate_vanilla_mappo import run_one_episode
+
+    rng_state = _capture_rng_state()
+    was_training = actor.training
+    actor.eval()
+    try:
+        rows = []
+        base_seed = int(config.seed or 0) + 1_000_000
+        for episode in range(config.eval_episodes):
+            rows.append(run_one_episode(
+                actor=actor,
+                rnn_hidden_size=config.rnn_hidden_size,
+                num_red=config.num_red,
+                num_blue=config.num_blue,
+                max_steps=config.max_episode_length,
+                device=device,
+                episode_idx=episode + 1,
+                enable_blue_gcas=config.enable_blue_gcas,
+                obs_mode=config.obs_mode,
+                obs_normalization=config.obs_normalization,
+                pid_profile=config.pid_profile,
+                pid_throttle_base=config.pid_throttle_base,
+                reward_mode=config.reward_mode,
+                missile_guidance_mode=config.missile_guidance_mode,
+                blue_policy_profile=config.blue_policy_profile,
+                environment_profile=config.environment_profile,
+                initial_condition_randomization_mode=(
+                    config.initial_condition_randomization_mode),
+                seed=base_seed + episode,
+                deterministic=True))
+        red_wins = sum(int(row["RedWin"]) for row in rows)
+        blue_wins = sum(int(row["BlueWin"]) for row in rows)
+        draws = sum(int(row["Draw"]) for row in rows)
+        result = {
+            "Iteration": int(iteration),
+            "Step": int(total_steps),
+            "FinalCheckpoint": int(final_checkpoint),
+            "Episodes": len(rows),
+            "RedWins": red_wins,
+            "BlueWins": blue_wins,
+            "Draws": draws,
+            "RedWinRate": _safe_div(red_wins, len(rows)),
+            "MeanRedReward": float(np.mean([
+                float(row["EpisodeRewardRed"]) for row in rows])) if rows else 0.0,
+            "EnvironmentProfile": config.environment_profile,
+            "EnvironmentConfigFingerprint": checkpoint_meta[
+                "environment_config_fingerprint"],
+            "MeanRedAlive": float(np.mean([
+                float(row.get("RedAlive", 0)) for row in rows])) if rows else 0.0,
+            "MeanBlueAlive": float(np.mean([
+                float(row.get("BlueAlive", 0)) for row in rows])) if rows else 0.0,
+            "RedMissilesFired": sum(float(row.get("RedMissilesFired", 0)) for row in rows),
+            "BlueMissilesFired": sum(float(row.get("BlueMissilesFired", 0)) for row in rows),
+            "RedMissileHits": sum(float(row.get("RedMissileHits", 0)) for row in rows),
+            "BlueMissileHits": sum(float(row.get("BlueMissileHits", 0)) for row in rows),
+            "MissileLifetimeMeanS": _mean_or_zero([
+                float(row["MissileLifetimeMeanS"])
+                for row in rows if row.get("MissileLifetimeMeanS") is not None]),
+            "RedMWSDetectedAgentDecisions": sum(int(
+                row.get("RedMWSDetectedAgentDecisions", 0)) for row in rows),
+            "RedMWSOverrideAgentDecisions": sum(int(
+                row.get("RedMWSOverrideAgentDecisions", 0)) for row in rows),
+            "BlueMWSDetectedAgentDecisions": sum(int(
+                row.get("BlueMWSDetectedAgentDecisions", 0)) for row in rows),
+            "BlueMWSOverrideAgentDecisions": sum(int(
+                row.get("BlueMWSOverrideAgentDecisions", 0)) for row in rows),
+            "InvalidEpisodes": sum(int(
+                row.get("InvalidNumericalEpisode", 0)) for row in rows),
+        }
+        exists = os.path.exists(config.eval_log_file)
+        with open(config.eval_log_file, "a", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=EVAL_LOG_FIELDS)
+            if not exists:
+                writer.writeheader()
+            writer.writerow(result)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return result
+    finally:
+        actor.train(was_training)
+        _restore_rng_state(rng_state)
+
+
 def main():
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = False
+    signal.signal(signal.SIGINT, _request_safe_stop)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _request_safe_stop)
     args = parse_args()
 
     if args.list_presets:
@@ -2315,6 +2850,8 @@ def main():
     config = make_config_from_args(args)
     if config.launch_quality_file is None:
         config.launch_quality_file = _default_launch_quality_file(config.results_file)
+    if config.eval_log_file is None:
+        config.eval_log_file = _default_eval_log_file(config.results_file)
     _set_main_process_seed(config.seed)
     device = _select_device(config.device)
 
@@ -2325,50 +2862,74 @@ def main():
     global_obs_dim = _compute_global_state_dim(config.num_red, config.obs_mode)
     rollout_layout = _rollout_layout(config.replay_buffer_size, config.num_envs)
     checkpoint_meta = _checkpoint_metadata(config, obs_dim, global_obs_dim)
+    resume_path = config.resume_state
+    if config.resume_latest:
+        if resume_path is not None:
+            raise ValueError("use only one of --resume-latest and --resume-state")
+        resume_path = os.path.join(
+            config.checkpoint_dir, "latest_training_state.pt")
+    resume_payload = None
+    if resume_path is not None:
+        resume_payload = torch.load(
+            resume_path, map_location="cpu", weights_only=False)
+        _validate_training_state(resume_payload, config, checkpoint_meta)
 
     # ---- 持久化：创建 checkpoint 目录 ----
     os.makedirs(config.checkpoint_dir, exist_ok=True)
+    if (resume_payload is None and os.path.exists(config.results_file)
+            and not config.overwrite_existing):
+        raise FileExistsError(
+            f"results file already exists: {config.results_file}")
+    if (config.eval_during_training and resume_payload is None
+            and os.path.exists(config.eval_log_file)
+            and not config.overwrite_existing):
+        raise FileExistsError(f"evaluation log already exists: {config.eval_log_file}")
+    if (config.eval_during_training and resume_payload is not None
+            and os.path.exists(config.eval_log_file)):
+        _validate_resume_csv_header(
+            config.eval_log_file, list(EVAL_LOG_FIELDS))
+    manifest_path = os.path.join(config.checkpoint_dir, "run_manifest.json")
+    if (resume_payload is None and os.path.exists(manifest_path)
+            and not config.overwrite_existing):
+        raise FileExistsError(
+            f"checkpoint run manifest already exists: {manifest_path}")
+    if resume_payload is not None and os.path.exists(manifest_path):
+        with open(manifest_path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        manifest["resume_count"] = int(manifest.get("resume_count", 0)) + 1
+        manifest["target_total_env_steps"] = int(config.total_env_steps)
+    else:
+        manifest = {
+            "run_id": f"vanilla-{time.time_ns()}",
+            "seed": config.seed,
+            "start_unix_time": time.time(),
+            "code_version": CHECKPOINT_SCHEMA_VERSION,
+            "training_state_schema": TRAINING_STATE_SCHEMA_VERSION,
+            "training_log_schema": _training_log_fields(),
+            "environment_config_fingerprint": checkpoint_meta[
+                "environment_config_fingerprint"],
+            "core_config": _training_core_config(config, checkpoint_meta),
+            "target_total_env_steps": int(config.total_env_steps),
+            "resume_count": 0,
+        }
+    _atomic_json_save(manifest, manifest_path)
 
     # ---- 持久化：CSV 日志 ----
     _ensure_parent_dir(config.log_file)
-    csv_file = open(config.log_file, "w", newline="")
+    train_log_fields = _training_log_fields()
+    if resume_payload is not None:
+        _validate_resume_csv(
+            config.log_file, train_log_fields,
+            int(resume_payload["runtime"]["total_steps"]))
+    elif os.path.exists(config.log_file) and not config.overwrite_existing:
+        raise FileExistsError(
+            f"training log already exists; use --resume-latest, --resume-state, "
+            f"or --overwrite-existing: {config.log_file}")
+    csv_file = open(
+        config.log_file, "a" if resume_payload is not None else "w", newline="")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["Iteration", "Step", "ActorLoss", "CriticLoss",
-                         "PolicyEntropy", *PPO_DIAG_CSV_FIELDS,
-                         "RedMeanReward", "RedWinRate",
-                         "RedRewardStd", "WinRateRecent",
-                         "RedMissiles", "BlueMissiles",
-                         *ROLLOUT_LAYOUT_CSV_FIELDS,
-                         "Episodes", "InvalidNumericalEpisodes",
-                         "InvalidTransitionsDropped", "InvalidEpisodesDropped",
-                         "UpdateSkipReason",
-                         "RedWins", "BlueWins", "Draws",
-                         "RedAliveMean", "BlueAliveMean",
-                          "RedDeathsMissile", "RedDeathsCrash",
-                          "BlueDeathsMissile", "BlueDeathsCrash",
-                          "RedMissileHits", "BlueMissileHits",
-                          "RedMissileHitRate", "BlueMissileHitRate",
-                          "KD_Red_AllDeaths", "KD_Red_MissileOnly",
-                          "RWR", "RWRDenominatorZero",
-                          "RewardVersion", "RewardMode", "EnvironmentProfile",
-                          "ObsNormalization", "PIDProfile", "PIDThrottleBase",
-                          "MissileGuidanceMode", "CheckpointSchema",
-                          "ActionDistribution",
-                          "EnvironmentConfigFingerprint", "BluePolicyProfile",
-                          "RedMWSMode", "BlueMWSMode",
-                          "NumRed", "NumBlue", "MaxSteps",
-                          "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
-                          *REWARD_COMPONENT_LOG_FIELDS,
-                          "ActionStdMean", "ActionStdMin", "ActionStdMax",
-                          "ActionLogStdMean",
-                          "StateDependentStdMean", "StateDependentStdMin",
-                          "StateDependentStdMax", "StateDependentStdLowerBoundFrac",
-                          "StateDependentStdUpperBoundFrac",
-                          *LAUNCH_DIAG_CSV_FIELDS,
-                          *LAUNCH_QUALITY_AGG_CSV_FIELDS,
-                          *ACTION_BOUND_CSV_FIELDS,
-                          *AIRCRAFT_ENVELOPE_CSV_FIELDS,
-                          *BLUE_POLICY_DIAG_CSV_FIELDS])
+    if resume_payload is None:
+        csv_writer.writerow(train_log_fields)
     csv_file.flush()
 
     launch_quality_file = config.launch_quality_file
@@ -2376,10 +2937,19 @@ def main():
     launch_quality_writer = None
     if launch_quality_file and str(launch_quality_file).lower() not in ("none", "off", "false"):
         _ensure_parent_dir(launch_quality_file)
-        launch_quality_csv_file = open(launch_quality_file, "w", newline="")
+        if resume_payload is not None:
+            _validate_resume_csv_header(
+                launch_quality_file, list(LAUNCH_QUALITY_DETAIL_FIELDS))
+        elif os.path.exists(launch_quality_file) and not config.overwrite_existing:
+            raise FileExistsError(
+                f"launch-quality log already exists: {launch_quality_file}")
+        launch_quality_csv_file = open(
+            launch_quality_file,
+            "a" if resume_payload is not None else "w", newline="")
         launch_quality_writer = csv.DictWriter(
             launch_quality_csv_file, fieldnames=LAUNCH_QUALITY_DETAIL_FIELDS)
-        launch_quality_writer.writeheader()
+        if resume_payload is None:
+            launch_quality_writer.writeheader()
         launch_quality_csv_file.flush()
 
     print(f"设备: {device}")
@@ -2406,7 +2976,9 @@ def main():
     print(f"  device: {device}")
     print("  reward_version: " + (
         "paper_literal_minimal_unspecified_v1"
-        if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+        if config.environment_profile in (
+            PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+            PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
         else REWARD_VERSION))
     print(f"  environment_profile: {config.environment_profile}")
     print(f"  obs_mode: {config.obs_mode}")
@@ -2436,6 +3008,8 @@ def main():
     env_kwargs = dict(max_num_blue=config.num_blue, max_num_red=config.num_red,
                       max_steps=config.max_episode_length,
                       environment_profile=config.environment_profile,
+                      initial_condition_randomization_mode=(
+                          config.initial_condition_randomization_mode),
                       obs_mode=config.obs_mode,
                       pid_profile=config.pid_profile,
                       pid_throttle_base=config.pid_throttle_base,
@@ -2468,7 +3042,13 @@ def main():
     # ---- 3. 从 best checkpoint 恢复训练 (消融 r_ceil 后重新起航) ----
     actor_best_path = os.path.join(config.checkpoint_dir, "vanilla_actor_best.pt")
     critic_best_path = os.path.join(config.checkpoint_dir, "centralized_critic_best.pt")
-    if (config.resume_from_best and os.path.exists(actor_best_path)
+    if resume_payload is not None:
+        actor.load_state_dict(resume_payload["actor_state_dict"])
+        critic.load_state_dict(resume_payload["critic_state_dict"])
+        actor_opt.load_state_dict(resume_payload["actor_optimizer_state_dict"])
+        critic_opt.load_state_dict(resume_payload["critic_optimizer_state_dict"])
+        print(f"[OK] loaded full training state: {resume_path}")
+    elif (config.resume_from_best and os.path.exists(actor_best_path)
             and os.path.exists(critic_best_path)):
         actor_payload = torch.load(
             actor_best_path, map_location=device, weights_only=False)
@@ -2527,6 +3107,75 @@ def main():
     current_ep_missiles_blue = np.zeros(config.num_envs, dtype=np.float32)
     # Results log for offline plotting — accumulates all key metrics per iteration
     results_log: list[dict] = []
+    cumulative_environment_diag = Counter()
+    cumulative_missile_term = Counter()
+    last_eval_steps = -1
+    if resume_payload is not None:
+        runtime = resume_payload["runtime"]
+        total_steps = int(runtime["total_steps"])
+        iteration = int(runtime["iteration"])
+        total_episodes = int(runtime["total_episodes"])
+        red_wins = int(runtime["red_wins"])
+        blue_wins = int(runtime["blue_wins"])
+        draws = int(runtime["draws"])
+        invalid_numerical_episodes = int(runtime["invalid_numerical_episodes"])
+        death_stats = {
+            "red": Counter(runtime["death_stats"]["red"]),
+            "blue": Counter(runtime["death_stats"]["blue"]),
+        }
+        red_missiles_total = float(runtime["red_missiles_total"])
+        blue_missiles_total = float(runtime["blue_missiles_total"])
+        best_reward_value = float(runtime["best_reward_value"])
+        best_reward_win_rate = float(runtime["best_reward_win_rate"])
+        best_winrate_value = float(runtime["best_winrate_value"])
+        best_winrate_reward = float(runtime["best_winrate_reward"])
+        recent_ep_rewards_red.extend(runtime.get("recent_ep_rewards_red", []))
+        recent_ep_comps_red.extend(runtime.get("recent_ep_comps_red", []))
+        recent_ep_missiles_red.extend(runtime.get("recent_ep_missiles_red", []))
+        recent_ep_missiles_blue.extend(runtime.get("recent_ep_missiles_blue", []))
+        recent_ep_red_alive.extend(runtime.get("recent_ep_red_alive", []))
+        recent_ep_blue_alive.extend(runtime.get("recent_ep_blue_alive", []))
+        cumulative_environment_diag.update(
+            runtime.get("cumulative_environment_diag", {}))
+        cumulative_missile_term.update(runtime.get("cumulative_missile_term", {}))
+        last_eval_steps = int(runtime.get("last_eval_steps", -1))
+        if os.path.exists(config.results_file):
+            with open(config.results_file, newline="") as handle:
+                results_log = list(csv.DictReader(handle))
+        _restore_rng_state(resume_payload["rng_state"])
+
+    def _runtime_state(next_iteration: int) -> dict:
+        return {
+            "run_id": manifest["run_id"],
+            "total_steps": int(total_steps),
+            "iteration": int(next_iteration),
+            "total_episodes": int(total_episodes),
+            "red_wins": int(red_wins),
+            "blue_wins": int(blue_wins),
+            "draws": int(draws),
+            "invalid_numerical_episodes": int(invalid_numerical_episodes),
+            "death_stats": {
+                "red": dict(death_stats["red"]),
+                "blue": dict(death_stats["blue"]),
+            },
+            "red_missiles_total": float(red_missiles_total),
+            "blue_missiles_total": float(blue_missiles_total),
+            "best_reward_value": float(best_reward_value),
+            "best_reward_win_rate": float(best_reward_win_rate),
+            "best_winrate_value": float(best_winrate_value),
+            "best_winrate_reward": float(best_winrate_reward),
+            "recent_ep_rewards_red": list(recent_ep_rewards_red),
+            "recent_ep_comps_red": list(recent_ep_comps_red),
+            "recent_ep_missiles_red": list(recent_ep_missiles_red),
+            "recent_ep_missiles_blue": list(recent_ep_missiles_blue),
+            "recent_ep_red_alive": list(recent_ep_red_alive),
+            "recent_ep_blue_alive": list(recent_ep_blue_alive),
+            "cumulative_environment_diag": dict(cumulative_environment_diag),
+            "cumulative_missile_term": dict(cumulative_missile_term),
+            "last_eval_steps": int(last_eval_steps),
+            "resume_starts_new_episode": True,
+            "ResumeEnvironmentReset": True,
+        }
 
     while total_steps < config.total_env_steps:
         t_start = time.perf_counter()
@@ -2544,6 +3193,8 @@ def main():
         iter_launch_quality_done_records: list[dict] = []
         iter_action_bound = _empty_action_bound_totals()
         iter_blue_policy_diag = Counter()
+        iter_environment_diag = Counter()
+        iter_episode_lengths: list[int] = []
         iter_aircraft_diag_records: list[dict] = []
         iter_episode_physics_frames = 0
         iter_invalid_episodes_dropped = 0
@@ -2762,6 +3413,36 @@ def main():
                 # ---- episodic settlement AFTER accumulation (terminal r_end is included) ----
                 if all(don.values()):
                     invalid_episode = _episode_is_invalid(inf)
+                    iter_episode_lengths.append(int(
+                        inf.get("__episode__", {}).get(
+                            "EpisodeLength", inf.get("__episode__", {}).get(
+                                "episode_length", 0))))
+                    target_diag = inf.get("__target_assignment_diag__", {})
+                    for field in (
+                            "target_reallocations",
+                            "target_reallocations_after_death",
+                            "target_switches_while_alive",
+                            "engaged_wait_frames", "no_alive_target_frames"):
+                        iter_environment_diag[field] += int(
+                            target_diag.get(field, 0))
+                    mws_diag = inf.get("__mws_diag__", {})
+                    for field in (
+                            "red_detected_agent_decisions",
+                            "red_override_agent_decisions",
+                            "blue_detected_agent_decisions",
+                            "blue_override_agent_decisions"):
+                        iter_environment_diag[field] += int(mws_diag.get(field, 0))
+                    for field in (
+                            "red_warning_to_terminal_mean_s",
+                            "red_warning_to_terminal_p50_s",
+                            "red_warning_to_hit_mean_s",
+                            "blue_warning_to_terminal_mean_s",
+                            "blue_warning_to_terminal_p50_s",
+                            "blue_warning_to_hit_mean_s"):
+                        value = mws_diag.get(field)
+                        if value is not None:
+                            iter_environment_diag[field] += float(value)
+                            iter_environment_diag[f"{field}_count"] += 1
                     blue_diag = inf.get("__blue_policy_diag__", {})
                     for field in BLUE_POLICY_DIAG_CSV_FIELDS:
                         iter_blue_policy_diag[field] += int(blue_diag.get(field, 0))
@@ -2912,6 +3593,17 @@ def main():
             iter_launch_quality_records,
             iter_launch_quality_done_records,
         )
+        learnability_metrics = _learnability_iteration_metrics(
+            iter_launch_quality_records, iter_launch_quality_done_records,
+            iter_environment_diag, iter_episode_lengths, iter_episodes,
+            t_elapsed, config.num_envs * num_steps,
+            max(config.total_env_steps - total_steps, 0),
+            int(manifest.get("resume_count", 0)))
+        cumulative_environment_diag.update(iter_environment_diag)
+        cumulative_missile_term.update(
+            (str(record.get("team", "")),
+             str(record.get("raw_termination_reason", "unknown")))
+            for record in iter_launch_quality_done_records)
         action_bound_metrics = _action_bound_metrics(iter_action_bound)
         def _diag_max(field: str) -> float:
             values = [float(row.get(field, float("nan")))
@@ -2974,12 +3666,12 @@ def main():
                              stats["CriticUpdatesSkipped"],
                              _csv_optional_float(action_std_delta),
                              _csv_optional_float(action_std_growth),
-                             f"{avg_r_red:.4f}",
+                             ("" if iter_episodes == 0 else f"{avg_r_red:.4f}"),
                              f"{red_win_rate:.6f}",
-                             f"{std_r_red:.4f}",
-                             f"{iter_win_rate:.6f}",
-                             f"{avg_m_red:.1f}",
-                             f"{avg_m_blue:.1f}",
+                             ("" if iter_episodes == 0 else f"{std_r_red:.4f}"),
+                             ("" if iter_episodes == 0 else f"{iter_win_rate:.6f}"),
+                             ("" if iter_episodes == 0 else f"{avg_m_red:.1f}"),
+                             ("" if iter_episodes == 0 else f"{avg_m_blue:.1f}"),
                              *[
                                  rollout_layout[field]
                                  for field in ROLLOUT_LAYOUT_CSV_FIELDS
@@ -2989,8 +3681,8 @@ def main():
                              iter_invalid_episodes_dropped,
                              stats["UpdateSkipReason"],
                              red_wins, blue_wins, draws,
-                             f"{red_alive_mean:.4f}",
-                             f"{blue_alive_mean:.4f}",
+                             ("" if iter_episodes == 0 else f"{red_alive_mean:.4f}"),
+                             ("" if iter_episodes == 0 else f"{blue_alive_mean:.4f}"),
                              red_deaths_missile,
                              red_deaths_crash,
                              blue_deaths_missile,
@@ -3004,7 +3696,9 @@ def main():
                              f"{rwr:.6f}",
                              int(rwr_denominator_zero),
                              ("paper_literal_minimal_unspecified_v1"
-                              if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+        if config.environment_profile in (
+            PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+            PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
                               else REWARD_VERSION),
                              config.reward_mode,
                              config.environment_profile,
@@ -3024,7 +3718,8 @@ def main():
                              config.altitude_reward_config.version,
                              altitude_config_json,
                              *[
-                                 f"{component_log_metrics[field]:.6f}"
+                                 ("" if iter_episodes == 0
+                                  else f"{component_log_metrics[field]:.6f}")
                                  for field in REWARD_COMPONENT_LOG_FIELDS
                              ],
                              _csv_optional_float(std_stats['action_std_mean']),
@@ -3058,19 +3753,23 @@ def main():
                                  for field in AIRCRAFT_ENVELOPE_CSV_FIELDS
                              ],
                              *[iter_blue_policy_diag[field]
-                               for field in BLUE_POLICY_DIAG_CSV_FIELDS]])
-        csv_file.flush()
+                               for field in BLUE_POLICY_DIAG_CSV_FIELDS],
+                             *[
+                                 _csv_optional_float(learnability_metrics[field])
+                                 for field in LEARNABILITY_DIAG_CSV_FIELDS
+                             ]])
+        _flush_and_periodic_fsync(csv_file, iteration)
 
         # ---- 持久化：results/ 绘图数据 (累计 + 每 1M 步自动保存) ----
         results_log.append({
             "Step":           total_steps,
             "Iteration":      iteration,
-            "RedMeanReward":  avg_r_red,
-            "RedRewardStd":   std_r_red,
-            "WinRateRecent":  iter_win_rate,
+            "RedMeanReward":  None if iter_episodes == 0 else avg_r_red,
+            "RedRewardStd":   None if iter_episodes == 0 else std_r_red,
+            "WinRateRecent":  None if iter_episodes == 0 else iter_win_rate,
             "WinRateCumul":   red_win_rate,
-            "RedMissiles":    avg_m_red,
-            "BlueMissiles":   avg_m_blue,
+            "RedMissiles":    None if iter_episodes == 0 else avg_m_red,
+            "BlueMissiles":   None if iter_episodes == 0 else avg_m_blue,
             "requested_replay_buffer_size": rollout_layout["requested_replay_buffer_size"],
             "rollout_horizon_per_env": rollout_layout["rollout_horizon_per_env"],
             "transitions_per_update": rollout_layout["transitions_per_update"],
@@ -3083,8 +3782,8 @@ def main():
             "RedWins":        red_wins,
             "BlueWins":       blue_wins,
             "Draws":          draws,
-            "RedAliveMean":   red_alive_mean,
-            "BlueAliveMean":  blue_alive_mean,
+            "RedAliveMean":   None if iter_episodes == 0 else red_alive_mean,
+            "BlueAliveMean":  None if iter_episodes == 0 else blue_alive_mean,
             "RedDeathsMissile": red_deaths_missile,
             "RedDeathsCrash": red_deaths_crash,
             "BlueDeathsMissile": blue_deaths_missile,
@@ -3099,7 +3798,9 @@ def main():
             "RWRDenominatorZero": rwr_denominator_zero,
             "RewardVersion":  (
                 "paper_literal_minimal_unspecified_v1"
-                if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+                if config.environment_profile in (
+                    PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+                    PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
                 else REWARD_VERSION),
             "RewardMode": config.reward_mode,
             "EnvironmentProfile": config.environment_profile,
@@ -3158,9 +3859,12 @@ def main():
             "r_end":          avg_comps.get("r_end", 0.0),
             "r_death":        avg_comps.get("r_death", 0.0),
         })
-        results_log[-1].update(component_log_metrics)
+        results_log[-1].update({
+            key: (None if iter_episodes == 0 else value)
+            for key, value in component_log_metrics.items()})
         results_log[-1].update(launch_diag_metrics)
         results_log[-1].update(launch_quality_metrics)
+        results_log[-1].update(learnability_metrics)
         results_log[-1].update({
             key: _result_optional_float(value)
             for key, value in action_bound_metrics.items()})
@@ -3283,6 +3987,25 @@ def main():
                       f"Reward={best_winrate_reward:+.2f}, "
                       f"CumulWinRate={red_win_rate:.4f}) ***")
 
+        if (config.eval_during_training
+                and total_steps >= config.eval_interval_steps
+                and total_steps - last_eval_steps >= config.eval_interval_steps):
+            _run_periodic_evaluation(
+                actor, config, device, checkpoint_meta, iteration,
+                total_steps, final_checkpoint=False)
+            last_eval_steps = total_steps
+
+        if iteration % 10 == 0 or _STOP_REQUESTED:
+            training_state = _build_training_state(
+                actor, critic, actor_opt, critic_opt, config, checkpoint_meta,
+                _runtime_state(iteration + 1))
+            _atomic_torch_save(
+                training_state,
+                os.path.join(config.checkpoint_dir, "latest_training_state.pt"))
+        if _STOP_REQUESTED:
+            print("[STOP] safe stop requested; latest training state saved.",
+                  flush=True)
+            break
         iteration += 1
 
     # ---- 持久化：最终模型存档 ----
@@ -3292,6 +4015,32 @@ def main():
     _save_model_checkpoint(
         os.path.join(config.checkpoint_dir, "centralized_critic_final.pt"),
         critic, checkpoint_meta, "critic")
+    _atomic_torch_save(
+        _build_training_state(
+            actor, critic, actor_opt, critic_opt, config, checkpoint_meta,
+            _runtime_state(iteration + (1 if _STOP_REQUESTED else 0))),
+        os.path.join(config.checkpoint_dir, "latest_training_state.pt"))
+    if (config.eval_during_training and not _STOP_REQUESTED
+            and last_eval_steps != total_steps):
+        _run_periodic_evaluation(
+            actor, config, device, checkpoint_meta, iteration,
+            total_steps, final_checkpoint=True)
+        last_eval_steps = total_steps
+        _atomic_torch_save(
+            _build_training_state(
+                actor, critic, actor_opt, critic_opt, config, checkpoint_meta,
+                _runtime_state(iteration)),
+            os.path.join(config.checkpoint_dir, "latest_training_state.pt"))
+    if results_log:
+        _ensure_parent_dir(config.results_file)
+        fieldnames = list(results_log[-1].keys())
+        with open(config.results_file, "w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in results_log:
+                writer.writerow({field: row.get(field, "") for field in fieldnames})
+            handle.flush()
+            os.fsync(handle.fileno())
     print("=" * 70)
     print(f"最终模型已保存至 {config.checkpoint_dir}/")
     print(f"Results 已保存至 {config.results_file} ({len(results_log)} rows)")

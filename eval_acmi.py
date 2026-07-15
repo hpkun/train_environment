@@ -55,6 +55,21 @@ from my_uav_env.alignment.reward_utils import (
     DEFAULT_ALTITUDE_REWARD_CONFIG,
     REWARD_VERSION,
 )
+from configs.paper_minimal_3v3_spec import (
+    PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+    REFERENCE_ENVIRONMENT_PROFILE,
+    minimal_environment_snapshot,
+)
+from configs.paper_learnable_3v3_spec import (
+    LEARNABLE_INITIALIZATION_MODES,
+    LEARNABLE_MISSILE_GUIDANCE_MODE,
+    PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
+    learnable_environment_snapshot,
+)
+from configs.brma_mappo_paper_spec import (
+    DEFAULT_PAPER_ENVIRONMENT_CONFIG,
+    environment_config_snapshot,
+)
 from train_vanilla_mappo import (
     ACTION_DISTRIBUTION_VERSION,
     ACTION_LOG_STD_INIT,
@@ -66,6 +81,7 @@ from train_vanilla_mappo import (
     _episode_outcome,
     _flatten_obs,
     _joint_team_reward_once,
+    _minimal_altitude_reward_config,
     _ratio_with_denominator_zero,
     _safe_div,
     _unpack_and_validate_checkpoint,
@@ -187,7 +203,9 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
              pid_throttle_base: float = 0.0,
              reward_mode: str = "paper_joint",
              missile_guidance_mode: str = "paper_eq9",
-             blue_policy_profile: str = "paper_pursuit"):
+             blue_policy_profile: str = "paper_pursuit",
+             environment_profile: str = REFERENCE_ENVIRONMENT_PROFILE,
+             initial_condition_randomization_mode: str = "deterministic_v1"):
     """Load a model, run one episode with TacView recording, save .acmi."""
 
     print(f"pid_throttle_base: {pid_throttle_base}", flush=True)
@@ -207,6 +225,9 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                            reward_mode=reward_mode,
                            missile_guidance_mode=missile_guidance_mode,
                            blue_policy_profile=blue_policy_profile,
+                           environment_profile=environment_profile,
+                           initial_condition_randomization_mode=(
+                               initial_condition_randomization_mode),
                            enable_gcas_for_blue=False,
                            suppress_jsbsim_output=True)
     except Exception:
@@ -223,22 +244,52 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                 checkpoint_path, map_location=device, weights_only=False)
             obs_dim = _compute_obs_dim(
                 num_red, num_blue, is_red=True, obs_mode=obs_mode)
+            if environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
+                environment_snapshot = minimal_environment_snapshot(
+                    num_red=num_red, num_blue=num_blue, sim_freq=60,
+                    agent_interaction_steps=12, max_episode_length=max_steps,
+                    seed=None, blue_policy_profile=blue_policy_profile)
+            elif environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
+                environment_snapshot = learnable_environment_snapshot(
+                    num_red=num_red, num_blue=num_blue, sim_freq=60,
+                    agent_interaction_steps=12, max_episode_length=max_steps,
+                    seed=None, blue_policy_profile=blue_policy_profile,
+                    initial_condition_randomization_mode=(
+                        initial_condition_randomization_mode))
+            else:
+                environment_snapshot = environment_config_snapshot(
+                    DEFAULT_PAPER_ENVIRONMENT_CONFIG, num_red=num_red,
+                    num_blue=num_blue, sim_freq=60, agent_interaction_steps=12,
+                    seed=None, blue_policy_profile=blue_policy_profile)
             expected_metadata = {
                 "schema_version": CHECKPOINT_SCHEMA_VERSION,
                 "obs_mode": obs_mode,
                 "obs_normalization": obs_normalization,
-                "reward_version": REWARD_VERSION,
+                "reward_version": (
+                    "paper_literal_minimal_unspecified_v1"
+                    if environment_profile in (
+                        PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+                        PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+                    else REWARD_VERSION),
                 "reward_mode": reward_mode,
                 "pid_profile": pid_profile,
                 "pid_throttle_base": float(pid_throttle_base),
                 "missile_guidance_mode": missile_guidance_mode,
-                "altitude_reward_config": asdict(DEFAULT_ALTITUDE_REWARD_CONFIG),
+                "altitude_reward_config": asdict(
+                    _minimal_altitude_reward_config()
+                    if environment_profile in (
+                        PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+                        PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+                    else DEFAULT_ALTITUDE_REWARD_CONFIG),
                 "action_distribution": ACTION_DISTRIBUTION_VERSION,
                 "action_log_std_init": ACTION_LOG_STD_INIT,
                 "actor_hidden_sizes": [128, 128],
                 "actor_rnn_hidden_size": 128,
                 "recurrent_n": 1,
                 "blue_policy_profile": blue_policy_profile,
+                "environment_profile": environment_profile,
+                "environment_config_fingerprint": environment_snapshot[
+                    "environment_config_fingerprint"],
                 "num_red": num_red,
                 "num_blue": num_blue,
                 "global_state_dim": _compute_global_state_dim(num_red, obs_mode),
@@ -574,18 +625,31 @@ if __name__ == "__main__":
         parser.add_argument("--obs-normalization",
                             choices=("paper_fixed_v1", "none"),
                             default="paper_fixed_v1")
-        parser.add_argument("--pid-profile", choices=("paper", "engineering_safe"),
+        parser.add_argument("--pid-profile", choices=(
+            "paper", "engineering_safe", "paper_minimal_shared_v1"),
                             default="paper")
         parser.add_argument("--pid-throttle-base", type=float, default=0.0)
-        parser.add_argument("--reward-mode", choices=("paper_joint", "engineering_local"),
+        parser.add_argument("--reward-mode", choices=(
+            "paper_joint", "engineering_local", "paper_minimal_joint_v1"),
                             default="paper_joint")
         parser.add_argument("--missile-guidance-mode",
-                            choices=("paper_eq9", "legacy_simplified"),
+                            choices=("paper_eq9", "legacy_simplified",
+                                     "paper_minimal_point_mass_v1",
+                                     LEARNABLE_MISSILE_GUIDANCE_MODE),
                             default="paper_eq9")
         parser.add_argument("--blue-policy-profile", choices=(
             "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
-            "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1"),
+            "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1",
+            "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1",
+            "paper_learnable_fixed_pair_v1"),
             default="paper_pursuit")
+        parser.add_argument("--environment-profile", choices=(
+            REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+            PAPER_LEARNABLE_ENVIRONMENT_PROFILE),
+            default=REFERENCE_ENVIRONMENT_PROFILE)
+        parser.add_argument("--initial-condition-randomization-mode",
+                            choices=LEARNABLE_INITIALIZATION_MODES,
+                            default="deterministic_v1")
         parser.add_argument("--draw-boundary", action="store_true", default=False,
                             help="Draw battlefield boundary in ACMI for debugging.")
         parser.add_argument("--boundary-half-size", type=float, default=40000.0,
@@ -622,7 +686,10 @@ if __name__ == "__main__":
                  pid_throttle_base=args.pid_throttle_base,
                  reward_mode=args.reward_mode,
                  missile_guidance_mode=args.missile_guidance_mode,
-                 blue_policy_profile=args.blue_policy_profile)
+                 blue_policy_profile=args.blue_policy_profile,
+                 environment_profile=args.environment_profile,
+                 initial_condition_randomization_mode=(
+                     args.initial_condition_randomization_mode))
     except Exception:
         print("FATAL: 未捕获的异常:", flush=True)
         traceback.print_exc()

@@ -29,6 +29,7 @@ BLUE_POLICY_PROFILES = (
     "frozen_route_blue_v1",
     "paper_minimal_fixed_pair_v1",
     "paper_minimal_straight_patrol_v1",
+    "paper_learnable_fixed_pair_v1",
 )
 
 
@@ -55,7 +56,8 @@ class BluePolicyController:
         return self.profile not in (
             "fixed_pair_no_mws_v1", "frozen_route_blue_v1",
             "paper_minimal_fixed_pair_v1",
-            "paper_minimal_straight_patrol_v1")
+            "paper_minimal_straight_patrol_v1",
+            "paper_learnable_fixed_pair_v1")
 
     def clear(self) -> None:
         self.initial_targets: dict[str, str | None] = {}
@@ -76,6 +78,11 @@ class BluePolicyController:
         self.base_heading_command_discontinuities = 0
         self.executed_heading_command_discontinuities = 0
         self.altitude_recovery_frames = 0
+        self.target_reallocations = 0
+        self.target_reallocations_after_death = 0
+        self.target_switches_while_alive = 0
+        self.engaged_wait_agent_decisions = 0
+        self.no_alive_target_agent_decisions = 0
 
     def reset(self, blue_ids: list[str], red_ids: list[str],
               initial_headings: dict[str, float],
@@ -130,6 +137,21 @@ class BluePolicyController:
             if self._target_alive(obs, candidate, num_blue, num_red):
                 return candidate
         return None
+
+    def _lowest_alive_unengaged_target(
+        self, obs: dict, num_blue: int, num_red: int,
+        engaged_targets: set[str],
+    ) -> tuple[str | None, str]:
+        alive = [
+            f"red_{index}" for index in range(num_red)
+            if self._target_alive(obs, f"red_{index}", num_blue, num_red)
+        ]
+        if not alive:
+            return None, "no_alive_target_hold"
+        for target_id in alive:
+            if target_id not in engaged_targets:
+                return target_id, "target_dead_reallocated"
+        return None, "all_alive_targets_engaged_wait"
 
     @staticmethod
     def _paper_assignments(blue_obs: dict[str, dict], num_blue: int,
@@ -321,6 +343,52 @@ class BluePolicyController:
                     continue
 
                 target_id = self.current_targets.get(blue_id)
+                if self.profile == "paper_learnable_fixed_pair_v1":
+                    previous_target = target_id
+                    if not self._target_alive(
+                            obs, target_id, num_blue, num_red):
+                        replacement, reason = self._lowest_alive_unengaged_target(
+                            obs, num_blue, num_red, engaged_targets or set())
+                        if replacement is not None:
+                            self.current_targets[blue_id] = replacement
+                            self.target_reallocations += 1
+                            self.target_reallocations_after_death += 1
+                            if previous_target is not None:
+                                self.target_switch_counts[blue_id] += 1
+                                self.switch_reason_counts["target_dead"] += 1
+                                self.last_switch_reasons[blue_id] = "target_dead"
+                        else:
+                            self.current_targets[blue_id] = None
+                            if reason == "all_alive_targets_engaged_wait":
+                                self.engaged_wait_agent_decisions += 1
+                            else:
+                                self.no_alive_target_agent_decisions += 1
+                        target_id = self.current_targets.get(blue_id)
+                        assignment_reasons[blue_id] = reason
+                    else:
+                        assignment_reasons[blue_id] = "fixed_pair_alive"
+                    assignments[blue_id] = target_id
+                    target_index = self._target_index(target_id)
+                    if target_index is None:
+                        heading = _wrap_pi(float(own_headings.get(blue_id, 0.0)))
+                        actions[blue_id] = _paper_absolute_action(
+                            0.0, heading, speed_mps=300.0)
+                    else:
+                        _idx, target_state, _range = _simple_target_by_index(
+                            obs, num_blue, num_red, target_index)
+                        actions[blue_id] = _blue_simple_pursuit_action_impl(
+                            obs, num_blue, num_red, blue_index,
+                            forced_target_idx=target_index,
+                            own_position=own_positions.get(blue_id),
+                            own_heading=own_headings.get(blue_id),
+                            paper_profile=True)
+                        actions[blue_id][0] = np.clip(
+                            actions[blue_id][0], -10.0 / 90.0, 10.0 / 90.0)
+                        actions[blue_id][2] = _paper_absolute_action(
+                            0.0, 0.0, speed_mps=300.0)[2]
+                        if target_state is None:
+                            assignment_reasons[blue_id] = "track_unavailable_hold"
+                    continue
                 if self.profile == "paper_minimal_fixed_pair_v1":
                     assignments[blue_id] = target_id
                     target_index = self._target_index(target_id)
@@ -397,7 +465,8 @@ class BluePolicyController:
             detected = False
             if self.profile not in (
                     "frozen_route_blue_v1", "paper_minimal_fixed_pair_v1",
-                    "paper_minimal_straight_patrol_v1"):
+                    "paper_minimal_straight_patrol_v1",
+                    "paper_learnable_fixed_pair_v1"):
                 warning = np.asarray(obs.get("missile_warning", [0.0])).reshape(-1)
                 detected = bool(mws_detected.get(
                     blue_id, warning[0] > 0.5 if warning.size else False))
@@ -416,7 +485,8 @@ class BluePolicyController:
                 recovery = bool(meta["altitude_recovery"])
             commanded_speed = (300.0 if self.profile in (
                 "paper_minimal_fixed_pair_v1",
-                "paper_minimal_straight_patrol_v1") else 250.0)
+                "paper_minimal_straight_patrol_v1",
+                "paper_learnable_fixed_pair_v1") else 250.0)
             delta = self._record_command(
                 blue_id, heading, pitch, commanded_speed, phase, recovery)
             assigned = assignments.get(blue_id)
@@ -480,4 +550,13 @@ class BluePolicyController:
             "blue_heading_command_discontinuities": int(
                 self.base_heading_command_discontinuities),
             "blue_altitude_recovery_frames": int(self.altitude_recovery_frames),
+            "blue_target_reallocations": int(self.target_reallocations),
+            "blue_target_reallocations_after_death": int(
+                self.target_reallocations_after_death),
+            "blue_target_switches_while_alive": int(
+                self.target_switches_while_alive),
+            "blue_engaged_wait_agent_decisions": int(
+                self.engaged_wait_agent_decisions),
+            "blue_no_alive_target_agent_decisions": int(
+                self.no_alive_target_agent_decisions),
         })

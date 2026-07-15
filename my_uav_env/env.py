@@ -23,6 +23,19 @@ from configs.paper_minimal_3v3_spec import (
     REFERENCE_ENVIRONMENT_PROFILE,
     minimal_environment_snapshot,
 )
+from configs.paper_learnable_3v3_spec import (
+    LEARNABLE_BLUE_POLICY_PROFILE,
+    LEARNABLE_INITIALIZATION_MODES,
+    LEARNABLE_LAUNCH_MAX_RANGE_M,
+    LEARNABLE_MISSILE_GUIDANCE_MODE,
+    LEARNABLE_MISSILE_LAUNCH_SPEED_MPS,
+    LEARNABLE_MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M,
+    LEARNABLE_MISSILE_OVERSHOOT_WINDOW_S,
+    LEARNABLE_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS,
+    LEARNABLE_PAPER_ENVIRONMENT_CONFIG,
+    PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
+    learnable_environment_snapshot,
+)
 from my_uav_env.sensors import SensorTrack, radar_diagnostic
 from my_uav_env.fire_control import FireControlState
 from my_uav_env.blue_policy_profiles import (
@@ -64,6 +77,11 @@ from .render_tacview import TacviewLogger
 logger = logging.getLogger(__name__)
 
 
+def _is_adapted_profile(env) -> bool:
+    return bool(getattr(
+        env, "is_paper_adapted", getattr(env, "is_paper_minimal", False)))
+
+
 def _minimal_missile_rng(seed: int | None, parent_uid: str,
                          sequence: int) -> np.random.Generator:
     """Independent deterministic stream for one minimal-profile launch."""
@@ -89,6 +107,8 @@ LAUNCH_DIAG_KEYS = (
     "cooldown_blocked",
     "kill_cooldown_blocked",
     "engaged_blocked",
+    "range_low_blocked",
+    "range_high_blocked",
     "launches",
 )
 from my_uav_env.alignment.state_extractor import body_angles_from_neu_vector
@@ -256,18 +276,28 @@ class UavCombatEnv(gymnasium.Env):
                  obs_mode: str = "paper_strict",
                  blue_policy_profile: str = "paper_pursuit",
                  environment_profile: str = REFERENCE_ENVIRONMENT_PROFILE,
+                 initial_condition_randomization_mode: str = "deterministic_v1",
                  suppress_jsbsim_output: bool = True,
                  environment_config: PaperEnvironmentConfig | None = None,
                  render_mode=None):
         super().__init__()
         if environment_profile not in (
-                REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE):
+                REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+                PAPER_LEARNABLE_ENVIRONMENT_PROFILE):
             raise ValueError(
-                "environment_profile must be 'brma_paper_profile_v1' or "
-                "'paper_minimal_3v3_v1'")
+                "unsupported environment_profile")
         self.environment_profile = str(environment_profile)
         self.is_paper_minimal = (
             self.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE)
+        self.is_paper_learnable = (
+            self.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+        self.is_paper_adapted = self.is_paper_minimal or self.is_paper_learnable
+        if initial_condition_randomization_mode not in LEARNABLE_INITIALIZATION_MODES:
+            raise ValueError(
+                "initial_condition_randomization_mode must be one of "
+                f"{LEARNABLE_INITIALIZATION_MODES}")
+        self.initial_condition_randomization_mode = str(
+            initial_condition_randomization_mode)
         if self.is_paper_minimal:
             if environment_config not in (None, MINIMAL_PAPER_ENVIRONMENT_CONFIG):
                 raise ValueError(
@@ -283,6 +313,27 @@ class UavCombatEnv(gymnasium.Env):
             enable_single_kill_per_step_gate = False
             if blue_policy_profile == "paper_pursuit":
                 blue_policy_profile = "paper_minimal_fixed_pair_v1"
+        elif self.is_paper_learnable:
+            if (max_num_red, max_num_blue, sim_freq, agent_interaction_steps,
+                    max_steps) != (3, 3, 60, 12, 1400):
+                raise ValueError(
+                    "paper_learnable_3v3_v1 requires 3V3, 60 Hz, 12 "
+                    "physics frames per decision, and 1400 steps")
+            if environment_config not in (None, LEARNABLE_PAPER_ENVIRONMENT_CONFIG):
+                raise ValueError(
+                    "paper_learnable_3v3_v1 does not accept a different "
+                    "environment_config")
+            self.environment_config = LEARNABLE_PAPER_ENVIRONMENT_CONFIG
+            num_missiles_per_plane = 999
+            obs_mode = "paper_strict"
+            reward_mode = "paper_minimal_joint_v1"
+            missile_guidance_mode = LEARNABLE_MISSILE_GUIDANCE_MODE
+            pid_profile = "paper_minimal_shared_v1"
+            enable_gcas_for_blue = False
+            enable_kill_cooldown_gate = False
+            enable_single_kill_per_step_gate = False
+            if blue_policy_profile == "paper_pursuit":
+                blue_policy_profile = LEARNABLE_BLUE_POLICY_PROFILE
         else:
             self.environment_config = environment_config or DEFAULT_PAPER_ENVIRONMENT_CONFIG
         scenario_cfg = self.environment_config.scenario
@@ -304,6 +355,9 @@ class UavCombatEnv(gymnasium.Env):
             self.environment_config.electro_optical.half_angle_rad.value)
         self.missile_launch_min_range = float(
             self.environment_config.electro_optical.minimum_launch_range_m.value)
+        self.missile_launch_max_range = (
+            LEARNABLE_LAUNCH_MAX_RANGE_M if self.is_paper_learnable
+            else float(self.environment_config.electro_optical.maximum_range_m.value))
         if pid_profile not in ("paper", "engineering_safe", "paper_minimal_shared_v1"):
             raise ValueError(
                 "pid_profile must be 'paper', 'engineering_safe', or "
@@ -320,12 +374,13 @@ class UavCombatEnv(gymnasium.Env):
         self.reward_mode = reward_mode
         self._reward_summary_step: dict = {}
         if missile_guidance_mode not in (
-                "paper_eq9", "legacy_simplified", "paper_minimal_point_mass_v1"):
+                "paper_eq9", "legacy_simplified", "paper_minimal_point_mass_v1",
+                LEARNABLE_MISSILE_GUIDANCE_MODE):
             raise ValueError(
                 "missile_guidance_mode must be 'paper_eq9', 'legacy_simplified', "
                 "or 'paper_minimal_point_mass_v1'")
         self.missile_guidance_mode = missile_guidance_mode
-        if self.is_paper_minimal:
+        if _is_adapted_profile(self):
             self.altitude_reward_config = AltitudeRewardConfig(
                 version="eq17_minimal_finite_tail_v1",
                 h_min_m=0.0, h_att_m=2000.0, h_adv_m=5000.0,
@@ -501,6 +556,7 @@ class UavCombatEnv(gymnasium.Env):
             # Gymnasium created a generator above; retain an explicit traceable seed.
             self._seed = int(self.np_random.integers(0, 2**32 - 1))
             self.np_random = np.random.default_rng(self._seed)
+        self._initial_jitter_by_index = self._make_initial_jitter()
         if self.is_paper_minimal:
             self._environment_config_snapshot = minimal_environment_snapshot(
                 num_red=self.max_num_red, num_blue=self.max_num_blue,
@@ -509,12 +565,25 @@ class UavCombatEnv(gymnasium.Env):
                 max_episode_length=self.max_steps,
                 seed=self._seed,
                 blue_policy_profile=self.blue_policy_profile)
+        elif self.is_paper_learnable:
+            self._environment_config_snapshot = learnable_environment_snapshot(
+                num_red=self.max_num_red, num_blue=self.max_num_blue,
+                sim_freq=self.sim_freq,
+                agent_interaction_steps=self.agent_interaction_steps,
+                max_episode_length=self.max_steps,
+                seed=self._seed,
+                blue_policy_profile=self.blue_policy_profile,
+                initial_condition_randomization_mode=(
+                    self.initial_condition_randomization_mode))
         else:
             self._environment_config_snapshot = environment_config_snapshot(
                 self.environment_config, num_red=self.max_num_red,
                 num_blue=self.max_num_blue, sim_freq=self.sim_freq,
                 agent_interaction_steps=self.agent_interaction_steps, seed=self._seed,
                 blue_policy_profile=self.blue_policy_profile)
+        if self.is_paper_learnable:
+            self._environment_config_snapshot["initial_jitter_sample"] = copy.deepcopy(
+                self._initial_jitter_by_index)
         self.current_step = 0
         self._physics_frame = 0
         self._sim_time = 0.0
@@ -626,6 +695,25 @@ class UavCombatEnv(gymnasium.Env):
         # Reset missile launch counters
         self._missile_launch_counts = {aid: 0 for aid in self.agent_ids}
         self._minimal_launch_sequence = {aid: 0 for aid in self.agent_ids}
+        self._fire_control_assignments = {
+            aid: self._initial_opponent_id(aid) for aid in self.agent_ids}
+        self._fire_control_pending_reallocation_after_death = set()
+        self._target_assignment_diagnostics = {
+            "target_reallocations": 0,
+            "target_reallocations_after_death": 0,
+            "target_switches_while_alive": 0,
+            "engaged_wait_frames": 0,
+            "no_alive_target_frames": 0,
+        }
+        self._mws_decision_diagnostics = {
+            "red_detected_agent_decisions": 0,
+            "red_override_agent_decisions": 0,
+            "blue_detected_agent_decisions": 0,
+            "blue_override_agent_decisions": 0,
+        }
+        self._missile_first_warning_frame = {}
+        self._warning_to_terminal_s = {"red": [], "blue": []}
+        self._warning_to_hit_s = {"red": [], "blue": []}
         self._launch_diag_step = make_empty_launch_diag()
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
@@ -730,7 +818,7 @@ class UavCombatEnv(gymnasium.Env):
         self._missile_trajectory_sink = sink
 
     def _profile_mws_defaults(self) -> dict[str, bool]:
-        if getattr(self, "is_paper_minimal", False):
+        if getattr(self, "is_paper_adapted", False):
             return {"red": True, "blue": False}
         controller = getattr(self, "blue_policy_controller", None)
         blue_enabled = bool(getattr(
@@ -746,7 +834,8 @@ class UavCombatEnv(gymnasium.Env):
             fallback = getattr(self, "blue_policy_profile", "paper_pursuit") not in (
                 "fixed_pair_no_mws_v1", "frozen_route_blue_v1",
                 "paper_minimal_fixed_pair_v1",
-                "paper_minimal_straight_patrol_v1")
+                "paper_minimal_straight_patrol_v1",
+                "paper_learnable_fixed_pair_v1")
             return bool(getattr(
                 self.blue_policy_controller, "blue_mws_override_enabled", fallback))
         return True
@@ -944,6 +1033,27 @@ class UavCombatEnv(gymnasium.Env):
             mws_enabled = self._mws_enabled_for_agent(aid)
             incoming = sim.check_missile_warning() if mws_enabled else None
             if incoming is not None and mws_enabled:
+                team = "blue" if is_blue else "red"
+                mws_counts = getattr(self, "_mws_decision_diagnostics", None)
+                if mws_counts is None:
+                    mws_counts = {
+                        "red_detected_agent_decisions": 0,
+                        "red_override_agent_decisions": 0,
+                        "blue_detected_agent_decisions": 0,
+                        "blue_override_agent_decisions": 0,
+                    }
+                    self._mws_decision_diagnostics = mws_counts
+                mws_counts[
+                    f"{team}_detected_agent_decisions"] += 1
+                mws_counts[
+                    f"{team}_override_agent_decisions"] += 1
+                warning_frames = getattr(
+                    self, "_missile_first_warning_frame", None)
+                if warning_frames is None:
+                    warning_frames = {}
+                    self._missile_first_warning_frame = warning_frames
+                warning_frames.setdefault(
+                    incoming.uid, int(getattr(self, "_physics_frame", 0)))
                 evasion = self._evasion_diagnostics[aid]
                 if not evasion["active"]:
                     evasion["activations"] += 1
@@ -962,7 +1072,7 @@ class UavCombatEnv(gymnasium.Env):
                 rh = np.hypot(dn, de) + 1e-8
                 ao = np.arctan2((vn * de - ve * dn) / (vh * rh),
                                 (vn * dn + ve * de) / (vh * rh))
-                if getattr(self, "is_paper_minimal", False):
+                if getattr(self, "is_paper_adapted", False):
                     turn_dir = -1.0 if ao > 0 else 1.0
                     target_heading = current_heading + turn_dir * np.deg2rad(60.0)
                     targets[aid] = (0.0, target_heading, 300.0)
@@ -1096,31 +1206,31 @@ class UavCombatEnv(gymnasium.Env):
                 g_load = float("nan")
             if not np.isfinite(g_load):
                 sim.crash()
-                if self.is_paper_minimal:
+                if _is_adapted_profile(self):
                     self._mark_invalid_numerical(aid, "NonFiniteLoad")
                 else:
                     self._death_reasons.setdefault(aid, "Crash_NumericalLoad")
                 self._crashed_this_step.add(aid)
                 continue
-            if (self.is_paper_minimal
+            if (_is_adapted_profile(self)
                     and g_load > MINIMAL_EXTREME_LOAD_INVALID_THRESHOLD_G):
                 sim.crash()
                 self._mark_invalid_numerical(aid, "ExtremeFiniteLoad")
                 self._crashed_this_step.add(aid)
                 continue
-            if g_load > 100.0 and not self.is_paper_minimal:
+            if g_load > 100.0 and not _is_adapted_profile(self):
                 sim.crash()
                 self._death_reasons.setdefault(aid, "Crash_NumericalLoad")
                 self._crashed_this_step.add(aid)
                 continue
             g_limit = float(self.environment_config.aircraft.maximum_load_g.value)
             if self.pid_profile in ("paper", "paper_minimal_shared_v1") and g_load > g_limit:
-                minimum_scale = 0.0 if self.is_paper_minimal else 0.1
+                minimum_scale = 0.0 if _is_adapted_profile(self) else 0.1
                 scale = float(np.clip(
                     g_limit / max(g_load, 1e-9), minimum_scale, 1.0))
                 aileron *= scale
                 elevator *= scale
-                if self.is_paper_minimal:
+                if _is_adapted_profile(self):
                     rudder *= scale
                 diag["load_limiter_activations"] += 1
 
@@ -1147,7 +1257,7 @@ class UavCombatEnv(gymnasium.Env):
         rpy = np.asarray(sim.get_rpy(), dtype=np.float64)
         if not np.all(np.isfinite(np.concatenate([velocity, position, rpy]))):
             sim.crash()
-            if self.is_paper_minimal:
+            if _is_adapted_profile(self):
                 self._mark_invalid_numerical(aid, "NonFiniteState")
             else:
                 self._death_reasons.setdefault(aid, "Crash_NonFinite")
@@ -1158,7 +1268,7 @@ class UavCombatEnv(gymnasium.Env):
         diag = self._aircraft_diagnostics[aid]
         diag["maximum_speed_mps_seen"] = max(
             diag["maximum_speed_mps_seen"], speed)
-        if self.is_paper_minimal and speed > maximum:
+        if _is_adapted_profile(self) and speed > maximum:
             diag["maximum_speed_before_limit_mps"] = max(
                 diag["maximum_speed_before_limit_mps"], speed)
             projected_speed = sim.project_velocity_magnitude(maximum)
@@ -1175,7 +1285,7 @@ class UavCombatEnv(gymnasium.Env):
             diag["maximum_speed_after_limit_mps"], speed)
         if speed > 10.0 * maximum:
             sim.crash()
-            if self.is_paper_minimal:
+            if _is_adapted_profile(self):
                 self._mark_invalid_numerical(aid, "NumericalEnvelope")
             else:
                 self._death_reasons.setdefault(aid, "Crash_NumericalEnvelope")
@@ -1187,6 +1297,48 @@ class UavCombatEnv(gymnasium.Env):
         if label not in self._invalid_numerical_reasons:
             self._invalid_numerical_reasons.append(label)
         self._death_reasons.setdefault(aid, "Invalid_Numerical")
+
+    def _initial_opponent_id(self, aid: str) -> str | None:
+        try:
+            index = int(aid.split("_", 1)[1])
+        except (ValueError, IndexError):
+            return None
+        prefix = "red" if aid.startswith("blue_") else "blue"
+        limit = self.max_num_red if prefix == "red" else self.max_num_blue
+        return f"{prefix}_{index}" if index < limit else None
+
+    def _learnable_fire_control_target(
+        self, aid: str, enemies: dict[str, AircraftSimulator],
+    ) -> AircraftSimulator | None:
+        """Keep a live assignment; after death choose lowest live unengaged."""
+        target_id = self._fire_control_assignments.get(aid)
+        current = enemies.get(target_id) if target_id is not None else None
+        if current is not None and current.is_alive:
+            return current
+        if target_id is not None:
+            self._fire_control_pending_reallocation_after_death.add(aid)
+
+        alive = sorted(
+            (enemy for enemy in enemies.values() if enemy.is_alive),
+            key=lambda enemy: int(enemy.uid.split("_", 1)[1]))
+        if not alive:
+            self._fire_control_assignments[aid] = None
+            self._target_assignment_diagnostics["no_alive_target_frames"] += 1
+            return None
+        replacement = next(
+            (enemy for enemy in alive if enemy.uid not in self._engaged_targets),
+            None)
+        if replacement is None:
+            self._fire_control_assignments[aid] = None
+            self._target_assignment_diagnostics["engaged_wait_frames"] += 1
+            return None
+        self._fire_control_assignments[aid] = replacement.uid
+        self._target_assignment_diagnostics["target_reallocations"] += 1
+        if aid in self._fire_control_pending_reallocation_after_death:
+            self._target_assignment_diagnostics[
+                "target_reallocations_after_death"] += 1
+            self._fire_control_pending_reallocation_after_death.discard(aid)
+        return replacement
 
     def _check_missile_launch(self):
         """Rule-based missile launch with lock-delay + hot-update deconfliction.
@@ -1231,7 +1383,10 @@ class UavCombatEnv(gymnasium.Env):
 
             # ---- Find the closest UNENGAGED enemy in the launch cone ----
             enemies = self.red_planes if sim.color == "Blue" else self.blue_planes
-            if self.is_paper_minimal:
+            if self.is_paper_learnable:
+                assigned = self._learnable_fire_control_target(aid, enemies)
+                candidate_enemies = [] if assigned is None else [assigned]
+            elif self.is_paper_minimal:
                 try:
                     paired_index = int(aid.split("_", 1)[1])
                 except (ValueError, IndexError):
@@ -1251,6 +1406,9 @@ class UavCombatEnv(gymnasium.Env):
                 # --- Target-deconfliction: skip enemies already engaged ---
                 if enemy_sim.uid in self._engaged_targets:
                     diag["engaged_blocked"] += 1
+                    if self.is_paper_learnable:
+                        self._target_assignment_diagnostics[
+                            "engaged_wait_frames"] += 1
                     continue
                 diag["unengaged_enemy_pairs"] += 1
 
@@ -1261,9 +1419,19 @@ class UavCombatEnv(gymnasium.Env):
                     ego_pos, sim.get_rpy()[2], enm_pos, enemy_sim.get_rpy()[2])
                 R = compute_3d_range(ego_pos, enm_pos)
                 eo_visible = self._is_detected_by_electro_optical(sim, enemy_sim)
-                range_ok = self.missile_launch_min_range < R and eo_visible
-                ao_ok = (True if self.is_paper_minimal
-                         else AO < self.missile_launch_ao_thresh)
+                if self.is_paper_learnable:
+                    if R < self.missile_launch_min_range:
+                        diag["range_low_blocked"] += 1
+                    if R > self.missile_launch_max_range:
+                        diag["range_high_blocked"] += 1
+                    range_ok = (
+                        self.missile_launch_min_range <= R
+                        <= self.missile_launch_max_range and eo_visible)
+                    ao_ok = AO <= self.missile_launch_ao_thresh
+                else:
+                    range_ok = self.missile_launch_min_range < R and eo_visible
+                    ao_ok = (True if self.is_paper_minimal
+                             else AO < self.missile_launch_ao_thresh)
                 ta_ok = TA > self.environment_config.fire_control.rear_hemisphere_ta_rad.value
                 if range_ok:
                     diag["range_ok_pairs"] += 1
@@ -1424,6 +1592,17 @@ class UavCombatEnv(gymnasium.Env):
                 MINIMAL_MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M)
             positive_closing_threshold_mps = (
                 MINIMAL_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS)
+        elif self.is_paper_learnable:
+            sequence = self._minimal_launch_sequence[parent.uid]
+            missile_rng = _minimal_missile_rng(
+                self._seed, parent.uid, sequence)
+            self._minimal_launch_sequence[parent.uid] = sequence + 1
+            launch_speed_mps = LEARNABLE_MISSILE_LAUNCH_SPEED_MPS
+            overshoot_window_s = LEARNABLE_MISSILE_OVERSHOOT_WINDOW_S
+            overshoot_distance_hysteresis_m = (
+                LEARNABLE_MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M)
+            positive_closing_threshold_mps = (
+                LEARNABLE_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS)
         else:
             overshoot_distance_hysteresis_m = 0.0
             positive_closing_threshold_mps = 0.0
@@ -1485,7 +1664,21 @@ class UavCombatEnv(gymnasium.Env):
             "termination_step": int(self.current_step),
             "step_delta": step_delta,
             "target_alive_at_termination": target_alive,
+            "pn_guidance_frames": int(getattr(missile, "_pn_guidance_frames", 0)),
+            "pn_nonzero_command_frames": int(getattr(
+                missile, "_pn_nonzero_command_frames", 0)),
+            "maximum_command_g": float(getattr(
+                missile, "_maximum_command_g", 0.0)),
         })
+        warning_frame = self._missile_first_warning_frame.get(missile.uid)
+        if warning_frame is not None:
+            target_team = "red" if missile._target_id.startswith("red") else "blue"
+            duration = max(
+                0.0, (int(self._physics_frame) - int(warning_frame))
+                / float(self.sim_freq))
+            self._warning_to_terminal_s[target_team].append(duration)
+            if raw_reason == "hit":
+                self._warning_to_hit_s[target_team].append(duration)
         self._launch_quality_done_step_records.append(dict(record))
 
     def _update_missiles(self):
@@ -1584,17 +1777,17 @@ class UavCombatEnv(gymnasium.Env):
                 sim.crash()
                 crashed = True
                 reason = "Crash_LowAlt"
-            elif self.is_paper_minimal and alt > self.arena_altitude_max_m:
+            elif _is_adapted_profile(self) and alt > self.arena_altitude_max_m:
                 sim.crash()
                 crashed = True
                 reason = "Crash_HighAlt"
-            elif self.is_paper_minimal and (
+            elif _is_adapted_profile(self) and (
                     abs(pos[0]) > self.arena_half_width_m
                     or abs(pos[1]) > self.arena_half_width_m):
                 sim.crash()
                 crashed = True
                 reason = "Crash_BattleVolume"
-            elif self.is_paper_minimal:
+            elif _is_adapted_profile(self):
                 # Other tactical death categories are disabled in this profile.
                 continue
             elif alt > self.arena_altitude_max_m:
@@ -1641,7 +1834,7 @@ class UavCombatEnv(gymnasium.Env):
 
     def _get_truncated(self) -> dict:
         truncated = self.current_step >= self.max_steps or (
-            self.is_paper_minimal and self._invalid_numerical_episode)
+            _is_adapted_profile(self) and self._invalid_numerical_episode)
         return {aid: truncated for aid in self.agent_ids}
 
     # ------------------------------------------------------------------
@@ -1744,7 +1937,7 @@ class UavCombatEnv(gymnasium.Env):
 
     def _compute_paper_joint_rewards(self) -> tuple[dict, dict]:
         """Return the paper team-joint reward identically to every teammate."""
-        if self.is_paper_minimal and self._invalid_numerical_episode:
+        if _is_adapted_profile(self) and self._invalid_numerical_episode:
             rewards = {aid: 0.0 for aid in self.agent_ids}
             components = {
                 aid: {
@@ -1833,7 +2026,7 @@ class UavCombatEnv(gymnasium.Env):
             "blue_joint_reward": float(blue_joint),
             "reward_version": (
                 "paper_literal_minimal_unspecified_v1"
-                if self.is_paper_minimal else REWARD_VERSION),
+                if _is_adapted_profile(self) else REWARD_VERSION),
             "reward_mode": self.reward_mode,
         }
         self._episode_stats["EpisodeRedJointReturn"] += red_joint
@@ -1927,7 +2120,7 @@ class UavCombatEnv(gymnasium.Env):
         if not enemy_alts:
             return 0.0
 
-        if self.is_paper_minimal:
+        if _is_adapted_profile(self):
             return altitude_reward_pairwise_mean_eq17(
                 alt_ego, enemy_alts, config=self.altitude_reward_config)
         return altitude_reward_pairwise_sum_eq17(
@@ -2249,10 +2442,35 @@ class UavCombatEnv(gymnasium.Env):
         info["__reward_summary__"] = dict(self._reward_summary_step)
         info["__blue_policy_diag__"] = (
             self.blue_policy_controller.snapshot_episode_diagnostics())
+        mws_diag = dict(self._mws_decision_diagnostics)
+        for team in ("red", "blue"):
+            terminal = self._warning_to_terminal_s[team]
+            hit = self._warning_to_hit_s[team]
+            mws_diag[f"{team}_warning_to_terminal_mean_s"] = (
+                float(np.mean(terminal)) if terminal else None)
+            mws_diag[f"{team}_warning_to_terminal_p50_s"] = (
+                float(np.median(terminal)) if terminal else None)
+            mws_diag[f"{team}_warning_to_hit_mean_s"] = (
+                float(np.mean(hit)) if hit else None)
+            mws_diag[f"{team}_mws_detected_agent_decisions"] = int(
+                mws_diag[f"{team}_detected_agent_decisions"])
+            mws_diag[f"{team}_mws_override_agent_decisions"] = int(
+                mws_diag[f"{team}_override_agent_decisions"])
+            mws_diag[f"{team}_mws_warning_to_terminal_mean_s"] = mws_diag[
+                f"{team}_warning_to_terminal_mean_s"]
+            mws_diag[f"{team}_mws_warning_to_terminal_p50_s"] = mws_diag[
+                f"{team}_warning_to_terminal_p50_s"]
+            mws_diag[f"{team}_mws_warning_to_hit_mean_s"] = mws_diag[
+                f"{team}_warning_to_hit_mean_s"]
+        info["__mws_diag__"] = mws_diag
+        info["__target_assignment_diag__"] = {
+            **dict(self._target_assignment_diagnostics),
+            "fire_control_assignments": dict(self._fire_control_assignments),
+        }
         n_red_alive = sum(int(s.is_alive) for s in self.red_planes.values())
         n_blue_alive = sum(int(s.is_alive) for s in self.blue_planes.values())
         timeout = self.current_step >= self.max_steps
-        invalid = bool(self.is_paper_minimal and self._invalid_numerical_episode)
+        invalid = bool(_is_adapted_profile(self) and self._invalid_numerical_episode)
         ended = timeout or invalid or n_red_alive == 0 or n_blue_alive == 0
         winner = ("red" if n_red_alive > n_blue_alive else
                   "blue" if n_blue_alive > n_red_alive else "draw")
@@ -2310,8 +2528,8 @@ class UavCombatEnv(gymnasium.Env):
             observer_sim.get_position(), observer_sim.get_rpy(),
             target_sim.get_position())
         return bool(
-            distance < self.environment_config.electro_optical.maximum_range_m.value
-            and q_los < self.missile_launch_ao_thresh)
+            distance <= self.environment_config.electro_optical.maximum_range_m.value
+            and q_los <= self.missile_launch_ao_thresh)
 
     def _is_detected_by_radar(self, ego_sim: AircraftSimulator,
                               enemy_sim: AircraftSimulator) -> bool:
@@ -2341,7 +2559,7 @@ class UavCombatEnv(gymnasium.Env):
             return SensorTrack("radar_full", target_sim.uid,
                                np.asarray(target_sim.get_position(), dtype=np.float64),
                                now, 0.0, 1.0, True, True, True)
-        if self.is_paper_minimal:
+        if _is_adapted_profile(self):
             # Deterministic per-decision AWACS/RWS fallback: no noise, delay,
             # stale-track memory, hold, or random loss.
             rws_detected = self._is_detected_by_radar(target_sim, observer_sim)
@@ -2445,6 +2663,25 @@ class UavCombatEnv(gymnasium.Env):
             result[aid] = self.get_strict_entity_observation(aid)
         return result
 
+    def _make_initial_jitter(self) -> dict[int, dict[str, float]]:
+        count = max(self.max_num_red, self.max_num_blue)
+        if (not self.is_paper_learnable
+                or self.initial_condition_randomization_mode == "deterministic_v1"):
+            return {
+                index: {"along_m": 0.0, "lateral_m": 0.0,
+                        "altitude_m": 0.0, "speed_mps": 0.0,
+                        "heading_deg": 0.0}
+                for index in range(count)}
+        return {
+            index: {
+                "along_m": float(self.np_random.uniform(-250.0, 250.0)),
+                "lateral_m": float(self.np_random.uniform(-100.0, 100.0)),
+                "altitude_m": float(self.np_random.uniform(-100.0, 100.0)),
+                "speed_mps": float(self.np_random.uniform(-10.0, 10.0)),
+                "heading_deg": float(self.np_random.uniform(-2.0, 2.0)),
+            }
+            for index in range(count)}
+
     def _make_init_state(self, color: str, index: int) -> dict:
         """Strict paper baseline (Table 4): head-on at exactly 10 km, altitude 20 000 ft.
 
@@ -2456,16 +2693,20 @@ class UavCombatEnv(gymnasium.Env):
         N = self.max_num_red if color == "Red" else self.max_num_blue
         lon_centre = float(cfg.reference_longitude_deg.value)
         lat_centre = float(cfg.reference_latitude_deg.value)
+        jitter = self._initial_jitter_by_index.get(index, {})
         formation_spacing_m = float(cfg.formation_spacing_m.value)
-        half_distance_m = float(cfg.initial_head_on_range_m.value) / 2.0
-        if self.is_paper_minimal:
+        lateral_jitter_m = float(jitter.get("lateral_m", 0.0))
+        half_distance_m = (float(cfg.initial_head_on_range_m.value) / 2.0
+                           - float(jitter.get("along_m", 0.0)))
+        if _is_adapted_profile(self):
             centre_lat_rad = np.deg2rad(lat_centre)
             meridional_radius = 6_378_137.0 * (1.0 - 0.00669437999014) / (
                 1.0 - 0.00669437999014 * np.sin(centre_lat_rad) ** 2) ** 1.5
             metres_per_lat_degree = (
                 meridional_radius + float(cfg.initial_altitude_m.value)) * np.pi / 180.0
             lat_offset_deg = (
-                index - (N - 1) / 2.0) * formation_spacing_m / metres_per_lat_degree
+                ((index - (N - 1) / 2.0) * formation_spacing_m
+                 + lateral_jitter_m) / metres_per_lat_degree)
             lane_latitude = lat_centre + lat_offset_deg
             lat_rad = np.deg2rad(lane_latitude)
         else:
@@ -2476,23 +2717,27 @@ class UavCombatEnv(gymnasium.Env):
         prime_vertical_radius = 6_378_137.0 / np.sqrt(
             1.0 - 0.00669437999014 * np.sin(lat_rad) ** 2)
         radius_at_altitude = (prime_vertical_radius + (
-            float(cfg.initial_altitude_m.value) if self.is_paper_minimal else 0.0))
+            float(cfg.initial_altitude_m.value) if _is_adapted_profile(self) else 0.0))
         metres_per_lon_degree = radius_at_altitude * np.cos(lat_rad) * np.pi / 180.0
         half_distance_deg_lon = half_distance_m / metres_per_lon_degree
 
         if color == "Blue":
-            heading = 90.0   # fly east
+            heading = 90.0 + float(jitter.get("heading_deg", 0.0))
             lon = lon_centre - half_distance_deg_lon
         else:
-            heading = -90.0  # fly west
+            heading = -90.0 - float(jitter.get("heading_deg", 0.0))
             lon = lon_centre + half_distance_deg_lon
 
         return {
             "ic/long-gc-deg": lon,
             "ic/lat-geod-deg": lane_latitude,
-            "ic/h-sl-ft": float(cfg.initial_altitude_m.value) / 0.3048,
+            "ic/h-sl-ft": (
+                float(cfg.initial_altitude_m.value)
+                + float(jitter.get("altitude_m", 0.0))) / 0.3048,
             "ic/psi-true-deg": heading,
-            "ic/u-fps": float(cfg.initial_speed_mps.value) / 0.3048,
+            "ic/u-fps": (
+                float(cfg.initial_speed_mps.value)
+                + float(jitter.get("speed_mps", 0.0))) / 0.3048,
             "ic/v-fps": 0.0,
             "ic/w-fps": 0.0,
         }

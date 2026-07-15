@@ -25,6 +25,12 @@ from configs.paper_minimal_3v3_spec import (
     REFERENCE_ENVIRONMENT_PROFILE,
     minimal_environment_snapshot,
 )
+from configs.paper_learnable_3v3_spec import (
+    LEARNABLE_INITIALIZATION_MODES,
+    LEARNABLE_MISSILE_GUIDANCE_MODE,
+    PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
+    learnable_environment_snapshot,
+)
 from configs.brma_mappo_paper_spec import (
     DEFAULT_PAPER_ENVIRONMENT_CONFIG,
     environment_config_snapshot,
@@ -74,6 +80,15 @@ EVALUATION_FIELDNAMES = [
     "blue_route_phase_changes", "blue_base_heading_command_discontinuities",
     "blue_executed_heading_command_discontinuities",
     "blue_altitude_recovery_frames",
+    "TargetReallocations", "TargetReallocationsAfterDeath",
+    "TargetSwitchesWhileAlive", "TargetEngagedWaitFrames",
+    "TargetNoAliveFrames", "RedMWSDetectedAgentDecisions",
+    "RedMWSOverrideAgentDecisions", "BlueMWSDetectedAgentDecisions",
+    "BlueMWSOverrideAgentDecisions", "RedWarningToTerminalMeanS",
+    "RedWarningToTerminalP50S", "RedWarningToHitMeanS",
+    "BlueWarningToTerminalMeanS", "BlueWarningToTerminalP50S",
+    "BlueWarningToHitMeanS",
+    "MissileLifetimeMeanS",
 ]
 
 EVALUATION_SUMMARY_FIELDNAMES = [
@@ -112,10 +127,12 @@ def parse_args():
     parser.add_argument("--blue-policy-profile", choices=(
         "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
         "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1",
-        "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1"),
+        "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1",
+        "paper_learnable_fixed_pair_v1"),
         default="paper_pursuit")
     parser.add_argument("--environment-profile", choices=(
-        REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE),
+        REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+        PAPER_LEARNABLE_ENVIRONMENT_PROFILE),
         default=REFERENCE_ENVIRONMENT_PROFILE)
     parser.add_argument("--obs-mode", type=str,
                         choices=("paper_strict", "engineering"),
@@ -132,8 +149,12 @@ def parse_args():
                         default="paper_joint")
     parser.add_argument("--missile-guidance-mode",
                         choices=("paper_eq9", "legacy_simplified",
-                                 "paper_minimal_point_mass_v1"),
+                                 "paper_minimal_point_mass_v1",
+                                 LEARNABLE_MISSILE_GUIDANCE_MODE),
                         default="paper_eq9")
+    parser.add_argument("--initial-condition-randomization-mode",
+                        choices=LEARNABLE_INITIALIZATION_MODES,
+                        default="deterministic_v1")
     parser.add_argument("--output", type=str,
                         default="results/eval_vanilla_mappo.csv")
     parser.add_argument("--summary-output", type=str, default=None)
@@ -208,6 +229,14 @@ def _load_actor(args, device: torch.device):
             sim_freq=60, agent_interaction_steps=12,
             max_episode_length=args.max_steps, seed=args.seed,
             blue_policy_profile=args.blue_policy_profile)
+    elif args.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
+        environment_snapshot = learnable_environment_snapshot(
+            num_red=args.num_red, num_blue=args.num_blue,
+            sim_freq=60, agent_interaction_steps=12,
+            max_episode_length=args.max_steps, seed=args.seed,
+            blue_policy_profile=args.blue_policy_profile,
+            initial_condition_randomization_mode=(
+                args.initial_condition_randomization_mode))
     else:
         environment_snapshot = environment_config_snapshot(
             DEFAULT_PAPER_ENVIRONMENT_CONFIG,
@@ -220,7 +249,9 @@ def _load_actor(args, device: torch.device):
         "obs_normalization": args.obs_normalization,
         "reward_version": (
             "paper_literal_minimal_unspecified_v1"
-            if args.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+            if args.environment_profile in (
+                PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+                PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
             else REWARD_VERSION),
         "reward_mode": args.reward_mode,
         "pid_profile": args.pid_profile,
@@ -228,7 +259,9 @@ def _load_actor(args, device: torch.device):
         "missile_guidance_mode": args.missile_guidance_mode,
         "altitude_reward_config": asdict(
             _minimal_altitude_reward_config()
-            if args.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+            if args.environment_profile in (
+                PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+                PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
             else DEFAULT_ALTITUDE_REWARD_CONFIG),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
         "action_log_std_init": ACTION_LOG_STD_INIT,
@@ -240,6 +273,8 @@ def _load_actor(args, device: torch.device):
         "recurrent_n": 1,
         "blue_policy_profile": args.blue_policy_profile,
         "environment_profile": args.environment_profile,
+        "initial_condition_randomization_mode": (
+            args.initial_condition_randomization_mode),
         "num_red": args.num_red,
         "num_blue": args.num_blue,
         "max_episode_length": args.max_steps,
@@ -301,6 +336,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                     missile_guidance_mode: str = "paper_eq9",
                     blue_policy_profile: str = "paper_pursuit",
                     environment_profile: str = REFERENCE_ENVIRONMENT_PROFILE,
+                    initial_condition_randomization_mode: str = "deterministic_v1",
                     seed: int | None = None,
                     deterministic: bool = True):
     env = UavCombatEnv(
@@ -314,6 +350,8 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         missile_guidance_mode=missile_guidance_mode,
         blue_policy_profile=blue_policy_profile,
         environment_profile=environment_profile,
+        initial_condition_randomization_mode=(
+            initial_condition_randomization_mode),
         enable_gcas_for_blue=enable_blue_gcas,
         suppress_jsbsim_output=True,
     )
@@ -331,6 +369,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         red_terminal_reward = 0.0
         launch_diag_totals = {"red": Counter(), "blue": Counter()}
         nan_inf_count = 0
+        missile_lifetimes = []
 
         done = False
         while not done:
@@ -395,6 +434,11 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             for team in ("red", "blue"):
                 launch_diag_totals[team].update(
                     info.get("__launch_diag__", {}).get(team, {}))
+            for record in info.get("__launch_quality_done__", []):
+                try:
+                    missile_lifetimes.append(float(record["flight_time_sec"]))
+                except (KeyError, TypeError, ValueError):
+                    pass
 
             for rid in red_ids:
                 red_missiles_fired += info.get(rid, {}).get(
@@ -435,13 +479,17 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         red_missile_hits = blue_deaths_missile
         blue_missile_hits = red_deaths_missile
         blue_diag = info.get("__blue_policy_diag__", {})
+        target_diag = info.get("__target_assignment_diag__", {})
+        mws_diag = info.get("__mws_diag__", {})
         environment_metadata = info.get("__environment_config__", {})
         def sourced_value(name):
             value = environment_metadata.get(name, "")
             return value.get("value", "") if isinstance(value, dict) else value
 
         altitude_config = (_minimal_altitude_reward_config()
-                           if environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+                           if environment_profile in (
+                               PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+                               PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
                            else DEFAULT_ALTITUDE_REWARD_CONFIG)
         return {
             "Episode": episode_idx,
@@ -473,7 +521,9 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "EnableBlueGCAS": bool(enable_blue_gcas),
             "RewardVersion": (
                 "paper_literal_minimal_unspecified_v1"
-                if environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+                if environment_profile in (
+                    PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+                    PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
                 else REWARD_VERSION),
             "RewardMode": reward_mode,
             "ObsNormalization": obs_normalization,
@@ -497,6 +547,34 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "BlueLockMature": int(launch_diag_totals["blue"]["lock_mature_pairs"]),
             "RedTerminalReward": red_terminal_reward,
             "NaNInfCount": nan_inf_count,
+            "MissileLifetimeMeanS": (
+                float(np.mean(missile_lifetimes)) if missile_lifetimes else None),
+            "TargetReallocations": int(target_diag.get("target_reallocations", 0)),
+            "TargetReallocationsAfterDeath": int(
+                target_diag.get("target_reallocations_after_death", 0)),
+            "TargetSwitchesWhileAlive": int(
+                target_diag.get("target_switches_while_alive", 0)),
+            "TargetEngagedWaitFrames": int(
+                target_diag.get("engaged_wait_frames", 0)),
+            "TargetNoAliveFrames": int(target_diag.get("no_alive_target_frames", 0)),
+            "RedMWSDetectedAgentDecisions": int(
+                mws_diag.get("red_detected_agent_decisions", 0)),
+            "RedMWSOverrideAgentDecisions": int(
+                mws_diag.get("red_override_agent_decisions", 0)),
+            "BlueMWSDetectedAgentDecisions": int(
+                mws_diag.get("blue_detected_agent_decisions", 0)),
+            "BlueMWSOverrideAgentDecisions": int(
+                mws_diag.get("blue_override_agent_decisions", 0)),
+            "RedWarningToTerminalMeanS": mws_diag.get(
+                "red_warning_to_terminal_mean_s"),
+            "RedWarningToTerminalP50S": mws_diag.get(
+                "red_warning_to_terminal_p50_s"),
+            "RedWarningToHitMeanS": mws_diag.get("red_warning_to_hit_mean_s"),
+            "BlueWarningToTerminalMeanS": mws_diag.get(
+                "blue_warning_to_terminal_mean_s"),
+            "BlueWarningToTerminalP50S": mws_diag.get(
+                "blue_warning_to_terminal_p50_s"),
+            "BlueWarningToHitMeanS": mws_diag.get("blue_warning_to_hit_mean_s"),
             **{field: int(blue_diag.get(field, 0)) for field in (
                 "blue_target_switches_total", "blue_target_dead_switches",
                 "blue_distance_triggered_switches", "blue_engaged_triggered_switches",
@@ -605,7 +683,9 @@ def main():
     device = _select_device(args.device)
     actor, rnn_hidden_size, _checkpoint = _load_actor(args, device)
     print(f"enable_blue_gcas: {args.enable_blue_gcas}", flush=True)
-    minimal = args.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+    minimal = args.environment_profile in (
+        PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+        PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
     print("reward_version: " + (
         "paper_literal_minimal_unspecified_v1" if minimal else REWARD_VERSION),
         flush=True)
@@ -645,6 +725,8 @@ def main():
                 missile_guidance_mode=args.missile_guidance_mode,
                 blue_policy_profile=args.blue_policy_profile,
                 environment_profile=args.environment_profile,
+                initial_condition_randomization_mode=(
+                    args.initial_condition_randomization_mode),
                 seed=None if args.seed is None else args.seed + ep - 1,
             )
             rows.append(row)

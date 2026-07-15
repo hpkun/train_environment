@@ -75,7 +75,8 @@ def test_profiles_and_default_remain_paper_pursuit():
     assert BLUE_POLICY_PROFILES == (
         "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
         "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1",
-        "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1")
+        "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1",
+        "paper_learnable_fixed_pair_v1")
     assert Config.blue_policy_profile == "paper_pursuit"
 
 

@@ -11,6 +11,8 @@ from collections import deque
 from abc import ABC, abstractmethod
 from typing import List, Union
 
+from my_uav_env.alignment.state_extractor import body_vector_to_inertial_neu
+
 
 def compute_los_angles_and_rates(relative_position, relative_velocity,
                                  epsilon: float = 1e-8):
@@ -630,6 +632,17 @@ class MissileSimulator(BaseSimulator):
                 heading = float(np.arctan2(
                     missile._velocity[1], missile._velocity[0]))
                 missile._posture[:] = [0.0, pitch, heading]
+        elif (guidance_mode == "paper_learnable_point_mass_v1"
+              and launch_speed_mps is not None):
+            roll, pitch, heading = np.asarray(parent.get_rpy(), dtype=np.float64)
+            body_x = body_vector_to_inertial_neu(
+                np.array([1.0, 0.0, 0.0], dtype=np.float64),
+                roll, pitch, heading)
+            norm = float(np.linalg.norm(body_x))
+            if np.isfinite(norm) and norm > 1e-9:
+                missile._velocity[:] = (
+                    body_x / norm * float(launch_speed_mps))
+                missile._posture[:] = [0.0, pitch, heading]
         return missile
 
     def __init__(self, uid="A0101", color="Red", model="AIM-9L", dt=1 / 12,
@@ -640,7 +653,8 @@ class MissileSimulator(BaseSimulator):
                  positive_closing_threshold_mps: float = 0.0):
         super().__init__(uid, color, dt)
         if guidance_mode not in (
-                "paper_eq9", "legacy_simplified", "paper_minimal_point_mass_v1"):
+                "paper_eq9", "legacy_simplified", "paper_minimal_point_mass_v1",
+                "paper_learnable_point_mass_v1"):
             raise ValueError(
                 "guidance_mode must be 'paper_eq9', 'legacy_simplified', or "
                 "'paper_minimal_point_mass_v1'")
@@ -686,6 +700,9 @@ class MissileSimulator(BaseSimulator):
         self._historical_min_range_m = float("inf")
         self._has_ever_positive_closing = False
         self._overshoot_counter = 0
+        self._pn_guidance_frames = 0
+        self._pn_nonzero_command_frames = 0
+        self._maximum_command_g = 0.0
 
     @property
     def is_alive(self):
@@ -745,6 +762,9 @@ class MissileSimulator(BaseSimulator):
         self._historical_min_range_m = float("inf")
         self._has_ever_positive_closing = False
         self._overshoot_counter = 0
+        self._pn_guidance_frames = 0
+        self._pn_nonzero_command_frames = 0
+        self._maximum_command_g = 0.0
         self._left_t = int(1 / self.dt)
         self.render_explosion = False
 
@@ -756,6 +776,10 @@ class MissileSimulator(BaseSimulator):
     def run(self):
         self._t += self.dt
         action, distance = self._guidance()
+        command_norm = float(np.linalg.norm(action))
+        self._pn_guidance_frames += 1
+        self._pn_nonzero_command_frames += int(command_norm > 1e-9)
+        self._maximum_command_g = max(self._maximum_command_g, command_norm)
         previous_distance = self._distance_pre
         increasing = bool(distance > previous_distance)
         self._distance_increment.append(increasing)
@@ -763,8 +787,14 @@ class MissileSimulator(BaseSimulator):
         diagnostic = self._intercept_diagnostic(
             action, distance, previous_distance)
 
-        armed = (self.guidance_mode == "paper_minimal_point_mass_v1"
-                 or self._t > self._t_arm)
+        armed = (
+            self.guidance_mode == "paper_minimal_point_mass_v1"
+            or (self.guidance_mode == "paper_learnable_point_mass_v1"
+                and self._t >= self._t_arm)
+            or (self.guidance_mode not in (
+                    "paper_minimal_point_mass_v1",
+                    "paper_learnable_point_mass_v1")
+                and self._t > self._t_arm))
         if distance < self._Rc and self.target_aircraft.is_alive and armed:
             # Paper: P_hit = 0.05 + 0.95 · dir_match — probabilistic kill filter
             # even when the physical missile reaches the target.
@@ -778,15 +808,21 @@ class MissileSimulator(BaseSimulator):
         elif self._t > self._t_max:
             self._status = MissileSimulator.MISS
             self._termination_reason = "timeout"
-        elif (self.guidance_mode != "paper_minimal_point_mass_v1"
+        elif (self.guidance_mode not in (
+                "paper_minimal_point_mass_v1",
+                "paper_learnable_point_mass_v1")
               and np.linalg.norm(self.get_velocity()) < self._v_min):
             self._status = MissileSimulator.MISS
             self._termination_reason = "low_speed"
-        elif (self.guidance_mode == "paper_minimal_point_mass_v1"
+        elif (self.guidance_mode in (
+                "paper_minimal_point_mass_v1",
+                "paper_learnable_point_mass_v1")
               and self._overshoot_counter >= self._distance_increment.maxlen):
             self._status = MissileSimulator.MISS
             self._termination_reason = "overshoot"
-        elif (self.guidance_mode != "paper_minimal_point_mass_v1"
+        elif (self.guidance_mode not in (
+                "paper_minimal_point_mass_v1",
+                "paper_learnable_point_mass_v1")
               and len(self._distance_increment) == self._distance_increment.maxlen
               and np.sum(self._distance_increment) >= self._distance_increment.maxlen):
             self._status = MissileSimulator.MISS
@@ -929,7 +965,9 @@ class MissileSimulator(BaseSimulator):
         Rxy = np.linalg.norm([x_m - x_t, y_m - y_t])
         Rxyz = max(np.linalg.norm([x_m - x_t, y_m - y_t, z_t - z_m]), 1e-8)
 
-        if self.guidance_mode in ("paper_eq9", "paper_minimal_point_mass_v1"):
+        if self.guidance_mode in (
+                "paper_eq9", "paper_minimal_point_mass_v1",
+                "paper_learnable_point_mass_v1"):
             relative_position = np.array([x_t - x_m, y_t - y_m, z_t - z_m])
             relative_velocity = np.array([dx_t - dx_m, dy_t - dy_m, dz_t - dz_m])
             ny, nz = compute_paper_eq9_overloads(
@@ -941,11 +979,20 @@ class MissileSimulator(BaseSimulator):
                 (x_t - x_m) * (dx_t - dx_m) + (y_t - y_m) * (dy_t - dy_m))) / (Rxyz ** 2 * Rxy + 1e-8)
             ny = self.K * v_m / self._g * np.cos(theta_m) * dbeta
             nz = self.K * v_m / self._g * deps + np.cos(theta_m)
-        return np.clip([ny, nz], -self._nyz_max, self._nyz_max), Rxyz
+        command = np.clip(
+            np.asarray([ny, nz], dtype=np.float64),
+            -self._nyz_max, self._nyz_max)
+        if self.guidance_mode == "paper_learnable_point_mass_v1":
+            norm = float(np.linalg.norm(command))
+            if norm > self._nyz_max:
+                command *= self._nyz_max / norm
+        return command, Rxyz
 
     def _state_trans(self, action):
         """Update missile position, velocity, and attitude."""
-        if self.guidance_mode == "paper_minimal_point_mass_v1":
+        if self.guidance_mode in (
+                "paper_minimal_point_mass_v1",
+                "paper_learnable_point_mass_v1"):
             self._state_trans_minimal_point_mass(action)
             return
         self._position[:] += self.dt * self.get_velocity()
