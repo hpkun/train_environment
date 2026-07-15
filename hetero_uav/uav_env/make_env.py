@@ -35,6 +35,10 @@ def make_env(config_path: str | None = None, **kwargs):
 
         tam_kwargs = {k: v for k, v in config.items() if k != "config_path"}
         return make_tam_env(**tam_kwargs)
+    if env_type == "hetero_3v2_pure_happo_v1":
+        from .JSBSim.formal_v1 import make_formal_env
+
+        return make_formal_env(env_type=env_type, **config)
     if env_type != "hetero":
         raise ValueError(f"Unknown env_type: {env_type}")
     from .JSBSim.envs.hetero_uav_env import HeteroUAVEnv
