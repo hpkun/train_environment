@@ -1159,7 +1159,9 @@ def test_vanilla_actor_matches_paper_mlp_gru_normal_layout():
     assert isinstance(distribution, torch.distributions.Normal)
     assert distribution.mean.shape == (2, 3) and hidden.shape == (2, 128)
     assert torch.allclose(distribution.scale, torch.full((2, 3), 0.3))
-    assert torch.allclose(actor.action_log_std, torch.full((3,), ACTION_LOG_STD_INIT))
+    assert torch.count_nonzero(actor.action_log_std_head.weight) == 0
+    assert torch.all(distribution.scale >= 0.05)
+    assert torch.all(distribution.scale <= 0.6)
 
 
 def test_raw_action_is_buffered_while_environment_action_is_clipped():
@@ -1323,7 +1325,7 @@ def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     global_dim = _compute_global_state_dim(3, "paper_strict")
     metadata = _checkpoint_metadata(cfg, obs_dim, global_dim)
     state = VanillaActor(obs_dim).state_dict()
-    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v4"
+    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v5"
     assert metadata["schema_version"] == CHECKPOINT_SCHEMA_VERSION
     assert metadata["action_distribution"] == ACTION_DISTRIBUTION_VERSION
     assert metadata["actor_obs_dim"] == 60

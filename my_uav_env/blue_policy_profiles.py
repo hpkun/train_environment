@@ -52,7 +52,9 @@ class BluePolicyController:
 
     @property
     def blue_mws_override_enabled(self) -> bool:
-        return self.profile not in ("fixed_pair_no_mws_v1", "frozen_route_blue_v1")
+        return self.profile not in (
+            "fixed_pair_no_mws_v1", "frozen_route_blue_v1",
+            "paper_minimal_straight_patrol_v1")
 
     def clear(self) -> None:
         self.initial_targets: dict[str, str | None] = {}

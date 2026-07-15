@@ -528,7 +528,7 @@ EXPERIMENT_PRESETS.update({
         "num_envs": 2,
         "total_env_steps": 2_000,
         "replay_buffer_size": 100,
-        "max_episode_length": 300,
+        "max_episode_length": 1_400,
         "environment_profile": "paper_minimal_3v3_v1",
         "reward_mode": "paper_minimal_joint_v1",
         "pid_profile": "paper_minimal_shared_v1",

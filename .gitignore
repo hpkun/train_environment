@@ -13,8 +13,16 @@ results/
 logs/
 checkpoints/
 runs/
+/tmp/
 *.npy
 *.acmi
+*.pt
+*.pth
+*.ckpt
+_jsbsim_recreate_*.log
+*worker*crash*.log
+*worker*reset*.log
+*jsbsim*trace*.log
 
 # vscode config
 .vscode

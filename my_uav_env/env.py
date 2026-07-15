@@ -62,6 +62,15 @@ from .render_tacview import TacviewLogger
 
 logger = logging.getLogger(__name__)
 
+
+def _minimal_missile_rng(seed: int | None, parent_uid: str,
+                         sequence: int) -> np.random.Generator:
+    """Independent deterministic stream for one minimal-profile launch."""
+    pair_index = int(parent_uid.split("_", 1)[1])
+    team_id = 0 if parent_uid.startswith("red_") else 1
+    return np.random.default_rng(np.random.SeedSequence([
+        int(seed or 0), team_id, pair_index, int(sequence)]))
+
 LAUNCH_DIAG_TEAMS = ("red", "blue")
 LAUNCH_DIAG_KEYS = (
     "scan_frames",
@@ -520,6 +529,7 @@ class UavCombatEnv(gymnasium.Env):
             "EpisodeRedLocalRewardSum": 0.0, "EpisodeBlueLocalRewardSum": 0.0,
             "EpisodeRedTerminalReward": 0.0, "EpisodeBlueTerminalReward": 0.0,
             "EpisodeLength": 0,
+            "maximum_live_missiles_observed": 0,
         }
         self._terminal_cleanup_done = False
         self._invalid_numerical_episode = False
@@ -602,6 +612,9 @@ class UavCombatEnv(gymnasium.Env):
         self._overload_timers = {aid: 0.0 for aid in self.agent_ids}
         self._aircraft_diagnostics = {
             aid: {"maximum_speed_mps_seen": 0.0, "overspeed_frames": 0,
+                  "maximum_speed_before_limit_mps": 0.0,
+                  "maximum_speed_after_limit_mps": 0.0,
+                  "speed_limiter_activations": 0,
                   "maximum_load_g_seen": 0.0, "over_g_frames": 0,
                   "load_limiter_activations": 0}
             for aid in self.agent_ids}
@@ -691,7 +704,9 @@ class UavCombatEnv(gymnasium.Env):
         for blue_id, sim in self.blue_planes.items():
             missile = (sim.check_missile_warning()
                        if sim.is_alive
-                       and self.blue_policy_profile != "frozen_route_blue_v1"
+                       and self.blue_policy_profile not in (
+                           "frozen_route_blue_v1",
+                           "paper_minimal_straight_patrol_v1")
                        else None)
             selected_missiles[blue_id] = getattr(missile, "uid", None)
             mws_detected[blue_id] = missile is not None
@@ -1048,19 +1063,28 @@ class UavCombatEnv(gymnasium.Env):
                     sim.get_property_value("accelerations/n-pilot-z-norm")]))
             except Exception:
                 g_load = 0.0
-            if g_load > 100.0:
+            if not np.isfinite(g_load):
                 sim.crash()
                 if self.is_paper_minimal:
-                    self._mark_invalid_numerical(aid, "NumericalLoad")
+                    self._mark_invalid_numerical(aid, "NonFiniteLoad")
                 else:
                     self._death_reasons.setdefault(aid, "Crash_NumericalLoad")
                 self._crashed_this_step.add(aid)
                 continue
+            if g_load > 100.0 and not self.is_paper_minimal:
+                sim.crash()
+                self._death_reasons.setdefault(aid, "Crash_NumericalLoad")
+                self._crashed_this_step.add(aid)
+                continue
             g_limit = float(self.environment_config.aircraft.maximum_load_g.value)
-            if self.pid_profile == "paper" and g_load > g_limit:
-                scale = float(np.clip(g_limit / max(g_load, 1e-9), 0.1, 1.0))
+            if self.pid_profile in ("paper", "paper_minimal_shared_v1") and g_load > g_limit:
+                minimum_scale = 0.0 if self.is_paper_minimal else 0.1
+                scale = float(np.clip(
+                    g_limit / max(g_load, 1e-9), minimum_scale, 1.0))
                 aileron *= scale
                 elevator *= scale
+                if self.is_paper_minimal:
+                    rudder *= scale
                 diag["load_limiter_activations"] += 1
 
             sim.set_property_value("fcs/aileron-cmd-norm", aileron)
@@ -1094,6 +1118,24 @@ class UavCombatEnv(gymnasium.Env):
             return
         speed = float(np.linalg.norm(velocity))
         maximum = float(self.environment_config.aircraft.maximum_speed_mps.value)
+        diag = self._aircraft_diagnostics[aid]
+        diag["maximum_speed_mps_seen"] = max(
+            diag["maximum_speed_mps_seen"], speed)
+        if self.is_paper_minimal and speed > maximum:
+            diag["maximum_speed_before_limit_mps"] = max(
+                diag["maximum_speed_before_limit_mps"], speed)
+            projected_speed = sim.project_velocity_magnitude(maximum)
+            diag["maximum_speed_after_limit_mps"] = max(
+                diag["maximum_speed_after_limit_mps"], projected_speed)
+            diag["speed_limiter_activations"] += 1
+            if (not np.isfinite(projected_speed)
+                    or projected_speed > maximum + 1e-3):
+                sim.crash()
+                self._mark_invalid_numerical(aid, "SpeedProjectionFailure")
+                self._crashed_this_step.add(aid)
+            return
+        diag["maximum_speed_after_limit_mps"] = max(
+            diag["maximum_speed_after_limit_mps"], speed)
         if speed > 10.0 * maximum:
             sim.crash()
             if self.is_paper_minimal:
@@ -1170,8 +1212,7 @@ class UavCombatEnv(gymnasium.Env):
                     continue
                 diag["alive_enemy_pairs"] += 1
                 # --- Target-deconfliction: skip enemies already engaged ---
-                if (not self.is_paper_minimal
-                        and enemy_sim.uid in self._engaged_targets):
+                if enemy_sim.uid in self._engaged_targets:
                     diag["engaged_blocked"] += 1
                     continue
                 diag["unengaged_enemy_pairs"] += 1
@@ -1252,8 +1293,7 @@ class UavCombatEnv(gymnasium.Env):
                 # ---- HOT-UPDATE: immediately mark target as engaged ----
                 # Subsequent agents in the same physics frame will see this
                 # and skip the target, preventing same-frame double-launch.
-                if not self.is_paper_minimal:
-                    self._engaged_targets.add(best_enemy.uid)
+                self._engaged_targets.add(best_enemy.uid)
                 # Reset lock after launch (must re-acquire)
                 self._lock_timer[aid] = 0
                 self._lock_target[aid] = None
@@ -1328,22 +1368,31 @@ class UavCombatEnv(gymnasium.Env):
         launch_quality: dict | None = None,
     ):
         missile_rng = self.np_random
+        launch_speed_mps = None
+        overshoot_window_s = None
         if self.is_paper_minimal:
-            pair_index = int(parent.uid.split("_", 1)[1])
+            from configs.paper_minimal_3v3_spec import (
+                MINIMAL_MISSILE_LAUNCH_SPEED_MPS,
+                MINIMAL_MISSILE_OVERSHOOT_WINDOW_S,
+            )
             sequence = self._minimal_launch_sequence[parent.uid]
-            # Mirrored red/blue pairs receive the same reproducible hit-roll
-            # stream. This removes loop-order color bias without changing the
-            # paper hit-probability equation.
-            missile_rng = np.random.default_rng(np.random.SeedSequence([
-                int(self._seed or 0), pair_index, sequence]))
+            missile_rng = _minimal_missile_rng(
+                self._seed, parent.uid, sequence)
             self._minimal_launch_sequence[parent.uid] = sequence + 1
+            launch_speed_mps = MINIMAL_MISSILE_LAUNCH_SPEED_MPS
+            overshoot_window_s = MINIMAL_MISSILE_OVERSHOOT_WINDOW_S
         missile = MissileSimulator.create(
             parent, target, f"m{self._missile_id_counter}",
             guidance_mode=self.missile_guidance_mode,
             config=self.environment_config.missile,
-            rng=missile_rng)
+            rng=missile_rng,
+            launch_speed_mps=launch_speed_mps,
+            overshoot_window_s=overshoot_window_s)
         self._missile_id_counter += 1
         self._missiles_in_flight[missile.uid] = missile
+        self._episode_stats["maximum_live_missiles_observed"] = max(
+            int(self._episode_stats["maximum_live_missiles_observed"]),
+            len(self._missiles_in_flight))
         if launch_quality is not None:
             launch_quality["missile_id"] = missile.uid
             self._launch_quality_records[missile.uid] = launch_quality
@@ -1486,6 +1535,10 @@ class UavCombatEnv(gymnasium.Env):
                 sim.crash()
                 crashed = True
                 reason = "Crash_LowAlt"
+            elif self.is_paper_minimal and alt > self.arena_altitude_max_m:
+                sim.crash()
+                crashed = True
+                reason = "Crash_HighAlt"
             elif self.is_paper_minimal and (
                     abs(pos[0]) > self.arena_half_width_m
                     or abs(pos[1]) > self.arena_half_width_m):
@@ -1493,8 +1546,7 @@ class UavCombatEnv(gymnasium.Env):
                 crashed = True
                 reason = "Crash_BattleVolume"
             elif self.is_paper_minimal:
-                # The minimal profile has no HighAlt, OverG, Extreme or
-                # numerical-envelope tactical death categories.
+                # Other tactical death categories are disabled in this profile.
                 continue
             elif alt > self.arena_altitude_max_m:
                 sim.crash()

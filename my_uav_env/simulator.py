@@ -541,6 +541,46 @@ class AircraftSimulator(BaseSimulator):
         else:
             raise ValueError(f"Unhandled property type: {type(prop)} ({prop})")
 
+    def project_velocity_magnitude(self, maximum_speed_mps: float) -> float:
+        """Scale the JSBSim velocity vector without changing its direction."""
+        velocity = np.asarray(self.get_velocity(), dtype=np.float64)
+        speed = float(np.linalg.norm(velocity))
+        maximum = float(maximum_speed_mps)
+        if not np.isfinite(speed) or speed <= maximum or speed <= 1e-12:
+            return speed
+        scale = maximum / speed
+        feet_per_meter = 1.0 / 0.3048
+        projected = velocity * scale
+        lon, lat, altitude = self.get_geodetic()
+        roll, pitch, heading = self.get_rpy()
+        angular_rates = self.get_property_values((
+            "velocities/p-rad_sec", "velocities/q-rad_sec",
+            "velocities/r-rad_sec"))
+        fcs_paths = (
+            "fcs/aileron-cmd-norm", "fcs/elevator-cmd-norm",
+            "fcs/rudder-cmd-norm", "fcs/throttle-cmd-norm")
+        fcs_commands = self.get_property_values(fcs_paths)
+        initial_state = {
+            "ic/long-gc-deg": lon,
+            "ic/lat-geod-deg": lat,
+            "ic/h-sl-ft": altitude * feet_per_meter,
+            "ic/phi-rad": roll,
+            "ic/theta-rad": pitch,
+            "ic/psi-true-rad": heading,
+            "ic/vn-fps": projected[0] * feet_per_meter,
+            "ic/ve-fps": projected[1] * feet_per_meter,
+            "ic/vd-fps": -projected[2] * feet_per_meter,
+            "ic/p-rad_sec": angular_rates[0],
+            "ic/q-rad_sec": angular_rates[1],
+            "ic/r-rad_sec": angular_rates[2],
+        }
+        for path, value in initial_state.items():
+            self.jsbsim_exec.set_property_value(path, float(value))
+        self.jsbsim_exec.reset_to_initial_conditions(1)
+        self.set_property_values(fcs_paths, fcs_commands)
+        self._update_properties()
+        return float(np.linalg.norm(self._velocity))
+
     def check_missile_warning(self):
         from my_uav_env.sensors import select_most_dangerous_missile
         missile, _diag = select_most_dangerous_missile(self, self.under_missiles)
@@ -562,17 +602,23 @@ class MissileSimulator(BaseSimulator):
     @classmethod
     def create(cls, parent: AircraftSimulator, target: AircraftSimulator,
                uid: str, missile_model: str = "AIM-9L",
-               guidance_mode: str = "paper_eq9", config=None, rng=None):
+               guidance_mode: str = "paper_eq9", config=None, rng=None,
+               launch_speed_mps: float | None = None,
+               overshoot_window_s: float | None = None):
         assert parent.dt == target.dt
         missile = MissileSimulator(
             uid, parent.color, missile_model, parent.dt,
-            guidance_mode=guidance_mode, config=config, rng=rng)
+            guidance_mode=guidance_mode, config=config, rng=rng,
+            launch_speed_mps=launch_speed_mps,
+            overshoot_window_s=overshoot_window_s)
         missile.launch(parent)
         missile.target(target)
         return missile
 
     def __init__(self, uid="A0101", color="Red", model="AIM-9L", dt=1 / 12,
-                 guidance_mode: str = "paper_eq9", config=None, rng=None):
+                 guidance_mode: str = "paper_eq9", config=None, rng=None,
+                 launch_speed_mps: float | None = None,
+                 overshoot_window_s: float | None = None):
         super().__init__(uid, color, dt)
         if guidance_mode not in (
                 "paper_eq9", "legacy_simplified", "paper_minimal_point_mass_v1"):
@@ -610,6 +656,9 @@ class MissileSimulator(BaseSimulator):
         self._Rc = float(self.config.hit_radius_m.value)
         self._v_min = float(self.config.minimum_speed_mps.value)
         self._t_arm = float(self.config.arming_time_s.value)
+        self._launch_speed_mps = launch_speed_mps
+        self._overshoot_window_s = float(
+            5.0 if overshoot_window_s is None else overshoot_window_s)
 
     @property
     def is_alive(self):
@@ -652,6 +701,10 @@ class MissileSimulator(BaseSimulator):
         self._geodetic[:] = parent.get_geodetic()
         self._position[:] = parent.get_position()
         self._velocity[:] = parent.get_velocity()
+        if self._launch_speed_mps is not None:
+            speed = float(np.linalg.norm(self._velocity))
+            if speed > 1e-12:
+                self._velocity[:] *= float(self._launch_speed_mps) / speed
         self._posture[:] = parent.get_rpy()
         self._posture[0] = 0
         self.lon0, self.lat0, self.alt0 = parent.lon0, parent.lat0, parent.alt0
@@ -660,7 +713,8 @@ class MissileSimulator(BaseSimulator):
         self._dtheta, self._dphi = 0, 0
         self._status = MissileSimulator.LAUNCHED
         self._distance_pre = np.inf
-        self._distance_increment = deque(maxlen=int(5 / self.dt))
+        self._distance_increment = deque(maxlen=max(
+            1, int(round(self._overshoot_window_s / self.dt))))
         self._left_t = int(1 / self.dt)
         self.render_explosion = False
 
@@ -694,7 +748,7 @@ class MissileSimulator(BaseSimulator):
               and np.linalg.norm(self.get_velocity()) < self._v_min):
             self._status = MissileSimulator.MISS
             self._termination_reason = "low_speed"
-        elif (self.guidance_mode != "paper_minimal_point_mass_v1"
+        elif (len(self._distance_increment) == self._distance_increment.maxlen
               and np.sum(self._distance_increment) >= self._distance_increment.maxlen):
             self._status = MissileSimulator.MISS
             self._termination_reason = "overshoot"

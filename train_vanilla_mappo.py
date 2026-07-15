@@ -193,7 +193,17 @@ def _global_state_from_local_obs_flats(
     ]).astype(np.float32)
 
 
-ACTION_LOG_STD_INIT = float(np.log(0.3))
+ACTION_STD_MIN = 0.05
+ACTION_STD_MAX = 0.6
+ACTION_STD_INIT = 0.3
+ACTION_LOG_STD_INIT = float(np.log(ACTION_STD_INIT))
+
+
+def _initial_log_std_head_bias() -> float:
+    lower = np.log(ACTION_STD_MIN)
+    upper = np.log(ACTION_STD_MAX)
+    normalized = 2.0 * (ACTION_LOG_STD_INIT - lower) / (upper - lower) - 1.0
+    return float(np.arctanh(np.clip(normalized, -0.999999, 0.999999)))
 
 
 class SquashedNormal:
@@ -240,8 +250,10 @@ class VanillaActor(nn.Module):
         self.fc_hidden = nn.Linear(hidden, hidden)
         self.rnn = nn.GRUCell(hidden, rnn_hidden)
         self.action_head = nn.Linear(rnn_hidden, action_dim)
-        self.action_log_std = nn.Parameter(torch.full(
-            (action_dim,), ACTION_LOG_STD_INIT))
+        self.action_log_std_head = nn.Linear(rnn_hidden, action_dim)
+        nn.init.zeros_(self.action_log_std_head.weight)
+        nn.init.constant_(
+            self.action_log_std_head.bias, _initial_log_std_head_bias())
 
     def forward(self, obs_flat: torch.Tensor, rnn_hidden: torch.Tensor):
         """
@@ -256,10 +268,12 @@ class VanillaActor(nn.Module):
         x = F.relu(self.fc_hidden(x))
         rnn_hidden_new = self.rnn(x, rnn_hidden)  # (B, rnn_hidden)
         action_mean = self.action_head(rnn_hidden_new)
-        action_mean = torch.nan_to_num(
-            action_mean, nan=0.0, posinf=20.0, neginf=-20.0)
-        sigma = torch.exp(self.action_log_std).clamp(min=1e-4)
-        sigma = sigma.unsqueeze(0).expand_as(action_mean)
+        raw_log_std = self.action_log_std_head(rnn_hidden_new)
+        log_std_min = float(np.log(ACTION_STD_MIN))
+        log_std_max = float(np.log(ACTION_STD_MAX))
+        log_std = log_std_min + 0.5 * (torch.tanh(raw_log_std) + 1.0) * (
+            log_std_max - log_std_min)
+        sigma = torch.exp(log_std)
         return torch.distributions.Normal(action_mean, sigma), rnn_hidden_new
 
 
@@ -487,8 +501,8 @@ BLUE_POLICY_DIAG_CSV_FIELDS = (
     "blue_altitude_recovery_frames",
 )
 
-CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v4"
-ACTION_DISTRIBUTION_VERSION = "diag_gaussian_env_clip_v1"
+CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v5"
+ACTION_DISTRIBUTION_VERSION = "state_dependent_diag_gaussian_env_clip_v2"
 
 
 def _minimal_altitude_reward_config() -> AltitudeRewardConfig:
@@ -550,7 +564,10 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "environment_profile": str(config.environment_profile),
         "blue_policy_profile": str(config.blue_policy_profile),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
-        "altitude_reward_interpretation": "pairwise_sum_all_alive_enemies_v1",
+        "altitude_reward_interpretation": (
+            "pairwise_mean_all_alive_enemies_v1"
+            if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
+            else "pairwise_sum_all_alive_enemies_v1"),
         "num_red": int(config.num_red),
         "num_blue": int(config.num_blue),
         "total_env_steps": int(config.total_env_steps),
@@ -569,6 +586,9 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "actor_rnn_hidden_size": int(config.rnn_hidden_size),
         "recurrent_n": 1,
         "action_log_std_init": ACTION_LOG_STD_INIT,
+        "action_std_init": ACTION_STD_INIT,
+        "action_std_bounds": [ACTION_STD_MIN, ACTION_STD_MAX],
+        "action_std_parameterization": "gru_state_tanh_bounded_log_std_head_v1",
         "environment_config": environment_snapshot,
         "environment_config_fingerprint": environment_snapshot[
             "environment_config_fingerprint"],
@@ -579,7 +599,11 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             "missile_profile", "reward_version", "altitude_pair_aggregation",
             "altitude_high_tail", "aircraft_model", "constant_rcs",
             "radar_range_constant", "initial_altitude_m", "initial_speed_mps",
-            "formation_spacing_m")
+            "formation_spacing_m", "initial_missile_speed_mps",
+            "missile_hit_radius_m", "missile_overshoot_window_s",
+            "missile_rng_version", "target_deconfliction",
+            "load_limiter_mode", "speed_limiter_mode", "vertical_bounds_m",
+            "maximum_live_missiles_observed")
         provenance = {}
         for key in sourced_keys:
             sourced = environment_snapshot[key]
@@ -1315,6 +1339,7 @@ class RolloutBuffer:
             [[None for _ in range(A)] for _ in range(E)] for _ in range(T)]
         self.actions = np.zeros((T, E, A, action_dim), dtype=np.float32)
         self.log_probs = np.zeros((T, E, A), dtype=np.float32)
+        self.action_stds = np.zeros((T, E, A, action_dim), dtype=np.float32)
         self.alive = np.zeros((T, E, A), dtype=bool)
         self.actor_rnn_states_before = np.zeros((T, E, A, H), dtype=np.float32)
         self.actor_sequence_start = np.zeros((T, E, A), dtype=bool)
@@ -1325,9 +1350,18 @@ class RolloutBuffer:
         self.joint_rewards = np.zeros((T, E), dtype=np.float32)
         self.team_values = np.zeros((T, E), dtype=np.float32)
         self.episode_dones = np.zeros((T, E), dtype=np.float32)
+        self.valid_transitions = np.ones((T, E), dtype=bool)
 
         # GAE bootstrap value is environment-level; critic has one team value.
         self.bootstrap_value = np.zeros(E, dtype=np.float32)
+
+    def invalidate_episode(self, env_idx: int, start_step: int, end_step: int) -> int:
+        """Invalidate one episode's transitions within the current rollout."""
+        start = max(0, int(start_step))
+        end = min(self.num_steps, int(end_step) + 1)
+        previous = int(np.count_nonzero(~self.valid_transitions[start:end, env_idx]))
+        self.valid_transitions[start:end, env_idx] = False
+        return max(0, end - start - previous)
 
     def store_team_step(self, step: int, env_idx: int, global_state: np.ndarray,
                         joint_reward: float, value: float, episode_done: float):
@@ -1340,10 +1374,14 @@ class RolloutBuffer:
                    obs_np: np.ndarray, action: np.ndarray,
                    log_prob: float, alive: bool,
                    actor_rnn_state_before: np.ndarray,
-                   sequence_start: bool):
+                   sequence_start: bool,
+                   action_std: np.ndarray | None = None):
         self.obs[step][env_idx][agent_idx] = obs_np
         self.actions[step, env_idx, agent_idx] = action
         self.log_probs[step, env_idx, agent_idx] = log_prob
+        if action_std is not None:
+            self.action_stds[step, env_idx, agent_idx] = np.asarray(
+                action_std, dtype=np.float32)
         self.alive[step, env_idx, agent_idx] = alive
         self.actor_rnn_states_before[step, env_idx, agent_idx] = np.asarray(
             actor_rnn_state_before, dtype=np.float32)
@@ -1381,7 +1419,22 @@ def _compute_joint_gae_by_env(buffer: RolloutBuffer, gamma: float, lam: float,
             ]), dtype=torch.float32, device=device)
         dones = torch.as_tensor(
             buffer.episode_dones[:, env_idx], dtype=torch.float32, device=device)
-        advantages, returns = compute_gae(rewards, values, dones, gamma, lam)
+        valid = torch.as_tensor(
+            buffer.valid_transitions[:, env_idx], dtype=torch.bool, device=device)
+        advantages = torch.zeros_like(rewards)
+        gae = torch.tensor(0.0, device=device)
+        for t in reversed(range(buffer.num_steps)):
+            if not bool(valid[t]):
+                gae = torch.tensor(0.0, device=device)
+                continue
+            next_value = values[t + 1]
+            if t + 1 < buffer.num_steps and not bool(valid[t + 1]):
+                next_value = torch.tensor(0.0, device=device)
+            delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
+            gae = delta + gamma * lam * (1 - dones[t]) * gae
+            advantages[t] = gae
+        returns = advantages + values[:buffer.num_steps]
+        returns = torch.where(valid, returns, torch.zeros_like(returns))
         advantages_by_env.append(advantages)
         returns_by_env.append(returns)
     return advantages_by_env, returns_by_env
@@ -1465,18 +1518,33 @@ def _reward_component_log_metrics(
     return metrics
 
 
-def _actor_std_stats(actor) -> dict:
+def _actor_std_stats(actor, sampled_stds: list[np.ndarray] | None = None) -> dict:
     """Return diagnostic std / log_std metrics for entropy monitoring.
 
     Does not modify any parameter or alter training behaviour.
     """
-    raw = actor.action_log_std.detach()
-    std = torch.exp(raw)
+    if sampled_stds:
+        std = torch.as_tensor(
+            np.concatenate([np.asarray(x).reshape(-1) for x in sampled_stds]),
+            dtype=torch.float32)
+    else:
+        with torch.no_grad():
+            raw = actor.action_log_std_head.bias
+            lower = float(np.log(ACTION_STD_MIN))
+            upper = float(np.log(ACTION_STD_MAX))
+            std = torch.exp(lower + 0.5 * (torch.tanh(raw) + 1.0) * (
+                upper - lower))
+    log_std = torch.log(std)
+    tolerance = 1e-4
     return {
         "action_std_mean": float(std.mean().item()),
         "action_std_min":  float(std.min().item()),
         "action_std_max":  float(std.max().item()),
-        "action_log_std_mean": float(raw.mean().item()),
+        "action_log_std_mean": float(log_std.mean().item()),
+        "action_std_lower_bound_frac": float(
+            (std <= ACTION_STD_MIN + tolerance).float().mean().item()),
+        "action_std_upper_bound_frac": float(
+            (std >= ACTION_STD_MAX - tolerance).float().mean().item()),
     }
 
 
@@ -1665,10 +1733,11 @@ def _build_actor_segments(
             current: list[int] = []
             for step in range(buffer.num_steps):
                 alive = bool(buffer.alive[step, env_idx, agent_idx])
+                valid = bool(buffer.valid_transitions[step, env_idx])
                 starts = bool(buffer.actor_sequence_start[step, env_idx, agent_idx])
                 previous_episode_done = bool(
                     step > 0 and buffer.episode_dones[step - 1, env_idx])
-                if not alive:
+                if not alive or not valid:
                     append_segment(env_idx, agent_idx, current)
                     current = []
                     continue
@@ -1712,7 +1781,26 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
     team_advantages, team_returns = _compute_joint_gae_by_env(
         buffer, config.gamma, config.gae_lambda, device)
 
-    all_adv = torch.cat(team_advantages)
+    valid_advantages = [
+        team_advantages[env_idx][torch.as_tensor(
+            buffer.valid_transitions[:, env_idx], dtype=torch.bool,
+            device=device)]
+        for env_idx in range(num_envs)
+    ]
+    valid_advantages = [adv for adv in valid_advantages if adv.numel()]
+    valid_transition_count = int(np.count_nonzero(buffer.valid_transitions))
+    invalid_transition_count = int(buffer.valid_transitions.size - valid_transition_count)
+    if not valid_advantages:
+        return {
+            "policy_loss": 0.0, "entropy_bonus": 0.0,
+            "actor_loss": 0.0, "critic_loss": 0.0, "entropy": 0.0,
+            "ActorUpdateAttempts": 0, "ActorUpdatesApplied": 0,
+            "ActorUpdatesSkipped": 0, "CriticUpdateAttempts": 0,
+            "CriticUpdatesApplied": 0, "CriticUpdatesSkipped": 0,
+            "InvalidTransitionsDropped": invalid_transition_count,
+            "UpdateSkipReason": "no_valid_transitions",
+        }
+    all_adv = torch.cat(valid_advantages)
     adv_std = torch.std(all_adv, correction=0)
     if not torch.isfinite(adv_std) or adv_std <= 1e-8:
         adv_std = torch.tensor(1.0, device=device)
@@ -1735,14 +1823,23 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
             "CriticUpdateAttempts": 0,
             "CriticUpdatesApplied": 0,
             "CriticUpdatesSkipped": 0,
+            "InvalidTransitionsDropped": invalid_transition_count,
+            "UpdateSkipReason": "no_valid_actor_samples",
         }
 
-    critic_states = torch.as_tensor(np.stack([
-        buffer.global_states[t][env_idx]
+    critic_pairs = [
+        (env_idx, t)
         for env_idx in range(num_envs)
         for t in range(num_steps)
+        if buffer.valid_transitions[t, env_idx]
+    ]
+    critic_states = torch.as_tensor(np.stack([
+        buffer.global_states[t][env_idx]
+        for env_idx, t in critic_pairs
     ]), dtype=torch.float32, device=device)
-    critic_targets = torch.cat(team_returns).detach()
+    critic_targets = torch.stack([
+        team_returns[env_idx][t] for env_idx, t in critic_pairs
+    ]).detach()
     entropy_coef = _current_entropy_coef(config, total_steps)
     policy_loss_log = []
     actor_loss_log = []
@@ -1822,6 +1919,8 @@ def ppo_update(actor, critic, actor_opt, critic_opt, buffer, config, device,
         "CriticUpdateAttempts": critic_update_attempts,
         "CriticUpdatesApplied": critic_updates_applied,
         "CriticUpdatesSkipped": critic_updates_skipped,
+        "InvalidTransitionsDropped": invalid_transition_count,
+        "UpdateSkipReason": "",
     }
 
 
@@ -2197,6 +2296,8 @@ def main():
                          "RedMissiles", "BlueMissiles",
                          *ROLLOUT_LAYOUT_CSV_FIELDS,
                          "Episodes", "InvalidNumericalEpisodes",
+                         "InvalidTransitionsDropped", "InvalidEpisodesDropped",
+                         "UpdateSkipReason",
                          "RedWins", "BlueWins", "Draws",
                          "RedAliveMean", "BlueAliveMean",
                           "RedDeathsMissile", "RedDeathsCrash",
@@ -2213,6 +2314,9 @@ def main():
                           *REWARD_COMPONENT_LOG_FIELDS,
                           "ActionStdMean", "ActionStdMin", "ActionStdMax",
                           "ActionLogStdMean",
+                          "StateDependentStdMean", "StateDependentStdMin",
+                          "StateDependentStdMax", "StateDependentStdLowerBoundFrac",
+                          "StateDependentStdUpperBoundFrac",
                           *LAUNCH_DIAG_CSV_FIELDS,
                           *LAUNCH_QUALITY_AGG_CSV_FIELDS,
                           *ACTION_BOUND_CSV_FIELDS,
@@ -2392,6 +2496,8 @@ def main():
         iter_launch_quality_done_records: list[dict] = []
         iter_action_bound = _empty_action_bound_totals()
         iter_blue_policy_diag = Counter()
+        iter_invalid_episodes_dropped = 0
+        episode_start_in_rollout = np.zeros(config.num_envs, dtype=np.int64)
 
         # ---- Rollout ----
         for step in range(num_steps):
@@ -2475,11 +2581,10 @@ def main():
                     action_dist, new_rnn_a = actor(obs_batch, batch_rnn_a)
                     action = action_dist.sample()
                     log_prob = action_dist.log_prob(action).sum(dim=-1)
+                action_stds_np = action_dist.scale.cpu().numpy()
 
                 actions_np = action.cpu().numpy()
                 env_actions_np = np.clip(actions_np, -1.0, 1.0)
-                _accumulate_action_bound_totals(
-                    iter_action_bound, actions_np, env_actions_np)
                 log_probs_np = log_prob.cpu().numpy()
                 new_rnn_np = new_rnn_a.cpu().numpy()
             else:
@@ -2535,7 +2640,8 @@ def main():
                                       actions_np[k], float(log_probs_np[k]),
                                       alive=True,
                                       actor_rnn_state_before=all_rnn_hidden_in[k],
-                                      sequence_start=all_sequence_start[k])
+                                      sequence_start=all_sequence_start[k],
+                                      action_std=action_stds_np[k])
 
                 actions_list.append(env_actions)
 
@@ -2617,6 +2723,15 @@ def main():
                         if inf.get(rid, {}).get("alive", False))
                     if invalid_episode:
                         invalid_numerical_episodes += 1
+                        iter_invalid_episodes_dropped += 1
+                        buffer.invalidate_episode(
+                            env_idx, episode_start_in_rollout[env_idx], step)
+                        reasons = inf.get("__episode__", {}).get(
+                            "invalid_numerical_reasons", [])
+                        print(
+                            f"  [INVALID EPISODE] env={env_idx} "
+                            f"total_steps={total_steps} reasons={reasons}",
+                            flush=True)
                     else:
                         total_episodes += 1
                         iter_episodes += 1
@@ -2652,6 +2767,7 @@ def main():
                         current_ep_comp_red[k][env_idx] = 0.0
                     current_ep_missiles_red[env_idx] = 0.0
                     current_ep_missiles_blue[env_idx] = 0.0
+                    episode_start_in_rollout[env_idx] = step + 1
 
             raw_obs_list = next_obs_list
             total_steps += config.num_envs
@@ -2681,6 +2797,18 @@ def main():
             v_bootstrap = (0.0 if buffer.episode_dones[-1, env_idx]
                            else float(v_bootstrap_all[env_idx]))
             buffer.bootstrap_value[env_idx] = v_bootstrap
+
+        valid_actor_mask = (
+            buffer.alive & buffer.valid_transitions[:, :, np.newaxis])
+        iter_action_bound = _empty_action_bound_totals()
+        valid_raw_actions = buffer.actions[valid_actor_mask]
+        if valid_raw_actions.size:
+            _accumulate_action_bound_totals(
+                iter_action_bound, valid_raw_actions,
+                np.clip(valid_raw_actions, -1.0, 1.0))
+        valid_std_values = buffer.action_stds[valid_actor_mask]
+        iter_sampled_stds = (
+            [valid_std_values] if valid_std_values.size else [])
 
         # ---- PPO 更新 ----
         stats = ppo_update(actor, critic, actor_opt, critic_opt,
@@ -2721,7 +2849,7 @@ def main():
         rwr, rwr_denominator_zero = _ratio_with_denominator_zero(
             red_wins, blue_wins)
 
-        std_stats = _actor_std_stats(actor)
+        std_stats = _actor_std_stats(actor, iter_sampled_stds)
         action_std_delta = std_stats["action_std_mean"] - 0.3
         action_std_growth = _safe_div(std_stats["action_std_mean"], 0.3)
         launch_diag_metrics = _launch_diag_metrics(iter_launch_diag)
@@ -2774,6 +2902,9 @@ def main():
                                  for field in ROLLOUT_LAYOUT_CSV_FIELDS
                              ],
                              total_episodes, invalid_numerical_episodes,
+                             stats["InvalidTransitionsDropped"],
+                             iter_invalid_episodes_dropped,
+                             stats["UpdateSkipReason"],
                              red_wins, blue_wins, draws,
                              f"{red_alive_mean:.4f}",
                              f"{blue_alive_mean:.4f}",
@@ -2810,6 +2941,11 @@ def main():
                              f"{std_stats['action_std_min']:.6f}",
                              f"{std_stats['action_std_max']:.6f}",
                              f"{std_stats['action_log_std_mean']:.6f}",
+                             f"{std_stats['action_std_mean']:.6f}",
+                             f"{std_stats['action_std_min']:.6f}",
+                             f"{std_stats['action_std_max']:.6f}",
+                             f"{std_stats['action_std_lower_bound_frac']:.6f}",
+                             f"{std_stats['action_std_upper_bound_frac']:.6f}",
                              *[
                                  (f"{launch_diag_metrics[field]:.6f}"
                                   if "Rate" in field else launch_diag_metrics[field])
@@ -2843,6 +2979,9 @@ def main():
             "unused_replay_slots": rollout_layout["unused_replay_slots"],
             "Episodes":       total_episodes,
             "InvalidNumericalEpisodes": invalid_numerical_episodes,
+            "InvalidTransitionsDropped": stats["InvalidTransitionsDropped"],
+            "InvalidEpisodesDropped": iter_invalid_episodes_dropped,
+            "UpdateSkipReason": stats["UpdateSkipReason"],
             "RedWins":        red_wins,
             "BlueWins":       blue_wins,
             "Draws":          draws,
@@ -2878,6 +3017,13 @@ def main():
             "ActionStdMin":   std_stats["action_std_min"],
             "ActionStdMax":   std_stats["action_std_max"],
             "ActionLogStdMean": std_stats["action_log_std_mean"],
+            "StateDependentStdMean": std_stats["action_std_mean"],
+            "StateDependentStdMin": std_stats["action_std_min"],
+            "StateDependentStdMax": std_stats["action_std_max"],
+            "StateDependentStdLowerBoundFrac": std_stats[
+                "action_std_lower_bound_frac"],
+            "StateDependentStdUpperBoundFrac": std_stats[
+                "action_std_upper_bound_frac"],
             "ActionStdDeltaFromInit": action_std_delta,
             "ActionStdGrowthRatio": action_std_growth,
             "ActorLoss":      stats["actor_loss"],

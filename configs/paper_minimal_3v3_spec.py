@@ -26,6 +26,10 @@ from configs.brma_mappo_paper_spec import (
 PAPER_MINIMAL_SOURCE = "paper_unspecified_minimal"
 PAPER_MINIMAL_ENVIRONMENT_PROFILE = "paper_minimal_3v3_v1"
 REFERENCE_ENVIRONMENT_PROFILE = "brma_paper_profile_v1"
+MINIMAL_MISSILE_LAUNCH_SPEED_MPS = 600.0
+MINIMAL_MISSILE_HIT_RADIUS_M = 300.0
+MINIMAL_MISSILE_OVERSHOOT_WINDOW_S = 0.5
+MINIMAL_MISSILE_RNG_VERSION = "seedsequence_team_pair_launch_v1"
 
 
 MINIMAL_SCENARIO = ScenarioConfig(
@@ -72,6 +76,7 @@ MINIMAL_MISSILE = replace(
     drag_coefficient=sv(0.0, PAPER_MINIMAL_SOURCE),
     initial_mass_kg=sv(1.0, PAPER_MINIMAL_SOURCE),
     mass_flow_kg_s=sv(0.0, PAPER_MINIMAL_SOURCE),
+    hit_radius_m=sv(MINIMAL_MISSILE_HIT_RADIUS_M, PAPER_MINIMAL_SOURCE),
     minimum_speed_mps=sv(0.0, PAPER_MINIMAL_SOURCE),
     arming_time_s=sv(0.0, PAPER_MINIMAL_SOURCE),
     density_model=sv("disabled", PAPER_MINIMAL_SOURCE),
@@ -127,6 +132,21 @@ MINIMAL_PROFILE_METADATA = {
     "initial_altitude_m": MINIMAL_SCENARIO.initial_altitude_m,
     "initial_speed_mps": MINIMAL_SCENARIO.initial_speed_mps,
     "formation_spacing_m": MINIMAL_SCENARIO.formation_spacing_m,
+    "initial_missile_speed_mps": sv(
+        MINIMAL_MISSILE_LAUNCH_SPEED_MPS, PAPER_MINIMAL_SOURCE),
+    "missile_hit_radius_m": sv(
+        MINIMAL_MISSILE_HIT_RADIUS_M, PAPER_MINIMAL_SOURCE),
+    "missile_overshoot_window_s": sv(
+        MINIMAL_MISSILE_OVERSHOOT_WINDOW_S, PAPER_MINIMAL_SOURCE),
+    "missile_rng_version": sv(
+        MINIMAL_MISSILE_RNG_VERSION, PAPER_MINIMAL_SOURCE),
+    "target_deconfliction": sv("hot_update_live_missile_target_v1", PAPER_INFERRED),
+    "load_limiter_mode": sv("symmetric_reactive_9g_v1", PAPER_MINIMAL_SOURCE),
+    "speed_limiter_mode": sv(
+        "throttle_cut_velocity_projection_600mps_v1", PAPER_MINIMAL_SOURCE),
+    "vertical_bounds_m": sv((0.0, 10_000.0), PAPER_EXPLICIT),
+    "maximum_live_missiles_observed": sv(
+        "runtime_episode_metric", PAPER_INFERRED),
 }
 
 

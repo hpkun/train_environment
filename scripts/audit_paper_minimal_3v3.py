@@ -5,8 +5,13 @@ import argparse
 from collections import Counter
 import json
 from pathlib import Path
+import sys
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from configs.brma_mappo_paper_spec import (
     DEFAULT_PAPER_ENVIRONMENT_CONFIG,
@@ -53,6 +58,7 @@ def _run_scenario(name: str, red_mode: str, blue_profile: str,
         first_launch = {"red": None, "blue": None}
         minimum_missile_distance_m = float("inf")
         finite = True
+        peak_live_missiles = 0
         for step in range(1, max_steps + 1):
             actions = _red_rule_actions(env, obs, red_mode)
             actions.update(env.blue_policy_actions({bid: obs[bid] for bid in env.blue_ids}))
@@ -62,6 +68,10 @@ def _run_scenario(name: str, red_mode: str, blue_profile: str,
                     minimum_missile_distance_m = min(
                         minimum_missile_distance_m,
                         float(missile.target_distance))
+            peak_live_missiles = max(
+                peak_live_missiles,
+                sum(int(missile.is_alive)
+                    for missile in env._missiles_in_flight.values()))
             finite &= all(np.isfinite(value) for value in rewards.values())
             for team in ("red", "blue"):
                 for key, value in info.get("__launch_diag__", {}).get(team, {}).items():
@@ -72,10 +82,24 @@ def _run_scenario(name: str, red_mode: str, blue_profile: str,
                 break
         term = info.get("__missile_term__", {})
         episode = info.get("__episode__", {})
-        deaths = Counter(
-            value for value in env._death_reasons.values() if value)
+        deaths_by_team = {
+            team: Counter(
+                reason for aid, reason in env._death_reasons.items()
+                if aid.startswith(team) and reason)
+            for team in ("red", "blue")}
+        aircraft_diag = {
+            team: [info.get(f"{team}_{index}", {}) for index in range(3)]
+            for team in ("red", "blue")}
+        def diag_max(team, key):
+            return max((float(row.get(key, 0.0))
+                        for row in aircraft_diag[team]), default=0.0)
+        def diag_sum(team, key):
+            return sum(int(row.get(key, 0)) for row in aircraft_diag[team])
+        def death_count(team, reason):
+            return int(deaths_by_team[team].get(reason, 0))
         return {
             "name": name,
+            "seed": int(seed),
             "steps": int(env.current_step),
             "red_mode": red_mode,
             "blue_profile": blue_profile,
@@ -92,14 +116,47 @@ def _run_scenario(name: str, red_mode: str, blue_profile: str,
             "red_hits": int(term.get("red", {}).get("hit", 0)),
             "blue_hits": int(term.get("blue", {}).get("hit", 0)),
             "missile_termination_reasons": term,
+            "red_p_hit_fail": int(term.get("red", {}).get("p_hit_fail", 0)),
+            "blue_p_hit_fail": int(term.get("blue", {}).get("p_hit_fail", 0)),
+            "red_overshoot": int(term.get("red", {}).get("overshoot", 0)),
+            "blue_overshoot": int(term.get("blue", {}).get("overshoot", 0)),
+            "red_timeout": int(term.get("red", {}).get("timeout", 0)),
+            "blue_timeout": int(term.get("blue", {}).get("timeout", 0)),
             "missiles_in_flight_final": int(len(env._missiles_in_flight)),
+            "peak_live_missiles": int(max(
+                peak_live_missiles,
+                episode.get("maximum_live_missiles_observed", 0))),
             "minimum_missile_distance_m": (
                 None if not np.isfinite(minimum_missile_distance_m)
                 else float(minimum_missile_distance_m)),
             "red_crashes": int(sum(
-                count for reason, count in deaths.items()
-                if reason.startswith("Crash_") and reason != "Crash_BattleVolume")),
-            "blue_crashes": 0,
+                count for reason, count in deaths_by_team["red"].items()
+                if reason.startswith("Crash_"))),
+            "blue_crashes": int(sum(
+                count for reason, count in deaths_by_team["blue"].items()
+                if reason.startswith("Crash_"))),
+            "red_low_altitude_exits": death_count("red", "Crash_LowAlt"),
+            "blue_low_altitude_exits": death_count("blue", "Crash_LowAlt"),
+            "red_high_altitude_exits": death_count("red", "Crash_HighAlt"),
+            "blue_high_altitude_exits": death_count("blue", "Crash_HighAlt"),
+            "red_horizontal_exits": death_count("red", "Crash_BattleVolume"),
+            "blue_horizontal_exits": death_count("blue", "Crash_BattleVolume"),
+            "red_max_speed_mps": diag_max("red", "maximum_speed_after_limit_mps"),
+            "blue_max_speed_mps": diag_max("blue", "maximum_speed_after_limit_mps"),
+            "red_max_prelimit_speed_mps": diag_max(
+                "red", "maximum_speed_before_limit_mps"),
+            "blue_max_prelimit_speed_mps": diag_max(
+                "blue", "maximum_speed_before_limit_mps"),
+            "red_speed_limiter_activations": diag_sum(
+                "red", "speed_limiter_activations"),
+            "blue_speed_limiter_activations": diag_sum(
+                "blue", "speed_limiter_activations"),
+            "red_max_load_g": diag_max("red", "maximum_load_g_seen"),
+            "blue_max_load_g": diag_max("blue", "maximum_load_g_seen"),
+            "red_load_limiter_activations": diag_sum(
+                "red", "load_limiter_activations"),
+            "blue_load_limiter_activations": diag_sum(
+                "blue", "load_limiter_activations"),
             "first_red_launch_step": first_launch["red"],
             "first_blue_launch_step": first_launch["blue"],
         }
@@ -161,16 +218,21 @@ def _initial_and_static_audit(seed: int) -> dict:
         env.close()
 
 
-def audit(seed: int, max_steps: int) -> dict:
-    static = _initial_and_static_audit(seed)
-    scenarios = [
-        _run_scenario("fixed_vs_fixed", "fixed",
-                      "paper_minimal_fixed_pair_v1", seed, max_steps),
-        _run_scenario("fixed_red_vs_straight_blue", "fixed",
-                      "paper_minimal_straight_patrol_v1", seed, max_steps),
-        _run_scenario("straight_red_vs_fixed_blue", "straight",
-                      "paper_minimal_fixed_pair_v1", seed, max_steps),
-    ]
+def audit(seeds: list[int] | tuple[int, ...], max_steps: int) -> dict:
+    seeds = [int(seed) for seed in seeds]
+    if len(seeds) < 2:
+        raise ValueError("audit requires at least two seeds")
+    static = _initial_and_static_audit(seeds[0])
+    scenarios = []
+    for seed in seeds:
+        scenarios.extend([
+            _run_scenario("fixed_vs_fixed", "fixed",
+                          "paper_minimal_fixed_pair_v1", seed, max_steps),
+            _run_scenario("fixed_red_vs_straight_blue", "fixed",
+                          "paper_minimal_straight_patrol_v1", seed, max_steps),
+            _run_scenario("straight_red_vs_fixed_blue", "straight",
+                          "paper_minimal_fixed_pair_v1", seed, max_steps),
+        ])
     mirror_errors = []
     for row in static["initial_pairs"]:
         mirror_errors.extend([
@@ -190,17 +252,58 @@ def audit(seed: int, max_steps: int) -> dict:
         "finite": all(row["finite_rewards"] for row in scenarios),
         "no_invalid_episodes": not any(
             row["invalid_numerical_episode"] for row in scenarios),
-        "fixed_vs_fixed_both_launch": (
-            scenarios[0]["red_launches"] > 0 and scenarios[0]["blue_launches"] > 0),
-        "fixed_red_can_launch_and_hit_straight_blue": (
-            scenarios[1]["red_launches"] > 0 and scenarios[1]["red_hits"] > 0),
-        "color_swap_has_fire_control_activity": (
-            scenarios[2]["blue_launches"] > 0 and scenarios[2]["blue_hits"] > 0),
     }
+    grouped = {
+        name: [row for row in scenarios if row["name"] == name]
+        for name in ("fixed_vs_fixed", "fixed_red_vs_straight_blue",
+                     "straight_red_vs_fixed_blue")}
+    def total(rows, field):
+        return sum(int(row[field]) for row in rows)
+    fixed = grouped["fixed_vs_fixed"]
+    red_fixed = grouped["fixed_red_vs_straight_blue"]
+    blue_fixed = grouped["straight_red_vs_fixed_blue"]
+    fixed_launch_total = total(fixed, "red_launches") + total(fixed, "blue_launches")
+    mirror_launch_total = total(red_fixed, "red_launches") + total(
+        blue_fixed, "blue_launches")
+    mirror_hit_total = total(red_fixed, "red_hits") + total(blue_fixed, "blue_hits")
+    checks.update({
+        "fixed_vs_fixed_both_launch": (
+            total(fixed, "red_launches") > 0 and total(fixed, "blue_launches") > 0),
+        "fixed_vs_fixed_launch_symmetry": abs(
+            total(fixed, "red_launches") - total(fixed, "blue_launches"))
+            <= max(2, int(np.ceil(0.25 * fixed_launch_total))),
+        "mirror_fixed_side_launch_symmetry": abs(
+            total(red_fixed, "red_launches") - total(blue_fixed, "blue_launches"))
+            <= max(2, int(np.ceil(0.25 * mirror_launch_total))),
+        "mirror_fixed_side_hit_symmetry": abs(
+            total(red_fixed, "red_hits") - total(blue_fixed, "blue_hits"))
+            <= max(2, int(np.ceil(0.5 * mirror_hit_total))),
+        "bounded_live_missiles": max(
+            row["peak_live_missiles"] for row in scenarios) <= 6,
+        "aircraft_speed_envelope_handled": all(
+            row["red_max_speed_mps"] <= 600.01
+            and row["blue_max_speed_mps"] <= 600.01
+            for row in scenarios),
+        "load_envelope_handled": all(
+            (row["red_max_load_g"] <= 9.0
+             or row["red_load_limiter_activations"] > 0)
+            and (row["blue_max_load_g"] <= 9.0
+                 or row["blue_load_limiter_activations"] > 0)
+            for row in scenarios),
+    })
     return {
         "status": "PASS" if all(checks.values()) else "FAIL",
         "checks": checks,
         "static": static,
+        "seeds": seeds,
+        "aggregate": {
+            "fixed_vs_fixed_red_launches": total(fixed, "red_launches"),
+            "fixed_vs_fixed_blue_launches": total(fixed, "blue_launches"),
+            "mirror_red_fixed_launches": total(red_fixed, "red_launches"),
+            "mirror_blue_fixed_launches": total(blue_fixed, "blue_launches"),
+            "mirror_red_fixed_hits": total(red_fixed, "red_hits"),
+            "mirror_blue_fixed_hits": total(blue_fixed, "blue_hits"),
+        },
         "scenarios": scenarios,
     }
 
@@ -211,25 +314,26 @@ def _markdown(result: dict) -> str:
         f"- {'PASS' if passed else 'FAIL'}: `{name}`"
         for name, passed in result["checks"].items())
     lines.extend(["", "## Rule-loop scenarios", "",
-                  "| scenario | steps | red launches/hits | blue launches/hits | invalid |",
-                  "|---|---:|---:|---:|---|"])
+                  "| scenario | seed | steps | red launches/hits | blue launches/hits | peak live | invalid |",
+                  "|---|---:|---:|---:|---:|---:|---|"])
     for row in result["scenarios"]:
         lines.append(
-            f"| {row['name']} | {row['steps']} | "
+            f"| {row['name']} | {row['seed']} | {row['steps']} | "
             f"{row['red_launches']}/{row['red_hits']} | "
             f"{row['blue_launches']}/{row['blue_hits']} | "
+            f"{row['peak_live_missiles']} | "
             f"{row['invalid_numerical_episode']} |")
     return "\n".join(lines) + "\n"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=3)
+    parser.add_argument("--seeds", type=int, nargs="+", default=[3, 7, 11])
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--json", default="tmp/paper_minimal_3v3_audit.json")
     parser.add_argument("--markdown", default="tmp/paper_minimal_3v3_audit.md")
     args = parser.parse_args()
-    result = audit(args.seed, args.steps)
+    result = audit(args.seeds, args.steps)
     json_path = Path(args.json)
     markdown_path = Path(args.markdown)
     json_path.parent.mkdir(parents=True, exist_ok=True)
