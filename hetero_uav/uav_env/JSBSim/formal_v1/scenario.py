@@ -17,8 +17,12 @@ TABLE6_INITIAL_STATES = {
 }
 
 
-def jsbsim_initial_state(agent_id: str) -> dict:
+def jsbsim_initial_state(agent_id: str, perturbation: dict | None = None) -> dict:
     lon, lat, altitude_m, speed_mps, yaw_deg = TABLE6_INITIAL_STATES[agent_id]
+    delta = (perturbation or {}).get(agent_id, {})
+    lon += float(delta.get("lon_deg", 0.0)); lat += float(delta.get("lat_deg", 0.0))
+    altitude_m += float(delta.get("altitude_m", 0.0))
+    speed_mps += float(delta.get("speed_mps", 0.0)); yaw_deg += float(delta.get("yaw_deg", 0.0))
     return {
         "ic/long-gc-deg": lon,
         "ic/lat-geod-deg": lat,

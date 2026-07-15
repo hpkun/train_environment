@@ -16,7 +16,7 @@ from .contract import (
 from .missile import FormalMissile
 from .observation import build_team_observations
 from .opponent import PaperGreedyOpponent
-from .reward import compute_team_reward
+from .reward import compute_role_rewards
 from .scenario import MISSILE_COUNTS, ROLES, jsbsim_initial_state
 from .targeting import fire_gate, select_target
 
@@ -74,20 +74,22 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.selected_targets: dict[str, str | None] = {}
         self.last_control_targets: dict[str, tuple[float, float, float] | None] = {}
         self.last_critic_state = np.zeros(CRITIC_STATE_DIM, np.float32)
+        self.previous_missile_risk = {aid: 0.0 for aid in self.red_ids}
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
+        perturbation = dict((options or {}).get("audit_initial_perturbation", {}))
         if not self.aircraft:
             for aid in (*self.red_ids, *self.blue_ids):
                 self.aircraft[aid] = AircraftSimulator(
                     uid=aid, color="Red" if aid.startswith("red") else "Blue",
-                    model="f16", init_state=jsbsim_initial_state(aid), origin=self.origin,
+                    model="f16", init_state=jsbsim_initial_state(aid, perturbation), origin=self.origin,
                     sim_freq=self.sim_freq, num_missiles=MISSILE_COUNTS[aid],
                     suppress_jsbsim_output=bool(self.config.get("suppress_jsbsim_output", True)),
                 )
         else:
             for aid, aircraft in self.aircraft.items():
-                aircraft.reload(new_state=jsbsim_initial_state(aid), new_origin=self.origin)
+                aircraft.reload(new_state=jsbsim_initial_state(aid, perturbation), new_origin=self.origin)
         for aid, aircraft in self.aircraft.items():
             aircraft.partners = [x for oid, x in self.aircraft.items()
                                  if oid != aid and oid.split("_")[0] == aid.split("_")[0]]
@@ -103,6 +105,8 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.newly_dead = set()
         self.selected_targets = {aid: None for aid in self.aircraft}
         self.last_control_targets = {aid: None for aid in self.aircraft}
+        self.previous_missile_risk = {aid: 0.0 for aid in self.red_ids}
+        self.audit_initial_perturbation = perturbation
         obs, self.last_critic_state = build_team_observations(self)
         return obs, self._info([], {})
 
@@ -160,14 +164,19 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
             if was_alive and not self.aircraft[aid].is_alive:
                 self.newly_dead.add(aid)
         self.step_count += 1
-        rewards, reward_components = compute_team_reward(
+        rewards, reward_components = compute_role_rewards(
             self, self.selected_targets, missile_events)
+        for aid in self.red_ids:
+            self.previous_missile_risk[aid] = float(
+                reward_components["per_agent"][aid].get("missile_risk", 0.0))
         red_alive = sum(self.aircraft[aid].is_alive for aid in self.red_ids)
         blue_alive = sum(self.aircraft[aid].is_alive for aid in self.blue_ids)
         terminated = bool(numeric_anomaly or red_alive == 0 or blue_alive == 0)
         truncated = bool(not terminated and self.step_count >= self.max_steps)
         if numeric_anomaly:
             outcome, reason = "invalid", "numeric_anomaly"
+        elif red_alive == 0 and blue_alive == 0:
+            outcome, reason = "mutual_elimination", "mutual_elimination"
         elif red_alive == 0:
             outcome, reason = "blue_win", "red_eliminated"
         elif blue_alive == 0:
@@ -179,7 +188,8 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         observations, self.last_critic_state = build_team_observations(self)
         terminations = {aid: terminated for aid in self.red_ids}
         truncations = {aid: truncated for aid in self.red_ids}
-        info = self._info(launch_records + missile_events, reward_components)
+        info = self._info(launch_records + missile_events, reward_components,
+                          alive_before=alive_before)
         info.update({"outcome": outcome, "end_reason": reason, "team_done": terminated or truncated})
         return observations, rewards, terminations, truncations, info
 
@@ -219,11 +229,15 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         return (float(action[0]) * np.pi / 2, float(action[1]) * np.pi,
                 102.0 + (float(action[2]) + 1.0) * 153.0)
 
-    def _info(self, step_events: list[dict], reward_components: dict) -> dict:
+    def _info(self, step_events: list[dict], reward_components: dict,
+              alive_before: dict | None = None) -> dict:
         return {
             "formal_contract": "hetero_3v2_pure_happo_v1",
             "critic_state": self.last_critic_state.copy(),
             "active_mask": np.asarray([self.aircraft[aid].is_alive for aid in self.red_ids], np.float32),
+            "alive_before_mask": np.asarray([
+                (alive_before or {}).get(aid, self.aircraft[aid].is_alive) for aid in self.red_ids
+            ], np.float32),
             "selected_targets": dict(self.selected_targets),
             "control_targets": dict(self.last_control_targets),
             "step_events": list(step_events),
@@ -232,6 +246,7 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
             "blue_alive": sum(self.aircraft[aid].is_alive for aid in self.blue_ids),
             "mav_alive": bool(self.aircraft.get("red_0") and self.aircraft["red_0"].is_alive),
             "death_reasons": dict(self.death_reasons),
+            "audit_initial_perturbation": getattr(self, "audit_initial_perturbation", {}),
         }
 
     def close(self):

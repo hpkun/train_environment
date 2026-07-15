@@ -3,17 +3,35 @@ from __future__ import annotations
 
 import numpy as np
 
-from .geometry import combat_geometry
+from .geometry import combat_geometry, unit
 from .sensing import red_track_sources
 
 
+TARGET_SCORE_WEIGHTS = {"angle": 0.35, "distance": 0.25,
+                        "height": 0.20, "speed": 0.20}
+TARGET_IDEAL_RANGE_M = 8_000.0
+TARGET_RANGE_WIDTH_M = 7_000.0
+TARGET_IDEAL_CLOSING_MPS = 50.0
+TARGET_CLOSING_WIDTH_MPS = 150.0
+
+
 def target_score(shooter, target, hmax_m=10_000.0, vmax_mps=400.0) -> float:
+    """Smooth bounded TAM-variable target rank; this is not an active reward."""
     geom = combat_geometry(shooter, target)
-    e_angle = 1.0 - (geom["ata_rad"] + geom["ta_rad"]) / (2.0 * np.pi)
-    e_distance = float(geom["range_m"] <= 14_000.0)
-    e_height = np.clip((shooter.get_position()[2] - target.get_position()[2]) / hmax_m, -1.0, 1.0)
-    e_speed = np.clip(np.linalg.norm(shooter.get_velocity() - target.get_velocity()) / vmax_mps, 0.0, 1.0)
-    return float(0.35 * e_angle + 0.25 * e_distance + 0.20 * e_height + 0.20 * e_speed)
+    angle_advantage = 0.5 + 0.25 * np.cos(geom["ata_rad"]) - 0.25 * np.cos(geom["ta_rad"])
+    distance_advantage = np.exp(-((geom["range_m"] - TARGET_IDEAL_RANGE_M) /
+                                  TARGET_RANGE_WIDTH_M) ** 2)
+    height_advantage = 0.5 * (1.0 + np.tanh(
+        (shooter.get_position()[2] - target.get_position()[2]) / max(hmax_m, 1e-6)))
+    closing = float(np.dot(shooter.get_velocity() - target.get_velocity(),
+                           unit(geom["relative_position"])))
+    speed_advantage = np.exp(-((closing - TARGET_IDEAL_CLOSING_MPS) /
+                               TARGET_CLOSING_WIDTH_MPS) ** 2)
+    score = (TARGET_SCORE_WEIGHTS["angle"] * angle_advantage +
+             TARGET_SCORE_WEIGHTS["distance"] * distance_advantage +
+             TARGET_SCORE_WEIGHTS["height"] * height_advantage +
+             TARGET_SCORE_WEIGHTS["speed"] * speed_advantage)
+    return float(np.clip(score, 0.0, 1.0))
 
 
 def select_target(env, shooter_id: str) -> str | None:

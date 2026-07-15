@@ -15,11 +15,21 @@ def main():
     p.add_argument("--episodes",type=int,default=3); p.add_argument("--seed",type=int,default=0)
     p.add_argument("--red-policy",choices=("rule","random"),default="rule")
     p.add_argument("--max-steps",type=int,default=1000)
+    p.add_argument("--perturb-initial",action="store_true")
     p.add_argument("--output",default="outputs/hetero_3v2_formal_v1_audit.json")
     a=p.parse_args(); env=make_env(str(ROOT/a.config)); rule=PaperGreedyOpponent(); rng=np.random.default_rng(a.seed)
     rows=[]
     for ep in range(a.episodes):
-        _,info=env.reset(seed=a.seed+ep)
+        perturbation={}
+        if a.perturb_initial:
+            local=np.random.default_rng(a.seed+ep)
+            perturbation={aid:{"lat_deg":float(local.uniform(-0.001,0.001)),
+                               "lon_deg":float(local.uniform(-0.001,0.001)),
+                               "altitude_m":float(local.uniform(-50,50)),
+                               "speed_mps":float(local.uniform(-3,3)),
+                               "yaw_deg":float(local.uniform(-2,2))}
+                          for aid in (*env.red_ids,*env.blue_ids)}
+        _,info=env.reset(seed=a.seed+ep,options={"audit_initial_perturbation":perturbation})
         for step in range(a.max_steps):
             actions=(rule.actions(env,"red") if a.red_policy=="rule" else
                      {x:rng.uniform(-1,1,3).astype(np.float32) for x in env.red_ids})
@@ -35,7 +45,8 @@ def main():
                      "launches":red_launches+blue_launches,"hits":red_hits+blue_hits,
                      "red_launches":red_launches,"blue_launches":blue_launches,
                      "red_hits":red_hits,"blue_hits":blue_hits,
-                     "red_alive":info["red_alive"],"blue_alive":info["blue_alive"]})
+                     "red_alive":info["red_alive"],"blue_alive":info["blue_alive"],
+                     "perturbation":perturbation})
     result={"red_policy":a.red_policy,"episodes":rows,"total_launches":sum(x["launches"] for x in rows),
             "total_hits":sum(x["hits"] for x in rows),
             "red_launches":sum(x["red_launches"] for x in rows),

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from collections import defaultdict
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
@@ -21,6 +22,9 @@ from algorithms.happo.happo_buffer import HAPPORolloutBuffer
 from algorithms.pure_happo import PureHAPPOPolicy, PureHAPPOTrainer
 from uav_env.make_env import make_env
 from uav_env.JSBSim.formal_v1.contract import ACTION_DIM, ENV_TYPE
+from uav_env.JSBSim.formal_v1.reward import (
+    EVENT_REWARDS, GLOBAL_REWARD_SCALE, MAV_WEIGHTS, REWARD_CONTRACT_VERSION, UAV_WEIGHTS,
+)
 
 
 def _args():
@@ -65,9 +69,25 @@ def main():
             "credit_mode": "shared_alive_team_mean", "actor_obs_dim": env.actor_obs_dim,
             "critic_state_dim": env.critic_state_dim, "action_dim": ACTION_DIM,
             "num_agents": len(env.red_ids), "config": str(config)}
+    meta["reward_contract"] = {
+        "version": REWARD_CONTRACT_VERSION,
+        "global_reward_scale": GLOBAL_REWARD_SCALE,
+        "uav_weights": UAV_WEIGHTS, "mav_weights": MAV_WEIGHTS,
+        "event_rewards": EVENT_REWARDS,
+    }
     _save(policy, output / "initial", {**meta, "total_env_steps_actual": 0})
     log_path = output / "train_log.csv"
-    fields = ["iteration", "total_steps", "avg_reward", "critic_loss", "finite"]
+    fields = [
+        "iteration", "total_steps", "episodes_completed", "avg_role_reward_mav",
+        "avg_role_reward_uav", "mav_dense", "mav_safety", "mav_support_position",
+        "mav_shared_information", "uav_dense", "uav_flight", "uav_speed", "uav_angle",
+        "uav_distance", "uav_dodge", "team_event_reward", "red_launches", "blue_launches",
+        "red_hits", "blue_hits", "red_kills", "blue_kills", "red_win", "blue_win",
+        "mutual_elimination", "timeout", "mav_survival", "red_alive_final",
+        "blue_alive_final", "flight_failures", "out_of_zone_deaths", "missile_deaths",
+        "actor_loss", "entropy", "approx_kl", "critic_loss", "value_explained_variance",
+        "action_saturation", "finite",
+    ]
     with log_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader()
         obs, info = env.reset(seed=args.seed)
@@ -76,7 +96,7 @@ def main():
             length = min(args.rollout_length, args.total_env_steps - total_steps)
             buffer = HAPPORolloutBuffer(length, len(env.red_ids), env.actor_obs_dim,
                                         env.critic_state_dim, ACTION_DIM, [0, 1, 1])
-            rewards_seen = []
+            stats = defaultdict(list); counts = defaultdict(int); completed = []
             for _ in range(length):
                 actor_obs = _flat(obs, env.red_ids)
                 critic = np.asarray(info["critic_state"], np.float32)
@@ -96,21 +116,74 @@ def main():
                              np.full(len(env.red_ids), done, np.float32),
                              result["value"].detach().cpu().numpy(), active,
                              next_value=next_value)
-                rewards_seen.append(float(reward_vec.mean()))
+                stats["role_mav"].append(float(reward_vec[0]))
+                stats["role_uav"].append(float(reward_vec[1:].mean()))
+                components = next_info["reward_components"]["per_agent"]
+                mav = components["red_0"]
+                for key in ("dense", "safety", "support_position", "shared_information"):
+                    stats[f"mav_{key}"].append(float(mav.get(key, 0.0)))
+                for key in ("dense", "flight", "speed", "angle", "distance", "dodge"):
+                    stats[f"uav_{key}"].append(float(np.mean([
+                        components[aid].get(key, 0.0) for aid in ("red_1", "red_2")])))
+                event_values = np.asarray([components[aid].get("event", 0.0) for aid in env.red_ids])
+                stats["team_event"].append(float((event_values * active).sum() / max(active.sum(), 1.0)))
+                stats["saturation"].append(float(np.mean(np.abs(actions[active > 0.5]) > 0.95))
+                                            if np.any(active > 0.5) else 0.0)
+                for event in next_info["step_events"]:
+                    side = "red" if str(event.get("shooter_id", "")).startswith("red") else "blue"
+                    if event.get("event") == "launch": counts[f"{side}_launches"] += 1
+                    if event.get("event") == "hit":
+                        counts[f"{side}_hits"] += 1; counts[f"{side}_kills"] += 1
+                next_active = np.asarray(next_info["active_mask"], np.float32)
+                for i, aid in enumerate(env.red_ids):
+                    if active[i] > 0.5 and next_active[i] < 0.5:
+                        reason = next_info["death_reasons"].get(aid, "")
+                        counts["out_of_zone_deaths" if reason == "out_of_zone" else
+                               ("missile_deaths" if reason == "missile_hit" else "flight_failures")] += 1
                 obs, info = next_obs, next_info
                 total_steps += 1
                 if done:
+                    completed.append({"outcome": next_info["outcome"],
+                                      "mav": float(next_info["mav_alive"]),
+                                      "red_alive": float(next_info["red_alive"]),
+                                      "blue_alive": float(next_info["blue_alive"])})
                     obs, info = env.reset(seed=args.seed + total_steps)
             metrics = trainer.update(buffer)
             iteration += 1
+            mean = lambda key: float(np.mean(stats[key])) if stats[key] else 0.0
+            episode_mean = lambda key: (float(np.mean([x[key] for x in completed]))
+                                        if completed else "")
             row = {"iteration": iteration, "total_steps": total_steps,
-                   "avg_reward": float(np.mean(rewards_seen)),
+                   "episodes_completed": len(completed),
+                   "avg_role_reward_mav": mean("role_mav"), "avg_role_reward_uav": mean("role_uav"),
+                   "mav_dense": mean("mav_dense"), "mav_safety": mean("mav_safety"),
+                   "mav_support_position": mean("mav_support_position"),
+                   "mav_shared_information": mean("mav_shared_information"),
+                   "uav_dense": mean("uav_dense"), "uav_flight": mean("uav_flight"),
+                   "uav_speed": mean("uav_speed"), "uav_angle": mean("uav_angle"),
+                   "uav_distance": mean("uav_distance"), "uav_dodge": mean("uav_dodge"),
+                   "team_event_reward": mean("team_event"),
+                   **{key: counts[key] for key in ("red_launches", "blue_launches", "red_hits",
+                       "blue_hits", "red_kills", "blue_kills", "flight_failures",
+                       "out_of_zone_deaths", "missile_deaths")},
+                   "red_win": sum(x["outcome"] == "red_win" for x in completed),
+                   "blue_win": sum(x["outcome"] == "blue_win" for x in completed),
+                   "mutual_elimination": sum(x["outcome"] == "mutual_elimination" for x in completed),
+                   "timeout": sum(x["outcome"] == "draw" for x in completed),
+                   "mav_survival": episode_mean("mav"), "red_alive_final": episode_mean("red_alive"),
+                   "blue_alive_final": episode_mean("blue_alive"),
+                   "actor_loss": float(metrics.get("actor_loss_mean", 0.0)),
+                   "entropy": float(metrics.get("entropy_mean", 0.0)),
+                   "approx_kl": float(metrics.get("approx_kl_mean", 0.0)),
                    "critic_loss": float(metrics.get("critic_loss", 0.0)),
+                   "value_explained_variance": float(metrics.get("value_explained_variance", 0.0)),
+                   "action_saturation": mean("saturation"),
                    "finite": int(all(torch.isfinite(parameter).all().item()
                                      for parameter in policy.parameters()))}
             writer.writerow(row); handle.flush()
             print(f"[formal-v1] it={iteration:04d} steps={total_steps}/{args.total_env_steps} "
-                  f"reward={row['avg_reward']:+.4f}", flush=True)
+                  f"reward:M/U={row['avg_role_reward_mav']:+.3f}/{row['avg_role_reward_uav']:+.3f} "
+                  f"launch:R/B={row['red_launches']}/{row['blue_launches']}", flush=True)
     _save(policy, output / "latest", {**meta, "total_env_steps_actual": total_steps})
     env.close()
 

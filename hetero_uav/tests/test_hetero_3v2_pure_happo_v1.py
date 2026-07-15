@@ -11,8 +11,15 @@ from uav_env.JSBSim.formal_v1.missile import FormalMissile
 from uav_env.JSBSim.formal_v1.observation import build_actor_observation
 from uav_env.JSBSim.formal_v1.sensing import red_track_sources
 from uav_env.JSBSim.formal_v1.targeting import fire_gate, select_target, target_score
-from uav_env.JSBSim.formal_v1.reward import compute_team_reward
+from uav_env.JSBSim.formal_v1 import reward as reward_module
+from uav_env.JSBSim.formal_v1.reward import (
+    angle_situation_score, compute_role_rewards, distance_situation_score,
+    dodge_score, flight_safety_score, mav_dense_components,
+    shared_information_score, speed_situation_score,
+)
 from uav_env.JSBSim.formal_v1.opponent import PaperGreedyOpponent
+from algorithms.pure_happo.trainer import _alive_before_team_mean
+import torch
 
 CFG = "uav_env/JSBSim/configs/hetero_3v2_pure_happo_v1.yaml"
 
@@ -37,7 +44,9 @@ def fake_env():
         roles={"red_0":"mav","red_1":"attack_uav","red_2":"attack_uav","blue_0":"attack_uav","blue_1":"attack_uav"},
         mav_detection_range_m=80000.,uav_detection_range_m=10000.,missiles=[],sim_time_sec=30.,
         last_launch_time={x:0. for x in aircraft},attack_interval_sec=25.,attack_range_m=14000.,
-        launch_ata_rad=np.deg2rad(60),launch_ta_rad=np.deg2rad(90))
+        launch_ata_rad=np.deg2rad(60),launch_ta_rad=np.deg2rad(90),
+        previous_missile_risk={"red_0":0.,"red_1":0.,"red_2":0.},
+        newly_dead=set(),death_reasons={},max_steps=1000)
 
 
 def test_config_constructs_and_dimensions():
@@ -154,14 +163,103 @@ def test_action_authority_and_mav_death_not_team_done():
     env.close()
 
 
-def test_reward_is_bounded_and_death_event_is_once():
-    env=fake_env(); env.max_steps=1000; env.newly_dead={"red_1"}; env.death_reasons={"red_1":"missile_hit"}
-    reward,detail=compute_team_reward(env,{"red_1":"blue_0","red_2":"blue_0"},[])
-    assert all(np.isfinite(list(reward.values()))) and max(map(abs,reward.values())) <= 2
-    first=reward["red_0"]
+def test_reward_is_finite_and_death_event_is_once():
+    env=fake_env(); env.newly_dead={"red_1"}; env.death_reasons={"red_1":"missile_hit"}
+    reward,detail=compute_role_rewards(env,{"red_1":"blue_0","red_2":"blue_0"},[])
+    assert all(np.isfinite(list(reward.values())))
+    first=reward["red_1"]
     env.newly_dead=set()
-    second,_=compute_team_reward(env,{"red_1":"blue_0","red_2":"blue_0"},[])
-    assert first < second["red_0"]
+    second,_=compute_role_rewards(env,{"red_1":"blue_0","red_2":"blue_0"},[])
+    assert first < second["red_1"]
+
+
+def test_reward_component_directions_and_bands():
+    assert flight_safety_score(6000,250) > flight_safety_score(150,250)
+    assert flight_safety_score(6000,250) > flight_safety_score(6000,70)
+    assert flight_safety_score(6000,250) > flight_safety_score(6000,500)
+    assert speed_situation_score(280,250) > speed_situation_score(100,250)
+    assert angle_situation_score(0,np.pi) > angle_situation_score(np.pi,0)
+    assert distance_situation_score(7000) > distance_situation_score(200)
+    assert distance_situation_score(7000) > distance_situation_score(20000)
+    assert dodge_score(0,0)==0
+    assert dodge_score(.8,.4)>0 and dodge_score(.2,.6)<0
+
+
+def test_shared_information_is_only_shared_only_and_dies_with_mav():
+    env=fake_env()
+    env.aircraft["blue_0"]._position=np.array([15000.,0,6000.])
+    env.aircraft["blue_1"]._position=np.array([9000.,0,6000.])
+    score=shared_information_score(env)
+    assert score==1.0
+    env.aircraft["red_0"].is_alive=False
+    assert shared_information_score(env)==0
+    env.aircraft["red_0"].is_alive=True
+    env.aircraft["blue_0"]._position=np.array([9000.,0,6000.])
+    assert shared_information_score(env)==0
+
+
+def test_initial_mav_state_is_not_maximum_reward():
+    env=fake_env()
+    value=mav_dense_components(env,0.0)["dense"]
+    assert -1 <= value < 0.9
+
+
+def test_global_scale_preserves_dense_event_ratio_and_max_steps_is_irrelevant(monkeypatch):
+    env=fake_env(); env.newly_dead={"red_1"}; env.death_reasons={"red_1":"missile_hit"}
+    first,detail=compute_role_rewards(env,{"red_1":"blue_0","red_2":"blue_0"},[])
+    env.max_steps=37
+    same,_=compute_role_rewards(env,{"red_1":"blue_0","red_2":"blue_0"},[])
+    assert first==same
+    monkeypatch.setattr(reward_module,"GLOBAL_REWARD_SCALE",0.5)
+    scaled,_=compute_role_rewards(env,{"red_1":"blue_0","red_2":"blue_0"},[])
+    assert scaled["red_1"]==pytest.approx(first["red_1"]*0.5)
+
+
+def test_alive_before_team_mean_matches_manual_and_dead_agent_no_longer_dilutes():
+    rewards=torch.tensor([[1.,2.,3.],[99.,4.,6.]])
+    active=torch.tensor([[1.,1.,1.],[0.,1.,1.]])
+    result=_alive_before_team_mean(rewards,active)
+    assert torch.allclose(result,torch.tensor([2.,5.]))
+
+
+def test_target_score_prefers_better_smooth_geometry():
+    shooter=FakeAircraft("red_1",(0,0,6000),velocity=(280,0,0))
+    favorable=FakeAircraft("blue_0",(8000,0,5800),velocity=(250,0,0))
+    poor=FakeAircraft("blue_1",(-18000,0,7000),velocity=(450,0,0))
+    assert target_score(shooter,favorable)>target_score(shooter,poor)
+
+
+def test_paper_greedy_returns_exhaustive_maximum():
+    env=fake_env(); policy=PaperGreedyOpponent()
+    rows=policy.scored_candidates(env,"blue_0")
+    action=policy.actions(env,"blue")["blue_0"]
+    best=max(rows,key=lambda row:row["score"])
+    assert len(rows)==len(env.red_ids)*18
+    assert np.allclose(action,best["action"])
+
+
+def test_greedy_avoidance_has_no_world_heading_sign_bonus_and_tracks_missile_direction():
+    env=fake_env(); policy=PaperGreedyOpponent()
+    rows=policy.scored_candidates(env,"blue_0")
+    left=next(x for x in rows if x["target_id"]=="red_1" and
+              np.isclose(x["action"][0],0) and np.isclose(x["action"][1],-1/6) and x["action"][2]>0)
+    right=next(x for x in rows if x["target_id"]=="red_1" and
+               np.isclose(x["action"][0],0) and np.isclose(x["action"][1],1/6) and x["action"][2]>0)
+    assert left["components"]["dodge"]==right["components"]["dodge"]==0
+    missile=lambda p,v: SimpleNamespace(is_launched=True,target_id="blue_0",
+                                         position=np.asarray(p,float),velocity=np.asarray(v,float))
+    env.missiles=[missile((8500,1000,6000),(0,-600,0))]
+    from_north=policy.actions(env,"blue")["blue_0"]
+    env.missiles=[missile((8500,-1000,6000),(0,600,0))]
+    from_south=policy.actions(env,"blue")["blue_0"]
+    assert np.sign(from_north[1])==-np.sign(from_south[1])
+
+
+def test_event_scale_is_40_marked_dense_steps_and_roles_are_distinct():
+    assert abs(reward_module.EVENT_REWARDS["red_kill"] / 0.20)==40
+    env=fake_env()
+    rewards,_=compute_role_rewards(env,{"red_1":"blue_0","red_2":"blue_1"},[])
+    assert len(set(round(value,6) for value in rewards.values()))>1
 
 
 def test_terminal_contract_red_elimination_and_timeout_are_exclusive():
@@ -172,4 +270,29 @@ def test_terminal_contract_red_elimination_and_timeout_are_exclusive():
     env.reset(seed=4); env.step_count=env.max_steps-1
     _,_,_,_,info=env.step({aid:np.zeros(3,np.float32) for aid in env.red_ids})
     assert info["team_done"] and info["outcome"]=="draw" and info["end_reason"]=="timeout"
+    env.close()
+
+
+def test_simultaneous_elimination_is_mutual_draw():
+    env=make_env(CFG); env.reset(seed=5)
+    for aircraft in env.aircraft.values(): aircraft.shotdown()
+    _,_,_,_,info=env.step({aid:np.zeros(3,np.float32) for aid in env.red_ids})
+    assert info["team_done"] and info["outcome"]=="mutual_elimination"
+    assert info["end_reason"]=="mutual_elimination"
+    env.close()
+
+
+def test_same_decision_last_aircraft_missile_hits_are_mutual_elimination():
+    env=make_env(CFG); env.reset(seed=6)
+    for aid in ("red_0","red_2","blue_1"): env.aircraft[aid].shotdown()
+    red=env.aircraft["red_1"]; blue=env.aircraft["blue_0"]
+    red_missile=FormalMissile("rm","red_1","blue_0",blue.get_position()-np.array([10.,0,0]),
+                              np.array([600.,0,0]),hit_radius_m=100.,arming_time_sec=0.)
+    blue_missile=FormalMissile("bm","blue_0","red_1",red.get_position()+np.array([10.,0,0]),
+                               np.array([-600.,0,0]),hit_radius_m=100.,arming_time_sec=0.)
+    red_missile.flight_time_sec=blue_missile.flight_time_sec=0.2
+    env.missiles=[red_missile,blue_missile]
+    _,_,_,_,info=env.step({aid:np.zeros(3,np.float32) for aid in env.red_ids})
+    assert info["outcome"]=="mutual_elimination" and info["team_done"]
+    assert sum(e["event"]=="hit" for e in info["step_events"])==2
     env.close()
