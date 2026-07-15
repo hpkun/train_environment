@@ -396,6 +396,63 @@ def test_gcas_executed_command_source_is_recorded():
     assert row["executed_heading_command_rad"] == pytest.approx(0.0)
 
 
+def _minimal_mws_parse_env(red_sim=None, blue_sim=None, blue_profile=None):
+    env = UavCombatEnv.__new__(UavCombatEnv)
+    env.red_planes = {"red_0": red_sim} if red_sim is not None else {}
+    env.blue_planes = {"blue_0": blue_sim} if blue_sim is not None else {}
+    env.is_paper_minimal = True
+    env.enable_gcas_for_blue = False
+    env._mws_enabled_by_team = {"red": True, "blue": True}
+    env._evasion_diagnostics = {
+        aid: {"activations": 0, "active_frames": 0, "active": False}
+        for aid in list(env.red_planes) + list(env.blue_planes)}
+    env.blue_policy_controller = BluePolicyController(
+        blue_profile or "paper_minimal_fixed_pair_v1")
+    env.blue_policy_controller.reset(
+        list(env.blue_planes), list(env.red_planes),
+        {aid: 0.0 for aid in env.blue_planes},
+        {aid: 6000.0 for aid in env.blue_planes})
+    return env
+
+
+def test_red_straight_team_gate_ignores_incoming_missile():
+    sim = _FakeBlueSim()
+    sim.incoming = _FakeIncomingMissile()
+    env = _minimal_mws_parse_env(red_sim=sim)
+    env.set_team_mws_enabled("red", False)
+    targets = env._parse_actions({"red_0": np.zeros(3, dtype=np.float32)})
+    assert targets["red_0"][0] == pytest.approx(0.0)
+    assert targets["red_0"][1] == pytest.approx(0.0)
+    assert env._evasion_diagnostics["red_0"]["activations"] == 0
+
+
+def test_blue_straight_profile_ignores_incoming_missile():
+    sim = _FakeBlueSim()
+    sim.incoming = _FakeIncomingMissile()
+    env = _minimal_mws_parse_env(
+        blue_sim=sim, blue_profile="paper_minimal_straight_patrol_v1")
+    targets = env._parse_actions({"blue_0": np.zeros(3, dtype=np.float32)})
+    assert targets["blue_0"][0] == pytest.approx(0.0)
+    assert targets["blue_0"][1] == pytest.approx(0.0)
+    assert env._evasion_diagnostics["blue_0"]["activations"] == 0
+
+
+def test_minimal_fixed_red_and_blue_use_same_mws_override():
+    red_sim = _FakeBlueSim()
+    blue_sim = _FakeBlueSim()
+    red_sim.incoming = _FakeIncomingMissile()
+    blue_sim.incoming = _FakeIncomingMissile()
+    env = _minimal_mws_parse_env(red_sim=red_sim, blue_sim=blue_sim)
+    targets = env._parse_actions({
+        "red_0": np.zeros(3, dtype=np.float32),
+        "blue_0": np.zeros(3, dtype=np.float32),
+    })
+    assert targets["red_0"] == pytest.approx(targets["blue_0"])
+    assert abs(targets["red_0"][1]) == pytest.approx(np.deg2rad(60.0))
+    assert env._evasion_diagnostics["red_0"]["activations"] == 1
+    assert env._evasion_diagnostics["blue_0"]["activations"] == 1
+
+
 def test_matrix_formal_fields_use_agent_decisions_and_two_heading_layers():
     assert "blue_mws_detected_agent_decisions" in MATRIX_FIELDS
     assert "blue_mws_override_agent_decisions" in MATRIX_FIELDS

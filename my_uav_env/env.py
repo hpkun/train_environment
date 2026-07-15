@@ -17,6 +17,7 @@ from configs.brma_mappo_paper_spec import (
     paper_value,
 )
 from configs.paper_minimal_3v3_spec import (
+    MINIMAL_EXTREME_LOAD_INVALID_THRESHOLD_G,
     MINIMAL_PAPER_ENVIRONMENT_CONFIG,
     PAPER_MINIMAL_ENVIRONMENT_PROFILE,
     REFERENCE_ENVIRONMENT_PROFILE,
@@ -441,6 +442,7 @@ class UavCombatEnv(gymnasium.Env):
         self._terminal_cleanup_done = False
         self._invalid_numerical_episode = False
         self._invalid_numerical_reasons: list[str] = []
+        self._mws_enabled_by_team = {"red": True, "blue": True}
 
         # Missile launch counters (per-episode, for debugging)
         self._missile_launch_counts: dict[str, int] = {}
@@ -703,10 +705,7 @@ class UavCombatEnv(gymnasium.Env):
         }
         for blue_id, sim in self.blue_planes.items():
             missile = (sim.check_missile_warning()
-                       if sim.is_alive
-                       and self.blue_policy_profile not in (
-                           "frozen_route_blue_v1",
-                           "paper_minimal_straight_patrol_v1")
+                       if sim.is_alive and self._mws_enabled_for_agent(blue_id)
                        else None)
             selected_missiles[blue_id] = getattr(missile, "uid", None)
             mws_detected[blue_id] = missile is not None
@@ -716,6 +715,26 @@ class UavCombatEnv(gymnasium.Env):
             {aid: data["heading"] for aid, data in kinematics.items()},
             self.current_step, selected_missiles, mws_detected,
             own_alive=own_alive)
+
+    def set_team_mws_enabled(self, team: str, enabled: bool) -> None:
+        """Set an audit-only team MWS gate without changing profile defaults."""
+        normalized = str(team).lower()
+        if normalized not in ("red", "blue"):
+            raise ValueError("team must be 'red' or 'blue'")
+        self._mws_enabled_by_team[normalized] = bool(enabled)
+
+    def _mws_enabled_for_agent(self, agent_id: str) -> bool:
+        team = "blue" if agent_id.startswith("blue") else "red"
+        gates = getattr(self, "_mws_enabled_by_team", {"red": True, "blue": True})
+        if not gates.get(team, True):
+            return False
+        if team == "blue":
+            fallback = getattr(self, "blue_policy_profile", "paper_pursuit") not in (
+                "fixed_pair_no_mws_v1", "frozen_route_blue_v1",
+                "paper_minimal_straight_patrol_v1")
+            return bool(getattr(
+                self.blue_policy_controller, "blue_mws_override_enabled", fallback))
+        return True
 
     def step(self, actions: dict):
         self.current_step += 1
@@ -907,12 +926,9 @@ class UavCombatEnv(gymnasium.Env):
             #  overrides all other control.  The paper explicitly lists missile
             #  evasion as scripted behaviour that is NOT learned.
             # =================================================================
-            blue_mws_enabled = (
-                not is_blue
-                or self.blue_policy_controller.blue_mws_override_enabled)
-            incoming = (sim.check_missile_warning()
-                        if blue_mws_enabled else None)
-            if incoming is not None and blue_mws_enabled:
+            mws_enabled = self._mws_enabled_for_agent(aid)
+            incoming = sim.check_missile_warning() if mws_enabled else None
+            if incoming is not None and mws_enabled:
                 evasion = self._evasion_diagnostics[aid]
                 if not evasion["active"]:
                     evasion["activations"] += 1
@@ -1062,13 +1078,19 @@ class UavCombatEnv(gymnasium.Env):
                     sim.get_property_value("accelerations/n-pilot-y-norm"),
                     sim.get_property_value("accelerations/n-pilot-z-norm")]))
             except Exception:
-                g_load = 0.0
+                g_load = float("nan")
             if not np.isfinite(g_load):
                 sim.crash()
                 if self.is_paper_minimal:
                     self._mark_invalid_numerical(aid, "NonFiniteLoad")
                 else:
                     self._death_reasons.setdefault(aid, "Crash_NumericalLoad")
+                self._crashed_this_step.add(aid)
+                continue
+            if (self.is_paper_minimal
+                    and g_load > MINIMAL_EXTREME_LOAD_INVALID_THRESHOLD_G):
+                sim.crash()
+                self._mark_invalid_numerical(aid, "ExtremeFiniteLoad")
                 self._crashed_this_step.add(aid)
                 continue
             if g_load > 100.0 and not self.is_paper_minimal:

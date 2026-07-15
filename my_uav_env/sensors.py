@@ -114,4 +114,8 @@ def select_most_dangerous_missile(aircraft, missiles) -> tuple[object | None, di
     candidates.sort(key=lambda row: (
         row[1]["time_to_closest_approach_s"] if has_finite_ttc else row[1]["distance_m"],
         row[1]["distance_m"], row[0].uid))
-    return candidates[0]
+    selected, diagnostic = candidates[0]
+    if not np.isfinite(diagnostic["time_to_closest_approach_s"]):
+        diagnostic = dict(diagnostic)
+        diagnostic["time_to_closest_approach_s"] = ""
+    return selected, diagnostic

@@ -1580,6 +1580,11 @@ def _diag_rows(**overrides):
             "ActionLogStdMean": math.log(0.3),
             "ActionStdDeltaFromInit": 0.0,
             "ActionStdGrowthRatio": 1.0,
+            "StateDependentStdMean": 0.3,
+            "StateDependentStdMin": 0.3,
+            "StateDependentStdMax": 0.3,
+            "StateDependentStdLowerBoundFrac": 0.0,
+            "StateDependentStdUpperBoundFrac": 0.0,
             "RawActionOutOfBoundsFrac": 0.0,
             "RawActionOutOfBoundsFracPitch": 0.0,
             "RawActionOutOfBoundsFracHeading": 0.0,
@@ -1589,7 +1594,13 @@ def _diag_rows(**overrides):
             "EnvActionNearBoundFracHeading": 0.0,
             "EnvActionNearBoundFracVelocity": 0.0,
             "ActorUpdatesSkipped": 0,
+            "ActorUpdateAttempts": 1,
+            "ActorUpdatesApplied": 1,
             "CriticUpdatesSkipped": 0,
+            "CriticUpdateAttempts": 1,
+            "CriticUpdatesApplied": 1,
+            "InvalidNumericalEpisodes": 0,
+            "InvalidTransitionsDropped": 0,
             "RedMeanReward": float(step) * 0.01,
             "WinRateRecent": 0.5,
             "WinRateCumul": 0.5,
@@ -1630,7 +1641,8 @@ def test_diagnostic_report_generates_pass_review_and_fail(tmp_path):
     rows = load_training_csv(pass_csv)
     status, fail, review, summaries = analyze(rows, expected_steps=500)
     assert status == "PASS"
-    assert not fail and not review
+    assert not fail
+    assert any("10k" in item for item in review)
     plot_dir = tmp_path / "plots"
     write_plots(rows, plot_dir)
     assert (plot_dir / "action_std.png").exists()
@@ -1650,9 +1662,9 @@ def test_diagnostic_report_generates_pass_review_and_fail(tmp_path):
     ))
     status, fail, review, _summaries = analyze(
         load_training_csv(review_csv), expected_steps=500)
-    assert status == "REVIEW"
+    assert status == "PASS"
     assert not fail
-    assert any("ActionStdGrowthRatio" in item for item in review)
+    assert any("10k" in item for item in review)
 
     fail_csv = tmp_path / "fail.csv"
     _write_diag_csv(fail_csv, _diag_rows(
@@ -1664,7 +1676,71 @@ def test_diagnostic_report_generates_pass_review_and_fail(tmp_path):
         load_training_csv(fail_csv), expected_steps=500)
     assert status == "FAIL"
     assert any("NaN" in item or "Inf" in item for item in fail)
-    assert any("ActorUpdatesSkipped" in item for item in fail)
+    assert any("Actor" in item and "跳过" in item for item in fail)
+
+
+def _diag_10k_rows(**overrides):
+    template = _diag_rows()[0]
+    rows = []
+    for index, step in enumerate(range(1000, 10001, 1000), start=1):
+        row = dict(template)
+        row.update({
+            "Step": step,
+            "Episodes": index,
+            "RedWins": 0,
+            "BlueWins": index,
+            "WinRateRecent": 0.0,
+            "WinRateCumul": 0.0,
+            "RedMeanReward": -10.0,
+            "LaunchDiagRedGeometryOk": 100 if step <= 3000 else 10,
+            "LaunchDiagRedLockMature": 50 if step <= 3000 else 5,
+            "LaunchDiagRedLaunches": 1,
+            "RedMissileHits": 0,
+            "RedAliveMean": 1.0,
+            "BlueAliveMean": 3.0,
+        })
+        row.update(overrides)
+        rows.append(row)
+    return rows
+
+
+def test_zero_early_wins_do_not_fail_environment_health():
+    from scripts.report_vanilla_mappo_diagnostic import analyze_diagnostics
+    result = analyze_diagnostics(_diag_rows(
+        RedWins=0, WinRateRecent=0.0, WinRateCumul=0.0), expected_steps=500)
+    assert result["EnvironmentHealthStatus"] == "PASS"
+    assert result["LearningEvidenceStatus"] == "INSUFFICIENT_DATA"
+
+
+def test_burn_in_is_excluded_and_health_can_pass_without_clear_trend():
+    from scripts.report_vanilla_mappo_diagnostic import analyze_diagnostics
+    result = analyze_diagnostics(_diag_10k_rows(), expected_steps=10_000)
+    assert result["EnvironmentHealthStatus"] == "PASS"
+    assert result["LearningEvidenceStatus"] == "NO_CLEAR_TREND_YET"
+    assert result["window_row_counts"]["burn_in"] == 3
+    assert result["window_row_counts"]["middle"] > 0
+    assert result["window_row_counts"]["late"] > 0
+
+
+def test_health_pass_and_optimization_warning_are_independent():
+    from scripts.report_vanilla_mappo_diagnostic import analyze_diagnostics
+    result = analyze_diagnostics(_diag_10k_rows(
+        StateDependentStdMean=0.58,
+        StateDependentStdMin=0.55,
+        StateDependentStdMax=0.59,
+        StateDependentStdUpperBoundFrac=0.5,
+    ), expected_steps=10_000)
+    assert result["EnvironmentHealthStatus"] == "PASS"
+    assert result["LearningEvidenceStatus"] == "OPTIMIZATION_WARNING"
+
+
+def test_speed_projection_failure_fails_health_not_learning_semantics():
+    from scripts.report_vanilla_mappo_diagnostic import analyze_diagnostics
+    result = analyze_diagnostics(_diag_rows(
+        MaximumSpeedAfterLimiterMps=600.02), expected_steps=500)
+    assert result["EnvironmentHealthStatus"] == "FAIL"
+    assert any("600.01" in reason
+               for reason in result["EnvironmentHealthReasons"])
 
 
 def test_short_jsbsim_paper_pid_steps_reduce_heading_pitch_and_speed_error():

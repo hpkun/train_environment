@@ -99,8 +99,10 @@ def test_mws_selects_minimum_positive_ttc_then_nearest_fallback():
     assert diag["time_to_closest_approach_s"] < 4.0
     receding_near = FakeMissile("near", [100, 0, 0], [100, 0, 0], target)
     receding_far = FakeMissile("far", [500, 0, 0], [100, 0, 0], target)
-    selected, _ = select_most_dangerous_missile(target, [receding_far, receding_near])
+    selected, diag = select_most_dangerous_missile(
+        target, [receding_far, receding_near])
     assert selected.uid == "near"
+    assert diag["time_to_closest_approach_s"] == ""
 
 
 def test_reset_seed_reproduces_awacs_coarse_track_and_snapshot():

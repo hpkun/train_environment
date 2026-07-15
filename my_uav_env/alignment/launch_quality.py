@@ -72,7 +72,7 @@ def make_launch_quality_record(
         "raw_termination_reason": "",
         "termination_reason": "",
         "is_success": False,
-        "flight_time_sec": nan_float(),
+        "flight_time_sec": "",
         "launch_step": int(current_step),
         "termination_step": "",
         "step_delta": "",

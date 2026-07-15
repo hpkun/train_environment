@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from collections import deque
+from fnmatch import fnmatch
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -37,10 +39,15 @@ from train_vanilla_mappo import (
     _compute_global_state_dim,
     _compute_obs_dim,
     _episode_is_invalid,
+    _action_std_growth_ratio,
+    _actor_std_stats,
+    _action_bound_metrics,
+    _empty_action_bound_totals,
     _minimal_altitude_reward_config,
     ppo_update,
     _unpack_and_validate_checkpoint,
 )
+from scripts.audit_paper_minimal_3v3 import evaluate_rule_audit
 
 
 def _strict_obs(num_own=3, num_enemy=3, heading=0.0):
@@ -84,6 +91,9 @@ def test_minimal_profile_snapshot_is_isolated_and_sourced():
     assert minimal["missile_overshoot_window_s"]["value"] == 0.5
     assert minimal["missile_rng_version"]["value"] == (
         "seedsequence_team_pair_launch_v1")
+    assert minimal["maximum_load_g"]["value"] == 9.0
+    assert minimal["extreme_load_invalid_threshold_g"] == {
+        "value": 30.0, "source": "paper_unspecified_minimal", "note": ""}
 
 
 def test_minimal_presets_and_dimensions_are_fixed():
@@ -331,6 +341,20 @@ def test_state_dependent_std_head_is_bounded_and_changes_with_hidden_state():
     assert distribution.scale[0, 0] != distribution.scale[1, 0]
 
 
+@pytest.mark.parametrize(("mean", "expected"), [
+    (0.3, 1.0), (0.45, 1.5), (0.15, 0.5)])
+def test_action_std_growth_ratio_uses_true_initial_denominator(mean, expected):
+    assert _action_std_growth_ratio(mean) == pytest.approx(expected)
+
+
+def test_empty_valid_actor_samples_produce_explicit_missing_diagnostics():
+    actor = VanillaActor(obs_dim=60)
+    std = _actor_std_stats(actor, sampled_stds=[])
+    bounds = _action_bound_metrics(_empty_action_bound_totals())
+    assert all(np.isnan(value) for value in std.values())
+    assert all(np.isnan(value) for value in bounds.values())
+
+
 def test_invalid_episode_mask_breaks_gae_and_excludes_rollout_segment():
     buffer = RolloutBuffer(4, 1, 1, 3, 4)
     buffer.joint_rewards[:, 0] = [1.0, 2.0, 3.0, 4.0]
@@ -472,7 +496,7 @@ def test_minimal_speed_projection_writes_back_to_jsbsim():
         env.close()
 
 
-def test_minimal_finite_extreme_load_uses_9g_limiter_before_invalidating():
+def _run_injected_load(g_load):
     env = UavCombatEnv(
         max_num_red=3, max_num_blue=3,
         environment_profile=PAPER_MINIMAL_ENVIRONMENT_PROFILE,
@@ -482,22 +506,47 @@ def test_minimal_finite_extreme_load_uses_9g_limiter_before_invalidating():
         sim = env.red_planes["red_0"]
         original_get = sim.get_property_value
         sim.get_property_value = lambda path: (
-            120.0 if path == "accelerations/n-pilot-z-norm"
+            g_load if path == "accelerations/n-pilot-z-norm"
             else 0.0 if path.startswith("accelerations/n-pilot-")
             else original_get(path))
         env.pid_controllers["red_0"].compute_control = (
             lambda *_args, **_kwargs: (1.0, 1.0, 1.0, 1.0))
         env._apply_pid_controls({"red_0": (0.0, 0.0, 300.0)})
-        scale = 9.0 / 120.0
-        assert sim.is_alive
-        assert not env._invalid_numerical_episode
-        assert sim.get_property_value("fcs/aileron-cmd-norm") == pytest.approx(scale)
-        assert sim.get_property_value("fcs/elevator-cmd-norm") == pytest.approx(scale)
-        assert sim.get_property_value("fcs/rudder-cmd-norm") == pytest.approx(scale)
-        assert env._aircraft_diagnostics["red_0"][
-            "load_limiter_activations"] == 1
+        return {
+            "alive": sim.is_alive,
+            "invalid": env._invalid_numerical_episode,
+            "reasons": list(env._invalid_numerical_reasons),
+            "limiter": env._aircraft_diagnostics["red_0"][
+                "load_limiter_activations"],
+            "aileron": original_get("fcs/aileron-cmd-norm"),
+        }
     finally:
         env.close()
+
+
+@pytest.mark.parametrize("g_load", [10.0, 11.0, 12.0])
+def test_minimal_normal_over_g_feedback_uses_limiter_without_invalid(g_load):
+    result = _run_injected_load(g_load)
+    assert result["alive"]
+    assert not result["invalid"]
+    assert result["limiter"] == 1
+    assert result["aileron"] == pytest.approx(9.0 / g_load)
+
+
+@pytest.mark.parametrize("g_load", [30.0001, 120.0])
+def test_minimal_extreme_finite_load_is_invalid(g_load):
+    result = _run_injected_load(g_load)
+    assert not result["alive"]
+    assert result["invalid"]
+    assert any("ExtremeFiniteLoad" in reason for reason in result["reasons"])
+
+
+@pytest.mark.parametrize("g_load", [float("nan"), float("inf")])
+def test_minimal_nonfinite_load_is_invalid(g_load):
+    result = _run_injected_load(g_load)
+    assert not result["alive"]
+    assert result["invalid"]
+    assert any("NonFiniteLoad" in reason for reason in result["reasons"])
 
 
 def test_minimal_engaged_target_blocks_fixed_pair_lock():
@@ -552,3 +601,81 @@ def test_minimal_invalid_episode_is_truncated_without_winner():
         "__episode__": {"invalid_numerical_episode": True}})
     assert not _episode_is_invalid({
         "__episode__": {"invalid_numerical_episode": False}})
+
+
+def _synthetic_rule_audit(hits=2, mirror_geometry=100, mirror_lock=50):
+    static = {
+        "entity_dim": 10, "actor_obs_dim": 60, "critic_state_dim": 30,
+        "sim_freq": 60, "agent_interaction_steps": 12,
+        "decision_frequency_hz": 5.0, "fingerprints_differ": True,
+        "initial_pairs": [{
+            "range_m": 10_000.0, "red_altitude_m": 6000.0,
+            "blue_altitude_m": 6000.0, "red_speed_mps": 300.0,
+            "blue_speed_mps": 300.0, "heading_separation_rad": np.pi,
+        }],
+    }
+    def row(name, red_fixed=True, blue_fixed=True):
+        return {
+            "name": name, "finite_state_action_reward_log": True,
+            "invalid_numerical_episode": False,
+            "red_geometry": 100 if red_fixed else 0,
+            "blue_geometry": 100 if blue_fixed else 0,
+            "red_lock_mature": 50 if red_fixed else 0,
+            "blue_lock_mature": 50 if blue_fixed else 0,
+            "red_launches": 10 if red_fixed else 0,
+            "blue_launches": 10 if blue_fixed else 0,
+            "red_hits": hits if red_fixed else 0,
+            "blue_hits": hits if blue_fixed else 0,
+            "red_crashes": 0, "blue_crashes": 0,
+            "peak_live_missiles": 6,
+            "red_max_speed_mps": 300.0, "blue_max_speed_mps": 300.0,
+            "red_max_load_g": 8.0, "blue_max_load_g": 8.0,
+            "red_load_limiter_activations": 0,
+            "blue_load_limiter_activations": 0,
+            "red_missile_deaths": 10 if red_fixed else 0,
+            "blue_missile_deaths": 10 if blue_fixed else 0,
+            "first_red_launch_step": 10 if red_fixed else None,
+            "first_blue_launch_step": 10 if blue_fixed else None,
+        }
+    scenarios = [
+        row("fixed_vs_fixed"),
+        row("fixed_red_vs_straight_blue", red_fixed=True, blue_fixed=False),
+        row("straight_red_vs_fixed_blue", red_fixed=False, blue_fixed=True),
+    ]
+    scenarios[1]["red_geometry"] = mirror_geometry
+    scenarios[1]["red_lock_mature"] = mirror_lock
+    return static, scenarios
+
+
+def test_rule_audit_zero_hits_cannot_pass():
+    static, scenarios = _synthetic_rule_audit(hits=0)
+    result = evaluate_rule_audit(static, scenarios)
+    assert result["status"] == "FAIL"
+    assert not result["checks"][
+        "missile_effectiveness.nonzero_fixed_hits"]
+
+
+def test_rule_audit_rejects_severe_geometry_and_lock_asymmetry():
+    static, scenarios = _synthetic_rule_audit(
+        hits=2, mirror_geometry=10, mirror_lock=5)
+    result = evaluate_rule_audit(static, scenarios)
+    assert result["status"] == "FAIL"
+    assert not result["checks"]["mirror_symmetry.mirror_geometry_ok"]
+    assert not result["checks"]["mirror_symmetry.mirror_lock_mature"]
+
+
+def test_runtime_temp_ignore_patterns_match_actual_worker_filenames():
+    patterns = {
+        line.strip() for line in Path(".gitignore").read_text().splitlines()
+        if line.strip() and not line.startswith("#")}
+    expected = {
+        "_worker_crash_*.txt": "_worker_crash_123.txt",
+        "_worker_crash_import_*.txt": "_worker_crash_import_123.txt",
+        "_worker_crash_env_*.txt": "_worker_crash_env_123.txt",
+        "_worker_crash_ready_*.txt": "_worker_crash_ready_123.txt",
+        "_worker_reset_tracer_*.txt": "_worker_reset_tracer_123.txt",
+        "_jsbsim_tracer_*.txt": "_jsbsim_tracer_123.txt",
+    }
+    assert expected.keys() <= patterns
+    assert all(fnmatch(filename, pattern)
+               for pattern, filename in expected.items())

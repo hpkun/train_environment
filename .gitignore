@@ -23,6 +23,12 @@ _jsbsim_recreate_*.log
 *worker*crash*.log
 *worker*reset*.log
 *jsbsim*trace*.log
+_worker_crash_*.txt
+_worker_crash_import_*.txt
+_worker_crash_env_*.txt
+_worker_crash_ready_*.txt
+_worker_reset_tracer_*.txt
+_jsbsim_tracer_*.txt
 
 # vscode config
 .vscode

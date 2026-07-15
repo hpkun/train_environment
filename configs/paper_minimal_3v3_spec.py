@@ -30,6 +30,7 @@ MINIMAL_MISSILE_LAUNCH_SPEED_MPS = 600.0
 MINIMAL_MISSILE_HIT_RADIUS_M = 300.0
 MINIMAL_MISSILE_OVERSHOOT_WINDOW_S = 0.5
 MINIMAL_MISSILE_RNG_VERSION = "seedsequence_team_pair_launch_v1"
+MINIMAL_EXTREME_LOAD_INVALID_THRESHOLD_G = 30.0
 
 
 MINIMAL_SCENARIO = ScenarioConfig(
@@ -142,6 +143,9 @@ MINIMAL_PROFILE_METADATA = {
         MINIMAL_MISSILE_RNG_VERSION, PAPER_MINIMAL_SOURCE),
     "target_deconfliction": sv("hot_update_live_missile_target_v1", PAPER_INFERRED),
     "load_limiter_mode": sv("symmetric_reactive_9g_v1", PAPER_MINIMAL_SOURCE),
+    "maximum_load_g": sv(9.0, PAPER_EXPLICIT),
+    "extreme_load_invalid_threshold_g": sv(
+        MINIMAL_EXTREME_LOAD_INVALID_THRESHOLD_G, PAPER_MINIMAL_SOURCE),
     "speed_limiter_mode": sv(
         "throttle_cut_velocity_projection_600mps_v1", PAPER_MINIMAL_SOURCE),
     "vertical_bounds_m": sv((0.0, 10_000.0), PAPER_EXPLICIT),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 from pathlib import Path
 
@@ -23,6 +24,11 @@ ANALYSIS_FIELDS = [
     "ActionLogStdMean",
     "ActionStdDeltaFromInit",
     "ActionStdGrowthRatio",
+    "StateDependentStdMean",
+    "StateDependentStdMin",
+    "StateDependentStdMax",
+    "StateDependentStdLowerBoundFrac",
+    "StateDependentStdUpperBoundFrac",
     "RawActionOutOfBoundsFrac",
     "RawActionOutOfBoundsFracPitch",
     "RawActionOutOfBoundsFracHeading",
@@ -32,7 +38,13 @@ ANALYSIS_FIELDS = [
     "EnvActionNearBoundFracHeading",
     "EnvActionNearBoundFracVelocity",
     "ActorUpdatesSkipped",
+    "ActorUpdateAttempts",
+    "ActorUpdatesApplied",
     "CriticUpdatesSkipped",
+    "CriticUpdateAttempts",
+    "CriticUpdatesApplied",
+    "InvalidNumericalEpisodes",
+    "InvalidTransitionsDropped",
     "RedMeanReward",
     "WinRateRecent",
     "RedWinRate",
@@ -55,6 +67,12 @@ ANALYSIS_FIELDS = [
     "RedDeathsCrash",
     "BlueDeathsMissile",
     "BlueDeathsCrash",
+    "RedAliveMean",
+    "BlueAliveMean",
+    "MaximumSpeedAfterLimiterMps",
+    "SpeedLimiterActivationRatePer1000PhysicsSteps",
+    "MaximumLoadG",
+    "LoadLimiterActivations",
 ]
 
 TREND_FIELDS = [
@@ -181,16 +199,63 @@ def _sum_field(rows: list[dict], field: str) -> float:
     return sum(v for v in (_to_float(row.get(field)) for row in rows) if math.isfinite(v))
 
 
-def analyze(rows: list[dict], expected_steps: int,
-            eval_summary: dict | None = None,
-            stdout_hits: dict | None = None) -> tuple[str, list[str], list[str], dict]:
+def _mean(rows: list[dict], field: str) -> float:
+    values = _finite_values(rows, field)
+    return sum(values) / len(values) if values else math.nan
+
+
+def _cumulative_delta(rows: list[dict], field: str) -> float:
+    values = _finite_values(rows, field)
+    return max(0.0, values[-1] - values[0]) if len(values) >= 2 else 0.0
+
+
+def _window_metrics(rows: list[dict]) -> dict:
+    if not rows:
+        return {}
+    step_values = _finite_values(rows, "Step")
+    step_span = max(step_values[-1] - step_values[0], 1.0) if step_values else 1.0
+    episode_delta = _cumulative_delta(rows, "Episodes")
+    launches = _sum_field(rows, "LaunchDiagRedLaunches")
+    hit_delta = _cumulative_delta(rows, "RedMissileHits")
+    return {
+        "RedMeanReward": _mean(rows, "RedMeanReward"),
+        "geometry_rate": _sum_field(rows, "LaunchDiagRedGeometryOk") / step_span,
+        "lock_mature_rate": _sum_field(rows, "LaunchDiagRedLockMature") / step_span,
+        "launches_per_episode": launches / max(episode_delta, 1.0),
+        "hits_per_episode": hit_delta / max(episode_delta, 1.0),
+        "RedWinRate": _mean(rows, "WinRateRecent") if any(
+            row.get("WinRateRecent", "") != "" for row in rows) else _mean(rows, "RedWinRate"),
+        "RedAliveMean": _mean(rows, "RedAliveMean"),
+        "BlueAliveMean": _mean(rows, "BlueAliveMean"),
+        "PolicyLoss": _mean(rows, "PolicyLoss"),
+        "PolicyEntropy": _mean(rows, "PolicyEntropy"),
+        "EntropyBonus": _mean(rows, "EntropyBonus"),
+        "StateDependentStdMean": _mean(rows, "StateDependentStdMean"),
+        "StateDependentStdUpperBoundFrac": _mean(
+            rows, "StateDependentStdUpperBoundFrac"),
+        "RawActionOutOfBoundsFrac": _mean(rows, "RawActionOutOfBoundsFrac"),
+    }
+
+
+def _improved(middle: float, late: float, relative: float = 0.05) -> bool:
+    if not math.isfinite(middle) or not math.isfinite(late):
+        return False
+    return late > middle + max(abs(middle) * relative, 1e-8)
+
+
+def analyze_diagnostics(rows: list[dict], expected_steps: int,
+                        eval_summary: dict | None = None,
+                        stdout_hits: dict | None = None,
+                        rule_audit: dict | None = None) -> dict:
     summaries = {
         field: summarize_metric(rows, field)
         for field in ANALYSIS_FIELDS
         if field in (rows[0].keys() if rows else [])
     }
-    fail = []
-    review = []
+    health_failures = []
+    learning_reasons = []
+    if not rows:
+        health_failures.append("训练日志为空")
     key_fields = [field for field in ANALYSIS_FIELDS if rows and field in rows[0]]
     bad_numeric = []
     for field in key_fields:
@@ -203,57 +268,129 @@ def analyze(rows: list[dict], expected_steps: int,
                 bad_numeric.append(field)
                 break
     if bad_numeric:
-        fail.append("关键列存在 NaN 或 Inf: " + ", ".join(sorted(set(bad_numeric))))
+        health_failures.append(
+            "关键列存在 NaN 或 Inf: " + ", ".join(sorted(set(bad_numeric))))
     if _sum_field(rows, "ActorUpdatesSkipped") > 0:
-        fail.append("ActorUpdatesSkipped 总数大于 0")
+        health_failures.append("Actor 梯度异常导致更新跳过")
     if _sum_field(rows, "CriticUpdatesSkipped") > 0:
-        fail.append("CriticUpdatesSkipped 总数大于 0")
-    if _recent_mean(rows, "ActionStdMean") > 0.6:
-        fail.append("最后 10% 的 ActionStdMean 大于 0.6")
-    if _recent_mean(rows, "RawActionOutOfBoundsFrac") > 0.05:
-        fail.append("最后 10% 的 RawActionOutOfBoundsFrac 大于 0.05")
-    if _recent_mean(rows, "EnvActionNearBoundFrac") > 0.05:
-        fail.append("最后 10% 的 EnvActionNearBoundFrac 大于 0.05")
+        health_failures.append("Critic 梯度异常导致更新跳过")
+    attempts = _sum_field(rows, "ActorUpdateAttempts") + _sum_field(
+        rows, "CriticUpdateAttempts")
+    applied = _sum_field(rows, "ActorUpdatesApplied") + _sum_field(
+        rows, "CriticUpdatesApplied")
+    if attempts > 0 and applied == 0:
+        health_failures.append("PPO 更新全部跳过")
+    if max(_finite_values(rows, "InvalidNumericalEpisodes") or [0.0]) > 0:
+        health_failures.append("存在 invalid numerical episode")
+    std_min = min(_finite_values(rows, "StateDependentStdMin") or [0.05])
+    std_max = max(_finite_values(rows, "StateDependentStdMax") or [0.6])
+    if std_min < 0.05 - 1e-6 or std_max > 0.6 + 1e-6:
+        health_failures.append("state-dependent std 越过 [0.05, 0.6] 硬边界")
+    if max(_finite_values(rows, "MaximumSpeedAfterLimiterMps") or [0.0]) > 600.01:
+        health_failures.append("速度投影后仍超过 600.01 m/s")
     stdout_hits = stdout_hits or {}
     if stdout_hits.get("Traceback", {}).get("count", 0) > 0:
-        fail.append("stdout 中存在 Traceback")
+        health_failures.append("stdout 中存在 Traceback")
     if stdout_hits.get("worker died", {}).get("count", 0) > 0:
-        fail.append("stdout 中存在 worker died")
+        health_failures.append("stdout 中存在 worker died")
     if stdout_hits.get("timed out", {}).get("count", 0) > 0:
-        fail.append("stdout 中存在 timed out")
+        health_failures.append("stdout 中存在 timed out")
     if _last(rows, "Step") < expected_steps:
-        fail.append("实际最终 Step 小于 expected_steps")
-
-    if _last(rows, "ActionStdGrowthRatio") > 1.25:
-        review.append("ActionStdGrowthRatio 末值大于 1.25")
-    raw_recent = _recent_mean(rows, "RawActionOutOfBoundsFrac")
-    env_recent = _recent_mean(rows, "EnvActionNearBoundFrac")
-    if 0.02 < raw_recent <= 0.05:
-        review.append("最后 10% 的 RawActionOutOfBoundsFrac 位于 REVIEW 区间")
-    if 0.02 < env_recent <= 0.05:
-        review.append("最后 10% 的 EnvActionNearBoundFrac 位于 REVIEW 区间")
-    trend = {field: summaries[field]["slope"] for field in TREND_FIELDS if field in summaries}
-    if all(trend.get(field, 0.0) > 0.0 for field in (
-            "ActionStdMean", "PolicyEntropy", "RawActionOutOfBoundsFrac",
-            "EnvActionNearBoundFrac")):
-        review.append("ActionStdMean、PolicyEntropy 和越界率均为正斜率")
-    if "CriticLoss" in summaries:
-        values = _finite_values(rows, "CriticLoss")
-        if len(values) >= 5:
-            n20 = max(1, math.ceil(len(values) * 0.2))
-            last20 = values[-n20:]
-            mid = values[len(values) // 3: max(len(values) // 3 + 1, 2 * len(values) // 3)]
-            if last20[-1] >= last20[0] and mid and (sum(last20) / len(last20)) > (sum(mid) / len(mid)) * 1.2:
-                review.append("CriticLoss 最后 20% 未下降且明显高于中段")
+        health_failures.append("实际最终 Step 小于 expected_steps")
+    if rule_audit is not None and rule_audit.get("status") != "PASS":
+        health_failures.append("规则环境审计 FAIL")
     eval_summary = eval_summary or {}
-    red_launches = _to_float(eval_summary.get("RedMissilesFired", eval_summary.get("RedMissiles")))
-    red_hits = _to_float(eval_summary.get("RedMissileHits", eval_summary.get("BlueDeathsMissile")))
-    if eval_summary and (not math.isfinite(red_launches) or red_launches <= 0) and (
-            not math.isfinite(red_hits) or red_hits <= 0):
-        review.append("正式评估中红方没有任何击杀或发射")
+    for field in ("CheckpointSchema", "EnvironmentProfile", "ObsNormalization"):
+        train_value = rows[-1].get(field) if rows else None
+        eval_value = eval_summary.get(field)
+        if train_value and eval_value and train_value != eval_value:
+            health_failures.append(f"checkpoint/评估 metadata 不一致: {field}")
 
-    status = "FAIL" if fail else ("REVIEW" if review else "PASS")
-    return status, fail, review, summaries
+    final_step = _last(rows, "Step")
+    windows = {"burn_in": [], "middle": [], "late": []}
+    if math.isfinite(final_step) and final_step >= 10_000:
+        windows["burn_in"] = [
+            row for row in rows if _to_float(row.get("Step")) <= 0.30 * final_step]
+        windows["middle"] = [
+            row for row in rows
+            if 0.30 * final_step < _to_float(row.get("Step")) <= 0.65 * final_step]
+        windows["late"] = [
+            row for row in rows if _to_float(row.get("Step")) > 0.65 * final_step]
+        middle = _window_metrics(windows["middle"])
+        late = _window_metrics(windows["late"])
+        improvements = []
+        for field in ("geometry_rate", "lock_mature_rate", "launches_per_episode",
+                      "hits_per_episode", "RedMeanReward", "RedAliveMean"):
+            if _improved(middle.get(field, math.nan), late.get(field, math.nan)):
+                improvements.append(field)
+        if (_improved(late.get("BlueAliveMean", math.nan),
+                      middle.get("BlueAliveMean", math.nan))):
+            improvements.append("BlueAliveMean下降")
+        if (middle.get("RedWinRate", 0.0) <= 0.0
+                and late.get("RedWinRate", 0.0) > 0.0):
+            improvements.append("出现非零胜率")
+        warnings = []
+        if late.get("StateDependentStdUpperBoundFrac", 0.0) > 0.20:
+            warnings.append("std 大量贴近上界")
+        middle_oob = middle.get("RawActionOutOfBoundsFrac", math.nan)
+        late_oob = late.get("RawActionOutOfBoundsFrac", math.nan)
+        if (math.isfinite(late_oob) and (late_oob > 0.25
+                or (math.isfinite(middle_oob) and late_oob > middle_oob + 0.05))):
+            warnings.append("raw action 越界率偏高或持续上升")
+        if (math.isfinite(late.get("EntropyBonus", math.nan))
+                and math.isfinite(late.get("PolicyLoss", math.nan))
+                and abs(late["EntropyBonus"]) > 1.5 * max(
+                    abs(late["PolicyLoss"]), 1e-8)):
+            warnings.append("entropy bonus 长期明显支配 policy surrogate")
+        worsening = sum(
+            _improved(late.get(field, math.nan), middle.get(field, math.nan), 0.10)
+            for field in ("BlueAliveMean",))
+        worsening += sum(
+            _improved(late.get(field, math.nan), middle.get(field, math.nan), 0.10)
+            for field in ("RawActionOutOfBoundsFrac",))
+        if worsening >= 2:
+            warnings.append("战术或优化指标持续恶化")
+        if warnings:
+            learning_status = "OPTIMIZATION_WARNING"
+            learning_reasons.extend(warnings)
+        elif len(improvements) >= 2:
+            learning_status = "POSITIVE_TREND"
+            learning_reasons.extend(improvements)
+        else:
+            learning_status = "NO_CLEAR_TREND_YET"
+            learning_reasons.append("middle 与 late 之间不足两个战术指标改善")
+        window_metrics = {"middle": middle, "late": late}
+    else:
+        learning_status = "INSUFFICIENT_DATA"
+        learning_reasons.append("少于 10k steps，只进行数值健康检查")
+        window_metrics = {}
+
+    return {
+        "EnvironmentHealthStatus": "FAIL" if health_failures else "PASS",
+        "LearningEvidenceStatus": learning_status,
+        "EnvironmentHealthReasons": health_failures,
+        "LearningEvidenceReasons": learning_reasons,
+        "summaries": summaries,
+        "burn_in_fraction": 0.30,
+        "window_boundaries": {"middle": [0.30, 0.65], "late": [0.65, 1.00]},
+        "window_metrics": window_metrics,
+        "window_row_counts": {key: len(value) for key, value in windows.items()},
+    }
+
+
+def analyze(rows: list[dict], expected_steps: int,
+            eval_summary: dict | None = None,
+            stdout_hits: dict | None = None) -> tuple[str, list[str], list[str], dict]:
+    """Compatibility wrapper; new callers should use analyze_diagnostics."""
+    result = analyze_diagnostics(
+        rows, expected_steps, eval_summary=eval_summary,
+        stdout_hits=stdout_hits)
+    return (
+        result["EnvironmentHealthStatus"],
+        result["EnvironmentHealthReasons"],
+        result["LearningEvidenceReasons"],
+        result["summaries"],
+    )
 
 
 def _plot_series(rows: list[dict], fields: list[str], output: Path,
@@ -348,6 +485,60 @@ def write_report(output: str | Path, status: str, fail: list[str], review: list[
     Path(output).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_diagnostic_report(output: str | Path, result: dict,
+                            rows: list[dict], eval_summary: dict,
+                            stdout_hits: dict) -> None:
+    lines = [
+        f"# EnvironmentHealthStatus: {result['EnvironmentHealthStatus']}",
+        "",
+        f"LearningEvidenceStatus: {result['LearningEvidenceStatus']}",
+        "",
+        "环境健康只依据数值、执行链路、硬边界和规则审计；"
+        "短期胜率、发射率、命中率和回报不参与环境 PASS/FAIL。",
+        "",
+        "## Environment Health",
+    ]
+    reasons = result["EnvironmentHealthReasons"]
+    lines.extend(
+        [f"- {item}" for item in reasons]
+        if reasons else ["- 未触发环境健康硬失败条件。"])
+    lines.extend(["", "## Learning Evidence"])
+    lines.extend(f"- {item}" for item in result["LearningEvidenceReasons"])
+    lines.extend([
+        "",
+        "## Burn-in And Windows",
+        "",
+        "- burn-in: 0%–30%，只检查数值健康性",
+        "- middle: 30%–65%",
+        "- late: 65%–100%",
+        f"- rows: {result['window_row_counts']}",
+    ])
+    for window, metrics in result.get("window_metrics", {}).items():
+        lines.extend(["", f"### {window}"])
+        lines.extend(f"- {key}: {value}" for key, value in metrics.items())
+    lines.extend(["", "## Metric Summary", ""])
+    lines.append("|Metric|First|Last|Last10Mean|Min|Max|Slope|")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    for field in ANALYSIS_FIELDS:
+        if field not in result["summaries"]:
+            continue
+        summary = result["summaries"][field]
+        lines.append(
+            f"|{field}|{summary['first']:.6g}|{summary['last']:.6g}|"
+            f"{summary['recent_mean']:.6g}|{summary['min']:.6g}|"
+            f"{summary['max']:.6g}|{summary['slope']:.6g}|")
+    if eval_summary:
+        lines.extend(["", "## Eval Summary"])
+        lines.extend(f"- {key}: {eval_summary[key]}" for key in sorted(eval_summary))
+    if stdout_hits:
+        lines.extend(["", "## Stdout Scan"])
+        lines.extend(
+            f"- {pattern}: {stdout_hits.get(pattern, {}).get('count', 0)}"
+            for pattern in STDOUT_PATTERNS)
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    Path(output).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", required=True)
@@ -356,17 +547,23 @@ def main() -> None:
     parser.add_argument("--expected-steps", type=int, required=True)
     parser.add_argument("--eval-summary")
     parser.add_argument("--stdout-log")
+    parser.add_argument("--rule-audit")
     args = parser.parse_args()
 
     rows = load_training_csv(args.log)
     stdout_hits = scan_stdout_log(args.stdout_log)
     eval_summary = load_eval_summary(args.eval_summary)
-    status, fail, review, summaries = analyze(
-        rows, args.expected_steps, eval_summary, stdout_hits)
+    rule_audit = None
+    if args.rule_audit:
+        rule_audit = json.loads(Path(args.rule_audit).read_text(encoding="utf-8"))
+    result = analyze_diagnostics(
+        rows, args.expected_steps, eval_summary, stdout_hits, rule_audit)
     write_plots(rows, args.plot_dir)
-    write_report(args.output, status, fail, review, summaries,
-                 rows, eval_summary, stdout_hits)
-    print(status)
+    write_diagnostic_report(
+        args.output, result, rows, eval_summary, stdout_hits)
+    print(
+        f"EnvironmentHealthStatus={result['EnvironmentHealthStatus']} "
+        f"LearningEvidenceStatus={result['LearningEvidenceStatus']}")
 
 
 if __name__ == "__main__":

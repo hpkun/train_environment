@@ -468,6 +468,16 @@ ACTION_BOUND_CSV_FIELDS = (
     "EnvActionNearBoundFracVelocity",
 )
 
+AIRCRAFT_ENVELOPE_CSV_FIELDS = (
+    "MaximumSpeedBeforeLimiterMps",
+    "MaximumSpeedAfterLimiterMps",
+    "SpeedLimiterActivations",
+    "SpeedLimiterActivationRatePer1000PhysicsSteps",
+    "MaximumLoadG",
+    "LoadLimiterActivations",
+    "EnvironmentDynamicsWarning",
+)
+
 ROLLOUT_LAYOUT_CSV_FIELDS = (
     "requested_replay_buffer_size",
     "rollout_horizon_per_env",
@@ -602,7 +612,8 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             "formation_spacing_m", "initial_missile_speed_mps",
             "missile_hit_radius_m", "missile_overshoot_window_s",
             "missile_rng_version", "target_deconfliction",
-            "load_limiter_mode", "speed_limiter_mode", "vertical_bounds_m",
+            "load_limiter_mode", "maximum_load_g",
+            "extreme_load_invalid_threshold_g", "speed_limiter_mode", "vertical_bounds_m",
             "maximum_live_missiles_observed")
         provenance = {}
         for key in sourced_keys:
@@ -820,6 +831,8 @@ def _action_bound_metrics(totals: dict) -> dict:
     raw_dim_abs = totals["raw_dim_abs_sum"]
     raw_dim_oob = totals["raw_dim_out_of_bounds_count"]
     env_dim_near = totals["env_dim_near_bound_count"]
+    if elem_count == 0:
+        return {field: float("nan") for field in ACTION_BOUND_CSV_FIELDS}
     return {
         "RawActionAbsMean": _safe_div(totals["raw_abs_sum"], elem_count),
         "RawActionAbsMeanPitch": _safe_div(raw_dim_abs[0], dim_count[0]),
@@ -1461,6 +1474,22 @@ def _safe_div(num: float, den: float) -> float:
     return float(num) / max(float(den), 1.0)
 
 
+def _action_std_growth_ratio(action_std_mean: float) -> float:
+    """Return true growth relative to the configured 0.3 initial std."""
+    value = float(action_std_mean)
+    return value / ACTION_STD_INIT if np.isfinite(value) else float("nan")
+
+
+def _csv_optional_float(value: float, digits: int = 6) -> str:
+    value = float(value)
+    return f"{value:.{digits}f}" if np.isfinite(value) else ""
+
+
+def _result_optional_float(value: float) -> float | None:
+    value = float(value)
+    return value if np.isfinite(value) else None
+
+
 def _ratio_with_denominator_zero(num: float, den: float) -> tuple[float, bool]:
     """Return a true ratio plus an explicit zero-denominator indicator."""
     numerator = float(num)
@@ -1523,6 +1552,15 @@ def _actor_std_stats(actor, sampled_stds: list[np.ndarray] | None = None) -> dic
 
     Does not modify any parameter or alter training behaviour.
     """
+    if sampled_stds is not None and not sampled_stds:
+        return {
+            "action_std_mean": float("nan"),
+            "action_std_min": float("nan"),
+            "action_std_max": float("nan"),
+            "action_log_std_mean": float("nan"),
+            "action_std_lower_bound_frac": float("nan"),
+            "action_std_upper_bound_frac": float("nan"),
+        }
     if sampled_stds:
         std = torch.as_tensor(
             np.concatenate([np.asarray(x).reshape(-1) for x in sampled_stds]),
@@ -2320,6 +2358,7 @@ def main():
                           *LAUNCH_DIAG_CSV_FIELDS,
                           *LAUNCH_QUALITY_AGG_CSV_FIELDS,
                           *ACTION_BOUND_CSV_FIELDS,
+                          *AIRCRAFT_ENVELOPE_CSV_FIELDS,
                           *BLUE_POLICY_DIAG_CSV_FIELDS])
     csv_file.flush()
 
@@ -2496,6 +2535,8 @@ def main():
         iter_launch_quality_done_records: list[dict] = []
         iter_action_bound = _empty_action_bound_totals()
         iter_blue_policy_diag = Counter()
+        iter_aircraft_diag_records: list[dict] = []
+        iter_episode_physics_frames = 0
         iter_invalid_episodes_dropped = 0
         episode_start_in_rollout = np.zeros(config.num_envs, dtype=np.int64)
 
@@ -2721,6 +2762,10 @@ def main():
                     red_alive = sum(
                         1 for rid in red_ids
                         if inf.get(rid, {}).get("alive", False))
+                    iter_aircraft_diag_records.extend(
+                        inf.get(aid, {}) for aid in red_ids + blue_ids)
+                    iter_episode_physics_frames += int(
+                        inf.get("__episode__", {}).get("EpisodeLength", 0)) * 12
                     if invalid_episode:
                         invalid_numerical_episodes += 1
                         iter_invalid_episodes_dropped += 1
@@ -2850,14 +2895,43 @@ def main():
             red_wins, blue_wins)
 
         std_stats = _actor_std_stats(actor, iter_sampled_stds)
-        action_std_delta = std_stats["action_std_mean"] - 0.3
-        action_std_growth = _safe_div(std_stats["action_std_mean"], 0.3)
+        action_std_delta = std_stats["action_std_mean"] - ACTION_STD_INIT
+        action_std_growth = _action_std_growth_ratio(
+            std_stats["action_std_mean"])
         launch_diag_metrics = _launch_diag_metrics(iter_launch_diag)
         launch_quality_metrics = _launch_quality_metrics(
             iter_launch_quality_records,
             iter_launch_quality_done_records,
         )
         action_bound_metrics = _action_bound_metrics(iter_action_bound)
+        def _diag_max(field: str) -> float:
+            values = [float(row.get(field, float("nan")))
+                      for row in iter_aircraft_diag_records]
+            finite = [value for value in values if np.isfinite(value)]
+            return max(finite) if finite else float("nan")
+        speed_limiter_activations = sum(
+            int(row.get("speed_limiter_activations", 0))
+            for row in iter_aircraft_diag_records)
+        load_limiter_activations = sum(
+            int(row.get("load_limiter_activations", 0))
+            for row in iter_aircraft_diag_records)
+        speed_limiter_rate = (
+            1000.0 * speed_limiter_activations / iter_episode_physics_frames
+            if iter_episode_physics_frames > 0 else float("nan"))
+        envelope_metrics = {
+            "MaximumSpeedBeforeLimiterMps": _diag_max(
+                "maximum_speed_before_limit_mps"),
+            "MaximumSpeedAfterLimiterMps": _diag_max(
+                "maximum_speed_after_limit_mps"),
+            "SpeedLimiterActivations": speed_limiter_activations,
+            "SpeedLimiterActivationRatePer1000PhysicsSteps": speed_limiter_rate,
+            "MaximumLoadG": _diag_max("maximum_load_g_seen"),
+            "LoadLimiterActivations": load_limiter_activations,
+            "EnvironmentDynamicsWarning": (
+                "frequent_speed_limiter_activation"
+                if np.isfinite(speed_limiter_rate) and speed_limiter_rate > 100.0
+                else ""),
+        }
 
         # Average per-component breakdown across completed episodes
         if recent_ep_comps_red:
@@ -2889,8 +2963,8 @@ def main():
                              stats["CriticUpdateAttempts"],
                              stats["CriticUpdatesApplied"],
                              stats["CriticUpdatesSkipped"],
-                             f"{action_std_delta:.6f}",
-                             f"{action_std_growth:.6f}",
+                             _csv_optional_float(action_std_delta),
+                             _csv_optional_float(action_std_growth),
                              f"{avg_r_red:.4f}",
                              f"{red_win_rate:.6f}",
                              f"{std_r_red:.4f}",
@@ -2937,15 +3011,17 @@ def main():
                                  f"{component_log_metrics[field]:.6f}"
                                  for field in REWARD_COMPONENT_LOG_FIELDS
                              ],
-                             f"{std_stats['action_std_mean']:.6f}",
-                             f"{std_stats['action_std_min']:.6f}",
-                             f"{std_stats['action_std_max']:.6f}",
-                             f"{std_stats['action_log_std_mean']:.6f}",
-                             f"{std_stats['action_std_mean']:.6f}",
-                             f"{std_stats['action_std_min']:.6f}",
-                             f"{std_stats['action_std_max']:.6f}",
-                             f"{std_stats['action_std_lower_bound_frac']:.6f}",
-                             f"{std_stats['action_std_upper_bound_frac']:.6f}",
+                             _csv_optional_float(std_stats['action_std_mean']),
+                             _csv_optional_float(std_stats['action_std_min']),
+                             _csv_optional_float(std_stats['action_std_max']),
+                             _csv_optional_float(std_stats['action_log_std_mean']),
+                             _csv_optional_float(std_stats['action_std_mean']),
+                             _csv_optional_float(std_stats['action_std_min']),
+                             _csv_optional_float(std_stats['action_std_max']),
+                             _csv_optional_float(
+                                 std_stats['action_std_lower_bound_frac']),
+                             _csv_optional_float(
+                                 std_stats['action_std_upper_bound_frac']),
                              *[
                                  (f"{launch_diag_metrics[field]:.6f}"
                                   if "Rate" in field else launch_diag_metrics[field])
@@ -2956,8 +3032,14 @@ def main():
                                  for field in LAUNCH_QUALITY_AGG_CSV_FIELDS
                              ],
                              *[
-                                 f"{action_bound_metrics[field]:.6f}"
+                                 _csv_optional_float(action_bound_metrics[field])
                                  for field in ACTION_BOUND_CSV_FIELDS
+                             ],
+                             *[
+                                 (envelope_metrics[field]
+                                  if field == "EnvironmentDynamicsWarning"
+                                  else _csv_optional_float(envelope_metrics[field]))
+                                 for field in AIRCRAFT_ENVELOPE_CSV_FIELDS
                              ],
                              *[iter_blue_policy_diag[field]
                                for field in BLUE_POLICY_DIAG_CSV_FIELDS]])
@@ -3013,19 +3095,25 @@ def main():
             "ActionDistribution": ACTION_DISTRIBUTION_VERSION,
             "AltitudeRewardConfigVersion": config.altitude_reward_config.version,
             "AltitudeRewardConfig": altitude_config_json,
-            "ActionStdMean":  std_stats["action_std_mean"],
-            "ActionStdMin":   std_stats["action_std_min"],
-            "ActionStdMax":   std_stats["action_std_max"],
-            "ActionLogStdMean": std_stats["action_log_std_mean"],
-            "StateDependentStdMean": std_stats["action_std_mean"],
-            "StateDependentStdMin": std_stats["action_std_min"],
-            "StateDependentStdMax": std_stats["action_std_max"],
+            "ActionStdMean":  _result_optional_float(std_stats["action_std_mean"]),
+            "ActionStdMin":   _result_optional_float(std_stats["action_std_min"]),
+            "ActionStdMax":   _result_optional_float(std_stats["action_std_max"]),
+            "ActionLogStdMean": _result_optional_float(
+                std_stats["action_log_std_mean"]),
+            "StateDependentStdMean": _result_optional_float(
+                std_stats["action_std_mean"]),
+            "StateDependentStdMin": _result_optional_float(
+                std_stats["action_std_min"]),
+            "StateDependentStdMax": _result_optional_float(
+                std_stats["action_std_max"]),
             "StateDependentStdLowerBoundFrac": std_stats[
-                "action_std_lower_bound_frac"],
+                "action_std_lower_bound_frac"] if np.isfinite(std_stats[
+                    "action_std_lower_bound_frac"]) else None,
             "StateDependentStdUpperBoundFrac": std_stats[
-                "action_std_upper_bound_frac"],
-            "ActionStdDeltaFromInit": action_std_delta,
-            "ActionStdGrowthRatio": action_std_growth,
+                "action_std_upper_bound_frac"] if np.isfinite(std_stats[
+                    "action_std_upper_bound_frac"]) else None,
+            "ActionStdDeltaFromInit": _result_optional_float(action_std_delta),
+            "ActionStdGrowthRatio": _result_optional_float(action_std_growth),
             "ActorLoss":      stats["actor_loss"],
             "CriticLoss":     stats["critic_loss"],
             "PolicyEntropy":  stats["entropy"],
@@ -3049,7 +3137,13 @@ def main():
         results_log[-1].update(component_log_metrics)
         results_log[-1].update(launch_diag_metrics)
         results_log[-1].update(launch_quality_metrics)
-        results_log[-1].update(action_bound_metrics)
+        results_log[-1].update({
+            key: _result_optional_float(value)
+            for key, value in action_bound_metrics.items()})
+        results_log[-1].update({
+            key: (value if key == "EnvironmentDynamicsWarning"
+                  else _result_optional_float(value))
+            for key, value in envelope_metrics.items()})
         milestone_cur = total_steps // 1_000_000
         milestone_prev = (total_steps - config.num_envs * num_steps) // 1_000_000
         if milestone_cur > milestone_prev or total_steps >= config.total_env_steps:
