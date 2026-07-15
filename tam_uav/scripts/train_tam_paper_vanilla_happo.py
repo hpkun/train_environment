@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import argparse, csv, importlib.metadata, json, platform, random, sys
+import argparse, csv, importlib.metadata, json, platform, random, sys, warnings
 from pathlib import Path
 import numpy as np
 import torch
@@ -11,11 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from algorithms.happo.vanilla_happo import VanillaHAPPORolloutBuffer, VanillaHAPPOTrainer
+from algorithms.happo.vanilla_happo import (ParameterSharingPPOTrainer,
+                                            VanillaHAPPORolloutBuffer,
+                                            VanillaHAPPOTrainer)
 from algorithms.happo.vanilla_happo_checkpoint import (load_vanilla_happo_checkpoint,
                                                        save_vanilla_happo_checkpoint)
 from scripts.vanilla_happo_runtime import (deterministic_evaluate, flattened_obs,
-                                           infer_policy, make_paper_env)
+                                           infer_policy, make_paper_env, seed_all)
+from scripts.tam_output_paths import resolve_tam_output
 
 
 def parse_args():
@@ -24,6 +27,7 @@ def parse_args():
     p.add_argument("--seed", type=int, default=2026)
     p.add_argument("--total-environment-steps", type=int, default=5000)
     p.add_argument("--rollout-length", type=int, default=256)
+    p.add_argument("--max-updates", type=int)
     p.add_argument("--actor-lr", type=float, default=5e-4)
     p.add_argument("--critic-lr", type=float, default=5e-4)
     p.add_argument("--ppo-epochs", type=int, default=2)
@@ -39,8 +43,11 @@ def parse_args():
     p.add_argument("--checkpoint-interval", type=int, default=1000)
     p.add_argument("--output-directory", default="outputs/tam_paper_vanilla_happo")
     p.add_argument("--resume-checkpoint")
+    p.add_argument("--allow-episode-restart-resume", action="store_true")
     p.add_argument("--device", default="cuda")
-    p.add_argument("--actor-sharing", choices=("independent", "role_shared_ablation"),
+    p.add_argument("--actor-sharing", choices=("independent",
+                                                "parameter_sharing_ppo_ablation",
+                                                "role_shared_ablation"),
                    default="independent")
     p.add_argument("--hidden-dim", type=int, default=128)
     return p.parse_args()
@@ -49,25 +56,40 @@ def parse_args():
 def main():
     args = parse_args()
     device = torch.device(args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu")
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(args.seed)
+    seed_all(args.seed)
     rng = np.random.default_rng(args.seed)
-    output = ROOT / args.output_directory
+    output = resolve_tam_output(ROOT, args.output_directory)
     output.mkdir(parents=True, exist_ok=True)
     env = make_paper_env(ROOT, args.scenario)
     policy, obs_dim, state_dim = infer_policy(
         env, args.actor_sharing, args.hidden_dim, device)
-    trainer = VanillaHAPPOTrainer(
-        policy, args.actor_lr, args.critic_lr, args.clip_param,
-        args.value_loss_coef, args.entropy_coef, args.max_gradient_norm,
-        args.ppo_epochs, args.minibatch_size, args.gamma, args.gae_lambda,
-        seed=args.seed)
+    if args.actor_sharing == "role_shared_ablation":
+        warnings.warn("role_shared_ablation is a legacy alias for "
+                      "parameter_sharing_ppo_ablation", FutureWarning)
+    if policy.actor_sharing == "independent":
+        trainer = VanillaHAPPOTrainer(
+            policy, args.actor_lr, args.critic_lr, args.clip_param,
+            args.value_loss_coef, args.entropy_coef, args.max_gradient_norm,
+            args.ppo_epochs, args.minibatch_size, args.gamma, args.gae_lambda,
+            seed=args.seed)
+    else:
+        trainer = ParameterSharingPPOTrainer(
+            policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
+            clip_param=args.clip_param, value_coef=args.value_loss_coef,
+            entropy_coef=args.entropy_coef, max_grad_norm=args.max_gradient_norm,
+            ppo_epochs=args.ppo_epochs, minibatch_size=args.minibatch_size,
+            gamma=args.gamma, gae_lambda=args.gae_lambda, seed=args.seed)
     steps = episodes = policy_version = 0
+    resumed_from_semantics = None
     if args.resume_checkpoint:
         loaded = load_vanilla_happo_checkpoint(
-            ROOT / args.resume_checkpoint, policy, trainer, numpy_rng=rng)
+            resolve_tam_output(ROOT, args.resume_checkpoint), policy, trainer,
+            numpy_rng=rng, for_resume=True,
+            allow_episode_restart=args.allow_episode_restart_resume,
+            expected_scenario=args.scenario)
         steps, episodes = loaded["environment_steps"], loaded["episodes"]
         policy_version = trainer.update_count
+        resumed_from_semantics = loaded["resume_semantics"]
     try:
         jsbsim_version = importlib.metadata.version("jsbsim")
     except importlib.metadata.PackageNotFoundError:
@@ -84,6 +106,10 @@ def main():
                              for aid in env.agent_ids},
         "critic_parameters": sum(p.numel() for p in policy.critic.parameters()),
         "uses_tam": False, "uses_recurrence": False, "uses_attention": False,
+        "algorithm_mode": trainer.algorithm_mode,
+        "reward_semantics": "heterogeneous_per_agent",
+        "theoretical_team_reward_monotonic_guarantee_claimed": False,
+        "resumed_from_semantics": resumed_from_semantics,
         "actor_sharing_label": ("formal_independent" if args.actor_sharing == "independent"
                                 else "parameter_sharing_ablation"),
     }
@@ -102,7 +128,9 @@ def main():
     episode_return = np.zeros(env.num_agents)
     episode_id = episodes
     rows, latest_eval = [], None
-    while steps < args.total_environment_steps:
+    at_episode_boundary = False
+    while (steps < args.total_environment_steps
+           and (args.max_updates is None or trainer.update_count < args.max_updates)):
         horizon = min(args.rollout_length, args.total_environment_steps - steps)
         for interval in (args.evaluation_interval, args.checkpoint_interval):
             if interval:
@@ -133,10 +161,10 @@ def main():
                 float(global_truncated and alive_end[aid]) for aid in env.agent_ids])
             with torch.no_grad():
                 next_value = policy.value(torch.as_tensor(env.get_state(), dtype=torch.float32,
-                                                           device=device)).item()
+                                                           device=device)).cpu().numpy()
             buffer.add(obs=actor_obs, state=state, actions=actions,
                        log_probs=action_out["log_probs"].cpu().numpy(), rewards=reward_array,
-                       value=action_out["value"].item(), next_value=next_value,
+                       value=action_out["value"].cpu().numpy(), next_value=next_value,
                        terminated=terminated, truncated=truncated,
                        active_masks=alive_start, available_actions=available,
                        agent_alive=alive_start, episode_id=episode_id,
@@ -157,6 +185,7 @@ def main():
                 terminal_agents += env.num_agents
                 episodes += 1; episode_id += 1; episode_return.fill(0)
                 obs, _ = env.reset(seed=args.seed + episodes)
+                break
         before = {name: value.detach().clone() for name, value in policy.named_parameters()}
         result = trainer.update(buffer); policy_version += 1
         unchanged = [name for name, value in policy.named_parameters()
@@ -168,6 +197,11 @@ def main():
             for aid in policy.agent_ids}
         critic_changed = any(not torch.equal(before[f"critic.{name}"], value)
                              for name, value in policy.critic.named_parameters())
+        critic_head_changed = {
+            aid: any(not torch.equal(
+                before[f"critic.heads.{aid}.{name}"], value)
+                for name, value in policy.critic.heads[aid].named_parameters())
+            for aid in policy.agent_ids}
         actions_all = buffer.actions[:buffer.pos]
         row = {"environment_steps": steps, "episodes": episodes,
                "mean_episode_return": float(np.mean([x.sum() for x in episode_returns])) if episode_returns else 0.0,
@@ -184,7 +218,9 @@ def main():
                "unchanged_parameter_count": len(unchanged),
                "actor_changed": json.dumps(actor_changed),
                "all_actors_changed": all(actor_changed.values()),
-               "critic_changed": critic_changed} | result.metrics
+               "critic_changed": critic_changed,
+               "critic_head_changed": json.dumps(critic_head_changed),
+               "all_critic_heads_changed": all(critic_head_changed.values())} | result.metrics
         for key, value in reward_component_sums.items():
             row[f"reward_component/{key}"] = value / max(reward_component_count, 1)
         for head in range(4):
@@ -200,11 +236,20 @@ def main():
         with csv_path.open("w", newline="", encoding="utf-8") as handle:
             csv_writer = csv.DictWriter(handle, fieldnames=sorted({k for item in rows for k in item}))
             csv_writer.writeheader(); csv_writer.writerows(rows)
+        at_episode_boundary = bool(buffer.pos and (
+            buffer.terminated[buffer.pos - 1].all()
+            or buffer.truncated[buffer.pos - 1].all()))
         if args.checkpoint_interval and (steps % args.checkpoint_interval == 0
                                          or steps == args.total_environment_steps):
             save_vanilla_happo_checkpoint(output / f"checkpoint_{steps}.pt", policy, trainer,
                                           environment_steps=steps, episodes=episodes,
-                                          config=snapshot, numpy_rng=rng)
+                                          config=snapshot, numpy_rng=rng,
+                                          checkpoint_type=("resumable" if at_episode_boundary
+                                                           else "evaluation_weights"),
+                                          at_episode_boundary=at_episode_boundary,
+                                          policy_version=policy_version,
+                                          seed_schedule={"episode_seed_base": args.seed,
+                                                         "next_episode": episodes})
         if args.evaluation_interval and (steps % args.evaluation_interval == 0
                                          or steps == args.total_environment_steps):
             eval_env = make_paper_env(ROOT, args.scenario)
@@ -213,24 +258,45 @@ def main():
             eval_env.close()
             (output / f"evaluation_{steps}.json").write_text(
                 json.dumps(latest_eval, indent=2), encoding="utf-8")
+    if latest_eval is None and args.evaluation_episodes > 0:
+        eval_env = make_paper_env(ROOT, args.scenario)
+        latest_eval = deterministic_evaluate(
+            eval_env, policy, args.evaluation_episodes, args.seed + 100000 + steps)
+        eval_env.close()
+        (output / f"evaluation_{steps}.json").write_text(
+            json.dumps(latest_eval, indent=2), encoding="utf-8")
     final_checkpoint = output / "checkpoint_final.pt"
     save_vanilla_happo_checkpoint(final_checkpoint, policy, trainer,
                                   environment_steps=steps, episodes=episodes,
-                                  config=snapshot, numpy_rng=rng)
-    early_signal = bool(all(row["nan_inf_count"] == 0
-                            and row["target_consistency_violation"] == 0
-                            and row["all_actors_changed"] and row["critic_changed"]
-                            for row in rows)
-                        and len(rows) >= 2
-                        and np.std([row["critic_loss"] for row in rows]) > 0)
+                                  config=snapshot, numpy_rng=rng,
+                                  checkpoint_type=("resumable" if at_episode_boundary
+                                                   else "evaluation_weights"),
+                                  at_episode_boundary=at_episode_boundary,
+                                  policy_version=policy_version,
+                                  seed_schedule={"episode_seed_base": args.seed,
+                                                 "next_episode": episodes})
+    numeric_metrics = [value for row in rows for value in row.values()
+                       if isinstance(value, (int, float, bool))]
+    optimization_active = bool(rows and np.isfinite(numeric_metrics).all()
+                               and all(row["all_actors_changed"] and row["critic_changed"]
+                                       and row["all_critic_heads_changed"]
+                                       and row["nan_inf_count"] == 0 for row in rows))
+    runtime_valid = bool(rows and all(
+        row.get("agent_order_count") == 1
+        and row.get("factor_initialization_count") == 1
+        and row.get("runtime_invariants_valid") for row in rows))
     summary = {"environment_steps": steps, "episodes": episodes,
                "latest_metrics": rows[-1], "latest_evaluation": latest_eval,
                "checkpoint": str(final_checkpoint.relative_to(ROOT)),
-               "ENVIRONMENT_CONTRACT_UNCHANGED": True,
-               "HAPPO_ALGORITHM_CONTRACT_READY": True,
-               "HAPPO_TRAINING_PIPELINE_READY": True,
-               "JSBSIM_TRAINING_SMOKE_READY": True,
-               "EARLY_LEARNING_SIGNAL_OBSERVED": early_signal,
+               "checkpoint_type": ("resumable" if at_episode_boundary
+                                   else "evaluation_weights"),
+               "resume_semantics": ("episode_boundary" if at_episode_boundary
+                                    else "evaluation_only"),
+               "resumed_from_semantics": resumed_from_semantics,
+               "OPTIMIZATION_PIPELINE_ACTIVE": optimization_active,
+               "HAPPO_RUNTIME_INVARIANTS_VALID": runtime_valid,
+               "EARLY_PERFORMANCE_SIGNAL_OBSERVED": False,
+               "early_performance_signal_reason": "insufficient_evaluation_samples",
                "LEARNING_CONVERGENCE_NOT_VALIDATED": True}
     (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     writer.close(); env.close()

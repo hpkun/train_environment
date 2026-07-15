@@ -55,6 +55,8 @@ def test_independent_actor_count_and_dynamic_dimensions(name, count):
     assert len(policy.actors) == count
     assert policy.critic_state_dim == state_dim
     assert all(policy.actor_key(aid) == aid for aid in env.agent_ids)
+    assert len(policy.critic.heads) == count
+    assert policy.value(torch.as_tensor(env.get_state())).shape == (count,)
     env.close()
 
 
@@ -62,7 +64,8 @@ def _one_step_buffer(terminated, truncated, active=(1.0,)):
     buffer = VanillaHAPPORolloutBuffer(1, 1, 2, 3)
     available = np.ones((1, 4, 40), np.float32)
     buffer.add(obs=np.zeros((1, 2)), state=np.zeros(3), actions=np.zeros((1, 4)),
-               log_probs=np.zeros(1), rewards=np.ones(1), value=2.0, next_value=10.0,
+               log_probs=np.zeros(1), rewards=np.ones(1),
+               value=np.array([2.0]), next_value=np.array([10.0]),
                terminated=np.array([terminated]), truncated=np.array([truncated]),
                active_masks=np.array(active), available_actions=available,
                agent_alive=np.array(active), episode_id=0, decision_step=0,
@@ -110,29 +113,35 @@ def test_randomized_order_changes_factor_correspondence_and_updates_all_paramete
             out = policy.act(obs, state, available)
         buffer.add(obs=obs, state=state, actions=out["actions"].numpy(),
                    log_probs=out["log_probs"].numpy(), rewards=np.ones(3),
-                   value=out["value"].item(), next_value=out["value"].item(),
+                   value=out["value"].numpy(), next_value=out["value"].numpy(),
                    terminated=np.zeros(3), truncated=np.zeros(3),
                    active_masks=np.ones(3), available_actions=available,
                    agent_alive=np.ones(3), episode_id=0, decision_step=step,
                    policy_version=0)
     before = {name: value.detach().clone() for name, value in policy.named_parameters()}
     result = trainer.update(buffer)
-    assert len({tuple(order) for order in result.update_orders}) > 1
+    assert result.update_orders and len(result.update_orders) == 1
+    assert result.metrics["agent_order_count"] == 1
+    assert result.metrics["factor_initialization_count"] == 1
     for aid in policy.agent_ids:
         assert any(not torch.equal(before[f"actors.{aid}.{name}"], value)
                    for name, value in policy.actors[aid].named_parameters())
     assert any(not torch.equal(before[f"critic.{name}"], value)
                for name, value in policy.critic.named_parameters())
-    assert all(np.isfinite(list(result.metrics.values())))
+    assert all(np.isfinite(value) for value in result.metrics.values()
+               if isinstance(value, (int, float, bool)))
 
 
 def test_role_shared_is_explicit_ablation_only():
-    policy = VanillaHAPPOPolicy(
-        ["red_0", "red_1", "red_2"],
-        {"red_0": "mav", "red_1": "uav", "red_2": "uav"}, 5, 8,
-        actor_sharing="role_shared_ablation")
-    assert policy.actor_sharing == "role_shared_ablation"
+    with pytest.warns(FutureWarning):
+        policy = VanillaHAPPOPolicy(
+            ["red_0", "red_1", "red_2"],
+            {"red_0": "mav", "red_1": "uav", "red_2": "uav"}, 5, 8,
+            actor_sharing="role_shared_ablation")
+    assert policy.actor_sharing == "parameter_sharing_ppo_ablation"
     assert len(policy.actors) == 2
+    with pytest.raises(ValueError, match="independent"):
+        VanillaHAPPOTrainer(policy)
 
 
 def test_checkpoint_roundtrip_optimizer_rng_and_resume_step(tmp_path):
@@ -145,10 +154,13 @@ def test_checkpoint_roundtrip_optimizer_rng_and_resume_step(tmp_path):
     path = tmp_path / "checkpoint.pt"
     saved = save_vanilla_happo_checkpoint(
         path, policy, trainer, environment_steps=123, episodes=4,
-        config={"scenario": "2v2"}, numpy_rng=rng)
+        config={"scenario": "2v2"}, numpy_rng=rng,
+        checkpoint_type="resumable", at_episode_boundary=True)
     for parameter in policy.parameters():
         parameter.data.add_(1.0)
-    loaded = load_vanilla_happo_checkpoint(path, policy, trainer, numpy_rng=rng)
+    loaded = load_vanilla_happo_checkpoint(
+        path, policy, trainer, numpy_rng=rng, for_resume=True,
+        expected_scenario="2v2")
     after = policy.act(obs, state, deterministic=True)
     torch.testing.assert_close(before["logits"], after["logits"])
     torch.testing.assert_close(before["actions"], after["actions"])
