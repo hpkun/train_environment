@@ -60,13 +60,18 @@ class PaperReward:
                 missiles, step_events: list[dict], out_of_zone_step: set[str],
                 alive_at_step_start: dict[str, bool]):
         by_id = {a.agent_id: a for a in agents}
-        kill_by_side = {"red": 0, "blue": 0}
+        hit_events_by_side = {"red": [], "blue": []}
+        death_sequence = {
+            event["agent_id"]: event.get("event_sequence_id", float("inf"))
+            for event in step_events
+            if event.get("event_type") == "aircraft_death"
+        }
         killed_by: dict[str, int] = {}
         for event in step_events:
             if event.get("reason") == "hit":
                 shooter = by_id.get(event.get("shooter_id"))
                 if shooter is not None:
-                    kill_by_side[shooter.side] += 1
+                    hit_events_by_side[shooter.side].append(event)
                     killed_by[shooter.agent_id] = killed_by.get(shooter.agent_id, 0) + 1
         rewards, components = {}, {}
         for agent in agents:
@@ -76,9 +81,14 @@ class PaperReward:
                 continue
             just_died = not agent.alive
             if agent.aircraft_type.role == "mav":
+                mav_death_sequence = death_sequence.get(agent.agent_id, float("inf"))
+                eligible_team_kills = sum(
+                    event.get("event_sequence_id", -1) < mav_death_sequence
+                    for event in hit_events_by_side[agent.side]
+                )
                 total, comp = self._mav(
                     agent, agents, missiles,
-                    kill_by_side[agent.side] if agent.alive else 0,
+                    eligible_team_kills,
                     just_died)
             else:
                 target = by_id.get(targets.get(agent.agent_id))

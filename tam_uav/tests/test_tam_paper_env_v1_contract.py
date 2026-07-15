@@ -104,7 +104,7 @@ def test_point_mass_missile_has_pn_limits_and_variable_speed():
         "maximum_missile_speed_mps": 900.0,
         "powered_duration_s": 2.0,
         "powered_acceleration_mps2": 100.0,
-        "drag_coefficient": 1.0e-5,
+        "effective_quadratic_drag_per_m": 1.0e-5,
         "missile_max_flight_time_s": 60.0,
         "hit_radius_m": 30.0,
     }

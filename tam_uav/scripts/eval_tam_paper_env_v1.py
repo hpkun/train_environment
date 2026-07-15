@@ -35,14 +35,8 @@ def main():
         for episode in range(args.episodes):
             obs, info = env.reset(seed=args.seed + level_index * 10000 + episode)
             while True:
-                by_id = {agent.agent_id: agent for agent in env.task.agents}
-                actions = {}
-                for aid in env.agent_ids:
-                    agent = by_id[aid]
-                    target = by_id.get(env.task.current_targets.get(aid))
-                    incoming = [missile for missile in env.task.weapon.missiles
-                                if missile.alive and missile.target_id == aid]
-                    actions[aid] = env.task.opponent.act(agent, target, incoming)[0]
+                env.prepare_decision_context()
+                actions = env.build_rule_actions(env.agent_ids)
                 obs, rewards, terminated, truncated, info = env.step(actions)
                 if all(terminated.values()) or all(truncated.values()):
                     break

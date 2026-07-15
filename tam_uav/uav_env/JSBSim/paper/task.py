@@ -42,6 +42,10 @@ class TAMPaperTask:
         self.simulation_time_s = 0.0
         self.episode_return = {}
         self.crashes = self.out_of_zone = self.structural_failures = 0
+        self.decision_context_counter = 0
+        self._decision_context = None
+        self.event_sequence_counter = 0
+        self.target_consistency_violation_count = 0
         self.last_info = {}
 
     def reset(self, rng: np.random.Generator):
@@ -55,6 +59,10 @@ class TAMPaperTask:
         self.step_count = 0
         self.simulation_time_s = 0.0
         self.crashes = self.out_of_zone = self.structural_failures = 0
+        self.decision_context_counter = 0
+        self._decision_context = None
+        self.event_sequence_counter = 0
+        self.target_consistency_violation_count = 0
         self.episode_return = {a.agent_id: 0.0 for a in self.agents}
         obs = self.observation.build(self.agents, self.weapon.missiles)
         self._update_targets(obs)
@@ -62,9 +70,53 @@ class TAMPaperTask:
         self.last_info = info
         return obs, info
 
-    def step(self, actions):
+    def prepare_decision_context(self):
+        """Prepare and freeze the target snapshot for exactly one decision step."""
+        if self._decision_context is not None:
+            return self._decision_context
         pre_obs = self.observation.build(self.agents, self.weapon.missiles)
         self._update_targets(pre_obs)
+        self.decision_context_counter += 1
+        by_id = {agent.agent_id: agent for agent in self.agents}
+        self._decision_context = {
+            "decision_context_id": self.decision_context_counter,
+            "pre_observation": pre_obs,
+            "targets": dict(self.current_targets),
+            "rule_inputs": {
+                agent.agent_id: {
+                    "agent": agent,
+                    "target": by_id.get(self.current_targets.get(agent.agent_id)),
+                    "incoming_missiles": [
+                        missile for missile in self.weapon.missiles
+                        if missile.alive and missile.target_id == agent.agent_id
+                    ],
+                }
+                for agent in self.agents if agent.alive
+            },
+            "target_used_by_rule_action": {},
+        }
+        return self._decision_context
+
+    def build_rule_actions(self, agent_ids=None):
+        context = self.prepare_decision_context()
+        selected = set(agent_ids) if agent_ids is not None else {
+            agent.agent_id for agent in self.controlled_agents()
+        }
+        actions = {}
+        for aid, inputs in context["rule_inputs"].items():
+            if aid not in selected:
+                continue
+            action, _ = self.opponent.act(
+                inputs["agent"], inputs["target"], inputs["incoming_missiles"])
+            actions[aid] = action
+            context["target_used_by_rule_action"][aid] = (
+                inputs["target"].agent_id if inputs["target"] is not None else None)
+        return actions
+
+    def step(self, actions):
+        context = self.prepare_decision_context()
+        pre_obs = context["pre_observation"]
+        self.current_targets = dict(context["targets"])
         alive_at_start = {a.agent_id: a.alive for a in self.agents}
         self.weapon.begin_decision_step()
         by_id = {a.agent_id: a for a in self.agents}
@@ -78,15 +130,22 @@ class TAMPaperTask:
                             if m.alive and m.target_id == agent.agent_id]
                 action_map[agent.agent_id], opponent_diag[agent.agent_id] = (
                     self.opponent.act(agent, target, incoming))
+                context["target_used_by_rule_action"][agent.agent_id] = (
+                    target.agent_id if target is not None else None)
 
         events = []
+        target_used_by_weapon = {}
         for shooter in self.agents:
             target = by_id.get(self.current_targets.get(shooter.agent_id))
+            target_used_by_weapon[shooter.agent_id] = (
+                target.agent_id if target is not None else None)
             launch = self.weapon.try_launch(
                 shooter, target, self._target_visible(shooter, target, pre_obs),
                 self.simulation_time_s)
             if launch:
-                events.append(launch)
+                events.append(self._stamp_event(
+                    launch, physics_frame_index=-1,
+                    simulation_time_s=self.simulation_time_s))
 
         commands = {}
         action_indices = {}
@@ -97,9 +156,9 @@ class TAMPaperTask:
             action_indices[agent.agent_id] = indices.copy()
             commands[agent.agent_id] = self.map_action(indices)
 
-        death_events = {}
+        recorded_deaths = {aid for aid, alive in alive_at_start.items() if not alive}
         out_step, crash_step, structural_step = set(), set(), set()
-        for _ in range(self.physics_frames):
+        for physics_frame_index in range(self.physics_frames):
             for agent in self.agents:
                 if agent.alive:
                     agent.apply_direct_fcs_command(commands[agent.agent_id])
@@ -110,17 +169,25 @@ class TAMPaperTask:
             out_step |= frame_out
             crash_step |= frame_crash
             structural_step |= frame_structural
-            for agent in self.agents:
-                if alive_at_start[agent.agent_id] and not agent.alive:
-                    death_events.setdefault(agent.agent_id, agent.death_reason)
-            events.extend(self.weapon.step_physics_once(by_id, self.physics_dt))
-            for agent in self.agents:
-                if alive_at_start[agent.agent_id] and not agent.alive:
-                    death_events.setdefault(agent.agent_id, agent.death_reason)
+            frame_time = self.simulation_time_s + self.physics_dt
+            self._record_new_deaths(
+                events, recorded_deaths, physics_frame_index, frame_time)
+            missile_events = self.weapon.step_physics_once(by_id, self.physics_dt)
+            for missile_event in missile_events:
+                events.append(self._stamp_event(
+                    missile_event, physics_frame_index, frame_time))
+                if missile_event.get("event_type") == "aircraft_death":
+                    recorded_deaths.add(missile_event["agent_id"])
+            self._record_new_deaths(
+                events, recorded_deaths, physics_frame_index, frame_time)
             self.simulation_time_s += self.physics_dt
 
         self.step_count += 1
         reward_scores = self._selected_target_scores_at_end()
+        target_used_by_reward = dict(self.current_targets)
+        consistency_violations = self._target_consistency_violations(
+            context, target_used_by_weapon, target_used_by_reward)
+        self.target_consistency_violation_count += len(consistency_violations)
         terminated, truncated, winner, reason = self._termination()
         rewards, components = self.reward.compute(
             self.agents, self.current_targets, reward_scores,
@@ -134,6 +201,13 @@ class TAMPaperTask:
         info = self._build_info(events, components, opponent_diag, winner, reason,
                                 alive_at_start, alive_at_end, just_died)
         info.update({
+            "decision_context_id": context["decision_context_id"],
+            "target_used_by_rule_action": dict(context["target_used_by_rule_action"]),
+            "target_used_by_weapon": target_used_by_weapon,
+            "target_used_by_reward": target_used_by_reward,
+            "target_consistency_violation": consistency_violations,
+            "target_consistency_violation_count": self.target_consistency_violation_count,
+            "event_ordering_consistent": self._event_ordering_consistent(events),
             "death_reason": {a.agent_id: a.death_reason for a in self.agents},
             "crash_step": sorted(crash_step), "out_of_zone_step": sorted(out_step),
             "structural_failure_step": sorted(structural_step),
@@ -144,9 +218,54 @@ class TAMPaperTask:
             "direct_fcs_commands": {aid: value.tolist() for aid, value in commands.items()},
         })
         self.last_info = info
+        self._decision_context = None
         term = {a.agent_id: bool(terminated or not a.alive) for a in self.agents}
         trunc = {a.agent_id: bool(truncated) for a in self.agents}
         return obs, rewards, term, trunc, info
+
+    def _stamp_event(self, event, physics_frame_index, simulation_time_s):
+        self.event_sequence_counter += 1
+        stamped = dict(event)
+        stamped.update({
+            "physics_frame_index": int(physics_frame_index),
+            "simulation_time_s": float(simulation_time_s),
+            "event_sequence_id": self.event_sequence_counter,
+        })
+        return stamped
+
+    def _record_new_deaths(self, events, recorded_deaths, frame_index, event_time):
+        for agent in self.agents:
+            if agent.alive or agent.agent_id in recorded_deaths:
+                continue
+            recorded_deaths.add(agent.agent_id)
+            events.append(self._stamp_event({
+                "event_type": "aircraft_death",
+                "agent_id": agent.agent_id,
+                "side": agent.side,
+                "reason": agent.death_reason,
+            }, frame_index, event_time))
+
+    @staticmethod
+    def _event_ordering_consistent(events):
+        sequence = [event["event_sequence_id"] for event in events]
+        times = [event["simulation_time_s"] for event in events]
+        return (sequence == sorted(sequence) and len(sequence) == len(set(sequence))
+                and times == sorted(times))
+
+    @staticmethod
+    def _target_consistency_violations(context, weapon_targets, reward_targets):
+        expected = context["targets"]
+        violations = []
+        for consumer, used in (
+                ("rule_action", context["target_used_by_rule_action"]),
+                ("weapon", weapon_targets), ("reward", reward_targets)):
+            for aid, target_id in used.items():
+                if target_id != expected.get(aid):
+                    violations.append({
+                        "agent_id": aid, "consumer": consumer,
+                        "expected_target": expected.get(aid), "used_target": target_id,
+                    })
+        return violations
 
     @staticmethod
     def map_action(indices) -> np.ndarray:

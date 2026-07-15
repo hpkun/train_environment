@@ -67,6 +67,12 @@ class TAMPaperEnv:
                 {aid: terminated[aid] for aid in self.agent_ids},
                 {aid: truncated[aid] for aid in self.agent_ids}, info)
 
+    def prepare_decision_context(self):
+        return self.task.prepare_decision_context()
+
+    def build_rule_actions(self, agent_ids=None):
+        return self.task.build_rule_actions(agent_ids)
+
     def map_action(self, indices):
         return self.task.map_action(indices)
 

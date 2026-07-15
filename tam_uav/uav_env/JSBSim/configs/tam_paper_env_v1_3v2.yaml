@@ -20,6 +20,9 @@ published_parameters:
   maximum_overload_g: 30.0
   navigation_gain_y: 3.0
   navigation_gain_z: 3.0
+  missile_mass_kg: 84.0
+  missile_length_m: 2.87
+  missile_diameter_m: 0.127
 inferred_parameters:
   # Paper does not publish the following engineering parameters.
   combat_zone_radius_m: 50000.0
@@ -36,7 +39,7 @@ inferred_parameters:
   maximum_missile_speed_mps: 1000.0
   missile_max_flight_time_s: 60.0
   hit_radius_m: 60.0
-  drag_coefficient: 0.00012
+  effective_quadratic_drag_per_m: 0.00012
   missile_speed_reward_norm_mps: 1000.0
   optimal_altitude_m: 6000.0
   maximum_altitude_m: 12000.0

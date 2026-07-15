@@ -74,6 +74,14 @@ class PaperWeaponManager:
                 events.append({"missile_id": missile.missile_id,
                                "shooter_id": missile.shooter_id,
                                "target_id": missile.target_id,
+                               "event_type": "missile_termination",
                                "reason": missile.termination_reason,
                                "hit": hit})
+                if hit:
+                    events.append({
+                        "event_type": "aircraft_death",
+                        "agent_id": target.agent_id,
+                        "side": target.side,
+                        "reason": target.death_reason,
+                    })
         return events

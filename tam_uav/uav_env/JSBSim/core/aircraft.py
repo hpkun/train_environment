@@ -274,7 +274,11 @@ class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
             propulsion.get_engine(i).init_running()
         propulsion.get_steady_state()
         self._set_property("gear/gear-cmd-norm", 0.0)
+        self._set_property("gear/gear-pos-norm", 0.0)
+        for index in range(3):
+            self._set_property(f"gear/unit[{index}]/pos-norm", 0.0)
         self._set_property("fcs/flap-cmd-norm", 0.0)
+        self._set_property("fcs/flap-pos-norm", 0.0)
         self._update_from_jsbsim()
 
     def step(self, action: np.ndarray, dt: float, speed_range: tuple[float, float]) -> None:
@@ -321,13 +325,30 @@ class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
         throttle, aileron, elevator, rudder = self._direct_fcs_command
         values = {
             "fcs/throttle-cmd-norm": throttle,
-            "fcs/throttle-pos-norm": throttle,
             "fcs/aileron-cmd-norm": aileron,
             "fcs/elevator-cmd-norm": elevator,
             "fcs/rudder-cmd-norm": rudder,
         }
         for name, value in values.items():
             self._set_property(name, float(value))
+
+    def control_initialization_status(self) -> dict:
+        propulsion = self.jsbsim_exec.get_propulsion()
+        engine_count = propulsion.get_num_engines()
+        return {
+            "model": self.model_name,
+            "gear_command_norm": self._get_property("gear/gear-cmd-norm"),
+            "gear_position_norm": self._get_property("gear/gear-pos-norm"),
+            "flap_command_norm": self._get_property("fcs/flap-cmd-norm"),
+            "flap_position_norm": self._get_property("fcs/flap-pos-norm"),
+            "engine_running": [bool(self._get_property(
+                "propulsion/engine/set-running" if index == 0
+                else f"propulsion/engine[{index}]/set-running"))
+                for index in range(engine_count)],
+            "throttle_command_norm": self._get_property("fcs/throttle-cmd-norm"),
+            "throttle_position_norm": self._get_property("fcs/throttle-pos-norm"),
+            "throttle_adapter": "command_only_no_adapter",
+        }
 
     def step_physics_once(self, dt: float | None = None) -> bool:
         del dt

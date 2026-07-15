@@ -22,6 +22,7 @@ from uav_env.JSBSim.paper.missile import PaperMissile
 from uav_env.JSBSim.paper.observation import PaperObservation
 from uav_env.JSBSim.paper.reward import PaperReward
 from uav_env.JSBSim.paper.weapon import PaperWeaponManager
+from uav_env.JSBSim.core.aircraft import JSBSimAircraftPlatform
 from uav_env.make_env import make_env
 
 
@@ -47,6 +48,9 @@ PARAMETER_CONSUMERS = {
     "maximum_speed_mps": "paper.task, paper.situation",
     "navigation_gain_y": "paper.missile",
     "navigation_gain_z": "paper.missile",
+    "missile_mass_kg": "paper.missile published metadata only; not used in point-mass dynamics",
+    "missile_length_m": "paper.missile published metadata only; not used in point-mass dynamics",
+    "missile_diameter_m": "paper.missile published metadata only; not used in point-mass dynamics",
     "minimum_safe_altitude_m": "paper.reward",
     "structural_limit_grace_s": "paper.task",
     "mav_detection_range_m": "core.aircraft_types",
@@ -55,15 +59,8 @@ PARAMETER_CONSUMERS = {
 
 
 def _rule_actions(env) -> dict[str, np.ndarray]:
-    by_id = {agent.agent_id: agent for agent in env.task.agents}
-    actions = {}
-    for aid in env.agent_ids:
-        agent = by_id[aid]
-        target = by_id.get(env.task.current_targets.get(aid))
-        incoming = [missile for missile in env.task.weapon.missiles
-                    if missile.alive and missile.target_id == aid]
-        actions[aid] = env.task.opponent.act(agent, target, incoming)[0]
-    return actions
+    env.prepare_decision_context()
+    return env.build_rule_actions(env.agent_ids)
 
 
 def rollout(config: Path, backend: str, steps: int, seed: int,
@@ -74,8 +71,19 @@ def rollout(config: Path, backend: str, steps: int, seed: int,
     info = {}
     completed = 0
     finite = True
+    reward_components_finite = True
+    target_consistency_violations = 0
+    event_ordering_consistent = True
+    event_metadata_complete = True
+    simulation_time_consistent = True
+    terminated_or_truncated = False
     try:
         _, info = env.reset(seed=seed)
+        initial_control_status = {
+            agent.agent_id: agent.control_initialization_status()
+            for agent in env.task.agents
+            if isinstance(agent, JSBSimAircraftPlatform)
+        }
         for _ in range(steps):
             if rule_red:
                 actions = _rule_actions(env)
@@ -87,8 +95,29 @@ def rollout(config: Path, backend: str, steps: int, seed: int,
                 cumulative[aid] += float(value)
             finite = bool(finite and np.isfinite(list(rewards.values())).all()
                           and np.isfinite(env.get_state()).all())
+            reward_components_finite = bool(
+                reward_components_finite and all(
+                    np.isfinite(list(agent_components.values())).all()
+                    for agent_components in info["reward_components"].values()))
+            target_consistency_violations += len(
+                info.get("target_consistency_violation", []))
+            event_ordering_consistent = bool(
+                event_ordering_consistent
+                and info.get("event_ordering_consistent", False))
+            ordered_events = [event for event in info.get("missile_events", [])
+                              if event.get("reason") == "hit"
+                              or event.get("event_type") == "aircraft_death"]
+            event_metadata_complete = bool(
+                event_metadata_complete and all(
+                    all(key in event for key in (
+                        "physics_frame_index", "simulation_time_s", "event_sequence_id"))
+                    for event in ordered_events))
             completed += 1
+            simulation_time_consistent = bool(
+                simulation_time_consistent
+                and np.isclose(info["simulation_time_s"], completed * 0.2))
             if all(terminated.values()) or all(truncated.values()):
+                terminated_or_truncated = True
                 break
 
         role_returns = {}
@@ -108,6 +137,8 @@ def rollout(config: Path, backend: str, steps: int, seed: int,
             "steps": completed,
             "winner": info.get("winner"),
             "termination_reason": info.get("termination_reason"),
+            "terminated_or_truncated": terminated_or_truncated,
+            "within_episode_limit": completed <= env.task.episode_limit,
             "shotdown": info.get("shotdown", 0),
             "crash": info.get("crashes", 0),
             "out_of_zone": info.get("out_of_zone", 0),
@@ -123,6 +154,15 @@ def rollout(config: Path, backend: str, steps: int, seed: int,
             "overload_violation_count": sum(
                 item["overload_violation_count"] for item in metrics.values()),
             "finite": finite,
+            "reward_components_finite": reward_components_finite,
+            "target_consistency_violations": target_consistency_violations,
+            "event_ordering_consistent": event_ordering_consistent,
+            "event_metadata_complete": event_metadata_complete,
+            "simulation_time_consistent": simulation_time_consistent,
+            "simulation_time_s": info.get("simulation_time_s"),
+            "initial_control_status": initial_control_status,
+            "throttle_adapter_status": sorted({
+                status["throttle_adapter"] for status in initial_control_status.values()}),
             "cumulative_reward_by_agent": cumulative,
             "cumulative_reward_by_role": role_returns,
             "missile_object_types": missile_types,
@@ -163,11 +203,19 @@ def _introspect(config: Path, backend: str) -> dict:
             "observation": isinstance(env.task.observation, PaperObservation),
             "weapon": isinstance(env.task.weapon, PaperWeaponManager),
             "missile_class": PaperMissile.__module__ == "uav_env.JSBSim.paper.missile",
+            "all_aircraft_jsbsim": all(isinstance(agent, JSBSimAircraftPlatform)
+                                        for agent in env.task.agents),
         }
         return {
             "class_names": {name: type(obj).__name__ for name, obj in objects.items()},
             "class_checks": class_checks,
             "legacy_attributes_found": legacy_found,
+            "initial_control_status": {
+                agent.agent_id: agent.control_initialization_status()
+                for agent in env.task.agents
+                if isinstance(agent, JSBSimAircraftPlatform)
+            },
+            "throttle_adapter_status": "command_only_no_adapter",
             "passed": all(class_checks.values())
                       and not any(legacy_found.values()),
         }
@@ -186,6 +234,8 @@ def _config_consumption(config: dict) -> list[dict]:
                 "consumer": PARAMETER_CONSUMERS.get(name, "paper environment contract"),
                 "published": published,
                 "inferred": not published,
+                "direct_dynamics_use": name not in {
+                    "missile_mass_kg", "missile_length_m", "missile_diameter_m"},
             })
     return rows
 
@@ -207,6 +257,7 @@ def main() -> int:
                          if args.skip_tests else _run_pytest([
                              "tests/test_tam_paper_env_v1_contract.py",
                              "tests/test_tam_paper_env_v1_phase2.py",
+                             "tests/test_tam_paper_env_v1_final_consistency.py",
                          ]))
     happo_smoke = ({"passed": False, "skipped": True}
                    if args.skip_tests else _run_pytest([
@@ -233,14 +284,43 @@ def main() -> int:
                     for item in group]
     real_jsbsim = (args.backend == "jsbsim"
                    and all(item["actual_backend"] == "jsbsim" for item in all_rollouts))
-    stable = all(item["finite"] and item["steps"] > 0 for item in all_rollouts)
+    stable = all(item["finite"] and item["reward_components_finite"]
+                 and item["steps"] > 0 for item in all_rollouts)
+    complete_episodes = all(
+        item["terminated_or_truncated"] and item["termination_reason"]
+        and item["within_episode_limit"] for item in all_rollouts)
+    target_consistent = all(
+        item["target_consistency_violations"] == 0 for item in all_rollouts)
+    event_ordering_consistent = all(
+        item["event_ordering_consistent"] and item["event_metadata_complete"]
+        for item in all_rollouts)
+    simulation_time_consistent = all(
+        item["simulation_time_consistent"] for item in all_rollouts)
+    aircraft_classes_valid = all(
+        item["aircraft_backend_types"] == ["JSBSimAircraftPlatform"]
+        for item in all_rollouts)
+    missile_classes_valid = all(
+        item["missiles_fired"] == 0 or item["missile_object_types"] == ["PaperMissile"]
+        for item in all_rollouts)
+    initial_controls_valid = all(
+        all(status["gear_command_norm"] == 0.0
+            and status["gear_position_norm"] == 0.0
+            and status["flap_command_norm"] == 0.0
+            and status["flap_position_norm"] == 0.0
+            and all(status["engine_running"])
+            and status["throttle_adapter"] == "command_only_no_adapter"
+            for status in item["initial_control_status"].values())
+        for item in all_rollouts)
     rule_items = [item for group in rule_rollouts.values() for item in group]
-    rule_combat = (all(any(item["missiles_fired"] > 0 for item in group)
-                       for group in rule_rollouts.values())
-                   and sum(item["hits"] for item in rule_items) > 0
-                   and any(item["termination_reason"] for item in rule_items))
+    rule_combat = all(sum(item["hits"] for item in group) > 0
+                      for group in rule_rollouts.values())
     environment_ready = bool(environment_tests["passed"] and introspection["passed"]
-                             and real_jsbsim and stable and rule_combat)
+                             and real_jsbsim and stable and complete_episodes
+                             and rule_combat and target_consistent
+                             and event_ordering_consistent
+                             and simulation_time_consistent
+                             and aircraft_classes_valid and missile_classes_valid
+                             and initial_controls_valid)
     happo_ready = bool(happo_smoke["passed"])
 
     try:
@@ -262,6 +342,10 @@ def main() -> int:
             },
         },
         "config_consumption_table": _config_consumption(config),
+        "missile_published_metadata": {
+            key: config["published_parameters"][key] for key in (
+                "missile_mass_kg", "missile_length_m", "missile_diameter_m")
+        },
         "runtime_introspection": introspection,
         "environment_contract_tests": environment_tests,
         "HAPPO_INTERFACE_SMOKE": happo_smoke,
@@ -271,6 +355,19 @@ def main() -> int:
             "all_rollouts_finite": stable,
             "all_rollouts_real_jsbsim": real_jsbsim,
             "rule_combat_exercised": rule_combat,
+            "all_episodes_terminated_or_truncated": complete_episodes,
+            "target_consistency_violation_count": sum(
+                item["target_consistency_violations"] for item in all_rollouts),
+            "event_ordering_consistent": event_ordering_consistent,
+            "event_metadata_complete": all(
+                item["event_metadata_complete"] for item in all_rollouts),
+            "simulation_time_consistent": simulation_time_consistent,
+            "all_aircraft_objects_jsbsim": aircraft_classes_valid,
+            "all_launched_missiles_paper_missile": missile_classes_valid,
+            "all_reward_components_finite": all(
+                item["reward_components_finite"] for item in all_rollouts),
+            "initial_gear_flap_engine_valid": initial_controls_valid,
+            "throttle_adapter_status": "command_only_no_adapter",
         },
         "ENVIRONMENT_CONTRACT_READY": environment_ready,
         "HAPPO_INTERFACE_READY": happo_ready,

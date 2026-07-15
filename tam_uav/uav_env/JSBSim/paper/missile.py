@@ -1,4 +1,10 @@
-"""Paper Eq. (7)-(9) point-mass missile with analytic LOS rates."""
+"""Paper Eq. (7)-(9) point-mass missile with analytic LOS rates.
+
+Mass, length, and diameter are published model metadata from paper Table 3.
+The paper does not provide a complete thrust curve, aerodynamic model, or drag
+coefficient. Powered acceleration and effective quadratic drag therefore remain
+explicit inferred engineering parameters in this point-mass implementation.
+"""
 
 from __future__ import annotations
 
@@ -115,7 +121,8 @@ class PaperMissile:
                                        -np.pi / 2.0 + 1e-4,
                                        np.pi / 2.0 - 1e-4))
 
-        drag_accel = float(self.config["drag_coefficient"]) * self.speed_mps ** 2
+        drag_accel = (float(self.config["effective_quadratic_drag_per_m"])
+                      * self.speed_mps ** 2)
         thrust_accel = (float(self.config["powered_acceleration_mps2"])
                         if self.flight_time_s < float(self.config["powered_duration_s"])
                         else 0.0)

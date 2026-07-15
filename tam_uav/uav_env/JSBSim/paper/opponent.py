@@ -44,10 +44,16 @@ class GreedyPaperOpponent:
             return action, {"current_target": None, "candidates": {},
                             "manoeuvre": "level", "action_indices": action.tolist()}
         candidates = {}
+        decision_dt = (float(self.published["physics_frames_per_action"])
+                       / float(self.published["simulation_frequency_hz"]))
+        predicted_target_position = (np.asarray(current_target.position, dtype=np.float64)
+                                     + np.asarray(current_target.velocity, dtype=np.float64)
+                                     * decision_dt)
+        predicted_target_velocity = np.asarray(current_target.velocity, dtype=np.float64)
         for name, indices in MANOEUVRES.items():
             position, velocity, pitch, heading, speed = self._predict(agent, indices)
-            pair = assess_pair(position, velocity, current_target.position,
-                               current_target.velocity,
+            pair = assess_pair(position, velocity, predicted_target_position,
+                               predicted_target_velocity,
                                self.published["maximum_attack_range_m"],
                                self.inferred["situation_height_norm_m"],
                                self.published["maximum_speed_mps"])
@@ -57,13 +63,18 @@ class GreedyPaperOpponent:
             r_speed = uav_speed_reward(speed, current_target.speed)
             r_angle = uav_angle_reward(pair.ata_rad, pair.aa_rad)
             r_distance = uav_distance_reward(pair.distance_m)
-            r_dodge = self._predicted_dodge(position, velocity, incoming_missiles)
+            r_dodge = self._predicted_dodge(
+                position, velocity, incoming_missiles, decision_dt)
             total = (10.0 * r_height + 10.0 * r_speed + 15.0 * r_angle
                      + 10.0 * r_distance + 30.0 * r_dodge)
             candidates[name] = {
                 "predicted_position_m": position.tolist(),
                 "predicted_velocity_mps": velocity.tolist(),
                 "predicted_pitch_rad": pitch, "predicted_heading_rad": heading,
+                "predicted_target_position_m": predicted_target_position.tolist(),
+                "predicted_target_velocity_mps": predicted_target_velocity.tolist(),
+                "prediction_time_s": decision_dt,
+                "threat_prediction": "constant_velocity",
                 "reward_components": {"r_height": r_height, "r_speed": r_speed,
                                       "r_angle": r_angle, "r_distance": r_distance,
                                       "r_dodge": r_dodge},
@@ -94,13 +105,15 @@ class GreedyPaperOpponent:
         position = np.asarray(agent.position, dtype=np.float64) + velocity * dt
         return position, velocity, pitch, heading, float(speed)
 
-    def _predicted_dodge(self, position, velocity, incoming_missiles):
+    def _predicted_dodge(self, position, velocity, incoming_missiles, decision_dt):
         active = [m for m in incoming_missiles if m.alive]
         if not active:
             return 0.0
-        threat = min(active, key=lambda m: np.linalg.norm(m.position - position)
+        threat = min(active, key=lambda m: np.linalg.norm(
+            m.position + m.velocity * decision_dt - position)
                      / max(m.speed_mps, 1.0))
-        los = position - threat.position
+        predicted_threat_position = threat.position + threat.velocity * decision_dt
+        los = position - predicted_threat_position
         denom = max(float(np.linalg.norm(los) * np.linalg.norm(threat.velocity)), 1e-8)
         lam = float(np.arccos(np.clip(np.dot(los, threat.velocity) / denom, -1.0, 1.0)))
         angle = -float(np.cos(lam))
