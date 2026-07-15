@@ -604,21 +604,40 @@ class MissileSimulator(BaseSimulator):
                uid: str, missile_model: str = "AIM-9L",
                guidance_mode: str = "paper_eq9", config=None, rng=None,
                launch_speed_mps: float | None = None,
-               overshoot_window_s: float | None = None):
+               overshoot_window_s: float | None = None,
+               overshoot_distance_hysteresis_m: float = 0.0,
+               positive_closing_threshold_mps: float = 0.0):
         assert parent.dt == target.dt
         missile = MissileSimulator(
             uid, parent.color, missile_model, parent.dt,
             guidance_mode=guidance_mode, config=config, rng=rng,
             launch_speed_mps=launch_speed_mps,
-            overshoot_window_s=overshoot_window_s)
+            overshoot_window_s=overshoot_window_s,
+            overshoot_distance_hysteresis_m=overshoot_distance_hysteresis_m,
+            positive_closing_threshold_mps=positive_closing_threshold_mps)
         missile.launch(parent)
         missile.target(target)
+        if (guidance_mode == "paper_minimal_point_mass_v1"
+                and launch_speed_mps is not None):
+            los = np.asarray(target.get_position(), dtype=np.float64) - np.asarray(
+                missile.get_position(), dtype=np.float64)
+            distance = float(np.linalg.norm(los))
+            if distance > 1e-9:
+                missile._velocity[:] = los / distance * float(launch_speed_mps)
+                speed = float(np.linalg.norm(missile._velocity))
+                pitch = float(np.arcsin(np.clip(
+                    missile._velocity[2] / max(speed, 1e-9), -1.0, 1.0)))
+                heading = float(np.arctan2(
+                    missile._velocity[1], missile._velocity[0]))
+                missile._posture[:] = [0.0, pitch, heading]
         return missile
 
     def __init__(self, uid="A0101", color="Red", model="AIM-9L", dt=1 / 12,
                  guidance_mode: str = "paper_eq9", config=None, rng=None,
                  launch_speed_mps: float | None = None,
-                 overshoot_window_s: float | None = None):
+                 overshoot_window_s: float | None = None,
+                 overshoot_distance_hysteresis_m: float = 0.0,
+                 positive_closing_threshold_mps: float = 0.0):
         super().__init__(uid, color, dt)
         if guidance_mode not in (
                 "paper_eq9", "legacy_simplified", "paper_minimal_point_mass_v1"):
@@ -659,6 +678,14 @@ class MissileSimulator(BaseSimulator):
         self._launch_speed_mps = launch_speed_mps
         self._overshoot_window_s = float(
             5.0 if overshoot_window_s is None else overshoot_window_s)
+        self._overshoot_distance_hysteresis_m = float(
+            overshoot_distance_hysteresis_m)
+        self._positive_closing_threshold_mps = float(
+            positive_closing_threshold_mps)
+        self._trajectory_sink = None
+        self._historical_min_range_m = float("inf")
+        self._has_ever_positive_closing = False
+        self._overshoot_counter = 0
 
     @property
     def is_alive(self):
@@ -715,6 +742,9 @@ class MissileSimulator(BaseSimulator):
         self._distance_pre = np.inf
         self._distance_increment = deque(maxlen=max(
             1, int(round(self._overshoot_window_s / self.dt))))
+        self._historical_min_range_m = float("inf")
+        self._has_ever_positive_closing = False
+        self._overshoot_counter = 0
         self._left_t = int(1 / self.dt)
         self.render_explosion = False
 
@@ -726,8 +756,12 @@ class MissileSimulator(BaseSimulator):
     def run(self):
         self._t += self.dt
         action, distance = self._guidance()
-        self._distance_increment.append(distance > self._distance_pre)
+        previous_distance = self._distance_pre
+        increasing = bool(distance > previous_distance)
+        self._distance_increment.append(increasing)
         self._distance_pre = distance
+        diagnostic = self._intercept_diagnostic(
+            action, distance, previous_distance)
 
         armed = (self.guidance_mode == "paper_minimal_point_mass_v1"
                  or self._t > self._t_arm)
@@ -748,7 +782,12 @@ class MissileSimulator(BaseSimulator):
               and np.linalg.norm(self.get_velocity()) < self._v_min):
             self._status = MissileSimulator.MISS
             self._termination_reason = "low_speed"
-        elif (len(self._distance_increment) == self._distance_increment.maxlen
+        elif (self.guidance_mode == "paper_minimal_point_mass_v1"
+              and self._overshoot_counter >= self._distance_increment.maxlen):
+            self._status = MissileSimulator.MISS
+            self._termination_reason = "overshoot"
+        elif (self.guidance_mode != "paper_minimal_point_mass_v1"
+              and len(self._distance_increment) == self._distance_increment.maxlen
               and np.sum(self._distance_increment) >= self._distance_increment.maxlen):
             self._status = MissileSimulator.MISS
             self._termination_reason = "overshoot"
@@ -756,7 +795,78 @@ class MissileSimulator(BaseSimulator):
             self._status = MissileSimulator.MISS
             self._termination_reason = "target_dead"
         else:
+            self._emit_trajectory_sample(diagnostic)
             self._state_trans(action)
+            return
+        self._emit_trajectory_sample(diagnostic)
+
+    def _intercept_diagnostic(self, action, distance: float,
+                              previous_distance: float) -> dict:
+        missile_position = np.asarray(self.get_position(), dtype=np.float64)
+        target_position = np.asarray(
+            self.target_aircraft.get_position(), dtype=np.float64)
+        missile_velocity = np.asarray(self.get_velocity(), dtype=np.float64)
+        target_velocity = np.asarray(
+            self.target_aircraft.get_velocity(), dtype=np.float64)
+        los = target_position - missile_position
+        relative_velocity = target_velocity - missile_velocity
+        los_norm = max(float(np.linalg.norm(los)), 1e-9)
+        missile_speed = float(np.linalg.norm(missile_velocity))
+        target_speed = float(np.linalg.norm(target_velocity))
+        closing = float(-np.dot(los, relative_velocity) / los_norm)
+        if closing > self._positive_closing_threshold_mps:
+            self._has_ever_positive_closing = True
+        self._historical_min_range_m = min(
+            self._historical_min_range_m, float(distance))
+        causal_overshoot = (
+            self._has_ever_positive_closing
+            and np.isfinite(self._historical_min_range_m)
+            and float(distance) > (
+                self._historical_min_range_m
+                + self._overshoot_distance_hysteresis_m)
+            and closing <= 0.0
+        )
+        self._overshoot_counter = (
+            self._overshoot_counter + 1 if causal_overshoot else 0)
+        cosine = (float(np.dot(missile_velocity, los))
+                  / max(missile_speed * los_norm, 1e-9))
+        velocity_to_los_angle_deg = float(np.rad2deg(np.arccos(
+            np.clip(cosine, -1.0, 1.0))))
+        los_angular_rate = float(
+            np.linalg.norm(np.cross(los, relative_velocity))
+            / max(los_norm * los_norm, 1e-9))
+        range_delta = (None if not np.isfinite(previous_distance)
+                       else float(distance - previous_distance))
+        return {
+            "missile_id": self.uid,
+            "shooter_id": self._parent_id,
+            "target_id": self._target_id,
+            "team": "red" if self._parent_id.startswith("red") else "blue",
+            "flight_time_sec": float(self._t),
+            "range_m": float(distance),
+            "historical_min_range_m": float(self._historical_min_range_m),
+            "range_delta_m": range_delta,
+            "closing_speed_mps": closing,
+            "has_ever_positive_closing": bool(
+                self._has_ever_positive_closing),
+            "missile_speed_mps": missile_speed,
+            "target_speed_mps": target_speed,
+            "missile_velocity_to_LOS_angle_deg": velocity_to_los_angle_deg,
+            "LOS_angular_rate_rad_s": los_angular_rate,
+            "PN_lateral_command_g": float(action[0]),
+            "PN_vertical_command_g": float(action[1]),
+            "missile_position": missile_position.tolist(),
+            "target_position": target_position.tolist(),
+            "missile_velocity": missile_velocity.tolist(),
+            "target_velocity": target_velocity.tolist(),
+            "overshoot_counter": int(self._overshoot_counter),
+            "termination_reason": self._termination_reason,
+        }
+
+    def _emit_trajectory_sample(self, diagnostic: dict) -> None:
+        if self._trajectory_sink is not None:
+            diagnostic["termination_reason"] = self._termination_reason
+            self._trajectory_sink(dict(diagnostic))
 
     def _roll_hit_probability(self) -> bool:
         """Paper 2.1.3 hit probability using missile velocity and LOS.

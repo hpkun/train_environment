@@ -442,7 +442,7 @@ class UavCombatEnv(gymnasium.Env):
         self._terminal_cleanup_done = False
         self._invalid_numerical_episode = False
         self._invalid_numerical_reasons: list[str] = []
-        self._mws_enabled_by_team = {"red": True, "blue": True}
+        self._mws_enabled_by_team = self._profile_mws_defaults()
 
         # Missile launch counters (per-episode, for debugging)
         self._missile_launch_counts: dict[str, int] = {}
@@ -456,6 +456,7 @@ class UavCombatEnv(gymnasium.Env):
         self._missile_term_reasons: dict[str, dict[str, int]] = {
             "red": {}, "blue": {},
         }
+        self._missile_trajectory_sink = None
 
         # Death reason tracking (set on the step the agent dies, cleared on reset)
         self._death_reasons: dict[str, str | None] = {}
@@ -492,6 +493,7 @@ class UavCombatEnv(gymnasium.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self._mws_enabled_by_team = self._profile_mws_defaults()
         if seed is not None:
             self._seed = int(seed)
             self.np_random = np.random.default_rng(self._seed)
@@ -723,6 +725,18 @@ class UavCombatEnv(gymnasium.Env):
             raise ValueError("team must be 'red' or 'blue'")
         self._mws_enabled_by_team[normalized] = bool(enabled)
 
+    def set_missile_trajectory_sink(self, sink) -> None:
+        """Install an audit-only per-physics-frame missile diagnostic sink."""
+        self._missile_trajectory_sink = sink
+
+    def _profile_mws_defaults(self) -> dict[str, bool]:
+        if getattr(self, "is_paper_minimal", False):
+            return {"red": True, "blue": False}
+        controller = getattr(self, "blue_policy_controller", None)
+        blue_enabled = bool(getattr(
+            controller, "blue_mws_override_enabled", True))
+        return {"red": True, "blue": blue_enabled}
+
     def _mws_enabled_for_agent(self, agent_id: str) -> bool:
         team = "blue" if agent_id.startswith("blue") else "red"
         gates = getattr(self, "_mws_enabled_by_team", {"red": True, "blue": True})
@@ -731,6 +745,7 @@ class UavCombatEnv(gymnasium.Env):
         if team == "blue":
             fallback = getattr(self, "blue_policy_profile", "paper_pursuit") not in (
                 "fixed_pair_no_mws_v1", "frozen_route_blue_v1",
+                "paper_minimal_fixed_pair_v1",
                 "paper_minimal_straight_patrol_v1")
             return bool(getattr(
                 self.blue_policy_controller, "blue_mws_override_enabled", fallback))
@@ -1395,7 +1410,9 @@ class UavCombatEnv(gymnasium.Env):
         if self.is_paper_minimal:
             from configs.paper_minimal_3v3_spec import (
                 MINIMAL_MISSILE_LAUNCH_SPEED_MPS,
+                MINIMAL_MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M,
                 MINIMAL_MISSILE_OVERSHOOT_WINDOW_S,
+                MINIMAL_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS,
             )
             sequence = self._minimal_launch_sequence[parent.uid]
             missile_rng = _minimal_missile_rng(
@@ -1403,13 +1420,23 @@ class UavCombatEnv(gymnasium.Env):
             self._minimal_launch_sequence[parent.uid] = sequence + 1
             launch_speed_mps = MINIMAL_MISSILE_LAUNCH_SPEED_MPS
             overshoot_window_s = MINIMAL_MISSILE_OVERSHOOT_WINDOW_S
+            overshoot_distance_hysteresis_m = (
+                MINIMAL_MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M)
+            positive_closing_threshold_mps = (
+                MINIMAL_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS)
+        else:
+            overshoot_distance_hysteresis_m = 0.0
+            positive_closing_threshold_mps = 0.0
         missile = MissileSimulator.create(
             parent, target, f"m{self._missile_id_counter}",
             guidance_mode=self.missile_guidance_mode,
             config=self.environment_config.missile,
             rng=missile_rng,
             launch_speed_mps=launch_speed_mps,
-            overshoot_window_s=overshoot_window_s)
+            overshoot_window_s=overshoot_window_s,
+            overshoot_distance_hysteresis_m=overshoot_distance_hysteresis_m,
+            positive_closing_threshold_mps=positive_closing_threshold_mps)
+        missile._trajectory_sink = self._missile_trajectory_sink
         self._missile_id_counter += 1
         self._missiles_in_flight[missile.uid] = missile
         self._episode_stats["maximum_live_missiles_observed"] = max(

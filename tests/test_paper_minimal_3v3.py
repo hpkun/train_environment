@@ -48,6 +48,7 @@ from train_vanilla_mappo import (
     _unpack_and_validate_checkpoint,
 )
 from scripts.audit_paper_minimal_3v3 import evaluate_rule_audit
+from scripts.audit_paper_minimal_missile_trajectory import summarize_trajectories
 
 
 def _strict_obs(num_own=3, num_enemy=3, heading=0.0):
@@ -89,6 +90,16 @@ def test_minimal_profile_snapshot_is_isolated_and_sourced():
     assert minimal["initial_missile_speed_mps"]["value"] == 600.0
     assert minimal["missile_hit_radius_m"]["value"] == 300.0
     assert minimal["missile_overshoot_window_s"]["value"] == 0.5
+    assert minimal["missile_overshoot_distance_hysteresis_m"]["value"] == 50.0
+    assert minimal["missile_positive_closing_threshold_mps"]["value"] == 1.0
+    assert minimal["initial_missile_direction_mode"]["value"] == "target_los_v1"
+    assert minimal["red_mws_mode"]["value"] == "scripted_minimal_evasion_v1"
+    assert minimal["blue_mws_mode"] == {
+        "value": "disabled_fixed_opponent_v1",
+        "source": "paper_unspecified_minimal", "note": ""}
+    assert minimal["blue_missile_evasion_enabled"]["value"] is False
+    assert minimal["mws_asymmetry_reason"]["value"] == (
+        "learnability_stage1_minimal_opponent")
     assert minimal["missile_rng_version"]["value"] == (
         "seedsequence_team_pair_launch_v1")
     assert minimal["maximum_load_g"]["value"] == 9.0
@@ -159,11 +170,13 @@ def test_minimal_straight_patrol_does_not_read_enemy_states():
     assert action[0] == pytest.approx(0.0)
     assert action[1] == pytest.approx(1.0 / np.pi)
     assert not controller.blue_mws_override_enabled
-    assert BluePolicyController(
+    assert not BluePolicyController(
         "paper_minimal_fixed_pair_v1").blue_mws_override_enabled
 
 
-def test_minimal_straight_patrol_does_not_query_mws():
+@pytest.mark.parametrize("profile", [
+    "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1"])
+def test_minimal_blue_profiles_do_not_query_mws(profile):
     class Sim:
         is_alive = True
         def check_missile_warning(self):
@@ -175,7 +188,7 @@ def test_minimal_straight_patrol_does_not_query_mws():
 
     env = object.__new__(UavCombatEnv)
     env.blue_planes = {"blue_0": Sim()}
-    env.blue_policy_profile = "paper_minimal_straight_patrol_v1"
+    env.blue_policy_profile = profile
     env.blue_policy_controller = Controller()
     env.max_num_blue = 1
     env.max_num_red = 1
@@ -185,6 +198,22 @@ def test_minimal_straight_patrol_does_not_query_mws():
         "blue_0": {"position": np.zeros(3), "heading": 0.0}}
     actions = env.blue_policy_actions({"blue_0": _strict_obs(1, 1)})
     assert actions["blue_0"].shape == (3,)
+
+
+def test_minimal_reset_restores_profile_mws_defaults():
+    env = UavCombatEnv(
+        max_num_red=1, max_num_blue=1,
+        environment_profile=PAPER_MINIMAL_ENVIRONMENT_PROFILE,
+        suppress_jsbsim_output=True)
+    try:
+        env.reset(seed=3)
+        assert env._mws_enabled_by_team == {"red": True, "blue": False}
+        env.set_team_mws_enabled("red", False)
+        env.set_team_mws_enabled("blue", True)
+        env.reset(seed=7)
+        assert env._mws_enabled_by_team == {"red": True, "blue": False}
+    finally:
+        env.close()
 
 
 class _RadarSim:
@@ -294,6 +323,32 @@ def test_minimal_missile_launch_speed_and_overshoot_window_are_explicit():
     assert missile._distance_increment.maxlen == 30
 
 
+def test_minimal_missile_create_aligns_initial_velocity_to_target_los():
+    class Aircraft:
+        dt = 1 / 60
+        lon0, lat0, alt0 = 120.0, 60.0, 0.0
+        color = "Red"
+        is_alive = True
+        def __init__(self, uid, position, velocity):
+            self.uid = uid
+            self.position = np.asarray(position, dtype=np.float64)
+            self.velocity = np.asarray(velocity, dtype=np.float64)
+            self.launch_missiles = []
+            self.under_missiles = []
+        def get_geodetic(self): return np.array([120.0, 60.0, 6000.0])
+        def get_position(self): return self.position
+        def get_velocity(self): return self.velocity
+        def get_rpy(self): return np.zeros(3)
+
+    parent = Aircraft("red_0", [0.0, 0.0, 6000.0], [0.0, 300.0, 0.0])
+    target = Aircraft("blue_0", [1000.0, 0.0, 6000.0], [0.0, 0.0, 0.0])
+    missile = MissileSimulator.create(
+        parent, target, "m0", guidance_mode="paper_minimal_point_mass_v1",
+        config=MINIMAL_PAPER_ENVIRONMENT_CONFIG.missile,
+        launch_speed_mps=600.0, overshoot_window_s=0.5)
+    assert missile.get_velocity() == pytest.approx([600.0, 0.0, 0.0])
+
+
 def test_minimal_missile_rng_is_reproducible_and_independent_by_team_pair():
     red_a = _minimal_missile_rng(17, "red_0", 0).random(4)
     red_b = _minimal_missile_rng(17, "red_0", 0).random(4)
@@ -304,26 +359,60 @@ def test_minimal_missile_rng_is_reproducible_and_independent_by_team_pair():
     assert not np.array_equal(red_a, other_pair)
 
 
-def test_minimal_missile_terminates_after_continuous_overshoot_window():
+def _causal_overshoot_missile():
     class Target:
         is_alive = True
         def get_position(self): return np.array([1000.0, 0.0, 0.0])
         def get_velocity(self): return np.zeros(3)
-
     missile = MissileSimulator(
         dt=0.1, guidance_mode="paper_minimal_point_mass_v1",
         config=MINIMAL_PAPER_ENVIRONMENT_CONFIG.missile,
-        overshoot_window_s=0.3)
+        overshoot_window_s=0.3,
+        overshoot_distance_hysteresis_m=50.0,
+        positive_closing_threshold_mps=1.0)
     missile._status = MissileSimulator.LAUNCHED
     missile._t = 0.0
+    missile._position[:] = [0.0, 0.0, 0.0]
+    missile._velocity[:] = [100.0, 0.0, 0.0]
     missile._distance_pre = np.inf
     missile._distance_increment = deque(maxlen=3)
     missile.target_aircraft = Target()
-    distances = iter([1000.0, 1001.0, 1002.0, 1003.0])
-    missile._guidance = lambda: (np.zeros(2), next(distances))
     missile._state_trans = lambda _action: None
+    return missile
+
+
+def test_minimal_missile_overshoot_requires_prior_positive_closing():
+    missile = _causal_overshoot_missile()
+    missile._velocity[:] = [-100.0, 0.0, 0.0]
+    distances = iter([1000.0, 1100.0, 1200.0, 1300.0])
+    missile._guidance = lambda: (np.zeros(2), next(distances))
     for _ in range(4):
         missile.run()
+    assert not missile.is_done
+    assert not missile._has_ever_positive_closing
+
+
+def test_minimal_missile_short_increase_inside_50m_does_not_overshoot():
+    missile = _causal_overshoot_missile()
+    distances = iter([1000.0, 1020.0, 1030.0, 1040.0])
+    missile._guidance = lambda: (np.zeros(2), next(distances))
+    missile.run()
+    missile._velocity[:] = [-100.0, 0.0, 0.0]
+    for _ in range(3):
+        missile.run()
+    assert not missile.is_done
+
+
+def test_minimal_missile_true_overshoot_persists_for_window():
+    missile = _causal_overshoot_missile()
+    distances = iter([1000.0, 1060.0, 1070.0, 1080.0])
+    missile._guidance = lambda: (np.zeros(2), next(distances))
+    missile.run()
+    missile._velocity[:] = [-100.0, 0.0, 0.0]
+    for _ in range(2):
+        missile.run()
+        assert not missile.is_done
+    missile.run()
     assert missile.is_done
     assert missile._termination_reason == "overshoot"
 
@@ -424,7 +513,16 @@ def test_minimal_checkpoint_metadata_cannot_mix_with_reference():
     cfg.missile_guidance_mode = "paper_minimal_point_mass_v1"
     cfg.altitude_reward_config = _minimal_altitude_reward_config()
     minimal = _checkpoint_metadata(cfg, 60, 30)
+    assert minimal["red_mws_mode"] == "scripted_minimal_evasion_v1"
+    assert minimal["blue_mws_mode"] == "disabled_fixed_opponent_v1"
+    assert minimal["blue_missile_evasion_enabled"] is False
     payload = {"state_dict": {}, "metadata": minimal, "model_kind": "actor"}
+    legacy_minimal = dict(minimal)
+    legacy_minimal.pop("blue_mws_mode")
+    with pytest.raises(ValueError, match="blue_mws_mode"):
+        _unpack_and_validate_checkpoint(
+            {"state_dict": {}, "metadata": legacy_minimal,
+             "model_kind": "actor"}, minimal, "actor")
     reference = dict(minimal)
     reference["environment_profile"] = "brma_paper_profile_v1"
     with pytest.raises(ValueError, match="environment_profile"):
@@ -613,37 +711,43 @@ def _synthetic_rule_audit(hits=2, mirror_geometry=100, mirror_lock=50):
             "blue_altitude_m": 6000.0, "red_speed_mps": 300.0,
             "blue_speed_mps": 300.0, "heading_separation_rad": np.pi,
         }],
+        "lane_spacings_m": {"red": [1000.0, 1000.0],
+                            "blue": [1000.0, 1000.0]},
     }
-    def row(name, red_fixed=True, blue_fixed=True):
+    def row(name, audit_kind, *, red_mws, blue_mws):
         return {
-            "name": name, "finite_state_action_reward_log": True,
+            "name": name, "audit_kind": audit_kind,
+            "red_mws_enabled": red_mws, "blue_mws_enabled": blue_mws,
+            "finite_state_action_reward_log": True,
             "invalid_numerical_episode": False,
-            "red_geometry": 100 if red_fixed else 0,
-            "blue_geometry": 100 if blue_fixed else 0,
-            "red_lock_mature": 50 if red_fixed else 0,
-            "blue_lock_mature": 50 if blue_fixed else 0,
-            "red_launches": 10 if red_fixed else 0,
-            "blue_launches": 10 if blue_fixed else 0,
-            "red_hits": hits if red_fixed else 0,
-            "blue_hits": hits if blue_fixed else 0,
+            "red_geometry": 100, "blue_geometry": 100,
+            "red_lock_mature": 50, "blue_lock_mature": 50,
+            "red_launches": 10, "blue_launches": 10,
+            "red_hits": hits, "blue_hits": hits,
+            "red_overshoot": 5, "blue_overshoot": 5,
             "red_crashes": 0, "blue_crashes": 0,
             "peak_live_missiles": 6,
             "red_max_speed_mps": 300.0, "blue_max_speed_mps": 300.0,
             "red_max_load_g": 8.0, "blue_max_load_g": 8.0,
             "red_load_limiter_activations": 0,
             "blue_load_limiter_activations": 0,
-            "red_missile_deaths": 10 if red_fixed else 0,
-            "blue_missile_deaths": 10 if blue_fixed else 0,
-            "first_red_launch_step": 10 if red_fixed else None,
-            "first_blue_launch_step": 10 if blue_fixed else None,
+            "red_missile_deaths": 10, "blue_missile_deaths": 10,
+            "first_red_launch_step": 10, "first_blue_launch_step": 10,
+            "red_mean_missile_lifetime_s": 1.0,
+            "blue_mean_missile_lifetime_s": 1.0,
+            "red_evasion_activations": 1 if red_mws else 0,
+            "blue_evasion_activations": 0,
+            "blue_target_switches": 0,
+            "blue_mws_override_agent_decisions": 0,
         }
     scenarios = [
-        row("fixed_vs_fixed"),
-        row("fixed_red_vs_straight_blue", red_fixed=True, blue_fixed=False),
-        row("straight_red_vs_fixed_blue", red_fixed=False, blue_fixed=True),
+        row("symmetric_fixed_vs_fixed", "symmetric_environment_audit",
+            red_mws=False, blue_mws=False),
+        row("training_profile", "training_profile_behavior_audit",
+            red_mws=True, blue_mws=False),
     ]
-    scenarios[1]["red_geometry"] = mirror_geometry
-    scenarios[1]["red_lock_mature"] = mirror_lock
+    scenarios[0]["red_geometry"] = mirror_geometry
+    scenarios[0]["red_lock_mature"] = mirror_lock
     return static, scenarios
 
 
@@ -651,8 +755,9 @@ def test_rule_audit_zero_hits_cannot_pass():
     static, scenarios = _synthetic_rule_audit(hits=0)
     result = evaluate_rule_audit(static, scenarios)
     assert result["status"] == "FAIL"
+    assert result["MissileEffectiveness"] == "FAIL"
     assert not result["checks"][
-        "missile_effectiveness.nonzero_fixed_hits"]
+        "MissileEffectiveness.both_teams_nonzero_hits"]
 
 
 def test_rule_audit_rejects_severe_geometry_and_lock_asymmetry():
@@ -660,8 +765,60 @@ def test_rule_audit_rejects_severe_geometry_and_lock_asymmetry():
         hits=2, mirror_geometry=10, mirror_lock=5)
     result = evaluate_rule_audit(static, scenarios)
     assert result["status"] == "FAIL"
-    assert not result["checks"]["mirror_symmetry.mirror_geometry_ok"]
-    assert not result["checks"]["mirror_symmetry.mirror_lock_mature"]
+    assert not result["checks"]["MirrorSymmetry.mirror_geometry_ok"]
+    assert not result["checks"]["MirrorSymmetry.mirror_lock_mature"]
+
+
+def test_rule_audit_high_overshoot_with_hits_is_warning():
+    static, scenarios = _synthetic_rule_audit(hits=1)
+    scenarios[0]["red_overshoot"] = 9
+    scenarios[0]["blue_overshoot"] = 9
+    result = evaluate_rule_audit(static, scenarios)
+    assert result["status"] == "PASS"
+    assert result["MissileEffectiveness"] == "WARNING"
+
+
+def test_rule_audit_uses_tight_initial_mirror_thresholds():
+    static, scenarios = _synthetic_rule_audit(hits=1)
+    static["initial_pairs"][0]["range_m"] = 10_001.01
+    result = evaluate_rule_audit(static, scenarios)
+    assert result["MirrorSymmetry"] == "FAIL"
+    assert not result["checks"][
+        "MirrorSymmetry.paired_range_error_le_1m"]
+
+
+def test_trajectory_summary_separates_never_closing_from_true_overshoot():
+    base = {
+        "seed": 3, "team": "red", "shooter_id": "red_0",
+        "target_id": "blue_0", "missile_speed_mps": 600.0,
+        "target_speed_mps": 300.0, "missile_velocity_to_LOS_angle_deg": 0.0,
+        "LOS_angular_rate_rad_s": 0.0, "PN_lateral_command_g": 0.0,
+        "PN_vertical_command_g": 0.0, "missile_position": [0, 0, 0],
+        "target_position": [1, 0, 0], "missile_velocity": [1, 0, 0],
+        "target_velocity": [0, 0, 0], "overshoot_counter": 0,
+    }
+    rows = [
+        {**base, "missile_id": "m0", "physics_frame": 1,
+         "flight_time_sec": 0.1, "range_m": 100.0,
+         "historical_min_range_m": 100.0, "range_delta_m": None,
+         "closing_speed_mps": -10.0, "has_ever_positive_closing": False,
+         "termination_reason": "overshoot"},
+        {**base, "missile_id": "m1", "physics_frame": 1,
+         "flight_time_sec": 0.1, "range_m": 100.0,
+         "historical_min_range_m": 100.0, "range_delta_m": None,
+         "closing_speed_mps": 10.0, "has_ever_positive_closing": True,
+         "termination_reason": ""},
+        {**base, "missile_id": "m1", "physics_frame": 2,
+         "flight_time_sec": 0.2, "range_m": 160.0,
+         "historical_min_range_m": 100.0, "range_delta_m": 60.0,
+         "closing_speed_mps": -10.0, "has_ever_positive_closing": True,
+         "termination_reason": "overshoot"},
+    ]
+    summary = summarize_trajectories(rows)["teams"]["red"]
+    assert summary["causal_classes"][
+        "never_established_positive_closing"] == 1
+    assert summary["causal_classes"][
+        "genuine_passed_closest_approach"] == 1
 
 
 def test_runtime_temp_ignore_patterns_match_actual_worker_filenames():

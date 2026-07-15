@@ -41,6 +41,7 @@ def _red_rule_actions(env: UavCombatEnv, obs: dict, mode: str) -> dict:
             forced_target_idx=index,
             own_position=np.asarray(sim.get_position()), own_heading=heading,
             paper_profile=True)
+        action[0] = np.clip(action[0], -10.0 / 90.0, 10.0 / 90.0)
         action[2] = _paper_absolute_action(0.0, 0.0, 300.0)[2]
         actions[aid] = action
     return actions
@@ -57,7 +58,8 @@ def _all_finite(value) -> bool:
 
 
 def _run_scenario(name: str, red_mode: str, blue_profile: str,
-                  seed: int, max_steps: int) -> dict:
+                  seed: int, max_steps: int, *, audit_kind: str,
+                  red_mws_enabled: bool, blue_mws_enabled: bool) -> dict:
     env = UavCombatEnv(
         max_num_red=3, max_num_blue=3, max_steps=max_steps,
         environment_profile=PAPER_MINIMAL_ENVIRONMENT_PROFILE,
@@ -65,9 +67,8 @@ def _run_scenario(name: str, red_mode: str, blue_profile: str,
     launch = {"red": Counter(), "blue": Counter()}
     try:
         obs, info = env.reset(seed=seed)
-        env.set_team_mws_enabled("red", red_mode != "straight")
-        env.set_team_mws_enabled(
-            "blue", blue_profile != "paper_minimal_straight_patrol_v1")
+        env.set_team_mws_enabled("red", red_mws_enabled)
+        env.set_team_mws_enabled("blue", blue_mws_enabled)
         first_launch = {"red": None, "blue": None}
         minimum_missile_distance_m = float("inf")
         finite = True
@@ -121,6 +122,9 @@ def _run_scenario(name: str, red_mode: str, blue_profile: str,
                         for row in aircraft_diag[team]), default=0.0)
         def diag_sum(team, key):
             return sum(int(row.get(key, 0)) for row in aircraft_diag[team])
+        def evasion_sum(team, key):
+            return sum(int(row.get("evasion", {}).get(key, 0))
+                       for row in aircraft_diag[team])
         def death_count(team, reason):
             return int(deaths_by_team[team].get(reason, 0))
         def missile_lifetimes(team):
@@ -141,10 +145,13 @@ def _run_scenario(name: str, red_mode: str, blue_profile: str,
         blue_overshoot = int(term.get("blue", {}).get("overshoot", 0))
         return {
             "name": name,
+            "audit_kind": audit_kind,
             "seed": int(seed),
             "steps": int(env.current_step),
             "red_mode": red_mode,
             "blue_profile": blue_profile,
+            "red_mws_enabled": bool(red_mws_enabled),
+            "blue_mws_enabled": bool(blue_mws_enabled),
             "winner": episode.get("winner", ""),
             "invalid_numerical_episode": bool(
                 episode.get("invalid_numerical_episode", False)),
@@ -229,6 +236,14 @@ def _run_scenario(name: str, red_mode: str, blue_profile: str,
                 "blue", "load_limiter_activations"),
             "first_red_launch_step": first_launch["red"],
             "first_blue_launch_step": first_launch["blue"],
+            "red_evasion_activations": evasion_sum("red", "activations"),
+            "blue_evasion_activations": evasion_sum("blue", "activations"),
+            "blue_target_switches": int(info.get(
+                "__blue_policy_diag__", {}).get(
+                    "blue_target_switches_total", 0)),
+            "blue_mws_override_agent_decisions": int(info.get(
+                "__blue_policy_diag__", {}).get(
+                    "blue_mws_override_agent_decisions", 0)),
         }
     finally:
         env.close()
@@ -258,6 +273,13 @@ def _initial_and_static_audit(seed: int) -> dict:
             })
         fingerprint = info["__environment_config__"][
             "environment_config_fingerprint"]
+        lane_spacings = {}
+        for team, planes in (("red", env.red_planes), ("blue", env.blue_planes)):
+            positions = [np.asarray(planes[f"{team}_{index}"].get_position())
+                         for index in range(3)]
+            lane_spacings[team] = [
+                float(np.linalg.norm(positions[index + 1] - positions[index]))
+                for index in range(2)]
         reference = environment_config_snapshot(
             DEFAULT_PAPER_ENVIRONMENT_CONFIG, num_red=3, num_blue=3,
             sim_freq=60, agent_interaction_steps=12, seed=seed,
@@ -271,6 +293,7 @@ def _initial_and_static_audit(seed: int) -> dict:
             "decision_frequency_hz": float(env.sim_freq / env.agent_interaction_steps),
             "max_episode_length": int(env.max_steps),
             "initial_pairs": pairs,
+            "lane_spacings_m": lane_spacings,
             "minimal_fingerprint": fingerprint,
             "reference_fingerprint": reference["environment_config_fingerprint"],
             "fingerprints_differ": fingerprint != reference[
@@ -294,40 +317,33 @@ def _relative_difference(a: float, b: float) -> float:
 
 
 def evaluate_rule_audit(static: dict, scenarios: list[dict]) -> dict:
-    mirror_errors = []
-    for row in static["initial_pairs"]:
-        mirror_errors.extend([
-            abs(row["range_m"] - 10_000.0),
-            abs(row["red_altitude_m"] - row["blue_altitude_m"]),
-            abs(row["red_speed_mps"] - row["blue_speed_mps"]),
-            abs(row["heading_separation_rad"] - np.pi),
-        ])
-    grouped = {
-        name: [row for row in scenarios if row["name"] == name]
-        for name in ("fixed_vs_fixed", "fixed_red_vs_straight_blue",
-                     "straight_red_vs_fixed_blue")}
+    symmetric = [row for row in scenarios
+                 if row.get("audit_kind") == "symmetric_environment_audit"]
+    training = [row for row in scenarios
+                if row.get("audit_kind") == "training_profile_behavior_audit"]
     def total(rows, field):
         return sum(float(row.get(field, 0)) for row in rows)
     def mean_present(rows, field):
         values = [float(row[field]) for row in rows if row.get(field) is not None]
         return float(np.mean(values)) if values else 0.0
-    fixed = grouped["fixed_vs_fixed"]
-    red_fixed = grouped["fixed_red_vs_straight_blue"]
-    blue_fixed = grouped["straight_red_vs_fixed_blue"]
-    fixed_red_hits = total(fixed, "red_hits")
-    fixed_blue_hits = total(fixed, "blue_hits")
+    red_hits = total(symmetric, "red_hits")
+    blue_hits = total(symmetric, "blue_hits")
+    red_launches = total(symmetric, "red_launches")
+    blue_launches = total(symmetric, "blue_launches")
+    red_overshoots = total(symmetric, "red_overshoot")
+    blue_overshoots = total(symmetric, "blue_overshoot")
     mirror_metrics = {
         "geometry_ok": (
-            total(red_fixed, "red_geometry"), total(blue_fixed, "blue_geometry"), 0.20),
+            total(symmetric, "red_geometry"), total(symmetric, "blue_geometry"), 0.20),
         "lock_mature": (
-            total(red_fixed, "red_lock_mature"), total(blue_fixed, "blue_lock_mature"), 0.20),
+            total(symmetric, "red_lock_mature"), total(symmetric, "blue_lock_mature"), 0.20),
         "launches": (
-            total(red_fixed, "red_launches"), total(blue_fixed, "blue_launches"), 0.20),
+            red_launches, blue_launches, 0.20),
         "hits": (
-            total(red_fixed, "red_hits"), total(blue_fixed, "blue_hits"), 0.30),
+            red_hits, blue_hits, 0.30),
         "first_launch_step": (
-            mean_present(red_fixed, "first_red_launch_step"),
-            mean_present(blue_fixed, "first_blue_launch_step"), 0.15),
+            mean_present(symmetric, "first_red_launch_step"),
+            mean_present(symmetric, "first_blue_launch_step"), 0.15),
     }
     mirror_checks = {
         f"mirror_{name}": (
@@ -335,7 +351,10 @@ def evaluate_rule_audit(static: dict, scenarios: list[dict]) -> dict:
         for name, (a, b, tolerance) in mirror_metrics.items()
     }
     mirror_checks["mirror_crash_count"] = abs(
-        total(red_fixed, "red_crashes") - total(blue_fixed, "blue_crashes")) <= 2
+        total(symmetric, "red_crashes") - total(symmetric, "blue_crashes")) <= 2
+    mirror_checks["symmetric_audit_only"] = bool(symmetric) and all(
+        not row["red_mws_enabled"] and not row["blue_mws_enabled"]
+        for row in symmetric)
     numerical_checks = {
         "finite_state_action_reward_log": all(
             row["finite_state_action_reward_log"] for row in scenarios),
@@ -352,74 +371,96 @@ def evaluate_rule_audit(static: dict, scenarios: list[dict]) -> dict:
                  or row["blue_load_limiter_activations"] > 0)
             for row in scenarios),
     }
-    rule_checks = {
+    initial_checks = {
+        "paired_range_error_le_1m": all(
+            abs(row["range_m"] - 10_000.0) <= 1.0
+            for row in static["initial_pairs"]),
+        "altitude_difference_le_0_1m": all(
+            abs(row["red_altitude_m"] - row["blue_altitude_m"]) <= 0.1
+            for row in static["initial_pairs"]),
+        "speed_difference_le_0_1mps": all(
+            abs(row["red_speed_mps"] - row["blue_speed_mps"]) <= 0.1
+            for row in static["initial_pairs"]),
+        "heading_separation_error_le_1e_4rad": all(
+            abs(row["heading_separation_rad"] - np.pi) <= 1e-4
+            for row in static["initial_pairs"]),
+        "lane_spacing_error_le_1m": all(
+            abs(spacing - 1_000.0) <= 1.0
+            for values in static["lane_spacings_m"].values()
+            for spacing in values),
+    }
+    closure_checks = {
         "profile_dimensions": static["entity_dim"] == 10
         and static["actor_obs_dim"] == 60 and static["critic_state_dim"] == 30,
         "timing": static["sim_freq"] == 60
         and static["agent_interaction_steps"] == 12
         and static["decision_frequency_hz"] == 5.0,
-        "initial_mirror": max(mirror_errors) < 25.0,
+        "initial_mirror": all(initial_checks.values()),
         "fingerprint_isolation": bool(static["fingerprints_differ"]),
-        "fixed_vs_fixed_red_fire_control": (
-            total(fixed, "red_geometry") > 0
-            and total(fixed, "red_lock_mature") > 0
-            and total(fixed, "red_launches") > 0 and fixed_red_hits > 0),
-        "fixed_vs_fixed_blue_fire_control": (
-            total(fixed, "blue_geometry") > 0
-            and total(fixed, "blue_lock_mature") > 0
-            and total(fixed, "blue_launches") > 0 and fixed_blue_hits > 0),
-        "fixed_red_vs_straight_blue_effective": (
-            total(red_fixed, "red_launches") > 0
-            and total(red_fixed, "red_hits") > 0),
-        "straight_red_vs_fixed_blue_effective": (
-            total(blue_fixed, "blue_launches") > 0
-            and total(blue_fixed, "blue_hits") > 0),
+        "red_fire_control_closure": (
+            total(symmetric, "red_geometry") > 0
+            and total(symmetric, "red_lock_mature") > 0
+            and red_launches > 0),
+        "blue_fire_control_closure": (
+            total(symmetric, "blue_geometry") > 0
+            and total(symmetric, "blue_lock_mature") > 0
+            and blue_launches > 0),
         "bounded_live_missiles": max(
             row["peak_live_missiles"] for row in scenarios) <= 6,
     }
     missile_checks = {
-        "nonzero_fixed_hits": (
-            fixed_red_hits > 0 and fixed_blue_hits > 0
-            and total(red_fixed, "red_hits") > 0
-            and total(blue_fixed, "blue_hits") > 0),
+        "both_teams_nonzero_hits": red_hits > 0 and blue_hits > 0,
         "missile_deaths_accounted": all(
             row["red_missile_deaths"] <= row["red_launches"]
             and row["blue_missile_deaths"] <= row["blue_launches"]
             for row in scenarios),
     }
+    red_overshoot_rate = red_overshoots / red_launches if red_launches else 0.0
+    blue_overshoot_rate = blue_overshoots / blue_launches if blue_launches else 0.0
+    if red_hits <= 0 or blue_hits <= 0:
+        missile_status = "FAIL"
+    elif max(red_overshoot_rate, blue_overshoot_rate) > 0.80:
+        missile_status = "WARNING"
+    else:
+        missile_status = "PASS"
+    training_checks = {
+        "red_mws_enabled": bool(training) and all(
+            row["red_mws_enabled"] for row in training),
+        "blue_mws_disabled": bool(training) and all(
+            not row["blue_mws_enabled"] for row in training),
+        "blue_no_evasion": all(
+            row["blue_evasion_activations"] == 0
+            and row["blue_mws_override_agent_decisions"] == 0
+            for row in training),
+        "blue_fixed_target_no_switch": all(
+            row["blue_target_switches"] == 0 for row in training),
+        "blue_fire_control_operational": (
+            total(training, "blue_geometry") > 0
+            and total(training, "blue_lock_mature") > 0
+            and total(training, "blue_launches") > 0),
+    }
     categories = {
-        "rule_environment_health": rule_checks,
-        "mirror_symmetry": mirror_checks,
-        "missile_effectiveness": missile_checks,
-        "numerical_stability": numerical_checks,
+        "EnvironmentNumericalHealth": numerical_checks,
+        "FireControlClosure": closure_checks,
+        "MissileEffectiveness": missile_checks,
+        "MirrorSymmetry": {**initial_checks, **mirror_checks},
+        "TrainingProfileBehavior": training_checks,
     }
     checks = {
         f"{category}.{name}": passed
         for category, values in categories.items()
         for name, passed in values.items()}
     aggregate = {
-        "fixed_vs_fixed_red_launches": total(fixed, "red_launches"),
-        "fixed_vs_fixed_blue_launches": total(fixed, "blue_launches"),
-        "fixed_vs_fixed_red_hits": fixed_red_hits,
-        "fixed_vs_fixed_blue_hits": fixed_blue_hits,
-        "mirror_red_fixed_geometry": total(red_fixed, "red_geometry"),
-        "mirror_blue_fixed_geometry": total(blue_fixed, "blue_geometry"),
-        "mirror_red_fixed_lock_mature": total(red_fixed, "red_lock_mature"),
-        "mirror_blue_fixed_lock_mature": total(blue_fixed, "blue_lock_mature"),
-        "mirror_red_fixed_launches": total(red_fixed, "red_launches"),
-        "mirror_blue_fixed_launches": total(blue_fixed, "blue_launches"),
-        "mirror_red_fixed_hits": total(red_fixed, "red_hits"),
-        "mirror_blue_fixed_hits": total(blue_fixed, "blue_hits"),
-        "total_red_launches": total(scenarios, "red_launches"),
-        "total_blue_launches": total(scenarios, "blue_launches"),
-        "total_red_hits": total(scenarios, "red_hits"),
-        "total_blue_hits": total(scenarios, "blue_hits"),
-        "total_red_overshoots": total(scenarios, "red_overshoot"),
-        "total_blue_overshoots": total(scenarios, "blue_overshoot"),
+        "total_red_launches": red_launches,
+        "total_blue_launches": blue_launches,
+        "total_red_hits": red_hits,
+        "total_blue_hits": blue_hits,
+        "total_red_overshoots": red_overshoots,
+        "total_blue_overshoots": blue_overshoots,
         "mean_red_missile_lifetime_s": mean_present(
-            scenarios, "red_mean_missile_lifetime_s"),
+            symmetric, "red_mean_missile_lifetime_s"),
         "mean_blue_missile_lifetime_s": mean_present(
-            scenarios, "blue_mean_missile_lifetime_s"),
+            symmetric, "blue_mean_missile_lifetime_s"),
     }
     aggregate["total_red_launch_to_hit_rate"] = (
         aggregate["total_red_hits"] / aggregate["total_red_launches"]
@@ -436,7 +477,21 @@ def evaluate_rule_audit(static: dict, scenarios: list[dict]) -> dict:
     for name, (a, b, _tolerance) in mirror_metrics.items():
         aggregate[f"mirror_{name}_relative_difference"] = _relative_difference(a, b)
     return {
-        "status": "PASS" if all(checks.values()) else "FAIL",
+        "status": "PASS" if (
+            all(numerical_checks.values()) and all(closure_checks.values())
+            and all(mirror_checks.values()) and all(initial_checks.values())
+            and all(training_checks.values()) and missile_status != "FAIL"
+        ) else "FAIL",
+        "EnvironmentNumericalHealth": (
+            "PASS" if all(numerical_checks.values()) else "FAIL"),
+        "FireControlClosure": (
+            "PASS" if all(closure_checks.values()) else "FAIL"),
+        "MissileEffectiveness": missile_status,
+        "MirrorSymmetry": (
+            "PASS" if all(mirror_checks.values())
+            and all(initial_checks.values()) else "FAIL"),
+        "TrainingProfileBehavior": (
+            "PASS" if all(training_checks.values()) else "FAIL"),
         "checks": checks,
         "categories": categories,
         "static": static,
@@ -453,12 +508,16 @@ def audit(seeds: list[int] | tuple[int, ...], max_steps: int) -> dict:
     scenarios = []
     for seed in seeds:
         scenarios.extend([
-            _run_scenario("fixed_vs_fixed", "fixed",
-                          "paper_minimal_fixed_pair_v1", seed, max_steps),
-            _run_scenario("fixed_red_vs_straight_blue", "fixed",
-                          "paper_minimal_straight_patrol_v1", seed, max_steps),
-            _run_scenario("straight_red_vs_fixed_blue", "straight",
-                          "paper_minimal_fixed_pair_v1", seed, max_steps),
+            _run_scenario(
+                "symmetric_fixed_vs_fixed", "fixed",
+                "paper_minimal_fixed_pair_v1", seed, max_steps,
+                audit_kind="symmetric_environment_audit",
+                red_mws_enabled=False, blue_mws_enabled=False),
+            _run_scenario(
+                "training_red_mws_vs_non_evasive_fixed_blue", "fixed",
+                "paper_minimal_fixed_pair_v1", seed, max_steps,
+                audit_kind="training_profile_behavior_audit",
+                red_mws_enabled=True, blue_mws_enabled=False),
         ])
     result = evaluate_rule_audit(static, scenarios)
     result["seeds"] = seeds
@@ -468,11 +527,17 @@ def audit(seeds: list[int] | tuple[int, ...], max_steps: int) -> dict:
 def _markdown(result: dict) -> str:
     lines = [f"# {result['status']}: paper_minimal_3v3_v1 audit"]
     for category, checks in result["categories"].items():
-        status = "PASS" if all(checks.values()) else "FAIL"
+        status = result.get(category, "PASS" if all(checks.values()) else "FAIL")
         lines.extend(["", f"## {category}: {status}", ""])
         lines.extend(
             f"- {'PASS' if passed else 'FAIL'}: `{name}`"
             for name, passed in checks.items())
+    lines.extend([
+        "", "## Audit semantics", "",
+        "- MirrorSymmetry uses only symmetric_environment_audit rows with both MWS gates disabled.",
+        "- TrainingProfileBehavior intentionally uses red scripted MWS and a non-evasive blue fixed opponent.",
+        "- This training-policy asymmetry is intentional and is not evidence of color-path bias.",
+    ])
     aggregate = result["aggregate"]
     lines.extend([
         "", "## Missile effectiveness", "",

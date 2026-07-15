@@ -23,6 +23,11 @@ from my_uav_env.alignment.reward_utils import (
 from configs.paper_minimal_3v3_spec import (
     PAPER_MINIMAL_ENVIRONMENT_PROFILE,
     REFERENCE_ENVIRONMENT_PROFILE,
+    minimal_environment_snapshot,
+)
+from configs.brma_mappo_paper_spec import (
+    DEFAULT_PAPER_ENVIRONMENT_CONFIG,
+    environment_config_snapshot,
 )
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
@@ -59,7 +64,8 @@ EVALUATION_FIELDNAMES = [
     "EnableBlueGCAS", "RewardVersion", "RewardMode", "ObsNormalization",
     "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
     "ActionDistribution", "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
-    "BluePolicyProfile", "EnvironmentProfile",
+    "BluePolicyProfile", "EnvironmentProfile", "EnvironmentConfigFingerprint",
+    "RedMWSMode", "BlueMWSMode",
     "RedGeometry", "RedLockMature", "BlueGeometry",
     "BlueLockMature", "RedTerminalReward", "NaNInfCount",
     "blue_target_switches_total", "blue_target_dead_switches",
@@ -85,7 +91,8 @@ EVALUATION_SUMMARY_FIELDNAMES = [
     "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
     "ActionDistribution", "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
     "BluePolicyProfile",
-    "EnvironmentProfile",
+    "EnvironmentProfile", "EnvironmentConfigFingerprint",
+    "RedMWSMode", "BlueMWSMode",
 ]
 
 
@@ -195,6 +202,18 @@ def _load_actor(args, device: torch.device):
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
     obs_dim = _compute_obs_dim(
         args.num_red, args.num_blue, is_red=True, obs_mode=args.obs_mode)
+    if args.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
+        environment_snapshot = minimal_environment_snapshot(
+            num_red=args.num_red, num_blue=args.num_blue,
+            sim_freq=60, agent_interaction_steps=12,
+            max_episode_length=args.max_steps, seed=args.seed,
+            blue_policy_profile=args.blue_policy_profile)
+    else:
+        environment_snapshot = environment_config_snapshot(
+            DEFAULT_PAPER_ENVIRONMENT_CONFIG,
+            num_red=args.num_red, num_blue=args.num_blue,
+            sim_freq=60, agent_interaction_steps=12, seed=args.seed,
+            blue_policy_profile=args.blue_policy_profile)
     expected_metadata = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": args.obs_mode,
@@ -223,9 +242,21 @@ def _load_actor(args, device: torch.device):
         "environment_profile": args.environment_profile,
         "num_red": args.num_red,
         "num_blue": args.num_blue,
+        "max_episode_length": args.max_steps,
+        "environment_config_fingerprint": environment_snapshot[
+            "environment_config_fingerprint"],
         "global_state_dim": _compute_global_state_dim(args.num_red, args.obs_mode),
         "actor_obs_dim": obs_dim,
     }
+    if args.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
+        expected_metadata.update({
+            "red_mws_mode": environment_snapshot["red_mws_mode"]["value"],
+            "blue_mws_mode": environment_snapshot["blue_mws_mode"]["value"],
+            "blue_missile_evasion_enabled": environment_snapshot[
+                "blue_missile_evasion_enabled"]["value"],
+            "mws_asymmetry_reason": environment_snapshot[
+                "mws_asymmetry_reason"]["value"],
+        })
     try:
         state = _unpack_and_validate_checkpoint(
             payload, expected_metadata, "actor")
@@ -404,6 +435,10 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         red_missile_hits = blue_deaths_missile
         blue_missile_hits = red_deaths_missile
         blue_diag = info.get("__blue_policy_diag__", {})
+        environment_metadata = info.get("__environment_config__", {})
+        def sourced_value(name):
+            value = environment_metadata.get(name, "")
+            return value.get("value", "") if isinstance(value, dict) else value
 
         altitude_config = (_minimal_altitude_reward_config()
                            if environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE
@@ -452,6 +487,10 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                 separators=(",", ":")),
             "BluePolicyProfile": blue_policy_profile,
             "EnvironmentProfile": environment_profile,
+            "EnvironmentConfigFingerprint": environment_metadata.get(
+                "environment_config_fingerprint", ""),
+            "RedMWSMode": sourced_value("red_mws_mode"),
+            "BlueMWSMode": sourced_value("blue_mws_mode"),
             "RedGeometry": int(launch_diag_totals["red"]["geometry_ok_pairs"]),
             "RedLockMature": int(launch_diag_totals["red"]["lock_mature_pairs"]),
             "BlueGeometry": int(launch_diag_totals["blue"]["geometry_ok_pairs"]),
@@ -528,6 +567,7 @@ def _aggregate_evaluation_summary(rows: list[dict]) -> dict:
                 "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
                 "ActionDistribution", "AltitudeRewardConfigVersion",
                 "AltitudeRewardConfig", "BluePolicyProfile", "EnvironmentProfile",
+                "EnvironmentConfigFingerprint", "RedMWSMode", "BlueMWSMode",
             )
         },
     }

@@ -300,11 +300,23 @@ def analyze_diagnostics(rows: list[dict], expected_steps: int,
     if rule_audit is not None and rule_audit.get("status") != "PASS":
         health_failures.append("规则环境审计 FAIL")
     eval_summary = eval_summary or {}
-    for field in ("CheckpointSchema", "EnvironmentProfile", "ObsNormalization"):
-        train_value = rows[-1].get(field) if rows else None
-        eval_value = eval_summary.get(field)
-        if train_value and eval_value and train_value != eval_value:
-            health_failures.append(f"checkpoint/评估 metadata 不一致: {field}")
+    metadata_fields = (
+        "CheckpointSchema", "EnvironmentProfile",
+        "EnvironmentConfigFingerprint", "ObsNormalization",
+        "RewardVersion", "RewardMode", "PIDProfile",
+        "MissileGuidanceMode", "ActionDistribution", "BluePolicyProfile",
+        "RedMWSMode", "BlueMWSMode", "NumRed", "NumBlue", "MaxSteps",
+    )
+    if eval_summary:
+        for field in metadata_fields:
+            train_value = rows[-1].get(field, "") if rows else ""
+            eval_value = eval_summary.get(field, "")
+            if train_value in (None, "") or eval_value in (None, ""):
+                health_failures.append(
+                    f"checkpoint/eval metadata field missing: {field}")
+            elif str(train_value) != str(eval_value):
+                health_failures.append(
+                    f"checkpoint/eval metadata mismatch: {field}")
 
     final_step = _last(rows, "Step")
     windows = {"burn_in": [], "middle": [], "late": []}

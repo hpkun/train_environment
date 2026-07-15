@@ -437,7 +437,7 @@ def test_blue_straight_profile_ignores_incoming_missile():
     assert env._evasion_diagnostics["blue_0"]["activations"] == 0
 
 
-def test_minimal_fixed_red_and_blue_use_same_mws_override():
+def test_minimal_training_red_uses_mws_and_fixed_blue_does_not():
     red_sim = _FakeBlueSim()
     blue_sim = _FakeBlueSim()
     red_sim.incoming = _FakeIncomingMissile()
@@ -447,10 +447,10 @@ def test_minimal_fixed_red_and_blue_use_same_mws_override():
         "red_0": np.zeros(3, dtype=np.float32),
         "blue_0": np.zeros(3, dtype=np.float32),
     })
-    assert targets["red_0"] == pytest.approx(targets["blue_0"])
     assert abs(targets["red_0"][1]) == pytest.approx(np.deg2rad(60.0))
+    assert targets["blue_0"][1] == pytest.approx(0.0)
     assert env._evasion_diagnostics["red_0"]["activations"] == 1
-    assert env._evasion_diagnostics["blue_0"]["activations"] == 1
+    assert env._evasion_diagnostics["blue_0"]["activations"] == 0
 
 
 def test_matrix_formal_fields_use_agent_decisions_and_two_heading_layers():

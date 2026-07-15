@@ -1622,6 +1622,21 @@ def _diag_rows(**overrides):
             "RedDeathsCrash": 0,
             "BlueDeathsMissile": 0,
             "BlueDeathsCrash": 0,
+            "CheckpointSchema": "vanilla_mappo_paper_env_v5",
+            "EnvironmentProfile": "paper_minimal_3v3_v1",
+            "EnvironmentConfigFingerprint": "fingerprint-a",
+            "ObsNormalization": "paper_fixed_v1",
+            "RewardVersion": "paper_literal_minimal_unspecified_v1",
+            "RewardMode": "paper_minimal_joint_v1",
+            "PIDProfile": "paper_minimal_shared_v1",
+            "MissileGuidanceMode": "paper_minimal_point_mass_v1",
+            "ActionDistribution": "state_dependent_diag_gaussian_env_clip_v2",
+            "BluePolicyProfile": "paper_minimal_fixed_pair_v1",
+            "RedMWSMode": "scripted_minimal_evasion_v1",
+            "BlueMWSMode": "disabled_fixed_opponent_v1",
+            "NumRed": 3,
+            "NumBlue": 3,
+            "MaxSteps": 1400,
         }
         row.update(overrides)
         base.append(row)
@@ -1740,6 +1755,32 @@ def test_speed_projection_failure_fails_health_not_learning_semantics():
         MaximumSpeedAfterLimiterMps=600.02), expected_steps=500)
     assert result["EnvironmentHealthStatus"] == "FAIL"
     assert any("600.01" in reason
+               for reason in result["EnvironmentHealthReasons"])
+
+
+def test_metadata_missing_or_mismatch_fails_environment_health():
+    from scripts.report_vanilla_mappo_diagnostic import analyze_diagnostics
+    rows = _diag_rows()
+    fields = (
+        "CheckpointSchema", "EnvironmentProfile",
+        "EnvironmentConfigFingerprint", "ObsNormalization",
+        "RewardVersion", "RewardMode", "PIDProfile",
+        "MissileGuidanceMode", "ActionDistribution", "BluePolicyProfile",
+        "RedMWSMode", "BlueMWSMode", "NumRed", "NumBlue", "MaxSteps")
+    matching = {field: rows[-1][field] for field in fields}
+    assert analyze_diagnostics(
+        rows, 500, matching)["EnvironmentHealthStatus"] == "PASS"
+    missing = dict(matching)
+    missing.pop("BlueMWSMode")
+    result = analyze_diagnostics(rows, 500, missing)
+    assert result["EnvironmentHealthStatus"] == "FAIL"
+    assert any("missing: BlueMWSMode" in reason
+               for reason in result["EnvironmentHealthReasons"])
+    mismatch = dict(matching)
+    mismatch["EnvironmentConfigFingerprint"] = "fingerprint-b"
+    result = analyze_diagnostics(rows, 500, mismatch)
+    assert result["EnvironmentHealthStatus"] == "FAIL"
+    assert any("mismatch: EnvironmentConfigFingerprint" in reason
                for reason in result["EnvironmentHealthReasons"])
 
 

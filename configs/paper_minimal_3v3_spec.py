@@ -29,8 +29,12 @@ REFERENCE_ENVIRONMENT_PROFILE = "brma_paper_profile_v1"
 MINIMAL_MISSILE_LAUNCH_SPEED_MPS = 600.0
 MINIMAL_MISSILE_HIT_RADIUS_M = 300.0
 MINIMAL_MISSILE_OVERSHOOT_WINDOW_S = 0.5
+MINIMAL_MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M = 50.0
+MINIMAL_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS = 1.0
 MINIMAL_MISSILE_RNG_VERSION = "seedsequence_team_pair_launch_v1"
 MINIMAL_EXTREME_LOAD_INVALID_THRESHOLD_G = 30.0
+MINIMAL_RED_MWS_MODE = "scripted_minimal_evasion_v1"
+MINIMAL_BLUE_MWS_MODE = "disabled_fixed_opponent_v1"
 
 
 MINIMAL_SCENARIO = ScenarioConfig(
@@ -121,6 +125,11 @@ MINIMAL_PROFILE_METADATA = {
     "sensor_profile": sv("paper_minimal_deterministic_v1", PAPER_INFERRED),
     "blue_policy_profile": sv("paper_minimal_fixed_pair_v1", PAPER_INFERRED),
     "mws_evasion_profile": sv("paper_minimal_mws_evasion_v1", PAPER_INFERRED),
+    "red_mws_mode": sv(MINIMAL_RED_MWS_MODE, PAPER_INFERRED),
+    "blue_mws_mode": sv(MINIMAL_BLUE_MWS_MODE, PAPER_MINIMAL_SOURCE),
+    "blue_missile_evasion_enabled": sv(False, PAPER_MINIMAL_SOURCE),
+    "mws_asymmetry_reason": sv(
+        "learnability_stage1_minimal_opponent", PAPER_MINIMAL_SOURCE),
     "pid_profile": sv("paper_minimal_shared_v1", PAPER_INFERRED),
     "missile_profile": sv("paper_minimal_point_mass_v1", PAPER_INFERRED),
     "reward_version": sv("paper_literal_minimal_unspecified_v1", PAPER_INFERRED),
@@ -139,6 +148,14 @@ MINIMAL_PROFILE_METADATA = {
         MINIMAL_MISSILE_HIT_RADIUS_M, PAPER_MINIMAL_SOURCE),
     "missile_overshoot_window_s": sv(
         MINIMAL_MISSILE_OVERSHOOT_WINDOW_S, PAPER_MINIMAL_SOURCE),
+    "missile_overshoot_distance_hysteresis_m": sv(
+        MINIMAL_MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M,
+        PAPER_MINIMAL_SOURCE),
+    "missile_positive_closing_threshold_mps": sv(
+        MINIMAL_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS,
+        PAPER_MINIMAL_SOURCE),
+    "initial_missile_direction_mode": sv(
+        "target_los_v1", PAPER_MINIMAL_SOURCE),
     "missile_rng_version": sv(
         MINIMAL_MISSILE_RNG_VERSION, PAPER_MINIMAL_SOURCE),
     "target_deconfliction": sv("hot_update_live_missile_target_v1", PAPER_INFERRED),
@@ -173,7 +190,11 @@ def minimal_environment_snapshot(*, num_red: int, num_blue: int, sim_freq: int,
         "environment_config": asdict(MINIMAL_PAPER_ENVIRONMENT_CONFIG),
         "seed": seed,
     })
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    fingerprint_payload = dict(payload)
+    fingerprint_payload.pop("seed", None)
+    encoded = json.dumps(
+        fingerprint_payload, sort_keys=True, separators=(",", ":"),
+        default=str)
     payload["environment_config_fingerprint"] = hashlib.sha256(
         encoded.encode("utf-8")).hexdigest()
     return payload

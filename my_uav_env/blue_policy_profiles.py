@@ -54,6 +54,7 @@ class BluePolicyController:
     def blue_mws_override_enabled(self) -> bool:
         return self.profile not in (
             "fixed_pair_no_mws_v1", "frozen_route_blue_v1",
+            "paper_minimal_fixed_pair_v1",
             "paper_minimal_straight_patrol_v1")
 
     def clear(self) -> None:
@@ -395,7 +396,8 @@ class BluePolicyController:
             action = np.asarray(actions.get(blue_id, np.zeros(3)), dtype=np.float32)
             detected = False
             if self.profile not in (
-                    "frozen_route_blue_v1", "paper_minimal_straight_patrol_v1"):
+                    "frozen_route_blue_v1", "paper_minimal_fixed_pair_v1",
+                    "paper_minimal_straight_patrol_v1"):
                 warning = np.asarray(obs.get("missile_warning", [0.0])).reshape(-1)
                 detected = bool(mws_detected.get(
                     blue_id, warning[0] > 0.5 if warning.size else False))
