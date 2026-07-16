@@ -16,7 +16,8 @@ from algorithms.happo.vanilla_happo_checkpoint import (
     save_vanilla_happo_checkpoint)
 from scripts.audit_tam_paper_vanilla_happo import audit, environment_contract_unchanged
 from scripts.tam_output_paths import resolve_tam_output
-from scripts.vanilla_happo_runtime import update_side_timing
+from scripts.vanilla_happo_runtime import (
+    stack_controlled_rule_actions, update_side_timing)
 from scripts.vanilla_happo_runtime import seed_all
 from scripts.train_tam_paper_vanilla_happo import (
     agent_update_contract, is_episode_boundary, resume_seed_state,
@@ -442,6 +443,44 @@ def test_red_and_blue_detection_and_attack_times_are_separate():
     update_side_timing(tracker, info, [red, blue])
     assert tracker["red"]["first_detection_time_s"] == 2.0
     assert tracker["red"]["first_attack_range_entry_s"] == 2.0
+
+
+def test_rule_action_stack_fills_only_dead_controlled_agent():
+    agents = [
+        SimpleNamespace(agent_id="red_0", alive=False),
+        SimpleNamespace(agent_id="red_1", alive=True),
+    ]
+    env = SimpleNamespace(
+        agent_ids=["red_0", "red_1"],
+        task=SimpleNamespace(agents=agents),
+        build_rule_actions=lambda _: {"red_1": np.array([24, 20, 20, 20])},
+    )
+    actions = stack_controlled_rule_actions(env)
+    assert actions.shape == (2, 4)
+    assert np.issubdtype(actions.dtype, np.integer)
+    assert actions.tolist() == [[20, 20, 20, 20], [24, 20, 20, 20]]
+
+
+def test_rule_action_stack_rejects_missing_alive_agent_action():
+    env = SimpleNamespace(
+        agent_ids=["red_0"],
+        task=SimpleNamespace(
+            agents=[SimpleNamespace(agent_id="red_0", alive=True)]),
+        build_rule_actions=lambda _: {},
+    )
+    with pytest.raises(RuntimeError, match="red_0"):
+        stack_controlled_rule_actions(env)
+
+
+def test_rule_action_stack_rejects_wrong_action_shape():
+    env = SimpleNamespace(
+        agent_ids=["red_0"],
+        task=SimpleNamespace(
+            agents=[SimpleNamespace(agent_id="red_0", alive=True)]),
+        build_rule_actions=lambda _: {"red_0": np.array([20, 20, 20])},
+    )
+    with pytest.raises(RuntimeError, match=r"shape \(4,\)"):
+        stack_controlled_rule_actions(env)
 
 
 def test_output_path_guard_rejects_parent_and_absolute_escape(tmp_path):

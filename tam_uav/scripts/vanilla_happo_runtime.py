@@ -91,6 +91,28 @@ def _new_side_tracker():
             for side in ("red", "blue")}
 
 
+def stack_controlled_rule_actions(env):
+    """Stack rule actions in controlled-agent order, filling dead agents only."""
+    rule = env.build_rule_actions(env.agent_ids)
+    by_id = {agent.agent_id: agent for agent in env.task.agents}
+    actions = []
+    for aid in env.agent_ids:
+        agent = by_id.get(aid)
+        if agent is None:
+            raise RuntimeError(f"controlled agent {aid!r} is missing from env.task.agents")
+        if aid in rule:
+            action = np.asarray(rule[aid], dtype=np.int64)
+        elif agent.alive:
+            raise RuntimeError(f"alive controlled agent {aid!r} has no rule action")
+        else:
+            action = np.full(4, 20, dtype=np.int64)
+        if action.shape != (4,):
+            raise RuntimeError(
+                f"rule action for {aid!r} must have shape (4,), got {action.shape}")
+        actions.append(action)
+    return np.stack(actions).astype(np.int64, copy=False)
+
+
 def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo"):
     records = []
     rng = np.random.default_rng(seed)
@@ -108,8 +130,7 @@ def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo"
                 actions = rng.integers(0, 40, size=(env.num_agents, 4))
             elif baseline == "rule":
                 env.prepare_decision_context()
-                rule = env.build_rule_actions(env.agent_ids)
-                actions = np.stack([rule[aid] for aid in env.agent_ids])
+                actions = stack_controlled_rule_actions(env)
             else:
                 with torch.no_grad():
                     actions = policy.act(flattened_obs(env, obs), env.get_state(),
