@@ -13,15 +13,21 @@ def potential(geometry):
 
 
 def terminal_reward(event):
-    if event in ("red_hit", "blue_crash"):
+    if event in ("red_hit", "blue_crash", "blue_numerical_invalid"):
         return 10.0
-    if event in ("blue_hit", "red_crash"):
+    if event in ("blue_hit", "red_crash", "red_numerical_invalid"):
         return -10.0
     return 0.0
 
 
 def step_reward(previous_potential, next_potential, red_dwell_delta,
-                blue_dwell_delta, event=None):
+                blue_dwell_delta, event=None, action=None,
+                previous_action=None):
+    smooth_penalty = 0.0
+    if action is not None and previous_action is not None:
+        smooth_penalty = 0.002 * float(np.mean(
+            (np.asarray(action) - np.asarray(previous_action)) ** 2))
     shaped = (0.99 * next_potential - previous_potential - 0.001
-              + 0.02 * (red_dwell_delta - blue_dwell_delta))
+              + 0.02 * (red_dwell_delta - blue_dwell_delta)
+              - smooth_penalty)
     return float(shaped + terminal_reward(event))

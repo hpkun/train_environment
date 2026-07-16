@@ -18,8 +18,8 @@ def state(north, speed, heading=0.0):
 
 def test_observation_is_finite_float32_and_in_space():
     observation = build_observation(state(0, 270), state(5000, 240), 0.2, 0.0)
-    space = spaces.Box(-1.0, 1.0, shape=(16,), dtype=np.float32)
-    assert observation.shape == (16,)
+    space = spaces.Box(-1.0, 1.0, shape=(20,), dtype=np.float32)
+    assert observation.shape == (20,)
     assert observation.dtype == np.float32
     assert np.all(np.isfinite(observation))
     assert space.contains(observation)

@@ -1,4 +1,4 @@
-"""Fixed 16-dimensional observation construction."""
+"""Fixed 20-dimensional observation construction."""
 
 from __future__ import annotations
 
@@ -22,5 +22,8 @@ def build_observation(red_state, blue_state, red_dwell, blue_dwell):
         (blue_state["true_airspeed"] - 250.0) / 100.0,
         np.sin(relative_heading), np.cos(relative_heading),
         red_dwell, blue_dwell,
+        np.sin(red_state["heading"]), np.cos(red_state["heading"]),
+        -red_state["v_down"] / 100.0,
+        -blue_state["v_down"] / 100.0,
     ], dtype=np.float32)
     return np.clip(values, -1.0, 1.0).astype(np.float32)
