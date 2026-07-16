@@ -49,3 +49,20 @@ Smoke outputs prove workflow execution only; they are not validated flight
 parameters. Timestamped artifacts are written under `aircombat_env_v1/outputs`
 and never overwrite prior runs. See `PID_DESIGN.md` for formulas, status rules,
 and metric definitions.
+
+## Minimal JSBSim 1v1 environment
+
+`AirCombat1v1Env` is a single-agent Gymnasium environment: external actions
+control red and an internal `straight` or pure-`pursuit` rule controls blue.
+The action is a three-vector for target pitch, relative heading, and speed;
+the observation is a clipped 16-vector. One environment step holds both
+commands for 12 interleaved 60 Hz JSBSim/PID frames.
+
+The fixed `tail_chase` scenario uses a geometric attack zone instead of
+missiles. This is intentionally only a learnability check, with no radar,
+weapons, rewards beyond the small geometric potential, or multi-agent API.
+
+```powershell
+python aircombat_env_v1/scripts/check_1v1_env.py
+python aircombat_env_v1/scripts/run_rule_1v1.py --episodes 5 --opponent straight
+```

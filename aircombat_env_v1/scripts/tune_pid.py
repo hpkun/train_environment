@@ -30,9 +30,6 @@ from aircombat_env_v1.validation import quick_cases, run_validation_case
 
 SEED = 20260316
 FAILURE_BASE = 1e6
-PITCH_INTEGRAL_BASELINE = (
-    ROOT / "aircombat_env_v1" / "outputs" / "tuning_20260716_145324_216384"
-    / "candidate_config.yaml")
 PITCH_INTEGRAL_VALUES = (0.0, 0.001, 0.0025, 0.005, 0.01, 0.02)
 
 
@@ -401,8 +398,7 @@ def main():
     parser.add_argument("--pitch-integral-only", action="store_true")
     args = parser.parse_args()
     if args.config is None:
-        args.config = (PITCH_INTEGRAL_BASELINE if args.pitch_integral_only
-                       else DEFAULT_CONFIG)
+        args.config = DEFAULT_CONFIG
     durations = {"roll_pd": args.roll_duration, "pitch_pd": args.pitch_duration,
                  "speed_pi": args.speed_duration}
     if args.joint_duration <= 0:
