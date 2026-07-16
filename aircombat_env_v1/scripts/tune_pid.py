@@ -20,7 +20,8 @@ if str(ROOT) not in sys.path:
 
 from aircombat_env_v1.aircraft import AircraftSimulator
 from aircombat_env_v1.config import DEFAULT_CONFIG, load_config, mark_candidate, save_config
-from aircombat_env_v1.execution import bounded_combined_command, run_command_hold
+from aircombat_env_v1.execution import (bounded_combined_command, run_command_hold,
+                                        then_level_command)
 from aircombat_env_v1.metrics import (aggregate_case_metrics, stable_segment_errors,
                                       trajectory_metrics)
 from aircombat_env_v1.pid import PaperAutopilot
@@ -60,6 +61,16 @@ def prepare_config(config):
     prepared["pid"]["roll"]["ki"] = 0.0
     prepared["pid"]["pitch"]["ki"] = 0.0
     prepared["pid"]["speed"]["kd"] = 0.0
+    return prepared
+
+
+def prepare_pitch_integral_config(config, pitch_ki):
+    """Change only pitch.ki while preserving all previously tuned gains."""
+    prepared = copy.deepcopy(config)
+    prepared["pid"]["roll"]["ki"] = 0.0
+    prepared["pid"]["pitch"]["ki"] = float(pitch_ki)
+    prepared["pid"]["speed"]["kd"] = 0.0
+    prepared["pid"].setdefault("pitch_integral_output_limit", 0.15)
     return prepared
 
 
@@ -122,9 +133,14 @@ def run_case(simulator, config, case, duration, strict_health=False):
     decisions = max(1, math.ceil(duration * decision_hz))
     rows, failure = [], None
     for decision in range(decisions):
-        target = (bounded_combined_command(
-            decision, 250.0, duration, decision_hz, stable_duration=10.0)
-                  if case.get("dynamic") else case["target"])
+        if case.get("command") == "descent_then_level":
+            target = then_level_command(
+                decision, 250.0, -5.0, decision_hz, maneuver_duration=20.0)
+        elif case.get("dynamic"):
+            target = bounded_combined_command(
+                decision, 250.0, duration, decision_hz, stable_duration=20.0)
+        else:
+            target = case["target"]
         held, failure = run_command_hold(simulator, controller, target, hold)
         rows.extend(held)
         if failure:
@@ -147,7 +163,8 @@ def run_case(simulator, config, case, duration, strict_health=False):
         cost += failure_penalty(metrics, completed_fraction)
     return {"name": case["name"], "complete": complete,
             "completed_fraction": completed_fraction, "cost": cost,
-            "health_failure_reasons": health_reasons, "metrics": metrics}
+            "health_failure_reasons": health_reasons, "metrics": metrics,
+            "rows": rows}
 
 
 def evaluate(simulator, config, cases, duration, strict_health=False):
@@ -199,6 +216,156 @@ def write_stage(output, stage, trace, report, config):
     save_config(mark_candidate(copy.deepcopy(config)), output / f"{stage}_candidate.yaml")
 
 
+def pitch_integral_cases():
+    return [
+        {"name": "descent_then_level", "command": "descent_then_level"},
+        {"name": "level", "target": (0.0, 0.0, 250.0)},
+        {"name": "speed_280", "target": (0.0, 0.0, 280.0)},
+        {"name": "heading_+30", "target": (0.0, np.deg2rad(30.0), 250.0)},
+        {"name": "bounded_combined", "dynamic": True},
+    ]
+
+
+def pitch_integral_grid(first_best=None):
+    if first_best is None:
+        return np.linspace(0.0, 0.005, 21)
+    half_width = 0.005 / 20.0
+    lower = max(0.0, float(first_best) - half_width)
+    upper = min(0.005, float(first_best) + half_width)
+    return np.linspace(lower, upper, 11)
+
+
+def evaluate_pitch_integral(simulator, config, pitch_ki, duration):
+    candidate = prepare_pitch_integral_config(config, pitch_ki)
+    results = []
+    for case in pitch_integral_cases():
+        result = run_case(simulator, candidate, case, duration)
+        result["metrics"].update(stable_segment_errors(
+            result["rows"], 10.0, candidate["timing"]["sim_frequency_hz"]))
+        health = []
+        if result["complete"]:
+            health = joint_health_reasons(
+                result["metrics"], candidate["validation_thresholds"], True)
+        result["health_failure_reasons"] = health
+        result["complete"] = result["complete"] and not health
+        if health:
+            result["cost"] += failure_penalty(
+                result["metrics"], result["completed_fraction"])
+        results.append(result)
+    metrics = aggregate_case_metrics(results)
+    stable_keys = ("stable_pitch_error_deg", "stable_heading_error_deg",
+                   "stable_speed_error_mps")
+    for key in stable_keys:
+        metrics[key] = float(max(result["metrics"][key] for result in results))
+    cost = float(np.mean([result["cost"] for result in results]))
+    return cost, metrics, results, candidate
+
+
+def pitch_integral_candidate_valid(pitch_ki, cost, baseline_cost, metrics):
+    return bool(pitch_ki > 0.0 and np.isfinite(cost)
+                and metrics["failed_case_count"] == 0 and cost < baseline_cost)
+
+
+def require_pitch_integral_candidate(valid):
+    if not valid:
+        raise RuntimeError(
+            "refusing --accept-candidate: no valid pitch integral candidate")
+
+
+def write_trajectory(path, rows):
+    fields = list(dict.fromkeys(key for row in rows for key in row))
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def run_pitch_integral_only(args):
+    output = (ROOT / "aircombat_env_v1" / "outputs" /
+              f"pitch_integral_{datetime.now():%Y%m%d_%H%M%S_%f}")
+    output.mkdir(parents=True, exist_ok=False)
+    base = prepare_pitch_integral_config(load_config(args.config), 0.0)
+    simulator = AircraftSimulator(base["timing"]["sim_frequency_hz"])
+    baseline_cost, baseline_metrics, baseline_results, _ = evaluate_pitch_integral(
+        simulator, base, 0.0, args.joint_duration)
+    records = []
+
+    def evaluate_grid(values, refinement_round):
+        evaluated = []
+        for pitch_ki in values:
+            cost, metrics, results, candidate = evaluate_pitch_integral(
+                simulator, base, float(pitch_ki), args.joint_duration)
+            valid = pitch_integral_candidate_valid(
+                float(pitch_ki), cost, baseline_cost, metrics)
+            record = {
+                "refinement_round": refinement_round, "pitch_ki": float(pitch_ki),
+                "total_cost": cost,
+                "failed_case_count": metrics["failed_case_count"],
+                "failed_cases": ";".join(metrics["failed_cases"]),
+                "stable_pitch_error_deg": metrics["stable_pitch_error_deg"],
+                "stable_heading_error_deg": metrics["stable_heading_error_deg"],
+                "stable_speed_error_mps": metrics["stable_speed_error_mps"],
+                "maximum_alpha_deg": metrics["maximum_alpha_deg"],
+                "maximum_beta_deg": metrics["maximum_beta_deg"],
+                "maximum_load_factor": metrics["maximum_load_factor"],
+                "elevator_saturation_ratio": metrics["elevator_saturation_ratio"],
+                "candidate_valid": valid,
+            }
+            records.append(record)
+            evaluated.append((cost, float(pitch_ki), metrics, results, candidate, valid))
+            print(f"pitch.ki={pitch_ki:.7f} cost={cost:.6g} "
+                  f"failed={metrics['failed_case_count']} valid={valid}")
+        return evaluated
+
+    first = evaluate_grid(pitch_integral_grid(), 1)
+    first_best = min(first, key=lambda item: item[0])[1]
+    second = evaluate_grid(pitch_integral_grid(first_best), 2)
+    valid_candidates = [item for item in first + second if item[5]]
+    if valid_candidates:
+        best = min(valid_candidates, key=lambda item: item[0])
+        improved = True
+    else:
+        best = (baseline_cost, 0.0, baseline_metrics, baseline_results, base, False)
+        improved = False
+    best_cost, best_ki, best_metrics, best_results, candidate, valid = best
+    candidate = mark_candidate(prepare_pitch_integral_config(candidate, best_ki))
+    fields = list(records[0])
+    with (output / "pitch_integral_candidates.csv").open(
+            "w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(records)
+    best_json = {
+        "baseline_pitch_ki": 0.0, "baseline_cost": baseline_cost,
+        "best_pitch_ki": best_ki, "best_cost": best_cost,
+        "improved_over_baseline": improved, "candidate_valid": valid,
+        "failed_case_count": best_metrics["failed_case_count"],
+        "failed_cases": best_metrics["failed_cases"],
+    }
+    (output / "pitch_integral_best.json").write_text(
+        json.dumps(best_json, indent=2), encoding="utf-8")
+    save_config(candidate, output / "candidate_config.yaml")
+    for result in best_results:
+        write_trajectory(output / f"{result['name']}_best_trajectory.csv",
+                         result["rows"])
+    acceptance = {
+        "acceptance_eligible": bool(valid),
+        "all_five_cases_passed": best_metrics["failed_case_count"] == 0,
+        "improved_over_baseline": improved,
+        "best_pitch_ki": best_ki,
+    }
+    (output / "acceptance.json").write_text(
+        json.dumps(acceptance, indent=2), encoding="utf-8")
+    if args.accept_candidate:
+        require_pitch_integral_candidate(valid)
+        save_config(candidate, args.config)
+        print(f"accepted pitch integral candidate into {args.config}")
+    if not valid:
+        print("no valid non-zero pitch integral candidate; pitch.ki remains 0")
+    print(f"outputs={output}")
+    return output
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -209,10 +376,16 @@ def main():
     parser.add_argument("--maxiter", type=int, default=6)
     parser.add_argument("--popsize", type=int, default=6)
     parser.add_argument("--accept-candidate", action="store_true")
+    parser.add_argument("--pitch-integral-only", action="store_true")
     args = parser.parse_args()
     durations = {"roll_pd": args.roll_duration, "pitch_pd": args.pitch_duration,
                  "speed_pi": args.speed_duration}
-    if min([*durations.values(), args.joint_duration]) <= 0 or args.maxiter < 1 or args.popsize < 2:
+    if args.joint_duration <= 0:
+        parser.error("joint-duration must be positive")
+    if args.pitch_integral_only:
+        run_pitch_integral_only(args)
+        return
+    if min(durations.values()) <= 0 or args.maxiter < 1 or args.popsize < 2:
         parser.error("durations/maxiter/popsize are out of range")
     output = (ROOT / "aircombat_env_v1" / "outputs" /
               f"tuning_{datetime.now():%Y%m%d_%H%M%S_%f}")

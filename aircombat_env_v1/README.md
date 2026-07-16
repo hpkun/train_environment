@@ -16,6 +16,7 @@ python aircombat_env_v1/scripts/find_trim.py
 python aircombat_env_v1/scripts/find_trim.py --accept
 python aircombat_env_v1/scripts/tune_pid.py
 python aircombat_env_v1/scripts/tune_pid.py --accept-candidate
+python aircombat_env_v1/scripts/tune_pid.py --pitch-integral-only --config path/to/candidate_config.yaml --joint-duration 90
 python aircombat_env_v1/scripts/validate_pid.py --mode quick
 python aircombat_env_v1/scripts/validate_pid.py --mode full
 python aircombat_env_v1/scripts/validate_pid.py --mode full --mark-validated

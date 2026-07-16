@@ -60,6 +60,11 @@ first reaches its target; settling requires the error to remain within its
 channel tolerance through the end of that step segment. Heading calculations
 use circular angle differences.
 
+The optional pitch integral contribution is capped at `0.15` of normalized
+elevator command. This is a local engineering anti-windup safety limit, not a
+paper parameter. `tune_pid.py --pitch-integral-only` performs a deterministic
+two-stage scalar grid search without changing Roll PD, Pitch PD, or Speed PI.
+
 Multi-case performance integrals and control energies are averaged. Safety,
 saturation, altitude loss, and final errors use their worst-case maxima. Failed
 optimization cases receive finite, completion-sensitive penalties so the

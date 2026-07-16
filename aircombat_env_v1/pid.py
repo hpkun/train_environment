@@ -20,7 +20,8 @@ class PIDLoop:
     """PID with conditional integration, output limits and derivative filtering."""
 
     def __init__(self, kp, ki, kd, output_min, output_max,
-                 integral_error_limit=float("inf"), derivative_filter_tau=0.0):
+                 integral_error_limit=float("inf"), derivative_filter_tau=0.0,
+                 integral_output_limit=None):
         if output_min >= output_max:
             raise ValueError("output_min must be less than output_max")
         if integral_error_limit < 0.0 or derivative_filter_tau < 0.0:
@@ -29,6 +30,10 @@ class PIDLoop:
         self.output_min, self.output_max = float(output_min), float(output_max)
         self.integral_error_limit = float(integral_error_limit)
         self.derivative_filter_tau = float(derivative_filter_tau)
+        self.integral_output_limit = (
+            None if integral_output_limit is None else float(integral_output_limit))
+        if self.integral_output_limit is not None and self.integral_output_limit < 0.0:
+            raise ValueError("integral_output_limit must be non-negative")
         self.reset()
 
     def reset(self):
@@ -50,6 +55,10 @@ class PIDLoop:
         candidate_integral = self.integral
         if abs(error) <= self.integral_error_limit:
             candidate_integral += error * dt
+        if self.ki != 0.0 and self.integral_output_limit is not None:
+            integral_limit = self.integral_output_limit / abs(self.ki)
+            candidate_integral = float(np.clip(
+                candidate_integral, -integral_limit, integral_limit))
 
         def unconstrained(integral):
             return (self.kp * error + self.ki * integral
@@ -70,7 +79,8 @@ class PaperAutopilot:
     def __init__(self, roll_gains, pitch_gains, speed_gains, elevator_trim,
                  throttle_base, actuator_sign_elevator,
                  integral_error_limits=(0.35, 0.25, 40.0),
-                 derivative_filter_tau=0.05):
+                 derivative_filter_tau=0.05,
+                 pitch_integral_output_limit=0.15):
         self.elevator_trim = float(elevator_trim)
         self.throttle_base = float(throttle_base)
         self.actuator_sign_elevator = float(actuator_sign_elevator)
@@ -86,7 +96,8 @@ class PaperAutopilot:
         self.roll_pid = PIDLoop(*roll.__dict__.values(), -1.0, 1.0,
                                 integral_error_limits[0], derivative_filter_tau)
         self.pitch_pid = PIDLoop(*pitch.__dict__.values(), -1.0, 1.0,
-                                 integral_error_limits[1], derivative_filter_tau)
+                                 integral_error_limits[1], derivative_filter_tau,
+                                 pitch_integral_output_limit)
         self.speed_pid = PIDLoop(*speed.__dict__.values(), -self.throttle_base,
                                  1.0 - self.throttle_base,
                                  integral_error_limits[2], derivative_filter_tau)
@@ -99,7 +110,8 @@ class PaperAutopilot:
                    config["trim"]["throttle_base"],
                    config["actuator_sign_elevator"],
                    tuple(pid["integral_error_limits"]),
-                   pid["derivative_filter_tau"])
+                   pid["derivative_filter_tau"],
+                   pid.get("pitch_integral_output_limit", 0.15))
 
     def reset(self):
         self.roll_pid.reset()

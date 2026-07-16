@@ -30,6 +30,30 @@ def test_pid_rejects_invalid_time_step():
         loop.step(0.2, 0.0)
 
 
+def test_integral_output_limit_clamps_integral_contribution():
+    loop = PIDLoop(0.0, 2.0, 0.0, -10.0, 10.0,
+                   integral_output_limit=0.15)
+    for _ in range(100):
+        loop.step(1.0, 0.1)
+    assert abs(loop.ki * loop.integral) <= 0.15
+
+
+def test_pid_reset_clears_integral_state():
+    loop = PIDLoop(0.0, 1.0, 0.0, -10.0, 10.0)
+    loop.step(1.0, 0.5)
+    assert loop.integral != 0.0
+    loop.reset()
+    assert loop.integral == 0.0
+
+
+def test_zero_integral_gain_is_unchanged_by_output_limit():
+    limited = PIDLoop(1.0, 0.0, 0.0, -1.0, 1.0,
+                      integral_output_limit=0.15)
+    unlimited = PIDLoop(1.0, 0.0, 0.0, -1.0, 1.0)
+    assert [limited.step(0.2, 0.1) for _ in range(5)] == [
+        unlimited.step(0.2, 0.1) for _ in range(5)]
+
+
 def test_rudder_is_always_zero():
     assert make_autopilot().step(0, 0, 0, 250, 0.1, 0.2, 260, 0.02)[2] == 0.0
 

@@ -36,6 +36,8 @@ pid:
   - 0.25
   - 40.0
   derivative_filter_tau: 0.05
+  # Local engineering safety limit, not a paper parameter.
+  pitch_integral_output_limit: 0.15
 validation_thresholds:
   no_nan_or_inf: true
   no_crash: true

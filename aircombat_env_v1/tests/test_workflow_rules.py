@@ -79,3 +79,32 @@ def test_quick_mode_contains_exactly_eight_cases():
 def test_mark_validated_rejects_quick_mode():
     with pytest.raises(ValueError, match="only with --mode full"):
         validate_pid.ensure_mark_validated_allowed("quick", True)
+
+
+def test_pitch_integral_only_preserves_all_other_tuned_parameters():
+    config = load_config()
+    original = {
+        "roll": dict(config["pid"]["roll"]),
+        "pitch_kp": config["pid"]["pitch"]["kp"],
+        "pitch_kd": config["pid"]["pitch"]["kd"],
+        "speed": dict(config["pid"]["speed"]),
+    }
+    candidate = tune_pid.prepare_pitch_integral_config(config, 0.003)
+    assert candidate["pid"]["roll"]["kp"] == original["roll"]["kp"]
+    assert candidate["pid"]["roll"]["kd"] == original["roll"]["kd"]
+    assert candidate["pid"]["roll"]["ki"] == 0.0
+    assert candidate["pid"]["pitch"]["kp"] == original["pitch_kp"]
+    assert candidate["pid"]["pitch"]["kd"] == original["pitch_kd"]
+    assert candidate["pid"]["pitch"]["ki"] == 0.003
+    assert candidate["pid"]["speed"]["kp"] == original["speed"]["kp"]
+    assert candidate["pid"]["speed"]["ki"] == original["speed"]["ki"]
+    assert candidate["pid"]["speed"]["kd"] == 0.0
+
+
+def test_pitch_integral_grid_explicitly_contains_zero():
+    assert 0.0 in tune_pid.pitch_integral_grid()
+
+
+def test_invalid_pitch_integral_candidate_cannot_be_accepted():
+    with pytest.raises(RuntimeError, match="no valid pitch integral candidate"):
+        tune_pid.require_pitch_integral_candidate(False)
