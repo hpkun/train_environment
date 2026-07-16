@@ -18,9 +18,13 @@ class HAPPORolloutBuffer:
         self.actor_obs = np.zeros((max_len, num_red, actor_dim), dtype=np.float32)
         self.critic_state = np.zeros((max_len, critic_dim), dtype=np.float32)
         self.actions = np.zeros((max_len, num_red, action_dim), dtype=np.float32)
+        self.raw_actions = np.zeros((max_len, num_red, action_dim), dtype=np.float32)
+        self.raw_action_valid = np.zeros(max_len, dtype=np.float32)
         self.log_probs = np.zeros((max_len, num_red), dtype=np.float32)
         self.rewards = np.zeros((max_len, num_red), dtype=np.float32)
         self.dones = np.zeros((max_len, num_red), dtype=np.float32)
+        self.terminated = np.zeros(max_len, dtype=np.float32)
+        self.episode_dones = np.zeros(max_len, dtype=np.float32)
         self.value_dim = int(value_dim)
         value_shape = (max_len,) if self.value_dim == 1 else (max_len, self.value_dim)
         self.values = np.zeros(value_shape, dtype=np.float32)
@@ -50,16 +54,23 @@ class HAPPORolloutBuffer:
               next_value=None, env_id=0,
               rnn_hidden=None, actor_entity_tokens=None, actor_keep_mask=None,
               critic_entity_tokens=None, critic_keep_mask=None,
-              critic_counts=None):
+              critic_counts=None, raw_actions=None, terminated=None,
+              episode_done=None):
         idx = self.pos
         if actor_obs is not None:
             self.actor_obs[idx] = actor_obs
         if critic_state is not None:
             self.critic_state[idx] = critic_state
         self.actions[idx] = actions
+        if raw_actions is not None:
+            self.raw_actions[idx] = np.asarray(raw_actions, dtype=np.float32)
+            self.raw_action_valid[idx] = 1.0
         self.log_probs[idx] = log_probs
         self.rewards[idx] = rewards
         self.dones[idx] = dones
+        legacy_done = float(np.asarray(dones).reshape(-1)[0])
+        self.terminated[idx] = legacy_done if terminated is None else float(terminated)
+        self.episode_dones[idx] = legacy_done if episode_done is None else float(episode_done)
         if self.value_dim == 1:
             self.values[idx] = float(np.asarray(value).reshape(-1)[0])
         else:
@@ -93,9 +104,13 @@ class HAPPORolloutBuffer:
             "actor_obs": torch.as_tensor(self.actor_obs[:n], device=device),
             "critic_state": torch.as_tensor(self.critic_state[:n], device=device),
             "actions": torch.as_tensor(self.actions[:n], device=device),
+            "raw_actions": torch.as_tensor(self.raw_actions[:n], device=device),
+            "raw_action_valid": torch.as_tensor(self.raw_action_valid[:n], device=device),
             "old_log_probs": torch.as_tensor(self.log_probs[:n], device=device),
             "rewards": torch.as_tensor(self.rewards[:n], device=device),
             "dones": torch.as_tensor(self.dones[:n], device=device),
+            "terminated": torch.as_tensor(self.terminated[:n], device=device),
+            "episode_dones": torch.as_tensor(self.episode_dones[:n], device=device),
             "values": torch.as_tensor(self.values[:n], device=device),
             "next_values": torch.as_tensor(self.next_values[:n], device=device),
             "active_masks": torch.as_tensor(self.active_masks[:n], device=device),

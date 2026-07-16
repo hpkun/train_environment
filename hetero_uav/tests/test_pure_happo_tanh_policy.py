@@ -56,7 +56,9 @@ def test_tanh_policy_large_std_has_consistent_replay():
     obs = torch.randn(3, 96)
     critic = torch.randn(480)
     out = policy.act(obs, critic_state=critic)
-    lp, _, _, _ = policy.evaluate_actions(obs.unsqueeze(0), critic.unsqueeze(0), out["action"].unsqueeze(0))
+    lp, _, _, _ = policy.evaluate_actions(
+        obs.unsqueeze(0), critic.unsqueeze(0), out["action"].unsqueeze(0),
+        out["raw_action"].unsqueeze(0))
     assert torch.isfinite(lp).all()
     assert torch.max(torch.abs(lp.squeeze(0) - out["log_prob"])) < 1e-5
 

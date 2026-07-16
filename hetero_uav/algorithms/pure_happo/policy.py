@@ -182,7 +182,7 @@ class LegacyClampPureHAPPOPolicy(nn.Module):
         self.load_state_dict(torch.load(path, map_location=map_location, weights_only=True))
 
 
-class PureHAPPOPolicy(LegacyClampPureHAPPOPolicy):
+class PureHAPPOPolicy(nn.Module):
     """Paper-aligned HAPPO baseline with tanh-squashed Gaussian bounded actions.
 
     Independent per-agent actors + shared V critic.  Uses tanh-squashed
@@ -190,16 +190,69 @@ class PureHAPPOPolicy(LegacyClampPureHAPPOPolicy):
     This is the canonical ``pure_happo`` policy for all formal experiments.
     """
 
-    tanh_eps = 1e-6
-    raw_action_limit = 4.0
+    LOG_STD_MIN = -5.0
+    LOG_STD_MAX = 2.0
+    RAW_MEAN_LIMIT = 10.0
+
+    def __init__(self, actor_obs_dim: int = 96, critic_state_dim: int = 480,
+                 action_dim: int = 3, num_agents: int = 3,
+                 init_log_std: float = -1.204,
+                 credit_mode: str = "shared_alive_team_mean"):
+        super().__init__()
+        if credit_mode != "shared_alive_team_mean":
+            raise ValueError(
+                "PureHAPPOPolicy formal contract requires shared_alive_team_mean")
+        self.actor_obs_dim = int(actor_obs_dim)
+        self.critic_state_dim = int(critic_state_dim)
+        self.action_dim = int(action_dim)
+        self.num_agents = int(num_agents)
+        self.credit_mode = credit_mode
+        self.initial_action_log_std = float(init_log_std)
+        self.actors = nn.ModuleList([
+            _mlp(self.actor_obs_dim, self.action_dim) for _ in range(self.num_agents)
+        ])
+        self.action_log_stds = nn.ParameterList([
+            nn.Parameter(torch.full((self.action_dim,), float(init_log_std)))
+            for _ in range(self.num_agents)
+        ])
+        self.critic = _mlp(self.critic_state_dim, 1)
+        for actor in self.actors:
+            self._initialize_mlp(actor, output_gain=0.01)
+        self._initialize_mlp(self.critic, output_gain=1.0)
+
+    @staticmethod
+    def _initialize_mlp(module: nn.Sequential, output_gain: float) -> None:
+        linear_layers = [layer for layer in module if isinstance(layer, nn.Linear)]
+        for layer in linear_layers[:-1]:
+            nn.init.orthogonal_(layer.weight, gain=2.0 ** 0.5)
+            nn.init.zeros_(layer.bias)
+        nn.init.orthogonal_(linear_layers[-1].weight, gain=output_gain)
+        nn.init.zeros_(linear_layers[-1].bias)
+
+    def _check_agent_count(self, count: int) -> None:
+        if count != self.num_agents:
+            raise ValueError(
+                f"PureHAPPOPolicy built for {self.num_agents} agents, got {count}")
+
+    def _distribution(self, obs: torch.Tensor, agent_idx: int):
+        raw_mean = torch.nan_to_num(self.actors[agent_idx](obs)).clamp(
+            -self.RAW_MEAN_LIMIT, self.RAW_MEAN_LIMIT)
+        log_std = self.action_log_stds[agent_idx].clamp(
+            self.LOG_STD_MIN, self.LOG_STD_MAX)
+        std = log_std.exp()
+        while std.dim() < raw_mean.dim():
+            std = std.unsqueeze(0)
+        return Normal(raw_mean, std), raw_mean
 
     def _squashed_log_prob(self, dist: Normal, raw_action: torch.Tensor) -> torch.Tensor:
-        squashed = torch.tanh(raw_action)
-        correction = torch.log(1.0 - squashed.pow(2) + self.tanh_eps)
+        correction = 2.0 * (
+            torch.log(torch.tensor(2.0, dtype=raw_action.dtype, device=raw_action.device))
+            - raw_action - torch.nn.functional.softplus(-2.0 * raw_action))
         return (dist.log_prob(raw_action) - correction).sum(dim=-1)
 
     def _atanh_action(self, action: torch.Tensor) -> torch.Tensor:
-        action = action.clamp(-1.0 + self.tanh_eps, 1.0 - self.tanh_eps)
+        eps = torch.finfo(action.dtype).eps
+        action = action.clamp(-1.0 + eps, 1.0 - eps)
         return 0.5 * (torch.log1p(action) - torch.log1p(-action))
 
     def act(self, actor_obs, roles=None, critic_state=None,
@@ -227,7 +280,6 @@ class PureHAPPOPolicy(LegacyClampPureHAPPOPolicy):
         for i in range(self.num_agents):
             dist, mean = self._distribution(actor_obs[:, i, :], i)
             raw = mean if deterministic else dist.rsample()
-            raw = raw.clamp(-self.raw_action_limit, self.raw_action_limit)
             action = torch.tanh(raw)
             actions[:, i, :] = action
             raw_actions[:, i, :] = raw
@@ -248,7 +300,7 @@ class PureHAPPOPolicy(LegacyClampPureHAPPOPolicy):
             out["rnn_hidden"] = rnn_hidden
         return out
 
-    def evaluate_actions(self, actor_obs, critic_state, actions):
+    def evaluate_actions(self, actor_obs, critic_state, actions, raw_actions=None):
         device = next(self.parameters()).device
         actor_obs = torch.as_tensor(actor_obs, dtype=torch.float32, device=device)
         critic_state = torch.as_tensor(critic_state, dtype=torch.float32, device=device)
@@ -260,7 +312,8 @@ class PureHAPPOPolicy(LegacyClampPureHAPPOPolicy):
         log_probs = torch.zeros(T, N, device=device)
         entropies = torch.zeros(T, N, device=device)
         means_t = torch.zeros(T, N, self.action_dim, device=device)
-        raw_actions = self._atanh_action(actions)
+        raw_actions = (self._atanh_action(actions) if raw_actions is None else
+                       torch.as_tensor(raw_actions, dtype=torch.float32, device=device))
 
         for i in range(self.num_agents):
             dist, mean = self._distribution(actor_obs[:, i, :], i)
@@ -272,12 +325,26 @@ class PureHAPPOPolicy(LegacyClampPureHAPPOPolicy):
         return log_probs, entropies, values, means_t
 
     def evaluate_agent_actions(self, agent_idx: int,
-                                actor_obs_i, actions_i):
+                                actor_obs_i, actions_i, raw_actions_i=None):
         device = next(self.parameters()).device
         actor_obs_i = torch.as_tensor(actor_obs_i, dtype=torch.float32, device=device)
         actions_i = torch.as_tensor(actions_i, dtype=torch.float32, device=device)
         dist, mean = self._distribution(actor_obs_i, agent_idx)
-        raw_action = self._atanh_action(actions_i)
+        raw_action = (self._atanh_action(actions_i) if raw_actions_i is None else
+                      torch.as_tensor(raw_actions_i, dtype=torch.float32, device=device))
         log_prob = self._squashed_log_prob(dist, raw_action)
         entropy = dist.entropy().sum(dim=-1)
         return log_prob, entropy, mean
+
+    def value(self, critic_state):
+        device = next(self.parameters()).device
+        critic_state = torch.as_tensor(critic_state, dtype=torch.float32, device=device)
+        if critic_state.dim() == 1:
+            critic_state = critic_state.unsqueeze(0)
+        return self.critic(critic_state).squeeze(-1)
+
+    def save(self, path: str):
+        torch.save(self.state_dict(), path)
+
+    def load(self, path: str, map_location=None):
+        self.load_state_dict(torch.load(path, map_location=map_location, weights_only=True))

@@ -10,10 +10,29 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
-from algorithms.pure_happo import PureHAPPOPolicy
+from algorithms.pure_happo import ALGORITHM_CONTRACT, PureHAPPOPolicy
 from uav_env.make_env import make_env
 from uav_env.JSBSim.formal_v1.contract import ENV_TYPE
 from uav_env.JSBSim.formal_v1.reward import REWARD_CONTRACT_VERSION
+
+
+def _validate_checkpoint_meta(meta: dict) -> None:
+    if meta.get("formal_contract") != ENV_TYPE or meta.get("credit_mode") != "shared_alive_team_mean":
+        raise ValueError("checkpoint is not a formal-v1 shared-credit checkpoint")
+    if meta.get("reward_contract", {}).get("version") != REWARD_CONTRACT_VERSION:
+        raise ValueError("checkpoint does not use the current formal role-reward contract")
+    expected = {
+        "algorithm_contract": ALGORITHM_CONTRACT,
+        "policy_distribution": "tanh_squashed_gaussian_raw_action",
+        "critic_contract": "centralized_shared_scalar_v",
+        "gae_contract": "separated_termination_truncation",
+        "actor_obs_dim": 68, "critic_state_dim": 204, "action_dim": 3,
+        "num_agents": 3,
+    }
+    for key, value in expected.items():
+        if meta.get(key) != value:
+            raise ValueError(
+                f"incompatible checkpoint {key}: {meta.get(key)!r} != {value!r}")
 
 
 def main():
@@ -27,10 +46,7 @@ def main():
     env = make_env(str(ROOT / a.config) if not Path(a.config).is_absolute() else a.config)
     model = Path(a.checkpoint); model = model if model.is_absolute() else ROOT / model
     meta = json.loads((model.parent / "meta.json").read_text(encoding="utf-8"))
-    if meta.get("formal_contract") != ENV_TYPE or meta.get("credit_mode") != "shared_alive_team_mean":
-        raise ValueError("checkpoint is not a formal-v1 shared-credit checkpoint")
-    if meta.get("reward_contract", {}).get("version") != REWARD_CONTRACT_VERSION:
-        raise ValueError("checkpoint does not use the current formal role-reward contract")
+    _validate_checkpoint_meta(meta)
     policy = PureHAPPOPolicy(meta["actor_obs_dim"], meta["critic_state_dim"],
                              meta["action_dim"], meta["num_agents"]).to(a.device)
     policy.load_state_dict(torch.load(model, map_location=a.device, weights_only=True)); policy.eval()

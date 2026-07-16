@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from algorithms.happo.happo_buffer import HAPPORolloutBuffer
-from algorithms.pure_happo import PureHAPPOPolicy, PureHAPPOTrainer
+from algorithms.pure_happo import ALGORITHM_CONTRACT, PureHAPPOPolicy, PureHAPPOTrainer
 from uav_env.make_env import make_env
 from uav_env.JSBSim.formal_v1.contract import ACTION_DIM, ENV_TYPE
 from uav_env.JSBSim.formal_v1.reward import (
@@ -77,7 +77,11 @@ def main():
     meta = {"formal_contract": ENV_TYPE, "policy_arch": "pure_happo",
             "credit_mode": "shared_alive_team_mean", "actor_obs_dim": env.actor_obs_dim,
             "critic_state_dim": env.critic_state_dim, "action_dim": ACTION_DIM,
-            "num_agents": len(env.red_ids), "config": str(config)}
+            "num_agents": len(env.red_ids), "config": str(config),
+            "algorithm_contract": ALGORITHM_CONTRACT,
+            "policy_distribution": "tanh_squashed_gaussian_raw_action",
+            "critic_contract": "centralized_shared_scalar_v",
+            "gae_contract": "separated_termination_truncation"}
     meta["reward_contract"] = {
         "version": REWARD_CONTRACT_VERSION,
         "global_reward_scale": GLOBAL_REWARD_SCALE,
@@ -101,6 +105,14 @@ def main():
         "clip_fraction_mav", "clip_fraction_uav", "ratio_p95_mav", "ratio_p95_uav",
         "ratio_p99_mav", "ratio_p99_uav", "policy_update_norm_mav",
         "policy_update_norm_uav", "actor_grad_norm_mav", "actor_grad_norm_uav",
+        "agent_update_order", "final_ratio_p95_mav", "final_ratio_p95_uav",
+        "final_ratio_p99_mav", "final_ratio_p99_uav", "factor_final_mean",
+        "factor_final_std", "factor_final_min", "factor_final_max",
+        "critic_grad_norm", "critic_update_norm", "value_explained_variance_old",
+        "advantage_raw_mean", "advantage_raw_std", "advantage_norm_mean",
+        "advantage_norm_std", "return_mean", "return_std", "terminated_count",
+        "truncation_count", "episode_boundary_count", "action_log_std_mav_mean",
+        "action_log_std_uav_mean",
         "red_geometry_samples", "red_range_rate", "red_ata_rate", "red_ta_rate",
         "red_geometry_rate", "action_saturation", "finite",
     ]
@@ -109,15 +121,19 @@ def main():
             fields.extend((f"{role}_action_mean_{dimension}",
                            f"{role}_action_std_{dimension}",
                            f"{role}_action_saturation_{dimension}"))
+    for agent_idx in range(len(env.red_ids)):
+        for position in ("before", "after"):
+            for stat in ("mean", "std", "min", "max"):
+                fields.append(f"factor_{position}_{stat}_agent{agent_idx}")
+    detail_log = output / "update_metrics.jsonl"
     with log_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader()
         obs, info = env.reset(seed=args.seed)
         total_steps = 0; iteration = 0
-        pending_checkpoints = sorted(set(
-            step for step in args.checkpoint_steps if 0 < step <= args.total_env_steps))
+        pending_checkpoints = sorted(set(step for step in args.checkpoint_steps if step > 0))
         saved_checkpoint_steps: set[int] = set()
         while total_steps < args.total_env_steps:
-            length = min(args.rollout_length, args.total_env_steps - total_steps)
+            length = args.rollout_length
             buffer = HAPPORolloutBuffer(length, len(env.red_ids), env.actor_obs_dim,
                                         env.critic_state_dim, ACTION_DIM, [0, 1, 1])
             stats = defaultdict(list); counts = defaultdict(int); completed = []
@@ -131,15 +147,18 @@ def main():
                 actions *= active[:, None]
                 next_obs, rewards, terms, truncs, next_info = env.step(
                     {aid: actions[i] for i, aid in enumerate(env.red_ids)})
-                done = float(next_info["team_done"])
+                terminated = float(any(terms.values()))
+                episode_done = float(terminated or any(truncs.values()))
                 with torch.no_grad():
                     next_value = policy.value(next_info["critic_state"]).detach().cpu().numpy()
                 reward_vec = np.asarray([rewards[aid] for aid in env.red_ids], np.float32)
                 buffer.store(actor_obs, critic, actions,
                              result["log_prob"].detach().cpu().numpy(), reward_vec,
-                             np.full(len(env.red_ids), done, np.float32),
+                             np.full(len(env.red_ids), episode_done, np.float32),
                              result["value"].detach().cpu().numpy(), active,
-                             next_value=next_value)
+                             next_value=next_value,
+                             raw_actions=result["raw_action"].detach().cpu().numpy(),
+                             terminated=terminated, episode_done=episode_done)
                 stats["role_mav"].append(float(reward_vec[0]))
                 stats["role_uav"].append(float(reward_vec[1:].mean()))
                 components = next_info["reward_components"]["per_agent"]
@@ -174,7 +193,7 @@ def main():
                         counts["red_geometry_ok"] += int(gate.get("geometry_ok", False))
                 obs, info = next_obs, next_info
                 total_steps += 1
-                if done:
+                if episode_done:
                     completed.append({"outcome": next_info["outcome"],
                                       "mav": float(next_info["mav_alive"]),
                                       "red_alive": float(next_info["red_alive"]),
@@ -220,6 +239,21 @@ def main():
                        "clip_fraction_uav", "ratio_p95_mav", "ratio_p95_uav",
                        "ratio_p99_mav", "ratio_p99_uav", "policy_update_norm_mav",
                        "policy_update_norm_uav", "actor_grad_norm_mav", "actor_grad_norm_uav")},
+                   "agent_update_order": int("".join(
+                       str(value) for value in metrics["agent_update_order"])),
+                   **{key: metric(key) for key in (
+                       "final_ratio_p95_mav", "final_ratio_p95_uav",
+                       "final_ratio_p99_mav", "final_ratio_p99_uav",
+                       "critic_grad_norm", "critic_update_norm",
+                       "value_explained_variance_old", "advantage_raw_mean",
+                       "advantage_raw_std", "advantage_norm_mean", "advantage_norm_std",
+                       "return_mean", "return_std", "terminated_count", "truncation_count",
+                       "episode_boundary_count", "action_log_std_mav_mean",
+                       "action_log_std_uav_mean")},
+                   "factor_final_mean": _finite_float(metrics["final_factor"]["mean"]),
+                   "factor_final_std": _finite_float(metrics["final_factor"]["std"]),
+                   "factor_final_min": _finite_float(metrics["final_factor"]["min"]),
+                   "factor_final_max": _finite_float(metrics["final_factor"]["max"]),
                    "red_geometry_samples": counts["red_geometry_samples"],
                    "red_range_rate": counts["red_range_ok"] / geometry_samples,
                    "red_ata_rate": counts["red_ata_ok"] / geometry_samples,
@@ -236,9 +270,43 @@ def main():
                         f"{role}_action_std_{dimension}_active")
                     row[f"{role}_action_saturation_{dimension}"] = metric(
                         f"{role}_action_saturation_{dimension}_active")
+            for agent_idx in range(len(env.red_ids)):
+                for position in ("before", "after"):
+                    factor_stats = metrics[f"factor_{position}_per_agent"][agent_idx]
+                    for stat in ("mean", "std", "min", "max"):
+                        row[f"factor_{position}_{stat}_agent{agent_idx}"] = _finite_float(
+                            factor_stats.get(stat, 0.0))
             if not all(np.isfinite(float(value)) for value in row.values()):
                 raise ValueError(f"non-finite formal training log row at step {total_steps}")
             writer.writerow(row); handle.flush()
+            with detail_log.open("a", encoding="utf-8") as detail_handle:
+                detail_handle.write(json.dumps({
+                    "iteration": iteration, "total_steps": total_steps,
+                    "agent_update_order": [int(value) for value in metrics["agent_update_order"]],
+                    "actor_update_trace": metrics["actor_update_trace"],
+                    "actor_loss_epochs_per_agent": metrics["actor_loss_epochs_per_agent"],
+                    "entropy_epochs_per_agent": metrics["entropy_epochs_per_agent"],
+                    "approx_kl_epochs_per_agent": metrics["approx_kl_epochs_per_agent"],
+                    "approx_kl_abs_epochs_per_agent": metrics["approx_kl_abs_epochs_per_agent"],
+                    "clip_fraction_epochs_per_agent": metrics["clip_fraction_epochs_per_agent"],
+                    "actor_loss_epoch_summary_per_agent": metrics[
+                        "actor_loss_epoch_summary_per_agent"],
+                    "entropy_epoch_summary_per_agent": metrics[
+                        "entropy_epoch_summary_per_agent"],
+                    "approx_kl_epoch_summary_per_agent": metrics[
+                        "approx_kl_epoch_summary_per_agent"],
+                    "approx_kl_abs_epoch_summary_per_agent": metrics[
+                        "approx_kl_abs_epoch_summary_per_agent"],
+                    "clip_fraction_epoch_summary_per_agent": metrics[
+                        "clip_fraction_epoch_summary_per_agent"],
+                    "factor_before_per_agent": metrics["factor_before_per_agent"],
+                    "factor_after_per_agent": metrics["factor_after_per_agent"],
+                    "final_factor": metrics["final_factor"],
+                    "final_ratio_mean_per_agent": metrics["final_ratio_mean_per_agent"],
+                    "final_ratio_std_per_agent": metrics["final_ratio_std_per_agent"],
+                    "final_ratio_p95_per_agent": metrics["final_ratio_p95_per_agent"],
+                    "final_ratio_p99_per_agent": metrics["final_ratio_p99_per_agent"],
+                }) + "\n")
             for requested_step in pending_checkpoints:
                 if requested_step <= total_steps and requested_step not in saved_checkpoint_steps:
                     checkpoint_meta = {
