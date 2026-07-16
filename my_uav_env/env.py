@@ -1789,7 +1789,8 @@ class UavCombatEnv(gymnasium.Env):
                 if not enemy_sim.is_alive:
                     continue
                 diag["alive_enemy_pairs"] += 1
-                diag["unengaged_enemy_pairs"] += 1
+                if enemy_sim.uid not in self._engaged_targets:
+                    diag["unengaged_enemy_pairs"] += 1
 
                 ego_pos = sim.get_position()
                 enm_pos = enemy_sim.get_position()
@@ -3199,7 +3200,8 @@ class UavCombatEnv(gymnasium.Env):
         for mid in done:
             missile = self._missiles_in_flight.pop(mid)
             missile.detach_references()
-            self._engaged_targets.discard(missile._target_id)
+        if done:
+            self.refresh_engaged_targets()
 
     # ------------------------------------------------------------------
     #  Rendering (TacView .acmi export)

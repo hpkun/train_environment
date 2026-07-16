@@ -4,6 +4,8 @@ import numpy as np
 
 
 PAPER_EQ13_ZERO_EPS = 1e-12
+PAPER_PID_ERROR_DEFINITION = (
+    "paper_quadrant_preserving_azimuth_continuous_elevation_operational_v1")
 
 
 class PIDLoop:
@@ -32,7 +34,7 @@ class PIDLoop:
 
     def reset(self):
         self._integral = 0.0
-        self._prev_error = 0.0
+        self._prev_error = None
         self._prev_output = 0.0
         self._last_diagnostic = {
             "p": 0.0, "i": 0.0, "d": 0.0,
@@ -45,14 +47,17 @@ class PIDLoop:
         p = self.kp * error
 
         # Derivative (computed before integral clamp so d-term informs anti-windup)
-        delta_error = float(error - self._prev_error)
-        if self.angular_error:
-            wrapped = (delta_error + np.pi) % (2.0 * np.pi) - np.pi
-            if np.isclose(wrapped, -np.pi) and delta_error > 0.0:
-                wrapped = np.pi
-            delta_error = float(wrapped)
-        d = self.kd * delta_error / max(dt, 1e-8)
-        self._prev_error = error
+        if self._prev_error is None:
+            d = 0.0
+        else:
+            delta_error = float(error - self._prev_error)
+            if self.angular_error:
+                wrapped = (delta_error + np.pi) % (2.0 * np.pi) - np.pi
+                if np.isclose(wrapped, -np.pi) and delta_error > 0.0:
+                    wrapped = np.pi
+                delta_error = float(wrapped)
+            d = self.kd * delta_error / max(dt, 1e-8)
+        self._prev_error = float(error)
 
         # Accumulate integral
         integral_enabled = abs(error) <= self.integral_error_limit
@@ -293,8 +298,9 @@ class PIDController:
             roll_error = float(np.pi)
         else:
             roll_error = float(np.arctan2(d_body[1], d_body[0]))
+        horizontal = float(np.hypot(d_body[0], d_body[1]))
         pitch_error = (0.0 if abs(d_body[2]) < PAPER_EQ13_ZERO_EPS
-                       else float(np.arctan2(d_body[2], d_body[0])))
+                       else float(np.arctan2(d_body[2], horizontal)))
         return (roll_error, pitch_error, d_des_neu, d_des_ned,
                 d_body, r_bi)
 
@@ -341,7 +347,7 @@ class PIDController:
             )
             saturated = (aileron, elevator, 0.0, throttle)
             self._last_diagnostic = {
-                "formula_version": "paper_eq13_quadrant_preserving_operational_v1",
+                "formula_version": PAPER_PID_ERROR_DEFINITION,
                 "d_I_des": tuple(float(value) for value in d_i_des),
                 "d_I_des_ned": tuple(float(value) for value in d_i_ned),
                 "d_B_des": tuple(float(value) for value in d_b_des),

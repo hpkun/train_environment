@@ -58,6 +58,7 @@ from configs.paper_learnable_3v3_spec import (
     PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
     learnable_environment_snapshot,
 )
+from my_uav_env.pid_controller import PAPER_PID_ERROR_DEFINITION
 
 torch.set_num_threads(1)
 try:
@@ -706,7 +707,9 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "reward_mode": config.reward_mode,
         "pid_profile": config.pid_profile,
         "pid_throttle_base": float(config.pid_throttle_base),
-        "pid_error_definition": "paper_eq13_quadrant_preserving_operational_v1",
+        "pid_error_definition": environment_snapshot.get(
+            "pid_error_definition", {}).get(
+                "value", PAPER_PID_ERROR_DEFINITION),
         "missile_guidance_mode": config.missile_guidance_mode,
         "altitude_reward_config": asdict(config.altitude_reward_config),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
@@ -789,7 +792,8 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             "missile_hit_radius_m", "missile_arming_time_s",
             "missile_overshoot_window_s",
             "missile_overshoot_distance_hysteresis_m",
-            "missile_positive_closing_threshold_mps", "launch_range_m",
+            "missile_positive_closing_threshold_mps", "eo_maximum_range_m",
+            "launch_positive_finite_range_guard",
             "launch_deconfliction", "missile_los_definition",
             "fire_control_profile", "reward_version", "target_assignment_mode",
             "observation_mode", "actor_input_dim",

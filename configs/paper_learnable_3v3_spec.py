@@ -16,6 +16,7 @@ from configs.paper_minimal_3v3_spec import (
     MINIMAL_PAPER_ENVIRONMENT_CONFIG,
     MINIMAL_SCENARIO,
 )
+from my_uav_env.pid_controller import PAPER_PID_ERROR_DEFINITION
 
 
 LEARNABILITY_ADAPTATION = "learnability_adaptation"
@@ -122,7 +123,9 @@ LEARNABLE_PROFILE_METADATA = {
     "missile_positive_closing_threshold_mps": sv(
         LEARNABLE_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS,
         LEARNABILITY_ADAPTATION),
-    "launch_range_m": sv((0.0, 10_000.0), PAPER_EXPLICIT),
+    "eo_maximum_range_m": sv(10_000.0, PAPER_EXPLICIT),
+    "launch_positive_finite_range_guard": sv(
+        "finite_and_strictly_positive_v1", PAPER_UNSPECIFIED_ENGINEERING),
     "launch_deconfliction": sv(
         "paper_launch_deconfliction_live_missile_v1",
         PAPER_UNSPECIFIED_ENGINEERING),
@@ -141,7 +144,7 @@ LEARNABLE_PROFILE_METADATA = {
         "disabled_for_paper_eq12_14",
         LEARNABILITY_ADAPTATION),
     "pid_error_definition": sv(
-        "paper_eq13_quadrant_preserving_operational_v1",
+        PAPER_PID_ERROR_DEFINITION,
         PAPER_UNSPECIFIED_ENGINEERING),
     "extreme_finite_load_guard": sv(
         "paper_unspecified_numerical_guard_30g_3frames_100g_immediate_v1",

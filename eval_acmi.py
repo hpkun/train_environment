@@ -38,6 +38,7 @@ except Exception:
     pass
 
 from my_uav_env import UavCombatEnv
+from my_uav_env.pid_controller import PAPER_PID_ERROR_DEFINITION
 from acmi_boundary_utils import (
     battlefield_boundary_acmi_lines as _battlefield_boundary_acmi_lines,
     maybe_write_battlefield_boundary_acmi as _maybe_write_battlefield_boundary_acmi,
@@ -276,6 +277,9 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                 "reward_mode": reward_mode,
                 "pid_profile": pid_profile,
                 "pid_throttle_base": float(pid_throttle_base),
+                "pid_error_definition": environment_snapshot.get(
+                    "pid_error_definition", {}).get(
+                        "value", PAPER_PID_ERROR_DEFINITION),
                 "missile_guidance_mode": missile_guidance_mode,
                 "altitude_reward_config": asdict(
                     _minimal_altitude_reward_config()

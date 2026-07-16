@@ -762,6 +762,28 @@ def test_paper_eq13_rear_target_and_body_x_zero_are_operational():
         assert np.max(np.abs(controls)) <= 1.0
 
 
+@pytest.mark.parametrize("target_pitch", [1e-9, -1e-9])
+def test_paper_pid_rear_hemisphere_tiny_vertical_perturbation_is_continuous(
+        target_pitch):
+    e_phi, e_theta, *_ = PIDController.paper_direction_errors(
+        np.zeros(3), target_pitch, math.pi)
+    assert e_phi == pytest.approx(math.pi, abs=1e-12)
+    assert e_theta == pytest.approx(-target_pitch, abs=1e-15)
+    assert abs(e_theta) < 2e-9
+
+
+@pytest.mark.parametrize("target_pitch,expected", [
+    (math.pi / 2, -math.pi / 2),
+    (-math.pi / 2, math.pi / 2),
+])
+def test_paper_pid_vertical_direction_has_finite_continuous_elevation(
+        target_pitch, expected):
+    _e_phi, e_theta, *_ = PIDController.paper_direction_errors(
+        np.zeros(3), target_pitch, 0.0)
+    assert np.isfinite(e_theta)
+    assert e_theta == pytest.approx(expected)
+
+
 @pytest.mark.parametrize("current_deg,target_deg,expected_deg", [
     (179.0, -179.0, 2.0),
     (-179.0, 179.0, -2.0),
@@ -783,6 +805,32 @@ def test_pid_loop_angular_derivative_wraps_branch_jump():
     assert loop._last_diagnostic["d"] == pytest.approx(0.02)
 
 
+def test_pid_loop_first_sample_has_no_derivative_kick_and_reset_repeats():
+    loop = PIDLoop(0.0, 0.0, 2.0, -100.0, 100.0)
+    loop.step(3.0, 0.5)
+    assert loop._last_diagnostic["d"] == 0.0
+    loop.step(4.0, 0.5)
+    assert loop._last_diagnostic["d"] == pytest.approx(4.0)
+    loop.reset()
+    loop.step(-7.0, 0.5)
+    assert loop._last_diagnostic["d"] == 0.0
+
+
+@pytest.mark.parametrize("first_deg,second_deg,expected_deg", [
+    (179.0, -179.0, 2.0),
+    (-179.0, 179.0, -2.0),
+])
+def test_angular_pid_first_sample_zero_then_wraps_derivative(
+        first_deg, second_deg, expected_deg):
+    loop = PIDLoop(0.0, 0.0, 1.0, -100.0, 100.0,
+                   angular_error=True)
+    loop.step(math.radians(first_deg), 1.0)
+    assert loop._last_diagnostic["d"] == 0.0
+    loop.step(math.radians(second_deg), 1.0)
+    assert math.degrees(loop._last_diagnostic["d"]) == pytest.approx(
+        expected_deg)
+
+
 def test_pid_loop_bounded_integral_saturation_and_reset_diagnostics():
     loop = PIDLoop(0.1, 0.5, 0.0, -1.0, 1.0,
                    integral_error_limit=0.25)
@@ -797,7 +845,7 @@ def test_pid_loop_bounded_integral_saturation_and_reset_diagnostics():
     assert loop._last_diagnostic["unsaturated"] > 1.0
     loop.reset()
     assert loop._integral == 0.0
-    assert loop._prev_error == 0.0
+    assert loop._prev_error is None
 
 
 def test_paper_eq14_diagnostics_and_channel_contract():
@@ -807,7 +855,8 @@ def test_paper_eq14_diagnostics_and_channel_contract():
     diag = pid._last_diagnostic
     assert controls[2] == 0.0
     assert diag["formula_version"] == (
-        "paper_eq13_quadrant_preserving_operational_v1")
+        "paper_quadrant_preserving_azimuth_continuous_elevation_"
+        "operational_v1")
     assert diag["e_velocity"] == pytest.approx(25.0)
     assert set(("p", "i", "d", "unsaturated", "saturated",
                 "integral_enabled")) <= set(diag["roll_pid"])
@@ -1546,7 +1595,8 @@ def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     state = VanillaActor(obs_dim).state_dict()
     assert metadata["schema_version"] == "vanilla_mappo_paper_env_v8"
     assert metadata["pid_error_definition"] == (
-        "paper_eq13_quadrant_preserving_operational_v1")
+        "paper_quadrant_preserving_azimuth_continuous_elevation_"
+        "operational_v1")
     assert metadata["schema_version"] == CHECKPOINT_SCHEMA_VERSION
     assert metadata["action_distribution"] == ACTION_DISTRIBUTION_VERSION
     assert metadata["actor_obs_dim"] == 60

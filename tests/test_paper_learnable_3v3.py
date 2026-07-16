@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
+import copy
+import hashlib
 import json
 import numpy as np
 import pytest
@@ -43,6 +45,7 @@ from train_vanilla_mappo import (
     _training_log_fields,
     _validate_training_state,
     _validate_preset_resume_semantics,
+    _unpack_and_validate_checkpoint,
 )
 from scripts.audit_paper_learnable_3v3 import _circular_error
 
@@ -71,7 +74,12 @@ def test_learnable_profile_contract_and_dimensions():
         blue_policy_profile="paper_learnable_fixed_pair_v1", seed=3,
         initial_condition_randomization_mode="deterministic_v1")
     assert snapshot["profile_provenance"]["value"] == "learnability_adaptation"
-    assert snapshot["launch_range_m"]["value"] == (0.0, 10_000.0)
+    assert snapshot["eo_maximum_range_m"]["value"] == 10_000.0
+    assert snapshot["eo_maximum_range_m"]["source"] == "paper_explicit"
+    assert snapshot["launch_positive_finite_range_guard"]["value"] == (
+        "finite_and_strictly_positive_v1")
+    assert snapshot["launch_positive_finite_range_guard"]["source"] == (
+        "paper_unspecified_engineering")
     assert snapshot["initial_missile_direction_mode"]["value"] == (
         "aircraft_body_x_v1")
     for key in (
@@ -86,7 +94,10 @@ def test_learnable_profile_contract_and_dimensions():
     assert snapshot["load_command_scaling"]["value"] == (
         "disabled_for_paper_eq12_14")
     assert snapshot["pid_error_definition"]["value"] == (
-        "paper_eq13_quadrant_preserving_operational_v1")
+        "paper_quadrant_preserving_azimuth_continuous_elevation_"
+        "operational_v1")
+    assert snapshot["pid_error_definition"]["source"] == (
+        "paper_unspecified_engineering")
     assert snapshot["environment_config"]["pid"]["throttle_base"]["value"] == 0.8
     assert _compute_obs_dim(3, 3, True, "paper_strict") == 60
     assert _compute_global_state_dim(3, "paper_strict") == 30
@@ -689,6 +700,107 @@ def test_learnable_same_frame_live_missile_deconfliction(monkeypatch):
     assert sorted(target_id for _, target_id in launches) == ["red_0", "red_1"]
 
 
+class _FrameMissile:
+    def __init__(self, uid, parent_id, target_id, terminate_on_run):
+        self.uid = uid
+        self._parent_id = parent_id
+        self._target_id = target_id
+        self._termination_reason = None
+        self._kill_rewarded = False
+        self.target_aircraft = None
+        self.is_success = False
+        self.is_done = False
+        self.is_alive = True
+        self.terminate_on_run = terminate_on_run
+
+    def run(self):
+        if self.terminate_on_run:
+            self.is_done = True
+            self.is_alive = False
+            self._termination_reason = "overshoot"
+
+    def detach_references(self):
+        pass
+
+
+def _prepare_deconfliction_frame_env(monkeypatch):
+    env = UavCombatEnv(
+        max_num_red=3, max_num_blue=3, max_steps=1400,
+        environment_profile=PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+    shooter = _Aircraft(
+        "blue_0", "Blue", [0.0, 0.0, 6000.0], [300.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0])
+    target = _Aircraft(
+        "red_0", "Red", [5000.0, 0.0, 6000.0], [-300.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0])
+    shooter.num_left_missiles = 999
+    env.blue_planes = {"blue_0": shooter}
+    env.red_planes = {"red_0": target}
+    env.agent_ids = ["blue_0"]
+    env._lock_timer = {"blue_0": 15}
+    env._lock_target = {"blue_0": "red_0"}
+    env._missile_cooldown = {"blue_0": 0}
+    env._fire_control_states = {"blue_0": FireControlState()}
+    env._fire_control_assignments = {"blue_0": "red_0"}
+    env._target_assignment_diagnostics = Counter()
+    env._launch_diag_step = make_empty_launch_diag()
+    env._agents_deny_kill = set()
+    monkeypatch.setattr(env, "_is_detected_by_electro_optical", lambda *_: True)
+    monkeypatch.setattr("my_uav_env.env.compute_3d_range", lambda *_: 5000.0)
+    monkeypatch.setattr("my_uav_env.env.compute_body_x_q_los", lambda *_: 0.0)
+    monkeypatch.setattr(
+        "my_uav_env.env.get2d_heading_AO_TA_R",
+        lambda *_: (0.0, np.pi, 5000.0))
+    launches = []
+    monkeypatch.setattr(
+        env, "_launch_missile",
+        lambda parent, enemy, _quality: launches.append(
+            (parent.uid, enemy.uid)))
+    return env, launches
+
+
+def test_deconfliction_releases_on_next_physics_frame_after_cleanup(
+        monkeypatch):
+    env, launches = _prepare_deconfliction_frame_env(monkeypatch)
+    missile = _FrameMissile("m0", "blue_1", "red_0", True)
+    env._missiles_in_flight = {"m0": missile}
+    env.refresh_engaged_targets()
+
+    env._check_missile_launch()  # physics frame N fire-control phase
+    assert launches == []
+    assert env._launch_diag_step["blue"]["unengaged_enemy_pairs"] == 0
+    env._update_missiles()
+    env._cleanup_missiles()
+    assert env._engaged_targets == set()
+
+    env._check_missile_launch()  # physics frame N+1 fire-control phase
+    assert launches == [("blue_0", "red_0")]
+    assert env._launch_diag_step["blue"]["unengaged_enemy_pairs"] == 1
+
+
+def test_deconfliction_waits_until_last_live_same_team_missile_ends(
+        monkeypatch):
+    env, launches = _prepare_deconfliction_frame_env(monkeypatch)
+    first = _FrameMissile("m0", "blue_1", "red_0", True)
+    second = _FrameMissile("m1", "blue_2", "red_0", False)
+    env._missiles_in_flight = {"m0": first, "m1": second}
+    env.refresh_engaged_targets()
+
+    env._check_missile_launch()
+    env._update_missiles()
+    env._cleanup_missiles()
+    assert env._engaged_targets == {"red_0"}
+    env._check_missile_launch()
+    assert launches == []
+
+    second.terminate_on_run = True
+    env._update_missiles()
+    env._cleanup_missiles()
+    assert env._engaged_targets == set()
+    env._check_missile_launch()
+    assert launches == [("blue_0", "red_0")]
+
+
 def test_environment_assignment_waits_when_all_live_targets_engaged():
     env = UavCombatEnv(
         max_num_red=3, max_num_blue=3, max_steps=1400,
@@ -751,6 +863,35 @@ def test_full_training_state_round_trip_and_total_step_extension(tmp_path):
     config.total_env_steps = 9_999
     with pytest.raises(ValueError, match="only stay equal or increase"):
         _validate_training_state(loaded, config, metadata)
+
+
+def test_old_pid_semantics_fingerprint_is_rejected_by_checkpoint_validation(
+        tmp_path):
+    config = _learnable_training_config(tmp_path)
+    metadata = _checkpoint_metadata(config, 60, 30)
+    stale_environment = copy.deepcopy(metadata["environment_config"])
+    stale_environment["pid_error_definition"]["value"] = (
+        "paper_eq13_quadrant_preserving_operational_v1")
+    stale_fingerprint_payload = dict(stale_environment)
+    stale_fingerprint_payload.pop("environment_config_fingerprint", None)
+    stale_fingerprint_payload.pop("seed", None)
+    encoded = json.dumps(
+        stale_fingerprint_payload, sort_keys=True, separators=(",", ":"),
+        default=str)
+    stale_fingerprint = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    assert stale_fingerprint != metadata["environment_config_fingerprint"]
+
+    actor = VanillaActor(obs_dim=60, hidden=8, rnn_hidden=4)
+    stale_metadata = dict(metadata)
+    stale_metadata["environment_config"] = stale_environment
+    stale_metadata["environment_config_fingerprint"] = stale_fingerprint
+    payload = {
+        "state_dict": actor.state_dict(),
+        "metadata": stale_metadata,
+        "model_kind": "actor",
+    }
+    with pytest.raises(ValueError, match="environment metadata mismatch"):
+        _unpack_and_validate_checkpoint(payload, metadata, "actor")
 
 
 def test_periodic_eval_marks_final_checkpoint_and_restores_rng(
@@ -897,4 +1038,3 @@ def test_fire_control_state_uses_paper_diagnostic_field_names():
     assert snapshot["tracked_target_id"] == "blue_1"
     assert snapshot["continuous_eo_detection_frames"] == 15
     assert snapshot["launch_cooldown_frames"] == 30
-
