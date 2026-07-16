@@ -21,12 +21,12 @@ actuator_sign_elevator: -1
 pid:
   roll:
     kp: 0.8
-    ki: 0.01
+    ki: 0.0
     kd: 0.03
   pitch:
-    kp: 0.8
-    ki: 0.01
-    kd: 0.03
+    kp: 0.8292870468658887
+    ki: 0.0
+    kd: 0.11914727619553969
   speed:
     kp: 0.01
     ki: 0.001
@@ -48,4 +48,3 @@ validation_thresholds:
   maximum_alpha_deg: 25.0
   maximum_beta_deg: 15.0
   maximum_load_factor: 9.0
-  long_run_altitude_loss_m: 1000.0

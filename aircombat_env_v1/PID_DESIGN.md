@@ -41,17 +41,27 @@ every 5 seconds.
 - `validated`: all 72 short cases and all eight representative 200-second long
   cases passed the configured local thresholds.
 
-Trim and tuning scripts emit candidate YAML by default. Their explicit accept
-flags can update the formal configuration only to `candidate`. Only
-`validate_pid.py --mark-validated` can set `validated`, and it refuses when any
-short or long case fails.
+Trim and tuning scripts emit candidate YAML by default. Attitude integrals are
+currently fixed at zero; formal tuning is deliberately limited to Roll PD,
+Pitch PD, and Speed PI. Each stage compares an optimized candidate against its
+incoming baseline and adopts it only when every case completes safely and cost
+improves. Explicit accept can update the formal configuration only when all
+three stages are accepted and joint validation is valid. Only full validation
+may set `validated`.
 
 ## Metrics
 
 Tuning records roll, pitch, and speed errors separately, normalized by 30 deg,
 10 deg, and 50 m/s. Control energy uses increments around the trim point:
 aileron, `elevator-elevator_trim`, rudder, and
-`throttle-throttle_base`. Step overshoot is measured only after the response
+`throttle-throttle_base`. Control-rate energy additionally penalizes squared
+physical-frame changes in aileron, elevator, and throttle. Step overshoot is measured only after the response
 first reaches its target; settling requires the error to remain within its
 channel tolerance through the end of that step segment. Heading calculations
 use circular angle differences.
+
+Multi-case performance integrals and control energies are averaged. Safety,
+saturation, altitude loss, and final errors use their worst-case maxima. Failed
+optimization cases receive finite, completion-sensitive penalties so the
+optimizer retains a useful gradient, while stage acceptance still requires
+zero failures.

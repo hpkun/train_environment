@@ -16,15 +16,17 @@ python aircombat_env_v1/scripts/find_trim.py
 python aircombat_env_v1/scripts/find_trim.py --accept
 python aircombat_env_v1/scripts/tune_pid.py
 python aircombat_env_v1/scripts/tune_pid.py --accept-candidate
-python aircombat_env_v1/scripts/validate_pid.py
-python aircombat_env_v1/scripts/validate_pid.py --mark-validated
+python aircombat_env_v1/scripts/validate_pid.py --mode quick
+python aircombat_env_v1/scripts/validate_pid.py --mode full
+python aircombat_env_v1/scripts/validate_pid.py --mode full --mark-validated
 ```
 
 Inspect each generated output before using the corresponding accept flag.
 Parameter status progresses from `initial_guess` to `candidate`, then to
-`validated`. Validation requires all 72 short 40-second cases and eight
-representative 200-second long cases to pass. `--mark-validated` refuses to
-update the formal configuration otherwise.
+`validated`. Quick mode runs eight representative 200-second health cases.
+Full mode runs the 72-case matrix plus those eight long cases.
+`--mark-validated` is rejected in quick mode and refuses to update the formal
+configuration unless full validation passes.
 
 Every closed-loop script uses the same 60 Hz physics/PID loop and 5 Hz command
 interface: one high-level command is held for 12 physics frames. In the
@@ -39,7 +41,7 @@ python -m pytest aircombat_env_v1/tests -q -m integration
 python aircombat_env_v1/scripts/check_actuator_signs.py --stabilization-duration 3
 python aircombat_env_v1/scripts/find_trim.py --duration 5 --grid-size 5
 python aircombat_env_v1/scripts/tune_pid.py --roll-duration 1 --pitch-duration 1 --speed-duration 1 --joint-duration 1 --maxiter 1 --popsize 2
-python aircombat_env_v1/scripts/validate_pid.py --short-duration 1 --long-duration 1
+python aircombat_env_v1/scripts/validate_pid.py --mode quick --quick-duration 1
 ```
 
 Smoke outputs prove workflow execution only; they are not validated flight

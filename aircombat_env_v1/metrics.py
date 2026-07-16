@@ -16,19 +16,31 @@ def trajectory_metrics(rows, config, initial_altitude, failure_reason=None):
     dt = 1.0 / config["timing"]["sim_frequency_hz"]
     trim = config["trim"]
     totals = {"roll_error_integral": 0.0, "pitch_error_integral": 0.0,
-              "speed_error_integral": 0.0, "control_increment_energy": 0.0}
+              "speed_error_integral": 0.0, "control_increment_energy": 0.0,
+              "control_rate_energy": 0.0}
     saturation = {"aileron": 0, "elevator": 0, "throttle": 0}
+    previous_controls = None
+    heading_errors, pitch_errors, speed_errors = [], [], []
     for row in rows:
         e_roll, e_pitch = paper_direction_errors(
             row["roll"], row["pitch"], row["heading"],
             row["target_pitch"], row["target_heading"])
         e_speed = row["target_true_airspeed"] - row["true_airspeed"]
+        heading_errors.append(abs(np.rad2deg(in_range_rad(
+            row["target_heading"] - row["heading"]))))
+        pitch_errors.append(abs(np.rad2deg(row["target_pitch"] - row["pitch"])))
+        speed_errors.append(abs(e_speed))
         totals["roll_error_integral"] += abs(e_roll) / ROLL_SCALE * dt
         totals["pitch_error_integral"] += abs(e_pitch) / PITCH_SCALE * dt
         totals["speed_error_integral"] += abs(e_speed) / SPEED_SCALE * dt
         increments = (row["aileron"], row["elevator"] - trim["elevator_trim"],
                       row["rudder"], row["throttle"] - trim["throttle_base"])
         totals["control_increment_energy"] += float(np.dot(increments, increments)) * dt
+        controls = np.array((row["aileron"], row["elevator"], row["throttle"]))
+        if previous_controls is not None:
+            delta = controls - previous_controls
+            totals["control_rate_energy"] += float(delta @ delta)
+        previous_controls = controls
         saturation["aileron"] += abs(row["aileron"]) >= 0.999
         saturation["elevator"] += abs(row["elevator"]) >= 0.999
         saturation["throttle"] += row["throttle"] <= 0.001 or row["throttle"] >= 0.999
@@ -45,6 +57,18 @@ def trajectory_metrics(rows, config, initial_altitude, failure_reason=None):
         "crashed": failure_reason not in (None, "nan_or_inf"),
         "has_nan_or_inf": failure_reason == "nan_or_inf",
         "failure_reason": failure_reason,
+        "heading_error_rms_deg": float(np.sqrt(np.mean(np.square(heading_errors))))
+        if heading_errors else float("inf"),
+        "pitch_error_rms_deg": float(np.sqrt(np.mean(np.square(pitch_errors))))
+        if pitch_errors else float("inf"),
+        "speed_error_rms_mps": float(np.sqrt(np.mean(np.square(speed_errors))))
+        if speed_errors else float("inf"),
+        "heading_error_p95_deg": float(np.percentile(heading_errors, 95))
+        if heading_errors else float("inf"),
+        "pitch_error_p95_deg": float(np.percentile(pitch_errors, 95))
+        if pitch_errors else float("inf"),
+        "speed_error_p95_mps": float(np.percentile(speed_errors, 95))
+        if speed_errors else float("inf"),
     })
     if rows:
         last = rows[-1]
@@ -59,6 +83,51 @@ def trajectory_metrics(rows, config, initial_altitude, failure_reason=None):
                       pitch_final_error_deg=float("inf"),
                       speed_final_error_mps=float("inf"))
     return totals
+
+
+MEAN_METRICS = ("roll_error_integral", "pitch_error_integral",
+                "speed_error_integral", "control_increment_energy",
+                "control_rate_energy")
+MAX_METRICS = ("aileron_saturation_ratio", "elevator_saturation_ratio",
+               "throttle_saturation_ratio", "altitude_loss_m",
+               "maximum_alpha_deg", "maximum_beta_deg", "maximum_load_factor",
+               "heading_final_error_deg", "pitch_final_error_deg",
+               "speed_final_error_mps", "heading_error_rms_deg",
+               "pitch_error_rms_deg", "speed_error_rms_mps",
+               "heading_error_p95_deg", "pitch_error_p95_deg",
+               "speed_error_p95_mps")
+
+
+def aggregate_case_metrics(case_results):
+    """Average performance metrics and keep worst-case safety metrics."""
+    aggregate = {}
+    for key in MEAN_METRICS:
+        aggregate[key] = float(np.mean([case["metrics"][key] for case in case_results]))
+    for key in MAX_METRICS:
+        aggregate[key] = float(np.max([case["metrics"][key] for case in case_results]))
+    failed = [case["name"] for case in case_results if not case["complete"]]
+    aggregate.update(failed_case_count=len(failed), failed_cases=failed,
+                     crashed=any(case["metrics"]["crashed"] for case in case_results),
+                     has_nan_or_inf=any(case["metrics"]["has_nan_or_inf"]
+                                        for case in case_results))
+    return aggregate
+
+
+def stable_segment_errors(rows, duration, sim_frequency_hz):
+    """Return worst errors in the final commanded-stable segment."""
+    tail = rows[-max(1, round(duration * sim_frequency_hz)):]
+    if not tail:
+        return {"stable_heading_error_deg": float("inf"),
+                "stable_pitch_error_deg": float("inf"),
+                "stable_speed_error_mps": float("inf")}
+    return {
+        "stable_heading_error_deg": max(abs(np.rad2deg(in_range_rad(
+            row["target_heading"] - row["heading"]))) for row in tail),
+        "stable_pitch_error_deg": max(abs(np.rad2deg(
+            row["target_pitch"] - row["pitch"])) for row in tail),
+        "stable_speed_error_mps": max(abs(
+            row["target_true_airspeed"] - row["true_airspeed"]) for row in tail),
+    }
 
 
 def _first_step(rows, target_key, actual_key, initial_value, circular=False):
