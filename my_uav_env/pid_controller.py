@@ -2,12 +2,41 @@ from __future__ import annotations
 """Bank-to-Turn PID controller for the paper environment.
 
 Eq.12 constructs the desired direction in NED. Eq.13 converts it to the
-paper's body-z-up convention and uses ``atan2(y, x)`` for roll error and
-``atan2(z, x)`` for pitch error. F-16 actuator signs are adapted only at the
-final output. Eq.14 throttle uses an explicit engineering ``throttle_base``;
-rudder remains fixed at zero.
+paper's body-z-up convention and uses the principal values ``atan(y / x)``
+and ``atan(z / x)``. F-16 actuator signs are adapted only at the final output.
+Eq.14 throttle uses an explicit engineering ``throttle_base``; rudder remains
+fixed at zero.
 """
 import numpy as np
+
+
+PAPER_EQ13_RATIO_EPS = 1e-12
+
+
+def paper_arctan_ratio(
+        numerator: float, denominator: float, *,
+        return_degenerate: bool = False):
+    """Paper Eq.13 principal-value ``atan(numerator / denominator)``.
+
+    This deliberately does not use ``atan2``: a negative denominator remains
+    on the principal arctangent branch. The zero-over-zero case is a
+    degenerate direction and deterministically returns zero.
+    """
+    numerator = float(numerator)
+    denominator = float(denominator)
+    if not np.isfinite(numerator) or not np.isfinite(denominator):
+        value, degenerate = 0.0, True
+    elif abs(denominator) >= PAPER_EQ13_RATIO_EPS:
+        value, degenerate = float(np.arctan(numerator / denominator)), False
+    elif abs(numerator) >= PAPER_EQ13_RATIO_EPS:
+        ratio_is_negative = (
+            np.signbit(numerator) != np.signbit(denominator))
+        value = -np.pi / 2.0 if ratio_is_negative else np.pi / 2.0
+        value, degenerate = float(value), False
+    else:
+        value, degenerate = 0.0, True
+    value = float(np.clip(value, -np.pi / 2.0, np.pi / 2.0))
+    return (value, degenerate) if return_degenerate else value
 
 
 class PIDLoop:
@@ -37,6 +66,11 @@ class PIDLoop:
         self._integral = 0.0
         self._prev_error = 0.0
         self._prev_output = 0.0
+        self._last_diagnostic = {
+            "p": 0.0, "i": 0.0, "d": 0.0,
+            "unsaturated": 0.0, "saturated": 0.0,
+            "integral_enabled": True,
+        }
 
     def step(self, error, dt):
         # Proportional
@@ -47,7 +81,8 @@ class PIDLoop:
         self._prev_error = error
 
         # Accumulate integral
-        if abs(error) <= self.integral_error_limit:
+        integral_enabled = abs(error) <= self.integral_error_limit
+        if integral_enabled:
             self._integral += self.ki * error * dt
 
         # -----------------------------------------------------------------
@@ -80,8 +115,14 @@ class PIDLoop:
         self._integral = np.clip(self._integral, -i_safety, i_safety)
 
         i = self._integral
-        output = float(np.clip(p + i + d, self.output_min, self.output_max))
+        unsaturated = float(p + i + d)
+        output = float(np.clip(unsaturated, self.output_min, self.output_max))
         self._prev_output = output
+        self._last_diagnostic = {
+            "p": float(p), "i": float(i), "d": float(d),
+            "unsaturated": unsaturated, "saturated": output,
+            "integral_enabled": bool(integral_enabled),
+        }
         return output
 
 
@@ -113,6 +154,7 @@ class PIDController:
         if not 0.0 <= float(throttle_base) <= 1.0:
             raise ValueError("throttle_base must be in [0, 1]")
         self.throttle_base = float(throttle_base)
+        self._last_diagnostic = {}
 
         # --- Roll PID (drives aileron) ---
         # F-16 aero has strong natural roll-damping (Cl_p ≈ −0.5 rad⁻¹ at
@@ -160,13 +202,7 @@ class PIDController:
         self._velocity_pid.reset()
         self._prev_target_heading = None     # clear heading LPF state
         self._prev_roll_error = None         # clear D-term guard state
-
-    def suppress_directional_memory(self):
-        """Clear roll/pitch integral and derivative memory for load protection."""
-        self._roll_pid.reset()
-        self._pitch_pid.reset()
-        self._prev_target_heading = None
-        self._prev_roll_error = None
+        self._last_diagnostic = {}
 
     # ------------------------------------------------------------------
     #  Rotation matrix helpers
@@ -260,13 +296,15 @@ class PIDController:
         return R_IB.T                                          # R_BI = R_IB^T
 
     @classmethod
-    def paper_direction_errors(cls, current_rpy, target_pitch, target_heading,
-                               r_bi_override: np.ndarray | None = None):
+    def paper_direction_errors(cls, current_rpy, target_pitch, target_heading):
         """Return literal Eq.12/Eq.13 direction errors and diagnostic vectors.
 
-        The paper writes body z as up. Internally this project uses NED and
-        aerospace body z down, so only the coordinate-equivalent z sign is
-        changed before evaluating the published atan2(y/x) and atan2(z/x).
+        Eq.12 is written in a ground frame with z up. The simulator uses NED
+        (z down), so the desired ground-z component is negated before applying
+        the Euler-angle NED-to-body-down matrix. The resulting body-z-down
+        component is negated once more to recover the paper's body-z-up
+        convention. These two explicit sign changes are the coordinate-
+        equivalent implementation of the published equation.
         """
         roll, pitch, yaw = [float(v) for v in current_rpy]
         c_theta = np.cos(target_pitch)
@@ -275,15 +313,15 @@ class PIDController:
             c_theta * np.sin(target_heading),
             -np.sin(target_pitch),
         ], dtype=np.float64)
-        r_bi = (np.asarray(r_bi_override, dtype=np.float64)
-                if r_bi_override is not None
-                else cls.ned_to_body_matrix(roll, pitch, yaw))
+        r_bi = cls.ned_to_body_matrix(roll, pitch, yaw)
         d_body_down = r_bi @ d_des_ned
         d_body_paper = np.array([
             d_body_down[0], d_body_down[1], -d_body_down[2]
         ], dtype=np.float64)
-        roll_error = float(np.arctan2(d_body_paper[1], d_body_paper[0]))
-        pitch_error = float(np.arctan2(d_body_paper[2], d_body_paper[0]))
+        roll_error, roll_degenerate = paper_arctan_ratio(
+            d_body_paper[1], d_body_paper[0], return_degenerate=True)
+        pitch_error, pitch_degenerate = paper_arctan_ratio(
+            d_body_paper[2], d_body_paper[0], return_degenerate=True)
         return roll_error, pitch_error, d_des_ned, d_body_down, d_body_paper, r_bi
 
     def compute_control(self, current_rpy, current_velocity,
@@ -310,15 +348,46 @@ class PIDController:
             return 0.0, 0.0, 0.0, 0.0
 
         if self.profile in ("paper", "paper_minimal_shared_v1"):
-            roll_error, pitch_error, *_geometry = self.paper_direction_errors(
+            roll_error, pitch_error, d_i_des, d_body_down, d_b_des, r_bi = (
+                self.paper_direction_errors(
                 current_rpy, target_pitch, target_heading)
+            )
             aileron = self._roll_pid.step(roll_error, self.dt)
             # F-16 actuator convention: positive elevator command pitches down.
-            elevator = -self._pitch_pid.step(pitch_error, self.dt)
-            correction = self._velocity_pid.step(
-                target_velocity - current_velocity, self.dt)
+            paper_elevator = self._pitch_pid.step(pitch_error, self.dt)
+            elevator = -paper_elevator
+            velocity_error = target_velocity - current_velocity
+            correction = self._velocity_pid.step(velocity_error, self.dt)
             throttle = float(np.clip(
                 self.throttle_base + correction, 0.0, 1.0))
+            unsaturated = (
+                self._roll_pid._last_diagnostic["unsaturated"],
+                -self._pitch_pid._last_diagnostic["unsaturated"],
+                0.0,
+                self.throttle_base
+                + self._velocity_pid._last_diagnostic["unsaturated"],
+            )
+            saturated = (aileron, elevator, 0.0, throttle)
+            self._last_diagnostic = {
+                "formula_version": "paper_eq12_14_principal_arctan_ratio_v1",
+                "d_I_des": tuple(float(value) for value in d_i_des),
+                "d_B_des": tuple(float(value) for value in d_b_des),
+                "d_B_down": tuple(float(value) for value in d_body_down),
+                "R_BI": np.asarray(r_bi, dtype=np.float64).tolist(),
+                "e_phi": float(roll_error),
+                "e_theta": float(pitch_error),
+                "e_velocity": float(velocity_error),
+                "roll_pid": dict(self._roll_pid._last_diagnostic),
+                "pitch_pid": dict(self._pitch_pid._last_diagnostic),
+                "velocity_pid": dict(self._velocity_pid._last_diagnostic),
+                "unsaturated_commands": tuple(float(value) for value in unsaturated),
+                "saturated_commands": tuple(float(value) for value in saturated),
+                "degenerate_arctan_ratio": bool(
+                    (abs(d_b_des[0]) < PAPER_EQ13_RATIO_EPS
+                     and (abs(d_b_des[1]) < PAPER_EQ13_RATIO_EPS
+                          or abs(d_b_des[2]) < PAPER_EQ13_RATIO_EPS))),
+                "jsbsim_elevator_sign_adapter": -1.0,
+            }
             return aileron, elevator, 0.0, throttle
 
         # =================================================================

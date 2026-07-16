@@ -11,7 +11,7 @@ import rule_based_agent as rule_agent
 from my_uav_env import UavCombatEnv
 from my_uav_env.alignment.los_geometry import compute_body_x_q_los
 from my_uav_env.alignment.launch_quality import LAUNCH_QUALITY_FIELDS, make_launch_quality_record
-from my_uav_env.pid_controller import PIDController
+from my_uav_env.pid_controller import PIDController, PIDLoop, paper_arctan_ratio
 from my_uav_env.simulator import (
     MissileSimulator,
     compute_los_angles_and_rates,
@@ -684,6 +684,134 @@ def test_paper_pid_eq13_direction_errors_use_x_denominator():
     assert math.isclose(pitch_error, math.radians(10.0), abs_tol=1e-9)
 
 
+@pytest.mark.parametrize("numerator,denominator,expected", [
+    (1.0, 2.0, math.atan(0.5)),
+    (-1.0, 2.0, math.atan(-0.5)),
+    (1.0, -2.0, math.atan(-0.5)),
+    (-1.0, -2.0, math.atan(0.5)),
+    (0.0, 2.0, 0.0),
+    (1.0, 1e-15, math.pi / 2.0),
+    (1.0, -1e-15, -math.pi / 2.0),
+    (-1.0, 1e-15, -math.pi / 2.0),
+    (-1.0, -1e-15, math.pi / 2.0),
+])
+def test_paper_arctan_ratio_principal_values(numerator, denominator, expected):
+    value = paper_arctan_ratio(numerator, denominator)
+    assert math.isfinite(value)
+    assert -math.pi / 2 <= value <= math.pi / 2
+    assert value == pytest.approx(expected)
+
+
+def test_paper_arctan_ratio_degenerate_and_not_atan2_branch():
+    value, degenerate = paper_arctan_ratio(
+        1e-15, -1e-15, return_degenerate=True)
+    assert value == 0.0
+    assert degenerate is True
+    principal = paper_arctan_ratio(0.1, -1.0)
+    assert principal == pytest.approx(math.atan(-0.1))
+    assert principal != pytest.approx(math.atan2(0.1, -1.0))
+    # Crossing y=0 behind the body stays on the principal branch rather than
+    # jumping between +pi and -pi as atan2 does.
+    values = [paper_arctan_ratio(y, -1.0) for y in np.linspace(-1e-4, 1e-4, 21)]
+    assert max(abs(np.diff(values))) < 1e-4
+
+
+def test_paper_eq12_coordinate_equivalence_random_1000():
+    rng = np.random.default_rng(20260716)
+    z_flip = np.diag([1.0, 1.0, -1.0])
+    for _ in range(1000):
+        rpy = rng.uniform([-math.pi, -1.4, -math.pi],
+                          [math.pi, 1.4, math.pi])
+        target_pitch = float(rng.uniform(-math.pi / 2, math.pi / 2))
+        target_heading = float(rng.uniform(-math.pi, math.pi))
+        _, _, d_ned, d_body_down, d_body_paper, r_bi = (
+            PIDController.paper_direction_errors(
+                rpy, target_pitch, target_heading))
+        d_paper = np.array([
+            math.cos(target_pitch) * math.cos(target_heading),
+            math.cos(target_pitch) * math.sin(target_heading),
+            math.sin(target_pitch),
+        ])
+        assert np.allclose(d_ned, z_flip @ d_paper, atol=1e-12)
+        assert np.allclose(d_body_down, r_bi @ z_flip @ d_paper, atol=1e-12)
+        assert np.allclose(d_body_paper, z_flip @ r_bi @ z_flip @ d_paper,
+                           atol=1e-12)
+
+
+@pytest.mark.parametrize("pitch,heading,expected", [
+    (0.0, 0.0, [1.0, 0.0, 0.0]),
+    (0.0, math.pi / 2, [0.0, 1.0, 0.0]),
+    (math.pi / 6, 0.0, [math.sqrt(3) / 2, 0.0, 0.5]),
+    (-math.pi / 6, 0.0, [math.sqrt(3) / 2, 0.0, -0.5]),
+])
+def test_paper_eq12_cardinal_directions(pitch, heading, expected):
+    *_, d_body_paper, _ = PIDController.paper_direction_errors(
+        np.zeros(3), pitch, heading)
+    assert np.allclose(d_body_paper, expected, atol=1e-12)
+
+
+def test_paper_eq13_mirror_error_signs():
+    original = np.array([0.7, 0.2, -0.3])
+    mirrored = np.array([0.7, -0.2, -0.3])
+    phi = paper_arctan_ratio(original[1], original[0])
+    theta = paper_arctan_ratio(original[2], original[0])
+    assert paper_arctan_ratio(mirrored[1], mirrored[0]) == pytest.approx(-phi)
+    assert paper_arctan_ratio(mirrored[2], mirrored[0]) == pytest.approx(theta)
+
+
+def test_paper_eq13_rear_target_and_body_x_zero_use_principal_branch():
+    zero = np.zeros(3)
+    rear_roll, rear_pitch, *_ = PIDController.paper_direction_errors(
+        zero, 0.0, math.pi)
+    assert rear_roll == pytest.approx(0.0, abs=1e-12)
+    assert rear_pitch == pytest.approx(0.0, abs=1e-12)
+
+    left, *_ = PIDController.paper_direction_errors(
+        zero, 0.0, -math.pi / 2)
+    right, *_ = PIDController.paper_direction_errors(
+        zero, 0.0, math.pi / 2)
+    assert left == pytest.approx(-math.pi / 2)
+    assert right == pytest.approx(math.pi / 2)
+
+    pid = PIDController(1.0 / 60.0, profile="paper")
+    for heading in (-math.pi, -math.pi / 2, math.pi / 2, math.pi):
+        controls = pid.compute_control(
+            zero, 300.0, 0.0, heading, 300.0,
+            np.array([300.0, 0.0, 0.0]))
+        assert np.isfinite(controls).all()
+        assert np.max(np.abs(controls)) <= 1.0
+
+
+def test_pid_loop_bounded_integral_saturation_and_reset_diagnostics():
+    loop = PIDLoop(0.1, 0.5, 0.0, -1.0, 1.0,
+                   integral_error_limit=0.25)
+    loop.step(0.2, 0.1)
+    integral = loop._integral
+    assert integral != 0.0
+    loop.step(0.5, 0.1)
+    assert loop._last_diagnostic["integral_enabled"] is False
+    assert loop._integral == pytest.approx(integral)
+    output = loop.step(20.0, 0.1)
+    assert output == 1.0
+    assert loop._last_diagnostic["unsaturated"] > 1.0
+    loop.reset()
+    assert loop._integral == 0.0
+    assert loop._prev_error == 0.0
+
+
+def test_paper_eq14_diagnostics_and_channel_contract():
+    pid = PIDController(1.0 / 60.0, profile="paper")
+    controls = pid.compute_control(
+        np.zeros(3), 200.0, math.radians(5), math.radians(10), 225.0)
+    diag = pid._last_diagnostic
+    assert controls[2] == 0.0
+    assert diag["formula_version"] == "paper_eq12_14_principal_arctan_ratio_v1"
+    assert diag["e_velocity"] == pytest.approx(25.0)
+    assert set(("p", "i", "d", "unsaturated", "saturated",
+                "integral_enabled")) <= set(diag["roll_pid"])
+    assert np.all(np.isfinite(diag["saturated_commands"]))
+
+
 def test_paper_pid_rotation_round_trip_and_current_nose_zero_error():
     rpy = np.array([0.4, -0.3, 1.2])
     r_ib = PIDController.body_to_ned_matrix(*rpy)
@@ -1325,7 +1453,9 @@ def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     global_dim = _compute_global_state_dim(3, "paper_strict")
     metadata = _checkpoint_metadata(cfg, obs_dim, global_dim)
     state = VanillaActor(obs_dim).state_dict()
-    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v6"
+    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v7"
+    assert metadata["pid_error_definition"] == (
+        "paper_eq13_principal_arctan_ratio_v1")
     assert metadata["schema_version"] == CHECKPOINT_SCHEMA_VERSION
     assert metadata["action_distribution"] == ACTION_DISTRIBUTION_VERSION
     assert metadata["actor_obs_dim"] == 60
@@ -1784,26 +1914,37 @@ def test_metadata_missing_or_mismatch_fails_environment_health():
                for reason in result["EnvironmentHealthReasons"])
 
 
-def test_short_jsbsim_paper_pid_steps_reduce_heading_pitch_and_speed_error():
-    def run_case(kind, frames):
+@pytest.mark.parametrize("team", ["red", "blue"])
+@pytest.mark.parametrize("kind,delta,frames", [
+    ("heading", math.radians(5.0), 240),
+    ("heading", math.radians(-5.0), 240),
+    ("pitch", math.radians(2.0), 180),
+    ("pitch", math.radians(-2.0), 180),
+    ("speed", 10.0, 600),
+    ("speed", -10.0, 600),
+])
+def test_short_jsbsim_paper_pid_step_response_direction(
+        team, kind, delta, frames):
+    def run_case():
         env = UavCombatEnv(
             max_num_red=1, max_num_blue=1, pid_profile="paper",
             suppress_jsbsim_output=True)
         try:
             env.reset()
-            sim = env.red_planes["red_0"]
-            pid = env.pid_controllers["red_0"]
+            aid = f"{team}_0"
+            sim = (env.red_planes if team == "red" else env.blue_planes)[aid]
+            pid = env.pid_controllers[aid]
             initial_rpy = sim.get_rpy().copy()
             initial_speed = float(np.linalg.norm(sim.get_velocity()))
             target_pitch = float(initial_rpy[1])
             target_heading = float(initial_rpy[2])
             target_speed = initial_speed
             if kind == "heading":
-                target_heading += math.radians(5.0)
+                target_heading += delta
             elif kind == "pitch":
-                target_pitch += math.radians(2.0)
+                target_pitch += delta
             else:
-                target_speed += 10.0
+                target_speed += delta
 
             def error():
                 if kind == "heading":
@@ -1831,9 +1972,14 @@ def test_short_jsbsim_paper_pid_steps_reduce_heading_pitch_and_speed_error():
             assert np.isfinite(controls).all()
             assert np.max(np.abs(controls)) <= 1.0
             assert float(error()) < initial_error
+            if kind == "speed":
+                if delta > 0.0:
+                    assert controls[0, 3] > pid.throttle_base
+                else:
+                    assert controls[0, 3] <= pid.throttle_base
+                final_speed = float(np.linalg.norm(sim.get_velocity()))
+                assert np.sign(final_speed - initial_speed) == np.sign(delta)
         finally:
             env.close()
 
-    run_case("heading", 180)
-    run_case("pitch", 180)
-    run_case("speed", 600)
+    run_case()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 import numpy as np
 import pytest
 
@@ -34,7 +35,9 @@ from train_vanilla_mappo import (
     _compute_obs_dim,
     _episode_is_invalid,
     _default_eval_log_file,
+    _default_extreme_load_trace_file,
     _default_launch_quality_file,
+    _append_invalid_trace_jsonl,
     _learnability_iteration_metrics,
     _run_periodic_evaluation,
     _training_log_fields,
@@ -78,6 +81,12 @@ def test_learnable_profile_contract_and_dimensions():
         assert snapshot[key]["source"] == LEARNABILITY_ADAPTATION
     missile = snapshot["environment_config"]["missile"]
     assert missile["maximum_flight_time_s"]["source"] == LEARNABILITY_ADAPTATION
+    assert snapshot["setpoint_rate_limiter"]["value"] == (
+        "disabled_for_paper_eq12_14")
+    assert snapshot["load_command_scaling"]["value"] == (
+        "disabled_for_paper_eq12_14")
+    assert snapshot["pid_error_definition"]["value"] == (
+        "paper_eq13_principal_arctan_ratio_v1")
     assert _compute_obs_dim(3, 3, True, "paper_strict") == 60
     assert _compute_global_state_dim(3, "paper_strict") == 30
     preset = get_preset("vanilla_3v3_paper_learnable_500k")
@@ -90,7 +99,9 @@ def test_learnable_profile_contract_and_dimensions():
             "CatastrophicFiniteLoadInvalidEpisodes",
             "PersistentExtremeFiniteLoadInvalidEpisodes",
             "RedMWSWarningGenerations",
-            "RedSetpointRateLimitActivations"):
+            "RedSetpointRateLimitActivations",
+            "RedMaximumAbsoluteEPhi",
+            "BlueDegenerateArctanRatioCount"):
         assert field in _training_log_fields()
 
 
@@ -104,6 +115,7 @@ def test_1m_preset_has_isolated_paths_and_explicit_resume_only():
     paths_500k = {
         preset_500k["log_file"], preset_500k["results_file"],
         _default_eval_log_file(preset_500k["results_file"]),
+        _default_extreme_load_trace_file(preset_500k["results_file"]),
         _default_launch_quality_file(preset_500k["results_file"]),
         *(f"{preset_500k['checkpoint_dir']}/{name}" for name in (
             "run_manifest.json", "latest_training_state.pt",
@@ -112,6 +124,7 @@ def test_1m_preset_has_isolated_paths_and_explicit_resume_only():
     paths_1m = {
         preset_1m["log_file"], preset_1m["results_file"],
         _default_eval_log_file(preset_1m["results_file"]),
+        _default_extreme_load_trace_file(preset_1m["results_file"]),
         _default_launch_quality_file(preset_1m["results_file"]),
         *(f"{preset_1m['checkpoint_dir']}/{name}" for name in (
             "run_manifest.json", "latest_training_state.pt",
@@ -203,13 +216,64 @@ def test_learnable_red_mws_direction_and_absolute_target_are_stable():
     assert env._mws_decision_diagnostics["red_warning_generations"] == 1
     assert env._mws_decision_diagnostics[
         "red_direction_changes_within_same_missile"] == 0
+    assert env._mws_decision_diagnostics[
+        "red_suppressed_direction_flip_attempts"] == 1
     env._deactivate_learnable_mws_state("red_0")
     env._learnable_red_mws_target("red_0", _Incoming("m1"), 0.4, -1.0)
     assert env._mws_decision_diagnostics["red_warning_generations"] == 2
 
 
+def test_invalid_trace_jsonl_preserves_twelve_frames_and_context(tmp_path):
+    path = tmp_path / "run_extreme_load_traces.jsonl"
+    frames = [{
+        "physics_frame": index,
+        "d_B_des": [1.0, 0.0, 0.0],
+        "e_phi": 0.0,
+        "e_theta": 0.0,
+        "roll_pid": {"p": 0.0, "i": 0.0, "d": 0.0},
+        "pitch_pid": {"p": 0.0, "i": 0.0, "d": 0.0},
+        "velocity_pid": {"p": 0.0, "i": 0.0, "d": 0.0},
+        "unsaturated_commands": [0.0, 0.0, 0.0, 0.5],
+        "saturated_commands": [0.0, 0.0, 0.0, 0.5],
+        "g_load_components": [0.0, 0.0, float("nan")],
+        "g_load_total": float("nan"),
+        "rpy_rad": [0.0, 0.0, 0.0],
+        "body_rates_rad_s": [0.0, 0.0, 0.0],
+        "airspeed_mps": 300.0,
+        "alpha_rad": 0.0,
+        "beta_rad": 0.0,
+        "mws_active": False,
+        "incoming_missile_uid": None,
+    } for index in range(12)]
+    written = _append_invalid_trace_jsonl(
+        str(path), run_id="audit-run", seed=7, total_step=123,
+        env_index=2,
+        episode_info={
+            "EpisodeLength": 17,
+            "invalid_numerical_reasons": ["red_0:NonFiniteLoad"],
+        },
+        traces=[{
+            "trigger_agent_id": "red_0",
+            "trigger_g": float("nan"),
+            "trigger_level": "numerical_invalid",
+            "frames": frames,
+        }])
+    assert written == 1
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["run_id"] == "audit-run"
+    assert record["seed"] == 7
+    assert record["total_step"] == 123
+    assert record["env_index"] == 2
+    assert record["episode_step"] == 17
+    assert record["agent_id"] == "red_0"
+    assert record["team"] == "red"
+    assert record["invalid_reason"] == "NonFiniteLoad"
+    assert len(record["physics_frames"]) == 12
+    assert record["physics_frames"][-1]["g_load_total"] is None
+
+
 @pytest.mark.parametrize("aid", ["red_0", "blue_0"])
-def test_learnable_setpoint_rate_limiter_is_symmetric_and_wrap_safe(aid):
+def test_learnable_setpoints_pass_through_without_rate_limiting(aid):
     env = UavCombatEnv(
         max_num_red=3, max_num_blue=3, max_steps=1400,
         environment_profile=PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
@@ -237,15 +301,13 @@ def test_learnable_setpoint_rate_limiter_is_symmetric_and_wrap_safe(aid):
     env._learnable_command_sources = {}
     applied = env._finalize_learnable_target(
         aid, (np.deg2rad(40), np.deg2rad(-170), 400.0), "base_policy")
-    assert applied[0] == pytest.approx(np.deg2rad(10.0))
-    assert env._wrap_angle_rad(applied[1] - np.deg2rad(170)) == pytest.approx(
-        np.deg2rad(20.0))
-    assert applied[2] == pytest.approx(350.0)
+    assert applied == pytest.approx(
+        (np.deg2rad(40), np.deg2rad(-170), 400.0))
     assert env._aircraft_diagnostics[aid][
-        "setpoint_rate_limit_activations"] == 1
+        "setpoint_rate_limit_activations"] == 0
 
 
-def test_learnable_load_protection_boundaries_and_persistence():
+def test_learnable_load_monitor_does_not_compute_command_scale():
     env = UavCombatEnv(
         max_num_red=3, max_num_blue=3, max_steps=1400,
         environment_profile=PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
@@ -253,18 +315,20 @@ def test_learnable_load_protection_boundaries_and_persistence():
     env._aircraft_diagnostics = {aid: {
         "maximum_load_g_seen": 0.0, "frames_above_9g": 0,
         "consecutive_above_9g_frames": 0,
+        "maximum_consecutive_above_9g_frames": 0,
+        "episode_ever_exceeded_9g": False,
         "consecutive_above_30g_frames": 0,
         "maximum_consecutive_above_30g_frames": 0,
         "transient_above_30g_events": 0,
         "load_limiter_activations": 0,
         "load_protection_active_frames": 0,
         "load_protection_minimum_scale": 1.0}}
-    assert env._paper_learnable_load_scale(aid, 9.0) == 1.0
-    assert env._paper_learnable_load_scale(aid, 12.0) == pytest.approx(0.5)
-    assert env._paper_learnable_load_scale(aid, 15.0) == 0.0
-    env._paper_learnable_load_scale(aid, 31.0)
+    assert env._update_paper_learnable_load_diagnostics(aid, 9.0) is None
+    env._update_paper_learnable_load_diagnostics(aid, 12.0)
+    env._update_paper_learnable_load_diagnostics(aid, 15.0)
+    env._update_paper_learnable_load_diagnostics(aid, 31.0)
     assert env._paper_learnable_load_invalid_reason(31.0, 1) is None
-    env._paper_learnable_load_scale(aid, 8.0)
+    env._update_paper_learnable_load_diagnostics(aid, 8.0)
     assert env._aircraft_diagnostics[aid]["transient_above_30g_events"] == 1
     assert env._paper_learnable_load_invalid_reason(31.0, 3) == (
         "PersistentExtremeFiniteLoad")
@@ -272,21 +336,8 @@ def test_learnable_load_protection_boundaries_and_persistence():
         "CatastrophicFiniteLoad")
     assert env._paper_learnable_load_invalid_reason(float("nan"), 0) == (
         "NonFiniteLoad")
-
-
-def test_load_protection_can_clear_directional_pid_memory_only():
-    pid = PIDController(1.0 / 60.0, profile="paper_minimal_shared_v1")
-    pid._roll_pid._integral = 0.7
-    pid._roll_pid._prev_error = 0.4
-    pid._pitch_pid._integral = -0.6
-    pid._pitch_pid._prev_error = -0.3
-    pid._velocity_pid._integral = 0.2
-    pid.suppress_directional_memory()
-    assert pid._roll_pid._integral == 0.0
-    assert pid._roll_pid._prev_error == 0.0
-    assert pid._pitch_pid._integral == 0.0
-    assert pid._pitch_pid._prev_error == 0.0
-    assert pid._velocity_pid._integral == pytest.approx(0.2)
+    assert env._aircraft_diagnostics[aid]["load_limiter_activations"] == 0
+    assert env._aircraft_diagnostics[aid]["load_protection_active_frames"] == 0
 
 
 def test_extreme_load_trace_retains_last_twelve_frames_and_causal_fields():
@@ -318,7 +369,7 @@ def test_extreme_load_trace_retains_last_twelve_frames_and_causal_fields():
     env._retain_load_frame(
         aid, sim, (0.0, 0.0, 21.0), 21.0,
         env._learnable_requested_setpoints[aid],
-        env._learnable_setpoint_state[aid], (1.0, 1.0, 0.0, 0.5), 0.0)
+        env._learnable_setpoint_state[aid], (1.0, 1.0, 0.0, 0.5), 1.0)
     trace = env._retained_extreme_load_traces[-1]
     assert len(trace["frames"]) == 12
     assert trace["trigger_level"] == 2

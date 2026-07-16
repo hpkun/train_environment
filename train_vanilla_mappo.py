@@ -151,6 +151,7 @@ class Config:
     log_file: str = "vanilla_training_log.csv"
     results_file: str = "results/vanilla_mappo_results.csv"
     launch_quality_file: str | None = None
+    extreme_load_trace_file: str | None = None
     checkpoint_dir: str = "checkpoints"
     resume_latest: bool = False
     resume_state: str | None = None
@@ -582,24 +583,34 @@ LEARNABILITY_DIAG_CSV_FIELDS = (
     "WorkerRestartCount", "ResumeCount",
     "RedMaximumGSeen", "BlueMaximumGSeen",
     "RedFramesAbove9G", "BlueFramesAbove9G",
+    "RedMaximumConsecutiveAbove9GFrames",
+    "BlueMaximumConsecutiveAbove9GFrames",
+    "RedEpisodeEverExceeded9G", "BlueEpisodeEverExceeded9G",
     "RedTransientAbove30GEvents", "BlueTransientAbove30GEvents",
     "RedMaximumConsecutiveAbove30GFrames",
     "BlueMaximumConsecutiveAbove30GFrames",
     "RedLoadProtectionActiveFrames", "BlueLoadProtectionActiveFrames",
     "RedMWSWarningGenerations", "BlueMWSWarningGenerations",
     "RedMWSDirectionChangesWithinSameMissile",
+    "RedMWSSuppressedDirectionFlipAttempts",
     "BlueMWSDirectionChangesWithinSameMissile",
     "RedSetpointRateLimitActivations", "BlueSetpointRateLimitActivations",
     "RedRequestedHeadingJumpMaxDeg", "BlueRequestedHeadingJumpMaxDeg",
     "RedAppliedHeadingJumpMaxDeg", "BlueAppliedHeadingJumpMaxDeg",
     "RedRequestedPitchJumpMaxDeg", "BlueRequestedPitchJumpMaxDeg",
     "RedAppliedPitchJumpMaxDeg", "BlueAppliedPitchJumpMaxDeg",
+    "RedMaximumAbsoluteEPhi", "BlueMaximumAbsoluteEPhi",
+    "RedMaximumAbsoluteETheta", "BlueMaximumAbsoluteETheta",
+    "RedMaximumAbsoluteDerivativeTerm",
+    "BlueMaximumAbsoluteDerivativeTerm",
+    "RedPIDOutputSaturationFrames", "BluePIDOutputSaturationFrames",
+    "RedDegenerateArctanRatioCount", "BlueDegenerateArctanRatioCount",
     "RedMWSMaximumContinuousDecisions", "RedMWSTargetHeadingDeltaMaxDeg",
     "NonFiniteLoadInvalidEpisodes", "CatastrophicFiniteLoadInvalidEpisodes",
     "PersistentExtremeFiniteLoadInvalidEpisodes",
 )
 
-CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v6"
+CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v7"
 TRAINING_STATE_SCHEMA_VERSION = "vanilla_mappo_training_state_v1"
 ACTION_DISTRIBUTION_VERSION = "tanh_squashed_diag_gaussian_v1"
 ENTROPY_ESTIMATOR_VERSION = "pre_tanh_base_normal_entropy_v1"
@@ -694,6 +705,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "reward_mode": config.reward_mode,
         "pid_profile": config.pid_profile,
         "pid_throttle_base": float(config.pid_throttle_base),
+        "pid_error_definition": "paper_eq13_principal_arctan_ratio_v1",
         "missile_guidance_mode": config.missile_guidance_mode,
         "altitude_reward_config": asdict(config.altitude_reward_config),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
@@ -779,7 +791,9 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             "missile_positive_closing_threshold_mps", "launch_range_m",
             "fire_control_profile", "reward_version", "target_assignment_mode",
             "observation_mode", "actor_input_dim",
-            "critic_input_dim")
+            "critic_input_dim", "setpoint_rate_limiter",
+            "load_command_scaling", "pid_error_definition",
+            "extreme_finite_load_guard")
         provenance = {}
         for key in sourced_keys:
             sourced = environment_snapshot[key]
@@ -912,6 +926,55 @@ def _atomic_json_save(payload: dict, path: str) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+def _json_finite(value):
+    if isinstance(value, dict):
+        return {str(key): _json_finite(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_finite(item) for item in value]
+    if isinstance(value, (float, np.floating)):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    return value
+
+
+def _append_invalid_trace_jsonl(
+        path: str, *, run_id: str, seed, total_step: int, env_index: int,
+        episode_info: dict, traces: list[dict]) -> int:
+    if not traces:
+        return 0
+    reasons = list(episode_info.get("invalid_numerical_reasons", []))
+    written = 0
+    with open(path, "a", encoding="utf-8") as handle:
+        for trace in traces:
+            agent_id = str(trace.get("trigger_agent_id", ""))
+            matching = [reason for reason in reasons
+                        if reason.startswith(f"{agent_id}:")]
+            record = {
+                "run_id": run_id,
+                "seed": seed,
+                "total_step": int(total_step),
+                "env_index": int(env_index),
+                "episode_step": int(episode_info.get("EpisodeLength", 0)),
+                "agent_id": agent_id,
+                "team": "blue" if agent_id.startswith("blue") else "red",
+                "invalid_reason": (matching[0].split(":", 1)[1]
+                                   if matching else trace.get(
+                                       "invalid_reason", "unknown")),
+                "trigger_g": trace.get("trigger_g"),
+                "trigger_level": trace.get("trigger_level"),
+                "physics_frames": trace.get("frames", []),
+            }
+            handle.write(json.dumps(
+                _json_finite(record), sort_keys=True, separators=(",", ":"))
+                + "\n")
+            written += 1
+        handle.flush()
+    return written
 
 
 _STOP_REQUESTED = False
@@ -1121,6 +1184,8 @@ def _learnability_iteration_metrics(
         "BlueMWSWarningGenerations": 0,
         "RedMWSDirectionChangesWithinSameMissile": int(
             environment_diag["red_direction_changes_within_same_missile"]),
+        "RedMWSSuppressedDirectionFlipAttempts": int(
+            environment_diag["red_suppressed_direction_flip_attempts"]),
         "BlueMWSDirectionChangesWithinSameMissile": 0,
         "NonFiniteLoadInvalidEpisodes": int(
             environment_diag["invalid_nonfinite_load_count"]),
@@ -2663,6 +2728,8 @@ def parse_args():
                         default=defaults.results_file)
     parser.add_argument("--launch-quality-file", type=str,
                         default=defaults.launch_quality_file)
+    parser.add_argument("--extreme-load-trace-file", type=str,
+                        default=defaults.extreme_load_trace_file)
     parser.add_argument("--checkpoint-dir", type=str,
                         default=defaults.checkpoint_dir)
     parser.add_argument("--seed", type=int, default=None)
@@ -2683,6 +2750,7 @@ _VANILLA_PRESET_CLI_FLAGS = {
     "overwrite_existing", "eval_during_training", "eval_interval_steps",
     "eval_episodes", "eval_log_file",
     "log_file", "results_file", "launch_quality_file",
+    "extreme_load_trace_file",
     "checkpoint_dir", "seed", "device",
 }
 
@@ -2755,6 +2823,7 @@ def make_config_from_args(args) -> Config:
     config.log_file = args.log_file
     config.results_file = args.results_file
     config.launch_quality_file = args.launch_quality_file
+    config.extreme_load_trace_file = args.extreme_load_trace_file
     config.checkpoint_dir = args.checkpoint_dir
     config.seed = args.seed
     config.device = args.device
@@ -2799,6 +2868,12 @@ def _default_eval_log_file(results_file: str) -> str:
     results_dir = os.path.dirname(results_file) or "results"
     stem = os.path.splitext(os.path.basename(results_file))[0]
     return os.path.join(results_dir, f"{stem}_eval.csv")
+
+
+def _default_extreme_load_trace_file(results_file: str) -> str:
+    results_dir = os.path.dirname(results_file) or "results"
+    stem = os.path.splitext(os.path.basename(results_file))[0]
+    return os.path.join(results_dir, f"{stem}_extreme_load_traces.jsonl")
 
 
 EVAL_LOG_FIELDS = (
@@ -2929,6 +3004,9 @@ def main():
         config.launch_quality_file = _default_launch_quality_file(config.results_file)
     if config.eval_log_file is None:
         config.eval_log_file = _default_eval_log_file(config.results_file)
+    if config.extreme_load_trace_file is None:
+        config.extreme_load_trace_file = _default_extreme_load_trace_file(
+            config.results_file)
     _set_main_process_seed(config.seed)
     device = _select_device(config.device)
 
@@ -3009,6 +3087,16 @@ def main():
         csv_writer.writerow(train_log_fields)
     csv_file.flush()
 
+    _ensure_parent_dir(config.extreme_load_trace_file)
+    if (resume_payload is None
+            and os.path.exists(config.extreme_load_trace_file)
+            and not config.overwrite_existing):
+        raise FileExistsError(
+            "extreme-load trace file already exists: "
+            f"{config.extreme_load_trace_file}")
+    if resume_payload is None:
+        open(config.extreme_load_trace_file, "w", encoding="utf-8").close()
+
     launch_quality_file = config.launch_quality_file
     launch_quality_csv_file = None
     launch_quality_writer = None
@@ -3048,6 +3136,7 @@ def main():
     print(f"  log_file: {config.log_file}")
     print(f"  results_file: {config.results_file}")
     print(f"  launch_quality_file: {launch_quality_file}")
+    print(f"  extreme_load_trace_file: {config.extreme_load_trace_file}")
     print(f"  checkpoint_dir: {config.checkpoint_dir}")
     print(f"  seed: {config.seed}")
     print(f"  device: {device}")
@@ -3516,7 +3605,8 @@ def main():
                             "blue_detected_agent_decisions",
                             "blue_override_agent_decisions",
                             "red_warning_generations",
-                            "red_direction_changes_within_same_missile"):
+                            "red_direction_changes_within_same_missile",
+                            "red_suppressed_direction_flip_attempts"):
                         iter_environment_diag[field] += int(mws_diag.get(field, 0))
                     iter_environment_diag["red_maximum_continuous_decisions"] = max(
                         iter_environment_diag["red_maximum_continuous_decisions"],
@@ -3555,12 +3645,24 @@ def main():
                     iter_episode_physics_frames += int(
                         inf.get("__episode__", {}).get("EpisodeLength", 0)) * 12
                     if invalid_episode:
+                        _append_invalid_trace_jsonl(
+                            config.extreme_load_trace_file,
+                            run_id=str(manifest["run_id"]), seed=config.seed,
+                            total_step=total_steps + config.num_envs,
+                            env_index=env_idx, episode_info=episode_info,
+                            traces=list(inf.get("__extreme_load_traces__", [])))
                         invalid_numerical_episodes += 1
                         iter_invalid_episodes_dropped += 1
                         buffer.invalidate_episode(
                             env_idx, episode_start_in_rollout[env_idx], step)
                         reasons = inf.get("__episode__", {}).get(
                             "invalid_numerical_reasons", [])
+                        for label in reasons:
+                            if ":" not in str(label):
+                                continue
+                            invalid_aid, invalid_reason = str(label).split(":", 1)
+                            team = "blue" if invalid_aid.startswith("blue") else "red"
+                            death_stats[team][f"Invalid_{invalid_reason}"] += 1
                         print(
                             f"  [INVALID EPISODE] env={env_idx} "
                             f"total_steps={total_steps} reasons={reasons}",
@@ -3758,6 +3860,11 @@ def main():
                 f"{prefix}MaximumGSeen": _team_max("maximum_load_g_seen"),
                 f"{prefix}FramesAbove9G": sum(
                     int(row.get("frames_above_9g", 0)) for row in rows),
+                f"{prefix}MaximumConsecutiveAbove9GFrames": _team_max(
+                    "maximum_consecutive_above_9g_frames"),
+                f"{prefix}EpisodeEverExceeded9G": int(any(
+                    bool(row.get("episode_ever_exceeded_9g", False))
+                    for row in rows)),
                 f"{prefix}TransientAbove30GEvents": sum(
                     int(row.get("transient_above_30g_events", 0)) for row in rows),
                 f"{prefix}MaximumConsecutiveAbove30GFrames": _team_max(
@@ -3774,6 +3881,18 @@ def main():
                     "requested_pitch_jump_max_rad")),
                 f"{prefix}AppliedPitchJumpMaxDeg": np.rad2deg(_team_max(
                     "applied_pitch_jump_max_rad")),
+                f"{prefix}MaximumAbsoluteEPhi": _team_max(
+                    "maximum_absolute_e_phi"),
+                f"{prefix}MaximumAbsoluteETheta": _team_max(
+                    "maximum_absolute_e_theta"),
+                f"{prefix}MaximumAbsoluteDerivativeTerm": _team_max(
+                    "maximum_absolute_derivative_term"),
+                f"{prefix}PIDOutputSaturationFrames": sum(
+                    int(row.get("pid_output_saturation_frames", 0))
+                    for row in rows),
+                f"{prefix}DegenerateArctanRatioCount": sum(
+                    int(row.get("degenerate_arctan_ratio_count", 0))
+                    for row in rows),
             })
 
         # Average per-component breakdown across completed episodes
@@ -4033,7 +4152,9 @@ def main():
         # ---- 终端打印 ----
         def _fmt_death(counter: Counter) -> str:
             order = ["Missile_Kill", "Crash_LowAlt", "Crash_HighAlt",
-                     "Crash_OverG", "Crash_Extreme"]
+                     "Crash_OverG", "Crash_Extreme", "Invalid_NonFiniteState",
+                     "Invalid_NonFiniteLoad", "Invalid_CatastrophicFiniteLoad",
+                     "Invalid_PersistentExtremeFiniteLoad"]
             parts = []
             for k in order:
                 parts.append(f"{k.replace('Crash_','').replace('Missile_','')}:{counter.get(k, 0)}")

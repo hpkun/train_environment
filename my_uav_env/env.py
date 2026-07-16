@@ -36,12 +36,8 @@ from configs.paper_learnable_3v3_spec import (
     LEARNABLE_PAPER_ENVIRONMENT_CONFIG,
     LEARNABLE_CATASTROPHIC_G,
     LEARNABLE_LOAD_PROTECTION_START_G,
-    LEARNABLE_LOAD_PROTECTION_ZERO_G,
     LEARNABLE_PERSISTENT_EXTREME_FRAMES,
     LEARNABLE_PERSISTENT_EXTREME_G,
-    LEARNABLE_SETPOINT_HEADING_RATE_RAD,
-    LEARNABLE_SETPOINT_PITCH_RATE_RAD,
-    LEARNABLE_SETPOINT_VELOCITY_RATE_MPS,
     PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
     learnable_environment_snapshot,
 )
@@ -713,6 +709,8 @@ class UavCombatEnv(gymnasium.Env):
                   "load_limiter_activations": 0,
                   "frames_above_9g": 0,
                   "consecutive_above_9g_frames": 0,
+                  "maximum_consecutive_above_9g_frames": 0,
+                  "episode_ever_exceeded_9g": False,
                   "consecutive_above_30g_frames": 0,
                   "maximum_consecutive_above_30g_frames": 0,
                   "transient_above_30g_events": 0,
@@ -727,7 +725,12 @@ class UavCombatEnv(gymnasium.Env):
                   "requested_pitch_jump_max_rad": 0.0,
                   "applied_pitch_jump_max_rad": 0.0,
                   "requested_velocity_jump_max_mps": 0.0,
-                  "applied_velocity_jump_max_mps": 0.0}
+                  "applied_velocity_jump_max_mps": 0.0,
+                  "maximum_absolute_e_phi": 0.0,
+                  "maximum_absolute_e_theta": 0.0,
+                  "maximum_absolute_derivative_term": 0.0,
+                  "pid_output_saturation_frames": 0,
+                  "degenerate_arctan_ratio_count": 0}
             for aid in self.agent_ids}
         self._learnable_mws_state = {
             aid: self._empty_learnable_mws_state() for aid in self.agent_ids}
@@ -760,6 +763,7 @@ class UavCombatEnv(gymnasium.Env):
             "blue_override_agent_decisions": 0,
             "red_warning_generations": 0,
             "red_direction_changes_within_same_missile": 0,
+            "red_suppressed_direction_flip_attempts": 0,
             "red_maximum_continuous_decisions": 0,
             "red_target_heading_delta_max_deg": 0.0,
         }
@@ -1114,7 +1118,7 @@ class UavCombatEnv(gymnasium.Env):
         elif float(state["break_direction"]) != float(turn_direction):
             # The stored direction is authoritative for an existing missile.
             self._mws_decision_diagnostics[
-                "red_direction_changes_within_same_missile"] += 0
+                "red_suppressed_direction_flip_attempts"] += 1
         state["previous_warning_active"] = True
         state["continuous_decisions"] += 1
         self._mws_decision_diagnostics["red_maximum_continuous_decisions"] = max(
@@ -1131,7 +1135,7 @@ class UavCombatEnv(gymnasium.Env):
     def _finalize_learnable_target(
             self, aid: str, requested: tuple[float, float, float],
             source: str) -> tuple[float, float, float]:
-        """Apply the symmetric decision-rate limiter before PID execution."""
+        """Record target jumps and pass paper Eq.12 inputs through unchanged."""
         if not getattr(self, "is_paper_learnable", False):
             if aid.startswith("blue"):
                 self.blue_policy_controller.record_executed_heading(
@@ -1147,17 +1151,7 @@ class UavCombatEnv(gymnasium.Env):
         heading_delta = self._wrap_angle_rad(req_heading - prev_heading)
         pitch_delta = req_pitch - prev_pitch
         velocity_delta = req_velocity - prev_velocity
-        applied = (
-            prev_pitch + float(np.clip(
-                pitch_delta, -LEARNABLE_SETPOINT_PITCH_RATE_RAD,
-                LEARNABLE_SETPOINT_PITCH_RATE_RAD)),
-            self._wrap_angle_rad(prev_heading + float(np.clip(
-                heading_delta, -LEARNABLE_SETPOINT_HEADING_RATE_RAD,
-                LEARNABLE_SETPOINT_HEADING_RATE_RAD))),
-            prev_velocity + float(np.clip(
-                velocity_delta, -LEARNABLE_SETPOINT_VELOCITY_RATE_MPS,
-                LEARNABLE_SETPOINT_VELOCITY_RATE_MPS)),
-        )
+        applied = (req_pitch, req_heading, req_velocity)
         diag = self._aircraft_diagnostics[aid]
         diag["requested_heading_jump_max_rad"] = max(
             diag["requested_heading_jump_max_rad"], abs(heading_delta))
@@ -1172,17 +1166,6 @@ class UavCombatEnv(gymnasium.Env):
             diag["requested_velocity_jump_max_mps"], abs(velocity_delta))
         diag["applied_velocity_jump_max_mps"] = max(
             diag["applied_velocity_jump_max_mps"], abs(applied[2] - prev_velocity))
-        heading_limited = (
-            abs(heading_delta) > LEARNABLE_SETPOINT_HEADING_RATE_RAD + 1e-12)
-        pitch_limited = (
-            abs(pitch_delta) > LEARNABLE_SETPOINT_PITCH_RATE_RAD + 1e-12)
-        velocity_limited = (
-            abs(velocity_delta) > LEARNABLE_SETPOINT_VELOCITY_RATE_MPS + 1e-12)
-        limited = heading_limited or pitch_limited or velocity_limited
-        diag["setpoint_rate_limit_activations"] += int(limited)
-        diag["heading_rate_limit_activations"] += int(heading_limited)
-        diag["pitch_rate_limit_activations"] += int(pitch_limited)
-        diag["velocity_rate_limit_activations"] += int(velocity_limited)
         self._learnable_requested_setpoints[aid] = (
             req_pitch, req_heading, req_velocity)
         self._learnable_previous_setpoints[aid] = previous
@@ -1384,6 +1367,13 @@ class UavCombatEnv(gymnasium.Env):
             float(requested[0] - previous_setpoints[0])
             if requested is not None and previous_setpoints is not None else 0.0)
         mws_state = copy.deepcopy(self._learnable_mws_state.get(aid, {}))
+        pid_diag = copy.deepcopy(getattr(
+            self.pid_controllers.get(aid), "_last_diagnostic", {}))
+        def _property(name: str) -> float:
+            try:
+                return float(sim.get_property_value(name))
+            except Exception:
+                return float("nan")
         row = {
             "physics_frame": int(self._physics_frame),
             "decision_step": int(self.current_step),
@@ -1394,6 +1384,12 @@ class UavCombatEnv(gymnasium.Env):
             "speed_mps": float(np.linalg.norm(velocity)),
             "vertical_velocity_mps": float(velocity[2]),
             "roll_pitch_heading_rad": rpy,
+            "body_angular_rates_rad_s": (
+                _property("velocities/p-rad_sec"),
+                _property("velocities/q-rad_sec"),
+                _property("velocities/r-rad_sec")),
+            "alpha_rad": _property("aero/alpha-rad"),
+            "beta_rad": _property("aero/beta-rad"),
             "g_components": tuple(float(value) for value in g_components),
             "g_load_total": float(g_load),
             "previous_g_load_total": previous_g,
@@ -1405,6 +1401,12 @@ class UavCombatEnv(gymnasium.Env):
             "command_source": self._learnable_command_sources.get(aid, ""),
             "pid_commands_before_load_protection": tuple(
                 float(value) for value in commands),
+            "pid_internal": pid_diag,
+            "d_B_des": pid_diag.get("d_B_des"),
+            "paper_e_phi": pid_diag.get("e_phi"),
+            "paper_e_theta": pid_diag.get("e_theta"),
+            "pid_unsaturated_commands": pid_diag.get("unsaturated_commands"),
+            "pid_saturated_commands": pid_diag.get("saturated_commands"),
             "pid_saturation": tuple(
                 (abs(float(value)) >= 1.0 - 1e-9 if index < 3
                  else float(value) <= 1e-9 or float(value) >= 1.0 - 1e-9)
@@ -1438,13 +1440,19 @@ class UavCombatEnv(gymnasium.Env):
             })
         self._last_load_trace_level[aid] = level
 
-    def _paper_learnable_load_scale(self, aid: str, g_load: float) -> float:
+    def _update_paper_learnable_load_diagnostics(
+            self, aid: str, g_load: float) -> None:
+        """Observe the paper 9g envelope without modifying flight controls."""
         diag = self._aircraft_diagnostics[aid]
         diag["maximum_load_g_seen"] = max(
             diag["maximum_load_g_seen"], float(g_load))
         if g_load > LEARNABLE_LOAD_PROTECTION_START_G:
             diag["frames_above_9g"] += 1
             diag["consecutive_above_9g_frames"] += 1
+            diag["maximum_consecutive_above_9g_frames"] = max(
+                diag["maximum_consecutive_above_9g_frames"],
+                diag["consecutive_above_9g_frames"])
+            diag["episode_ever_exceeded_9g"] = True
         else:
             diag["consecutive_above_9g_frames"] = 0
         previous_above_30 = int(diag["consecutive_above_30g_frames"])
@@ -1457,17 +1465,6 @@ class UavCombatEnv(gymnasium.Env):
             if 0 < previous_above_30 < LEARNABLE_PERSISTENT_EXTREME_FRAMES:
                 diag["transient_above_30g_events"] += 1
             diag["consecutive_above_30g_frames"] = 0
-        if g_load <= LEARNABLE_LOAD_PROTECTION_START_G:
-            return 1.0
-        scale = float(np.clip(
-            (LEARNABLE_LOAD_PROTECTION_ZERO_G - g_load)
-            / (LEARNABLE_LOAD_PROTECTION_ZERO_G
-               - LEARNABLE_LOAD_PROTECTION_START_G), 0.0, 1.0))
-        diag["load_limiter_activations"] += 1
-        diag["load_protection_active_frames"] += 1
-        diag["load_protection_minimum_scale"] = min(
-            diag["load_protection_minimum_scale"], scale)
-        return scale
 
     @staticmethod
     def _paper_learnable_load_invalid_reason(
@@ -1505,6 +1502,29 @@ class UavCombatEnv(gymnasium.Env):
             )
 
             diag = self._aircraft_diagnostics[aid]
+            pid_diag = dict(getattr(pid, "_last_diagnostic", {}))
+            if pid_diag:
+                diag["maximum_absolute_e_phi"] = max(
+                    diag.get("maximum_absolute_e_phi", 0.0),
+                    abs(float(pid_diag.get("e_phi", 0.0))))
+                diag["maximum_absolute_e_theta"] = max(
+                    diag.get("maximum_absolute_e_theta", 0.0),
+                    abs(float(pid_diag.get("e_theta", 0.0))))
+                derivative_terms = [abs(float(pid_diag.get(loop, {}).get("d", 0.0)))
+                                    for loop in ("roll_pid", "pitch_pid", "velocity_pid")]
+                diag["maximum_absolute_derivative_term"] = max(
+                    diag.get("maximum_absolute_derivative_term", 0.0),
+                    max(derivative_terms, default=0.0))
+                saturated = pid_diag.get("saturated_commands", ())
+                unsaturated = pid_diag.get("unsaturated_commands", ())
+                if len(saturated) == len(unsaturated) and any(
+                        abs(float(before) - float(after)) > 1e-12
+                        for before, after in zip(unsaturated, saturated)):
+                    diag["pid_output_saturation_frames"] = int(
+                        diag.get("pid_output_saturation_frames", 0)) + 1
+                diag["degenerate_arctan_ratio_count"] = int(
+                    diag.get("degenerate_arctan_ratio_count", 0)) + int(
+                        pid_diag.get("degenerate_arctan_ratio", False))
             max_speed = float(self.environment_config.aircraft.maximum_speed_mps.value)
             if current_speed > max_speed:
                 throttle = min(throttle, float(
@@ -1521,28 +1541,20 @@ class UavCombatEnv(gymnasium.Env):
             except Exception:
                 g_components = (float("nan"),) * 3
                 g_load = float("nan")
-            invalid_reason = self._paper_learnable_load_invalid_reason(
-                g_load, int(diag.get("consecutive_above_30g_frames", 0)))
             if not np.isfinite(g_load):
+                diag["maximum_load_g_seen"] = float("inf")
+                diag["nonfinite_load_frames"] = int(
+                    diag.get("nonfinite_load_frames", 0)) + 1
                 if self.is_paper_learnable:
                     self._retain_load_frame(
                         aid, sim, g_components, g_load,
                         self._learnable_requested_setpoints.get(aid), target,
-                        (aileron, elevator, rudder, throttle), 0.0)
+                        (aileron, elevator, rudder, throttle), 1.0)
                 sim.crash()
                 if _is_adapted_profile(self):
                     self._mark_invalid_numerical(aid, "NonFiniteLoad")
                 else:
                     self._death_reasons.setdefault(aid, "Crash_NumericalLoad")
-                self._crashed_this_step.add(aid)
-                continue
-            if self.is_paper_learnable and invalid_reason == "CatastrophicFiniteLoad":
-                self._retain_load_frame(
-                    aid, sim, g_components, g_load,
-                    self._learnable_requested_setpoints.get(aid), target,
-                    (aileron, elevator, rudder, throttle), 0.0)
-                sim.crash()
-                self._mark_invalid_numerical(aid, "CatastrophicFiniteLoad")
                 self._crashed_this_step.add(aid)
                 continue
             if (self.is_paper_minimal
@@ -1557,28 +1569,21 @@ class UavCombatEnv(gymnasium.Env):
                 self._crashed_this_step.add(aid)
                 continue
             if self.is_paper_learnable:
-                scale = self._paper_learnable_load_scale(aid, g_load)
+                self._update_paper_learnable_load_diagnostics(aid, g_load)
                 self._retain_load_frame(
                     aid, sim, g_components, g_load,
                     self._learnable_requested_setpoints.get(aid), target,
-                    (aileron, elevator, rudder, throttle), scale)
+                    (aileron, elevator, rudder, throttle), 1.0)
                 invalid_reason = self._paper_learnable_load_invalid_reason(
                     g_load, self._aircraft_diagnostics[aid][
                         "consecutive_above_30g_frames"])
-                if invalid_reason == "PersistentExtremeFiniteLoad":
+                if invalid_reason in (
+                        "CatastrophicFiniteLoad",
+                        "PersistentExtremeFiniteLoad"):
                     sim.crash()
-                    self._mark_invalid_numerical(
-                        aid, "PersistentExtremeFiniteLoad")
+                    self._mark_invalid_numerical(aid, invalid_reason)
                     self._crashed_this_step.add(aid)
                     continue
-                aileron *= scale
-                elevator *= scale
-                rudder *= scale
-                if g_load >= LEARNABLE_LOAD_PROTECTION_ZERO_G:
-                    throttle = min(throttle, float(
-                        self.environment_config.aircraft.
-                        overspeed_throttle_limit.value))
-                    pid.suppress_directional_memory()
             else:
                 g_limit = float(self.environment_config.aircraft.maximum_load_g.value)
                 if self.pid_profile in ("paper", "paper_minimal_shared_v1") and g_load > g_limit:
@@ -1653,6 +1658,21 @@ class UavCombatEnv(gymnasium.Env):
         label = f"{aid}:{reason}"
         if label not in self._invalid_numerical_reasons:
             self._invalid_numerical_reasons.append(label)
+        if self.is_paper_learnable:
+            history = list(self._load_frame_history.get(aid, ()))
+            last_trace = (self._retained_extreme_load_traces[-1]
+                          if self._retained_extreme_load_traces else None)
+            if (last_trace is not None
+                    and last_trace.get("trigger_agent_id") == aid):
+                last_trace["invalid_reason"] = reason
+            elif history:
+                self._retained_extreme_load_traces.append({
+                    "trigger_agent_id": aid,
+                    "trigger_g": history[-1].get("g_load_total"),
+                    "trigger_level": "numerical_invalid",
+                    "invalid_reason": reason,
+                    "frames": copy.deepcopy(history),
+                })
         self._death_reasons.setdefault(aid, "Invalid_Numerical")
 
     def _initial_opponent_id(self, aid: str) -> str | None:
@@ -2927,6 +2947,8 @@ class UavCombatEnv(gymnasium.Env):
                     "red_warning_generations", 0)),
                 "RedMWSDirectionChangesWithinSameMissile": int(mws_diag.get(
                     "red_direction_changes_within_same_missile", 0)),
+                "RedMWSSuppressedDirectionFlipAttempts": int(mws_diag.get(
+                    "red_suppressed_direction_flip_attempts", 0)),
                 "RedMWSMaximumContinuousDecisions": int(mws_diag.get(
                     "red_maximum_continuous_decisions", 0)),
                 "RedMWSTargetHeadingDeltaMaxDeg": float(mws_diag.get(
