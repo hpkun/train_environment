@@ -81,15 +81,25 @@ def _alive_before_team_mean(rewards: torch.Tensor, active: torch.Tensor) -> torc
 
 
 def _compute_grouped_gae(rewards, values, next_values, bootstrap_or_dones,
-                         continuation_or_env_ids, env_ids_or_gamma,
-                         gamma_or_lambda, gae_lambda=None):
+                         continuation_or_env_ids, env_ids_or_gamma=None,
+                         gamma_or_lambda=None, gae_lambda=None, **legacy_kwargs):
     """GAE with separate bootstrap and episode-continuation masks.
 
     The seven-argument legacy form remains readable for old diagnostic callers;
     it interprets ``bootstrap_or_dones`` as done and derives both masks from it.
     Formal sequential-v2 callers use the eight-argument mask form.
     """
+    if legacy_kwargs:
+        unexpected = set(legacy_kwargs) - {"gamma", "lam"}
+        if unexpected:
+            raise TypeError(f"unexpected GAE keyword(s): {sorted(unexpected)}")
+        if env_ids_or_gamma is not None or gamma_or_lambda is not None or gae_lambda is not None:
+            raise TypeError("do not mix positional and keyword legacy GAE parameters")
+        env_ids_or_gamma = legacy_kwargs.get("gamma")
+        gamma_or_lambda = legacy_kwargs.get("lam")
     if gae_lambda is None:
+        if env_ids_or_gamma is None or gamma_or_lambda is None:
+            raise TypeError("legacy GAE requires gamma and lam")
         dones = bootstrap_or_dones
         bootstrap_masks = 1.0 - dones
         continuation_masks = 1.0 - dones
@@ -292,6 +302,8 @@ class PureHAPPOTrainer:
         clip_per_agent = [average(row["clip"]) for row in per_agent]
         ratio_p95 = [average(row["ratio_p95"]) for row in per_agent]
         ratio_p99 = [average(row["ratio_p99"]) for row in per_agent]
+        ratio_mean = [average(row["ratio_mean"]) for row in per_agent]
+        ratio_std = [average(row["ratio_std"]) for row in per_agent]
         grad_norms = [average(row["grad_norm"]) for row in per_agent]
         uav = [1, 2] if count >= 3 else list(range(1, count))
         role_mean = lambda values, indices: average([values[i] for i in indices])
@@ -330,6 +342,8 @@ class PureHAPPOTrainer:
             "approx_kl_per_agent": kl_per_agent,
             "approx_kl_abs_per_agent": kl_abs_per_agent,
             "clip_fraction_per_agent": clip_per_agent,
+            "ratio_mean_per_agent": ratio_mean,
+            "ratio_std_per_agent": ratio_std,
             "ratio_p95_per_agent": ratio_p95,
             "ratio_p99_per_agent": ratio_p99,
             "actor_grad_norm_per_agent": grad_norms,
@@ -369,11 +383,24 @@ class PureHAPPOTrainer:
             "actor_grad_norm_mav": grad_norms[0],
             "actor_grad_norm_uav": role_mean(grad_norms, uav),
             "critic_loss": critic_losses[-1] if critic_losses else 0.0,
+            "critic_loss_unscaled": critic_losses[-1] if critic_losses else 0.0,
+            "critic_loss_scaled": (
+                self.value_coef * critic_losses[-1] if critic_losses else 0.0),
+            "critic_epochs": self.critic_epochs,
+            "critic_loss_per_epoch": critic_losses,
+            "critic_grad_norm_per_epoch": critic_grad_norms,
+            "critic_loss_mean_over_epochs": average(critic_losses),
+            "critic_loss_first_epoch": critic_losses[0] if critic_losses else 0.0,
+            "critic_loss_last_epoch": critic_losses[-1] if critic_losses else 0.0,
+            "critic_grad_norm_mean_over_epochs": average(critic_grad_norms),
+            "critic_grad_norm_max_over_epochs": maximum(critic_grad_norms),
             "critic_grad_norm": critic_grad_norms[-1] if critic_grad_norms else 0.0,
             "critic_update_norm": critic_update_norm,
             "value_explained_variance_old": old_ev,
             "value_explained_variance_new": new_ev,
             "value_explained_variance": new_ev,
+            "value_pred_old_mean": float(values.mean()),
+            "value_pred_new_mean": float(final_values.mean()),
             "advantage_raw_mean": raw_adv_stats["mean"],
             "advantage_raw_std": raw_adv_stats["std"],
             "advantage_raw_min": raw_adv_stats["min"],
@@ -391,8 +418,20 @@ class PureHAPPOTrainer:
             "action_log_std_mav_mean": float(log_stds[0].mean()),
             "action_log_std_uav_mean": float(log_stds[1:].mean()) if count > 1 else 0.0,
             "credit_mode": self.policy.credit_mode,
+            "active_sample_ratio_per_agent": [
+                value / max(int(actor_active.shape[0]), 1) for value in valid_counts],
+            "m_mean_after_each_agent": [
+                factor_after[index].get("mean", 0.0) for index in order],
+            "m_std_after_each_agent": [
+                factor_after[index].get("std", 0.0) for index in order],
+            "m_abs_max_after_each_agent": [
+                max(abs(factor_after[index].get("min", 0.0)),
+                    abs(factor_after[index].get("max", 0.0))) for index in order],
             **action_stats,
         }
+        for key, value in action_stats.items():
+            if key.endswith("_active"):
+                metrics[key[:-7]] = value
         for prefix, values in (("actor_loss", actor_loss_per_agent),
                                ("entropy", entropy_per_agent)):
             metrics[f"{prefix}_mav"] = values[0]

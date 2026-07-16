@@ -124,6 +124,13 @@ def main():
         summary[f"{key}_mean"]=float(np.mean([x[key] for x in rows]))
     summary["finite"]=bool(all(
         np.isfinite(value) for row in rows for value in row.values() if not isinstance(value,str)))
+    numeric_episode_keys = [
+        key for key, value in rows[0].items()
+        if key != "episode" and isinstance(value, (int, float, np.number))]
+    summary["episode_metric_std"] = {
+        key: float(np.std([float(row[key]) for row in rows]))
+        for key in numeric_episode_keys
+    }
     out=Path(a.output); out=out if out.is_absolute() else ROOT/out; out.parent.mkdir(parents=True,exist_ok=True)
     out.write_text(json.dumps(summary,indent=2),encoding="utf-8"); print(json.dumps(summary,indent=2))
     env.close()

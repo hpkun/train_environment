@@ -85,9 +85,15 @@ def _training_stage(seed: int, stage: str, rows: list[dict]) -> dict:
     return result
 
 
-def _eval_row(seed: int, stage: str, path: Path) -> dict:
+def _eval_row(seed: int, stage: str, path: Path, meta_path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
-    row = {"seed": seed, "stage": stage}
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    row = {
+        "seed": seed,
+        "stage": stage,
+        "requested_checkpoint_step": int(meta["requested_checkpoint_step"]),
+        "actual_checkpoint_step": int(meta["total_env_steps_actual"]),
+    }
     for key, value in data.items():
         if key != "episodes":
             row[key] = value
@@ -121,8 +127,10 @@ def main() -> None:
         for stage, actual in STAGES:
             selected = [row for row in rows if int(row["total_steps"]) <= actual]
             training_rows.append(_training_stage(seed, stage, selected))
+            requested = int(stage[:-1]) * 1000
             eval_rows.append(_eval_row(
-                seed, stage, run / f"eval_step_{int(stage[:-1]) * 1000:06d}_10ep.json"))
+                seed, stage, run / f"eval_step_{requested:06d}_10ep.json",
+                run / "checkpoints" / f"step_{requested:06d}" / "meta.json"))
     aggregates = _aggregate_eval(eval_rows)
     _write_csv(output / "training_stage_summary.csv", training_rows)
     _write_csv(output / "checkpoint_eval_summary.csv", eval_rows)
@@ -156,15 +164,10 @@ def main() -> None:
             f"{row['red_hits_mean_std']:.3f} | {row['blue_alive_final_mean_mean']:.3f} +/- "
             f"{row['blue_alive_final_mean_std']:.3f} | {row['geometry_rate_mean_mean']:.5f} +/- "
             f"{row['geometry_rate_mean_std']:.5f} |")
-    lines += [
-        "", "## Interpretation", "",
-        "- All three runs and all nine deterministic evaluations are finite.",
-        "- Seed 0 improves at 25K and loses the behavior at 50K.",
-        "- Seed 1 first shows deterministic launch geometry at 50K, without hits.",
-        "- Seed 2 strongly improves at 25K and partially regresses at 50K.",
-        "- The baseline therefore demonstrates learnable attack behavior, but not stable "
-        "convergence, robust MAV survival, or consistent wins within 50K.",
-    ]
+    lines += ["", "## Data status", "",
+              f"- Finite evaluations: {sum(bool(row['finite']) for row in eval_rows)}/{len(eval_rows)}.",
+              "- Behavioral interpretation is intentionally not hard-coded; use the numeric "
+              "checkpoint table and aggregate CSV."]
     (output / "REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(output)
 
