@@ -1,5 +1,8 @@
 # ignore files
 test.py
+
+# Training / experiment outputs
+outputs/
 smoke_train_log.csv
 smoke_checkpoints/
 smoke_eval.acmi
