@@ -1,0 +1,150 @@
+========================================================================================
+VANILLA HAPPO TRAINING REPORT
+========================================================================================
+Run directory: /mnt/c/Users/HPK/Desktop/train_environment/tam_uav/outputs/happo_2v2_1m_seed2026
+Updates: 6012
+Final environment steps: 1000000
+Completed episodes: 5968
+
+[1] Configuration
+scenario: 2v2
+seed: 2026
+requested total steps: 1000000
+rollout length: 256
+requested device: cuda
+actual device: cuda
+algorithm mode: heterogeneous-reward vanilla HAPPO
+actor sharing: formal_independent
+actor observation dim: 73
+critic state dim: 146
+hidden dim: 128
+actor lr: 0.0005
+critic lr: 0.0005
+ppo epochs: 2
+minibatch size: 256
+clip: 0.2
+entropy coef: 0.01
+gamma: 0.99
+gae lambda: 0.95
+uses TAM/recurrence/attention: False/False/False
+
+[2] Output integrity
+config_snapshot.json: 1.55 KiB
+summary.json: 8.35 KiB
+training.csv: 27.12 MiB
+checkpoint_final.pt: 1.51 MiB
+checkpoint_type: evaluation_weights
+resume_semantics: evaluation_only
+OPTIMIZATION_PIPELINE_ACTIVE: False
+HAPPO_RUNTIME_INVARIANTS_VALID: True
+EARLY_PERFORMANCE_SIGNAL_OBSERVED: False
+LEARNING_CONVERGENCE_NOT_VALIDATED: True
+
+[3] Rollout diagnostics
+length min/p50/p95/max: 1/163.0000/212.0000/256
+shorter than configured 256: 5967/6012
+tiny rollouts <32: 34/6012
+common lengths (length x count): 161x500, 162x487, 160x443, 163x393, 164x308, 159x278, 165x244, 166x165, 167x144, 169x126, 168x120, 172x118
+
+[4] Runtime correctness
+NaN/Inf count sum: 0
+target consistency violation sum: 0
+invalid optimization update rows: 42/6012
+invalid runtime invariant rows: 0/6012
+
+[5] Active samples
+red_0: min=0, p50=161.0000, p95=199.0000, max=256.0000, zero=21, positive<32=19
+  invalid contract rows: 21/6012
+red_1: min=0, p50=151.0000, p95=186.0000, max=256.0000, zero=21, positive<32=16
+  invalid contract rows: 21/6012
+
+[6] PPO actor diagnostics
+red_0 KL mean/p95/p99/max(last): 0.003457/0.013592/0.022015/0.892227 at step 84133; last=0.000974
+red_0 entropy early/middle/late: 14.2365/13.3215/13.1427; min=0.000000 last=13.5161
+red_0 clip mean/p95/max/last: 0.000195/0.000000/0.500000/0.000000
+red_0 actor grad mean/p95/max/last: 0.920098/1.063295/750.7969/0.807211
+red_1 KL mean/p95/p99/max(last): 0.003723/0.016262/0.024776/0.233195 at step 988233; last=0.000113
+red_1 entropy early/middle/late: 14.1851/13.1345/11.8299; min=0.000000 last=9.879382
+red_1 clip mean/p95/max/last: 0.000468/0.000000/0.500000/0.000000
+red_1 actor grad mean/p95/max/last: 0.890606/1.255885/114.5725/0.985792
+importance factor global min/max: 0.351420/2.761952; final min/max=0.855837/1.181076
+
+[7] Critic diagnostics
+critic grad mean/p95/max/last: 2,233.646/7,259.721/63,456.344/8,229.402
+red_0 critic loss mean/p95/max/last: 18,758.682/44,401.825/181,834.711/18,592.902
+red_0 explained variance early/middle/late: 0.110234/0.347815/0.670894; min=-0.904063 max=0.970326 last=0.852169
+red_1 critic loss mean/p95/max/last: 19,887.652/44,209.048/154,829.656/21,918.785
+red_1 explained variance early/middle/late: 0.121192/0.394598/0.492397; min=-3.381196 max=0.968362 last=0.172977
+
+[8] Sampled training-episode performance
+updates containing completed episodes: 5968/6012
+team return early/middle/late: -2,155.330/-1,675.930/-1,543.584
+agent-0 return early/middle/late: -1,010.713/-936.9995/-686.5953
+other UAV return early/middle/late: -1,144.617/-738.9305/-856.9883
+win rate early/middle/late: 0.741611/0.597315/0.632550
+draw rate early/middle/late: 0.000000/0.000000/0.000000
+episode length early/middle/late: 173.8322/167.8205/170.7500
+launch rate early/middle/late: 4.192953/4.162752/4.211409
+hit rate early/middle/late: 0.350747/0.327297/0.346632
+survival rate early/middle/late: 0.692953/0.645973/0.633389
+structural failure rate early/middle/late: 1.063758/1.333893/1.253356
+boundary rate early/middle/late: 0.000000/0.000000/0.000000
+last completed-episode updates:
+  step=998297, episodes=5959, return=-1,346.656, win=0.000000, hit=0.250000, survival=0.500000, structural=2.000000
+  step=998523, episodes=5960, return=-1,421.528, win=0.000000, hit=0.166667, survival=0.500000, structural=1.000000
+  step=998683, episodes=5961, return=-1,219.736, win=1.000000, hit=0.500000, survival=0.500000, structural=1.000000
+  step=998916, episodes=5962, return=-2,601.373, win=1.000000, hit=0.166667, survival=0.500000, structural=2.000000
+  step=999056, episodes=5963, return=-3,411.227, win=0.000000, hit=0.000000, survival=1.000000, structural=2.000000
+  step=999215, episodes=5964, return=-2,516.931, win=1.000000, hit=0.500000, survival=0.500000, structural=1.000000
+  step=999374, episodes=5965, return=-1,699.712, win=1.000000, hit=0.500000, survival=0.500000, structural=1.000000
+  step=999512, episodes=5966, return=-2,518.004, win=0.000000, hit=0.000000, survival=1.000000, structural=2.000000
+  step=999670, episodes=5967, return=-2,037.134, win=1.000000, hit=0.500000, survival=0.500000, structural=1.000000
+  step=999842, episodes=5968, return=-2,978.385, win=1.000000, hit=0.250000, survival=0.500000, structural=2.000000
+
+[9] Final CSV row
+environment_steps: 1000000
+episodes: 5968
+mean_episode_return: 0.0
+win_rate: 0.0
+hit_rate: 0.0
+survival_rate: 0.0
+structural_failure_rate: 0.0
+boundary_rate: 0.0
+critic_loss: 20255.84375
+critic_gradient_norm: 8229.40185546875
+importance_factor_min: 0.8558371067047119
+importance_factor_max: 1.1810758113861084
+optimization_update_contract_valid: True
+runtime_invariants_valid: True
+nan_inf_count: 0
+target_consistency_violation: 0
+active_sample_count/red_0: 158
+approx_kl/red_0: 0.0009744439157657325
+entropy/red_0: 13.516149997711182
+clip_fraction/red_0: 0.0
+explained_variance/red_0: 0.8521686792373657
+update_contract_valid/red_0: True
+active_sample_count/red_1: 125
+approx_kl/red_1: 0.00011297607852611691
+entropy/red_1: 9.879382133483887
+clip_fraction/red_1: 0.0
+explained_variance/red_1: 0.17297667264938354
+update_contract_valid/red_1: True
+
+[10] Evaluation availability
+evaluation JSON files: 0
+latest_evaluation present: False
+This run disabled evaluation. The report can assess optimization stability and sampled training episodes, but cannot establish policy quality against fixed untrained/random/rule baselines.
+
+[11] Automatic flags
+- 5967 updates had rollouts shorter than 256.
+- red_0 had zero-active-sample updates.
+- red_0 maximum approximate KL exceeded 0.1: 0.892227.
+- red_1 had zero-active-sample updates.
+- red_1 maximum approximate KL exceeded 0.1: 0.233195.
+- 42 updates failed optimization_update_contract_valid.
+- Long-run learning and convergence remain unverified without a fixed evaluation set.
+
+========================================================================================
+END OF REPORT
+========================================================================================

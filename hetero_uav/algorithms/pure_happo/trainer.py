@@ -238,7 +238,8 @@ class PureHAPPOTrainer:
                 target["kl_abs"].append(stats["approx_kl_abs"])
                 target["clip"].append(stats["clip_fraction"])
                 for key in ("ratio_mean", "ratio_std", "ratio_p95", "ratio_p99"):
-                    target[key].append(stats[key.removeprefix("ratio_")])
+                    short_key = key[6:] if key.startswith("ratio_") else key
+                    target[key].append(stats[short_key])
                 target["grad_norm"].append(_safe_float(grad_norm))
             update_norm[agent_idx] = float(torch.linalg.vector_norm(
                 _param_vector(params) - before))
