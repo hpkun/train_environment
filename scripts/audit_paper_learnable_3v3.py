@@ -18,6 +18,7 @@ from configs.paper_learnable_3v3_spec import (
 )
 from my_uav_env import UavCombatEnv
 from my_uav_env.blue_policy_profiles import BluePolicyController
+from scripts.audit_paper_learnable_missile_trajectory import run_audit as run_trajectory_audit
 
 
 SEEDS = (3, 7, 11, 17, 23)
@@ -83,6 +84,55 @@ def _finite_obs(obs: dict) -> bool:
     )
 
 
+def _circular_error(a: float, b: float) -> float:
+    return abs(float((a - b + np.pi) % (2.0 * np.pi) - np.pi))
+
+
+def _mirror_dynamics_errors(env: UavCombatEnv, actions: dict, info: dict) -> dict:
+    result = {
+        "position_m": 0.0, "velocity_mps": 0.0,
+        "attitude_rad": 0.0, "speed_mps": 0.0,
+        "action": 0.0, "setpoint": 0.0, "g_load": 0.0,
+        "reward_component": 0.0, "load_scale": 0.0,
+    }
+    for index in range(3):
+        blue_id, red_id = f"blue_{index}", f"red_{index}"
+        blue, red = env.blue_planes[blue_id], env.red_planes[red_id]
+        bp, rp = np.asarray(blue.get_position()), np.asarray(red.get_position())
+        bv, rv = np.asarray(blue.get_velocity()), np.asarray(red.get_velocity())
+        br, rr = np.asarray(blue.get_rpy()), np.asarray(red.get_rpy())
+        result["position_m"] = max(result["position_m"], float(np.max(
+            np.abs(bp - np.array([rp[0], -rp[1], rp[2]])))))
+        result["velocity_mps"] = max(result["velocity_mps"], float(np.max(
+            np.abs(bv - np.array([rv[0], -rv[1], rv[2]])))))
+        result["speed_mps"] = max(result["speed_mps"], abs(
+            float(np.linalg.norm(bv) - np.linalg.norm(rv))))
+        result["attitude_rad"] = max(
+            result["attitude_rad"], _circular_error(br[0], -rr[0]),
+            _circular_error(br[1], rr[1]), _circular_error(br[2], -rr[2]))
+        ba, ra = np.asarray(actions[blue_id]), np.asarray(actions[red_id])
+        result["action"] = max(result["action"], float(np.max(np.abs(
+            ba - np.array([ra[0], -ra[1], ra[2]])))))
+        bs = env._learnable_setpoint_state.get(blue_id)
+        rs = env._learnable_setpoint_state.get(red_id)
+        if bs is not None and rs is not None:
+            result["setpoint"] = max(
+                result["setpoint"], abs(bs[0] - rs[0]),
+                _circular_error(bs[1], -rs[1]), abs(bs[2] - rs[2]))
+        bd, rd = info.get(blue_id, {}), info.get(red_id, {})
+        result["g_load"] = max(result["g_load"], abs(float(
+            bd.get("maximum_load_g_seen", 0.0)) - float(
+            rd.get("maximum_load_g_seen", 0.0))))
+        result["load_scale"] = max(result["load_scale"], abs(float(
+            bd.get("load_protection_minimum_scale", 1.0)) - float(
+            rd.get("load_protection_minimum_scale", 1.0))))
+        for key in ("r_pitch", "r_roll", "r_alt", "r_bound", "r_vel", "r_adv"):
+            result["reward_component"] = max(
+                result["reward_component"], abs(float(bd.get(key, 0.0))
+                                                  - float(rd.get(key, 0.0))))
+    return result
+
+
 def run_case(seed: int, scenario: str, max_steps: int = 1400) -> dict:
     env = UavCombatEnv(
         max_num_red=3, max_num_blue=3, max_steps=1400,
@@ -90,8 +140,12 @@ def run_case(seed: int, scenario: str, max_steps: int = 1400) -> dict:
         suppress_jsbsim_output=True)
     try:
         obs, info = env.reset(seed=seed)
-        env.set_team_mws_enabled("red", False)
-        env.set_team_mws_enabled("blue", False)
+        pure_dynamics = scenario == "fixed_vs_fixed_symmetric"
+        if pure_dynamics:
+            env.set_team_mws_enabled("red", False)
+            env.set_team_mws_enabled("blue", False)
+            env._check_missile_launch = lambda: None
+            max_steps = min(max_steps, 300)
         initial_headings = {
             aid: float(env._get_sim(aid).get_rpy()[2]) for aid in env.agent_ids}
         red_controller = BluePolicyController("paper_learnable_fixed_pair_v1")
@@ -111,6 +165,11 @@ def run_case(seed: int, scenario: str, max_steps: int = 1400) -> dict:
         finite = _finite_obs(obs)
         movement_matches = True
         initial_mirror_error = _initial_mirror_error(env)
+        maximum_mirror_errors = {
+            key: 0.0 for key in (
+                "position_m", "velocity_mps", "attitude_rad", "speed_mps",
+                "action", "setpoint", "g_load", "reward_component", "load_scale")}
+        final_mirror_errors = dict(maximum_mirror_errors)
 
         for _ in range(max_steps):
             actions: dict[str, np.ndarray] = {}
@@ -124,9 +183,13 @@ def run_case(seed: int, scenario: str, max_steps: int = 1400) -> dict:
                     aid: _straight_action(env, initial_headings[aid])
                     for aid in env.blue_ids})
 
-            if scenario in (
-                    "red_fixed_vs_blue_straight",
-                    "fixed_vs_fixed_symmetric"):
+            if pure_dynamics:
+                for index in range(3):
+                    blue_action = actions[f"blue_{index}"]
+                    actions[f"red_{index}"] = np.asarray([
+                        blue_action[0], -blue_action[1], blue_action[2]],
+                        dtype=np.float32)
+            elif scenario == "red_fixed_vs_blue_straight":
                 actions.update(_red_fixed_actions(env, obs, red_controller))
             else:
                 actions.update({
@@ -138,6 +201,12 @@ def run_case(seed: int, scenario: str, max_steps: int = 1400) -> dict:
             obs, rewards, terminated, truncated, info = env.step(actions)
             finite = finite and _finite_obs(obs) and all(
                 np.isfinite(float(value)) for value in rewards.values())
+            if pure_dynamics:
+                errors = _mirror_dynamics_errors(env, actions, info)
+                final_mirror_errors = dict(errors)
+                maximum_mirror_errors = {
+                    key: max(maximum_mirror_errors[key], value)
+                    for key, value in errors.items()}
             for team in ("red", "blue"):
                 diag = info.get("__launch_diag__", {}).get(team, {})
                 if first_geometry[team] is None and diag.get("geometry_ok_pairs", 0):
@@ -212,6 +281,8 @@ def run_case(seed: int, scenario: str, max_steps: int = 1400) -> dict:
             "one_physics_frame_hit_count": int(one_frame_hits),
             "missiles_survived_one_decision_count": int(survived_decision),
             "first_launch_records": first_launch_record,
+            "mirror_errors": maximum_mirror_errors,
+            "final_mirror_errors": final_mirror_errors,
         }
         return row
     finally:
@@ -231,29 +302,6 @@ def _closure(rows: list[dict], team: str) -> str:
     ) else "FAIL"
 
 
-def _mirror_launch_health(rows: list[dict]) -> tuple[bool, str]:
-    compared = 0
-    unilateral = 0
-    healthy = True
-    for row in rows:
-        red = row["first_launch_records"]["red"]
-        blue = row["first_launch_records"]["blue"]
-        if red is None and blue is None:
-            continue
-        if red is None or blue is None:
-            healthy = False
-            unilateral += 1
-            continue
-        compared += 1
-        healthy = healthy and abs(float(red["range_m"]) - float(blue["range_m"])) <= 1e-2
-        healthy = healthy and abs(float(red["AO_rad"]) - float(blue["AO_rad"])) <= 1e-6
-        healthy = healthy and abs(float(red["TA_rad"]) - float(blue["TA_rad"])) <= 1e-6
-    note = ("unilateral_launch_before_mirror_match" if unilateral
-            else "launch_geometry_compared" if compared
-            else "symmetric_policy_did_not_break_symmetry")
-    return healthy, note
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=1400)
@@ -266,14 +314,23 @@ def main() -> None:
     by_scenario = {
         scenario: [row for row in rows if row["scenario"] == scenario]
         for scenario in SCENARIOS}
-    mirror_ok, mirror_note = _mirror_launch_health(
-        by_scenario["fixed_vs_fixed_symmetric"])
     mirror_rows = by_scenario["fixed_vs_fixed_symmetric"]
     mirror_health = (
         all(row["initial_mirror_error_m"] <= 1e-6 for row in mirror_rows)
         and all(row["finite"] and row["invalid_episode"] == 0 for row in mirror_rows)
         and all(row["movement_matches_fire_control"] for row in mirror_rows)
-        and mirror_ok)
+        and all(row["red_launches"] == 0 and row["blue_launches"] == 0
+                for row in mirror_rows)
+        and all(row["final_mirror_errors"]["position_m"] <= 1.0
+                for row in mirror_rows)
+        and all(row["final_mirror_errors"]["speed_mps"] <= 0.1
+                for row in mirror_rows)
+        and all(np.rad2deg(row["final_mirror_errors"]["attitude_rad"]) <= 0.1
+                for row in mirror_rows))
+    load_health = all(
+        row["mirror_errors"]["load_scale"] <= 1e-6
+        for row in mirror_rows)
+    missile_trajectory_health = run_trajectory_audit()["MissileTrajectoryHealth"]
     report = {
         "profile": PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
         "seeds": list(SEEDS),
@@ -283,19 +340,21 @@ def main() -> None:
             by_scenario["red_fixed_vs_blue_straight"], "red"),
         "FireControlClosureBlue": _closure(
             by_scenario["blue_fixed_vs_red_straight"], "blue"),
-        "MirrorNumericalHealth": "PASS" if mirror_health else "FAIL",
-        "MirrorSymmetryNote": mirror_note,
-        "MissileTrajectoryHealth": "RUN_SEPARATE_TRAJECTORY_AUDIT",
+        "MirrorDynamicsHealth": "PASS" if mirror_health else "FAIL",
+        "LoadControlHealth": "PASS" if load_health else "FAIL",
+        "MissileTrajectoryHealth": missile_trajectory_health,
     }
-    report["OverallRuleAudit"] = "PASS" if all(
+    report["OverallEnvironmentAudit"] = "PASS" if all(
         report[key] == "PASS" for key in (
             "FireControlClosureRed", "FireControlClosureBlue",
-            "MirrorNumericalHealth")) else "FAIL"
+            "MirrorDynamicsHealth", "LoadControlHealth",
+            "MissileTrajectoryHealth")) else "FAIL"
     encoded = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:
             handle.write(encoded + "\n")
-    print(encoded)
+    else:
+        print(encoded)
 
 
 if __name__ == "__main__":

@@ -131,10 +131,7 @@ def audit_case(name: str, target_position: list[float]) -> dict:
     }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output", default=None)
-    args = parser.parse_args()
+def run_audit() -> dict:
     rows = [
         audit_case("head_on_1km", [1000.0, 0.0, 6000.0]),
         audit_case("head_on_3km", [3000.0, 0.0, 6000.0]),
@@ -170,7 +167,14 @@ def main() -> None:
         report["no_one_frame_termination"], report["no_pre_arming_hit"],
         report["off_axis_nonzero_direction_change"],
     )) else "FAIL"
-    encoded = json.dumps(report, indent=2, sort_keys=True)
+    return report
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", default=None)
+    args = parser.parse_args()
+    encoded = json.dumps(run_audit(), indent=2, sort_keys=True)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:
             handle.write(encoded + "\n")

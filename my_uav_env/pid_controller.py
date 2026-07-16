@@ -161,6 +161,13 @@ class PIDController:
         self._prev_target_heading = None     # clear heading LPF state
         self._prev_roll_error = None         # clear D-term guard state
 
+    def suppress_directional_memory(self):
+        """Clear roll/pitch integral and derivative memory for load protection."""
+        self._roll_pid.reset()
+        self._pitch_pid.reset()
+        self._prev_target_heading = None
+        self._prev_roll_error = None
+
     # ------------------------------------------------------------------
     #  Rotation matrix helpers
     # ------------------------------------------------------------------

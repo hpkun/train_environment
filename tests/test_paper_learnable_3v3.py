@@ -15,6 +15,7 @@ from configs.paper_learnable_3v3_spec import (
 from my_uav_env.blue_policy_profiles import BluePolicyController
 from my_uav_env.env import UavCombatEnv, make_empty_launch_diag
 from my_uav_env.fire_control import FireControlState
+from my_uav_env.pid_controller import PIDController
 from my_uav_env.simulator import MissileSimulator
 import torch
 from train_vanilla_mappo import (
@@ -32,12 +33,15 @@ from train_vanilla_mappo import (
     _compute_global_state_dim,
     _compute_obs_dim,
     _episode_is_invalid,
+    _default_eval_log_file,
+    _default_launch_quality_file,
     _learnability_iteration_metrics,
     _run_periodic_evaluation,
     _training_log_fields,
     _validate_training_state,
+    _validate_preset_resume_semantics,
 )
-from scripts.audit_paper_learnable_3v3 import _mirror_launch_health
+from scripts.audit_paper_learnable_3v3 import _circular_error
 
 
 def _strict_obs() -> dict:
@@ -81,6 +85,48 @@ def test_learnable_profile_contract_and_dimensions():
     assert preset["total_env_steps"] == 500_000
     assert "MissilePNNonzeroCommandFrames" in _training_log_fields()
     assert "TargetSwitchesWhileAlive" in _training_log_fields()
+    for field in (
+            "NonFiniteLoadInvalidEpisodes",
+            "CatastrophicFiniteLoadInvalidEpisodes",
+            "PersistentExtremeFiniteLoadInvalidEpisodes",
+            "RedMWSWarningGenerations",
+            "RedSetpointRateLimitActivations"):
+        assert field in _training_log_fields()
+
+
+def test_1m_preset_has_isolated_paths_and_explicit_resume_only():
+    from types import SimpleNamespace
+    preset_500k = get_preset("vanilla_3v3_paper_learnable_500k")
+    preset_1m = get_preset("vanilla_3v3_paper_learnable_1m")
+    for field in ("checkpoint_dir", "log_file", "results_file"):
+        assert preset_500k[field] != preset_1m[field]
+        assert "1m" in preset_1m[field]
+    paths_500k = {
+        preset_500k["log_file"], preset_500k["results_file"],
+        _default_eval_log_file(preset_500k["results_file"]),
+        _default_launch_quality_file(preset_500k["results_file"]),
+        *(f"{preset_500k['checkpoint_dir']}/{name}" for name in (
+            "run_manifest.json", "latest_training_state.pt",
+            "vanilla_actor_best.pt", "centralized_critic_best.pt")),
+    }
+    paths_1m = {
+        preset_1m["log_file"], preset_1m["results_file"],
+        _default_eval_log_file(preset_1m["results_file"]),
+        _default_launch_quality_file(preset_1m["results_file"]),
+        *(f"{preset_1m['checkpoint_dir']}/{name}" for name in (
+            "run_manifest.json", "latest_training_state.pt",
+            "vanilla_actor_best.pt", "centralized_critic_best.pt")),
+    }
+    assert paths_500k.isdisjoint(paths_1m)
+    assert not preset_1m.get("resume_latest", False)
+    assert not preset_1m.get("resume_from_best", False)
+    _validate_preset_resume_semantics(SimpleNamespace(
+        preset="vanilla_3v3_paper_learnable_1m", resume_latest=False,
+        resume_from_best=False, resume_state=None))
+    with pytest.raises(ValueError, match="explicit --resume-state"):
+        _validate_preset_resume_semantics(SimpleNamespace(
+            preset="vanilla_3v3_paper_learnable_1m", resume_latest=True,
+            resume_from_best=False, resume_state=None))
 
 
 def test_learnable_blue_policy_consumes_environment_assignment_only():
@@ -135,6 +181,154 @@ class _Aircraft:
 
     def shotdown(self):
         self.is_alive = False
+
+
+class _Incoming:
+    def __init__(self, uid):
+        self.uid = uid
+
+
+def test_learnable_red_mws_direction_and_absolute_target_are_stable():
+    env = UavCombatEnv(
+        max_num_red=3, max_num_blue=3, max_steps=1400,
+        environment_profile=PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+    env._learnable_mws_state = {"red_0": env._empty_learnable_mws_state()}
+    env._mws_decision_diagnostics = Counter()
+    first = env._learnable_red_mws_target(
+        "red_0", _Incoming("m0"), 0.2, 1.0)
+    second = env._learnable_red_mws_target(
+        "red_0", _Incoming("m0"), 1.1, -1.0)
+    assert first == second
+    assert first[1] == pytest.approx(env._wrap_angle_rad(0.2 + np.deg2rad(60)))
+    assert env._mws_decision_diagnostics["red_warning_generations"] == 1
+    assert env._mws_decision_diagnostics[
+        "red_direction_changes_within_same_missile"] == 0
+    env._deactivate_learnable_mws_state("red_0")
+    env._learnable_red_mws_target("red_0", _Incoming("m1"), 0.4, -1.0)
+    assert env._mws_decision_diagnostics["red_warning_generations"] == 2
+
+
+@pytest.mark.parametrize("aid", ["red_0", "blue_0"])
+def test_learnable_setpoint_rate_limiter_is_symmetric_and_wrap_safe(aid):
+    env = UavCombatEnv(
+        max_num_red=3, max_num_blue=3, max_steps=1400,
+        environment_profile=PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+    aircraft = _Aircraft(
+        aid, "Red" if aid.startswith("red") else "Blue",
+        [0.0, 0.0, 6000.0], [300.0, 0.0, 0.0],
+        [0.0, 0.0, np.deg2rad(170.0)])
+    if aid.startswith("red"):
+        env.red_planes = {aid: aircraft}
+    else:
+        env.blue_planes = {aid: aircraft}
+    env._aircraft_diagnostics = {aid: {
+        "setpoint_rate_limit_activations": 0,
+        "heading_rate_limit_activations": 0,
+        "pitch_rate_limit_activations": 0,
+        "velocity_rate_limit_activations": 0,
+        "requested_heading_jump_max_rad": 0.0,
+        "applied_heading_jump_max_rad": 0.0,
+        "requested_pitch_jump_max_rad": 0.0,
+        "applied_pitch_jump_max_rad": 0.0,
+        "requested_velocity_jump_max_mps": 0.0,
+        "applied_velocity_jump_max_mps": 0.0}}
+    env._learnable_setpoint_state = {}
+    env._learnable_requested_setpoints = {}
+    env._learnable_command_sources = {}
+    applied = env._finalize_learnable_target(
+        aid, (np.deg2rad(40), np.deg2rad(-170), 400.0), "base_policy")
+    assert applied[0] == pytest.approx(np.deg2rad(10.0))
+    assert env._wrap_angle_rad(applied[1] - np.deg2rad(170)) == pytest.approx(
+        np.deg2rad(20.0))
+    assert applied[2] == pytest.approx(350.0)
+    assert env._aircraft_diagnostics[aid][
+        "setpoint_rate_limit_activations"] == 1
+
+
+def test_learnable_load_protection_boundaries_and_persistence():
+    env = UavCombatEnv(
+        max_num_red=3, max_num_blue=3, max_steps=1400,
+        environment_profile=PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+    aid = "red_0"
+    env._aircraft_diagnostics = {aid: {
+        "maximum_load_g_seen": 0.0, "frames_above_9g": 0,
+        "consecutive_above_9g_frames": 0,
+        "consecutive_above_30g_frames": 0,
+        "maximum_consecutive_above_30g_frames": 0,
+        "transient_above_30g_events": 0,
+        "load_limiter_activations": 0,
+        "load_protection_active_frames": 0,
+        "load_protection_minimum_scale": 1.0}}
+    assert env._paper_learnable_load_scale(aid, 9.0) == 1.0
+    assert env._paper_learnable_load_scale(aid, 12.0) == pytest.approx(0.5)
+    assert env._paper_learnable_load_scale(aid, 15.0) == 0.0
+    env._paper_learnable_load_scale(aid, 31.0)
+    assert env._paper_learnable_load_invalid_reason(31.0, 1) is None
+    env._paper_learnable_load_scale(aid, 8.0)
+    assert env._aircraft_diagnostics[aid]["transient_above_30g_events"] == 1
+    assert env._paper_learnable_load_invalid_reason(31.0, 3) == (
+        "PersistentExtremeFiniteLoad")
+    assert env._paper_learnable_load_invalid_reason(101.0, 1) == (
+        "CatastrophicFiniteLoad")
+    assert env._paper_learnable_load_invalid_reason(float("nan"), 0) == (
+        "NonFiniteLoad")
+
+
+def test_load_protection_can_clear_directional_pid_memory_only():
+    pid = PIDController(1.0 / 60.0, profile="paper_minimal_shared_v1")
+    pid._roll_pid._integral = 0.7
+    pid._roll_pid._prev_error = 0.4
+    pid._pitch_pid._integral = -0.6
+    pid._pitch_pid._prev_error = -0.3
+    pid._velocity_pid._integral = 0.2
+    pid.suppress_directional_memory()
+    assert pid._roll_pid._integral == 0.0
+    assert pid._roll_pid._prev_error == 0.0
+    assert pid._pitch_pid._integral == 0.0
+    assert pid._pitch_pid._prev_error == 0.0
+    assert pid._velocity_pid._integral == pytest.approx(0.2)
+
+
+def test_extreme_load_trace_retains_last_twelve_frames_and_causal_fields():
+    from collections import deque
+    env = UavCombatEnv(
+        max_num_red=3, max_num_blue=3, max_steps=1400,
+        environment_profile=PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+    aid = "red_0"
+    sim = _Aircraft(
+        aid, "Red", [0.0, 0.0, 6000.0], [300.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0])
+    env._load_frame_history = {aid: deque(maxlen=12)}
+    env._last_load_trace_level = {aid: 0}
+    env._retained_extreme_load_traces = []
+    env._aircraft_diagnostics = {aid: {
+        "consecutive_above_30g_frames": 0}}
+    env._learnable_mws_state = {aid: env._empty_learnable_mws_state()}
+    env._learnable_requested_setpoints = {aid: (0.1, 0.2, 300.0)}
+    env._learnable_previous_setpoints = {aid: (0.0, 0.0, 300.0)}
+    env._learnable_setpoint_state = {aid: (0.1, 0.2, 300.0)}
+    env._learnable_command_sources = {aid: "mws_override"}
+    for frame in range(12):
+        env._physics_frame = frame
+        env._retain_load_frame(
+            aid, sim, (0.0, 0.0, 1.0), 1.0,
+            env._learnable_requested_setpoints[aid],
+            env._learnable_setpoint_state[aid], (0.2, 0.3, 0.0, 0.5), 1.0)
+    env._physics_frame = 12
+    env._retain_load_frame(
+        aid, sim, (0.0, 0.0, 21.0), 21.0,
+        env._learnable_requested_setpoints[aid],
+        env._learnable_setpoint_state[aid], (1.0, 1.0, 0.0, 0.5), 0.0)
+    trace = env._retained_extreme_load_traces[-1]
+    assert len(trace["frames"]) == 12
+    assert trace["trigger_level"] == 2
+    final = trace["frames"][-1]
+    for field in (
+            "g_components", "requested_setpoints", "applied_setpoints",
+            "previous_applied_setpoints", "pid_commands_before_load_protection",
+            "mws_state", "pid_saturation", "load_protection_scale",
+            "action_update"):
+        assert field in final
 
 
 def test_learnable_missile_uses_body_x_and_respects_arming_time():
@@ -491,12 +685,9 @@ def test_checkpoint_schema_rejects_v5_action_distribution(tmp_path):
         _validate_training_state(payload, config, metadata)
 
 
-def test_mirror_audit_reports_unilateral_launch_honestly():
-    healthy, note = _mirror_launch_health([{
-        "first_launch_records": {
-            "red": None,
-            "blue": {"range_m": 3000.0, "AO_rad": 0.2, "TA_rad": 2.0},
-        }
-    }])
-    assert healthy is False
-    assert note == "unilateral_launch_before_mirror_match"
+def test_mirror_audit_heading_error_is_circular_and_has_no_launch_gate():
+    assert np.rad2deg(_circular_error(
+        np.deg2rad(179.0), np.deg2rad(-179.0))) == pytest.approx(2.0)
+    source = open(
+        "scripts/audit_paper_learnable_3v3.py", encoding="utf-8").read()
+    assert "_mirror_launch_health" not in source

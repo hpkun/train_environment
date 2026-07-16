@@ -91,6 +91,18 @@ EVALUATION_FIELDNAMES = [
     "BlueWarningToTerminalMeanS", "BlueWarningToTerminalP50S",
     "BlueWarningToHitMeanS",
     "MissileLifetimeMeanS",
+    "RedMaximumGSeen", "BlueMaximumGSeen",
+    "RedFramesAbove9G", "BlueFramesAbove9G",
+    "RedTransientAbove30GEvents", "BlueTransientAbove30GEvents",
+    "RedMaximumConsecutiveAbove30GFrames",
+    "BlueMaximumConsecutiveAbove30GFrames",
+    "RedLoadProtectionActiveFrames", "BlueLoadProtectionActiveFrames",
+    "RedMWSWarningGenerations",
+    "RedMWSDirectionChangesWithinSameMissile",
+    "RedMWSMaximumContinuousDecisions", "RedMWSTargetHeadingDeltaMaxDeg",
+    "RedSetpointRateLimitActivations", "BlueSetpointRateLimitActivations",
+    "NonFiniteLoadInvalidEpisodes", "CatastrophicFiniteLoadInvalidEpisodes",
+    "PersistentExtremeFiniteLoadInvalidEpisodes",
 ]
 
 EVALUATION_SUMMARY_FIELDNAMES = [
@@ -484,6 +496,10 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         blue_diag = info.get("__blue_policy_diag__", {})
         target_diag = info.get("__target_assignment_diag__", {})
         mws_diag = info.get("__mws_diag__", {})
+        load_diag = info.get("__load_diag__", {})
+        def team_diag(team_ids, field, aggregate=max):
+            values = [float(info.get(aid, {}).get(field, 0.0)) for aid in team_ids]
+            return aggregate(values) if values else 0.0
         environment_metadata = info.get("__environment_config__", {})
         def sourced_value(name):
             value = environment_metadata.get(name, "")
@@ -579,6 +595,40 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "BlueWarningToTerminalP50S": mws_diag.get(
                 "blue_warning_to_terminal_p50_s"),
             "BlueWarningToHitMeanS": mws_diag.get("blue_warning_to_hit_mean_s"),
+            "RedMaximumGSeen": team_diag(red_ids, "maximum_load_g_seen"),
+            "BlueMaximumGSeen": team_diag(blue_ids, "maximum_load_g_seen"),
+            "RedFramesAbove9G": team_diag(red_ids, "frames_above_9g", sum),
+            "BlueFramesAbove9G": team_diag(blue_ids, "frames_above_9g", sum),
+            "RedTransientAbove30GEvents": team_diag(
+                red_ids, "transient_above_30g_events", sum),
+            "BlueTransientAbove30GEvents": team_diag(
+                blue_ids, "transient_above_30g_events", sum),
+            "RedMaximumConsecutiveAbove30GFrames": team_diag(
+                red_ids, "maximum_consecutive_above_30g_frames"),
+            "BlueMaximumConsecutiveAbove30GFrames": team_diag(
+                blue_ids, "maximum_consecutive_above_30g_frames"),
+            "RedLoadProtectionActiveFrames": team_diag(
+                red_ids, "load_protection_active_frames", sum),
+            "BlueLoadProtectionActiveFrames": team_diag(
+                blue_ids, "load_protection_active_frames", sum),
+            "RedMWSWarningGenerations": int(mws_diag.get(
+                "red_warning_generations", 0)),
+            "RedMWSDirectionChangesWithinSameMissile": int(mws_diag.get(
+                "red_direction_changes_within_same_missile", 0)),
+            "RedMWSMaximumContinuousDecisions": int(mws_diag.get(
+                "red_maximum_continuous_decisions", 0)),
+            "RedMWSTargetHeadingDeltaMaxDeg": float(mws_diag.get(
+                "red_target_heading_delta_max_deg", 0.0)),
+            "RedSetpointRateLimitActivations": team_diag(
+                red_ids, "setpoint_rate_limit_activations", sum),
+            "BlueSetpointRateLimitActivations": team_diag(
+                blue_ids, "setpoint_rate_limit_activations", sum),
+            "NonFiniteLoadInvalidEpisodes": int(load_diag.get(
+                "invalid_nonfinite_load_count", 0)),
+            "CatastrophicFiniteLoadInvalidEpisodes": int(load_diag.get(
+                "invalid_catastrophic_finite_load_count", 0)),
+            "PersistentExtremeFiniteLoadInvalidEpisodes": int(load_diag.get(
+                "invalid_persistent_extreme_finite_load_count", 0)),
             **{field: int(blue_diag.get(field, 0)) for field in (
                 "blue_target_switches_total", "blue_target_dead_switches",
                 "blue_distance_triggered_switches", "blue_engaged_triggered_switches",

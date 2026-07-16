@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 import hashlib
 import json
+import numpy as np
 
 from configs.brma_mappo_paper_spec import (
     PAPER_EXPLICIT,
@@ -34,6 +35,14 @@ LEARNABLE_MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M = 50.0
 LEARNABLE_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS = 1.0
 LEARNABLE_LAUNCH_MIN_RANGE_M = 1_000.0
 LEARNABLE_LAUNCH_MAX_RANGE_M = 8_000.0
+LEARNABLE_SETPOINT_HEADING_RATE_RAD = np.deg2rad(30.0)
+LEARNABLE_SETPOINT_PITCH_RATE_RAD = np.deg2rad(10.0)
+LEARNABLE_SETPOINT_VELOCITY_RATE_MPS = 50.0
+LEARNABLE_LOAD_PROTECTION_START_G = 9.0
+LEARNABLE_LOAD_PROTECTION_ZERO_G = 15.0
+LEARNABLE_PERSISTENT_EXTREME_G = 30.0
+LEARNABLE_PERSISTENT_EXTREME_FRAMES = 3
+LEARNABLE_CATASTROPHIC_G = 100.0
 
 
 LEARNABLE_MISSILE = replace(
@@ -107,6 +116,12 @@ LEARNABLE_PROFILE_METADATA = {
     "observation_mode": sv("paper_strict", LEARNABILITY_ADAPTATION),
     "actor_input_dim": sv(60, LEARNABILITY_ADAPTATION),
     "critic_input_dim": sv(30, LEARNABILITY_ADAPTATION),
+    "setpoint_rate_limiter": sv(
+        "heading_30deg_pitch_10deg_velocity_50mps_per_decision_v1",
+        LEARNABILITY_ADAPTATION),
+    "load_protection": sv(
+        "surface_scale_9g_to_15g_persistent_30g_3frames_v1",
+        LEARNABILITY_ADAPTATION),
 }
 
 

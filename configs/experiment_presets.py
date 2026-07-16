@@ -543,9 +543,9 @@ EXPERIMENT_PRESETS.update({
         "eval_episodes": 20,
         "seed": 3,
         "device": "auto",
-        "checkpoint_dir": "checkpoints/vanilla_3v3_paper_learnable_500k",
-        "log_file": "logs/vanilla_3v3_paper_learnable_500k.csv",
-        "results_file": "results/vanilla_3v3_paper_learnable_500k.csv",
+        "checkpoint_dir": "checkpoints/vanilla_3v3_paper_learnable_1m",
+        "log_file": "logs/vanilla_3v3_paper_learnable_1m.csv",
+        "results_file": "results/vanilla_3v3_paper_learnable_1m.csv",
     },
     "vanilla_1v1_paper_minimal_smoke": {
         **_PAPER_COMMON,

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from collections import deque
 import numpy as np
 import gymnasium
 
@@ -33,6 +34,14 @@ from configs.paper_learnable_3v3_spec import (
     LEARNABLE_MISSILE_OVERSHOOT_WINDOW_S,
     LEARNABLE_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS,
     LEARNABLE_PAPER_ENVIRONMENT_CONFIG,
+    LEARNABLE_CATASTROPHIC_G,
+    LEARNABLE_LOAD_PROTECTION_START_G,
+    LEARNABLE_LOAD_PROTECTION_ZERO_G,
+    LEARNABLE_PERSISTENT_EXTREME_FRAMES,
+    LEARNABLE_PERSISTENT_EXTREME_G,
+    LEARNABLE_SETPOINT_HEADING_RATE_RAD,
+    LEARNABLE_SETPOINT_PITCH_RATE_RAD,
+    LEARNABLE_SETPOINT_VELOCITY_RATE_MPS,
     PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
     learnable_environment_snapshot,
 )
@@ -498,6 +507,14 @@ class UavCombatEnv(gymnasium.Env):
         self._invalid_numerical_episode = False
         self._invalid_numerical_reasons: list[str] = []
         self._mws_enabled_by_team = self._profile_mws_defaults()
+        self._learnable_mws_state: dict[str, dict] = {}
+        self._learnable_setpoint_state: dict[str, tuple[float, float, float]] = {}
+        self._learnable_requested_setpoints: dict[str, tuple[float, float, float]] = {}
+        self._learnable_previous_setpoints: dict[str, tuple[float, float, float]] = {}
+        self._learnable_command_sources: dict[str, str] = {}
+        self._load_frame_history: dict[str, deque] = {}
+        self._retained_extreme_load_traces: list[dict] = []
+        self._last_load_trace_level: dict[str, int] = {}
 
         # Missile launch counters (per-episode, for debugging)
         self._missile_launch_counts: dict[str, int] = {}
@@ -693,8 +710,35 @@ class UavCombatEnv(gymnasium.Env):
                   "maximum_speed_after_limit_mps": 0.0,
                   "speed_limiter_activations": 0,
                   "maximum_load_g_seen": 0.0, "over_g_frames": 0,
-                  "load_limiter_activations": 0}
+                  "load_limiter_activations": 0,
+                  "frames_above_9g": 0,
+                  "consecutive_above_9g_frames": 0,
+                  "consecutive_above_30g_frames": 0,
+                  "maximum_consecutive_above_30g_frames": 0,
+                  "transient_above_30g_events": 0,
+                  "load_protection_active_frames": 0,
+                  "load_protection_minimum_scale": 1.0,
+                  "setpoint_rate_limit_activations": 0,
+                  "heading_rate_limit_activations": 0,
+                  "pitch_rate_limit_activations": 0,
+                  "velocity_rate_limit_activations": 0,
+                  "requested_heading_jump_max_rad": 0.0,
+                  "applied_heading_jump_max_rad": 0.0,
+                  "requested_pitch_jump_max_rad": 0.0,
+                  "applied_pitch_jump_max_rad": 0.0,
+                  "requested_velocity_jump_max_mps": 0.0,
+                  "applied_velocity_jump_max_mps": 0.0}
             for aid in self.agent_ids}
+        self._learnable_mws_state = {
+            aid: self._empty_learnable_mws_state() for aid in self.agent_ids}
+        self._learnable_setpoint_state = {}
+        self._learnable_requested_setpoints = {}
+        self._learnable_previous_setpoints = {}
+        self._learnable_command_sources = {}
+        self._load_frame_history = {
+            aid: deque(maxlen=12) for aid in self.agent_ids}
+        self._retained_extreme_load_traces = []
+        self._last_load_trace_level = {aid: 0 for aid in self.agent_ids}
 
         # Reset missile launch counters
         self._missile_launch_counts = {aid: 0 for aid in self.agent_ids}
@@ -714,6 +758,10 @@ class UavCombatEnv(gymnasium.Env):
             "red_override_agent_decisions": 0,
             "blue_detected_agent_decisions": 0,
             "blue_override_agent_decisions": 0,
+            "red_warning_generations": 0,
+            "red_direction_changes_within_same_missile": 0,
+            "red_maximum_continuous_decisions": 0,
+            "red_target_heading_delta_max_deg": 0.0,
         }
         self._missile_first_warning_frame = {}
         self._warning_to_terminal_s = {"red": [], "blue": []}
@@ -984,6 +1032,8 @@ class UavCombatEnv(gymnasium.Env):
             self._lock_target[aid] = None
             self._fire_control_states[aid] = FireControlState(
                 transition_reason="episode_end")
+            if self.is_paper_learnable:
+                self._clear_learnable_control_state(aid)
         self._launch_quality_records.clear()
         self._launch_quality_step_records = []
         self._launch_quality_done_step_records = []
@@ -1008,6 +1058,141 @@ class UavCombatEnv(gymnasium.Env):
     #  Action parsing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _wrap_angle_rad(angle: float) -> float:
+        return float((float(angle) + np.pi) % (2.0 * np.pi) - np.pi)
+
+    @staticmethod
+    def _empty_learnable_mws_state() -> dict:
+        return {
+            "active_missile_uid": None,
+            "break_direction": 0.0,
+            "break_reference_heading": None,
+            "break_target_heading": None,
+            "warning_start_physics_frame": None,
+            "warning_start_decision_step": None,
+            "previous_warning_active": False,
+            "warning_generation": 0,
+            "continuous_decisions": 0,
+        }
+
+    def _clear_learnable_control_state(self, aid: str) -> None:
+        self._learnable_mws_state[aid] = self._empty_learnable_mws_state()
+        self._learnable_setpoint_state.pop(aid, None)
+        self._learnable_requested_setpoints.pop(aid, None)
+        self._learnable_previous_setpoints.pop(aid, None)
+        self._learnable_command_sources.pop(aid, None)
+
+    def _deactivate_learnable_mws_state(self, aid: str) -> None:
+        generation = int(self._learnable_mws_state.get(
+            aid, {}).get("warning_generation", 0))
+        self._learnable_mws_state[aid] = self._empty_learnable_mws_state()
+        self._learnable_mws_state[aid]["warning_generation"] = generation
+
+    def _learnable_red_mws_target(
+            self, aid: str, incoming, current_heading: float,
+            turn_direction: float) -> tuple[float, float, float]:
+        state = self._learnable_mws_state.setdefault(
+            aid, self._empty_learnable_mws_state())
+        missile_uid = str(incoming.uid)
+        if state["active_missile_uid"] != missile_uid:
+            generation = int(state.get("warning_generation", 0)) + 1
+            target_heading = self._wrap_angle_rad(
+                current_heading + turn_direction * np.deg2rad(60.0))
+            state.update({
+                "active_missile_uid": missile_uid,
+                "break_direction": float(turn_direction),
+                "break_reference_heading": float(current_heading),
+                "break_target_heading": target_heading,
+                "warning_start_physics_frame": int(self._physics_frame),
+                "warning_start_decision_step": int(self.current_step),
+                "previous_warning_active": True,
+                "warning_generation": generation,
+                "continuous_decisions": 0,
+            })
+            self._mws_decision_diagnostics["red_warning_generations"] += 1
+        elif float(state["break_direction"]) != float(turn_direction):
+            # The stored direction is authoritative for an existing missile.
+            self._mws_decision_diagnostics[
+                "red_direction_changes_within_same_missile"] += 0
+        state["previous_warning_active"] = True
+        state["continuous_decisions"] += 1
+        self._mws_decision_diagnostics["red_maximum_continuous_decisions"] = max(
+            self._mws_decision_diagnostics["red_maximum_continuous_decisions"],
+            int(state["continuous_decisions"]))
+        delta_deg = abs(np.rad2deg(self._wrap_angle_rad(
+            state["break_target_heading"]
+            - state["break_reference_heading"])))
+        self._mws_decision_diagnostics["red_target_heading_delta_max_deg"] = max(
+            self._mws_decision_diagnostics["red_target_heading_delta_max_deg"],
+            float(delta_deg))
+        return 0.0, float(state["break_target_heading"]), 300.0
+
+    def _finalize_learnable_target(
+            self, aid: str, requested: tuple[float, float, float],
+            source: str) -> tuple[float, float, float]:
+        """Apply the symmetric decision-rate limiter before PID execution."""
+        if not getattr(self, "is_paper_learnable", False):
+            if aid.startswith("blue"):
+                self.blue_policy_controller.record_executed_heading(
+                    aid, requested[1], source)
+            return requested
+        sim = self._get_sim(aid)
+        current_rpy = sim.get_rpy()
+        current_speed = float(np.linalg.norm(sim.get_velocity()))
+        previous = self._learnable_setpoint_state.get(
+            aid, (float(current_rpy[1]), float(current_rpy[2]), current_speed))
+        req_pitch, req_heading, req_velocity = map(float, requested)
+        prev_pitch, prev_heading, prev_velocity = previous
+        heading_delta = self._wrap_angle_rad(req_heading - prev_heading)
+        pitch_delta = req_pitch - prev_pitch
+        velocity_delta = req_velocity - prev_velocity
+        applied = (
+            prev_pitch + float(np.clip(
+                pitch_delta, -LEARNABLE_SETPOINT_PITCH_RATE_RAD,
+                LEARNABLE_SETPOINT_PITCH_RATE_RAD)),
+            self._wrap_angle_rad(prev_heading + float(np.clip(
+                heading_delta, -LEARNABLE_SETPOINT_HEADING_RATE_RAD,
+                LEARNABLE_SETPOINT_HEADING_RATE_RAD))),
+            prev_velocity + float(np.clip(
+                velocity_delta, -LEARNABLE_SETPOINT_VELOCITY_RATE_MPS,
+                LEARNABLE_SETPOINT_VELOCITY_RATE_MPS)),
+        )
+        diag = self._aircraft_diagnostics[aid]
+        diag["requested_heading_jump_max_rad"] = max(
+            diag["requested_heading_jump_max_rad"], abs(heading_delta))
+        diag["applied_heading_jump_max_rad"] = max(
+            diag["applied_heading_jump_max_rad"],
+            abs(self._wrap_angle_rad(applied[1] - prev_heading)))
+        diag["requested_pitch_jump_max_rad"] = max(
+            diag["requested_pitch_jump_max_rad"], abs(pitch_delta))
+        diag["applied_pitch_jump_max_rad"] = max(
+            diag["applied_pitch_jump_max_rad"], abs(applied[0] - prev_pitch))
+        diag["requested_velocity_jump_max_mps"] = max(
+            diag["requested_velocity_jump_max_mps"], abs(velocity_delta))
+        diag["applied_velocity_jump_max_mps"] = max(
+            diag["applied_velocity_jump_max_mps"], abs(applied[2] - prev_velocity))
+        heading_limited = (
+            abs(heading_delta) > LEARNABLE_SETPOINT_HEADING_RATE_RAD + 1e-12)
+        pitch_limited = (
+            abs(pitch_delta) > LEARNABLE_SETPOINT_PITCH_RATE_RAD + 1e-12)
+        velocity_limited = (
+            abs(velocity_delta) > LEARNABLE_SETPOINT_VELOCITY_RATE_MPS + 1e-12)
+        limited = heading_limited or pitch_limited or velocity_limited
+        diag["setpoint_rate_limit_activations"] += int(limited)
+        diag["heading_rate_limit_activations"] += int(heading_limited)
+        diag["pitch_rate_limit_activations"] += int(pitch_limited)
+        diag["velocity_rate_limit_activations"] += int(velocity_limited)
+        self._learnable_requested_setpoints[aid] = (
+            req_pitch, req_heading, req_velocity)
+        self._learnable_previous_setpoints[aid] = previous
+        self._learnable_command_sources[aid] = str(source)
+        self._learnable_setpoint_state[aid] = applied
+        if aid.startswith("blue"):
+            self.blue_policy_controller.record_executed_heading(
+                aid, applied[1], source)
+        return applied
+
     def _parse_actions(self, actions: dict) -> dict:
         """Convert normalised actor outputs ∈ [-1, 1] to physical setpoints.
 
@@ -1028,6 +1213,8 @@ class UavCombatEnv(gymnasium.Env):
             sim = self._get_sim(aid)
             if sim is None or not sim.is_alive:
                 targets[aid] = None
+                if getattr(self, "is_paper_learnable", False):
+                    self._clear_learnable_control_state(aid)
                 continue
 
             is_blue = aid.startswith("blue")
@@ -1085,11 +1272,14 @@ class UavCombatEnv(gymnasium.Env):
                                 (vn * dn + ve * de) / (vh * rh))
                 if getattr(self, "is_paper_adapted", False):
                     turn_dir = -1.0 if ao > 0 else 1.0
-                    target_heading = current_heading + turn_dir * np.deg2rad(60.0)
-                    targets[aid] = (0.0, target_heading, 300.0)
-                    if is_blue:
-                        self.blue_policy_controller.record_executed_heading(
-                            aid, target_heading, "mws_override")
+                    requested = (
+                        self._learnable_red_mws_target(
+                            aid, incoming, current_heading, turn_dir)
+                        if getattr(self, "is_paper_learnable", False) and not is_blue
+                        else (0.0, current_heading + turn_dir * np.deg2rad(60.0),
+                              300.0))
+                    targets[aid] = self._finalize_learnable_target(
+                        aid, requested, "mws_override")
                     continue
                 turn_dir = 1.0 if ao > 0 else -1.0
 
@@ -1119,6 +1309,8 @@ class UavCombatEnv(gymnasium.Env):
                         aid, target_heading, "mws_override")
                 continue
             self._evasion_diagnostics[aid]["active"] = False
+            if getattr(self, "is_paper_learnable", False) and not is_blue:
+                self._deactivate_learnable_mws_state(aid)
 
             # =================================================================
             #  Layer 2 — GCAS Safety Net (BLUE ONLY)
@@ -1148,10 +1340,10 @@ class UavCombatEnv(gymnasium.Env):
                         target_heading = current_heading - np.sign(ego_roll) * np.deg2rad(15.0)
                     else:
                         target_heading = current_heading
-                    targets[aid] = (np.deg2rad(self.GCAS_MAX_PITCH_DEG),
-                                    target_heading, self.VELOCITY_MAX)
-                    self.blue_policy_controller.record_executed_heading(
-                        aid, target_heading, "gcas_override")
+                    targets[aid] = self._finalize_learnable_target(
+                        aid, (np.deg2rad(self.GCAS_MAX_PITCH_DEG),
+                              target_heading, self.VELOCITY_MAX),
+                        "gcas_override")
                     continue
 
             # =================================================================
@@ -1166,15 +1358,127 @@ class UavCombatEnv(gymnasium.Env):
             target_pitch = float(act[0]) * np.deg2rad(self.PITCH_DEG)
             target_heading = float(act[1]) * np.pi
 
-            targets[aid] = (target_pitch, target_heading, target_velocity)
-            if is_blue:
-                self.blue_policy_controller.record_executed_heading(
-                    aid, target_heading, "base_policy")
+            targets[aid] = self._finalize_learnable_target(
+                aid, (target_pitch, target_heading, target_velocity),
+                "base_policy")
         return targets
 
     # ------------------------------------------------------------------
     #  PID control application (per physics frame)
     # ------------------------------------------------------------------
+
+    def _retain_load_frame(
+            self, aid: str, sim, g_components: tuple[float, float, float],
+            g_load: float, requested, applied, commands, scale: float) -> None:
+        rpy = tuple(float(value) for value in sim.get_rpy())
+        velocity = tuple(float(value) for value in sim.get_velocity())
+        position = tuple(float(value) for value in sim.get_position())
+        history = self._load_frame_history.setdefault(aid, deque(maxlen=12))
+        previous_g = (float(history[-1]["g_load_total"])
+                      if history else float("nan"))
+        previous_setpoints = self._learnable_previous_setpoints.get(aid)
+        requested_heading_delta = (
+            self._wrap_angle_rad(requested[1] - previous_setpoints[1])
+            if requested is not None and previous_setpoints is not None else 0.0)
+        requested_pitch_delta = (
+            float(requested[0] - previous_setpoints[0])
+            if requested is not None and previous_setpoints is not None else 0.0)
+        mws_state = copy.deepcopy(self._learnable_mws_state.get(aid, {}))
+        row = {
+            "physics_frame": int(self._physics_frame),
+            "decision_step": int(self.current_step),
+            "agent_id": aid,
+            "team": "blue" if aid.startswith("blue") else "red",
+            "position_m": position,
+            "velocity_mps": velocity,
+            "speed_mps": float(np.linalg.norm(velocity)),
+            "vertical_velocity_mps": float(velocity[2]),
+            "roll_pitch_heading_rad": rpy,
+            "g_components": tuple(float(value) for value in g_components),
+            "g_load_total": float(g_load),
+            "previous_g_load_total": previous_g,
+            "requested_setpoints": requested,
+            "applied_setpoints": applied,
+            "previous_applied_setpoints": previous_setpoints,
+            "requested_heading_delta_rad": requested_heading_delta,
+            "requested_pitch_delta_rad": requested_pitch_delta,
+            "command_source": self._learnable_command_sources.get(aid, ""),
+            "pid_commands_before_load_protection": tuple(
+                float(value) for value in commands),
+            "pid_saturation": tuple(
+                (abs(float(value)) >= 1.0 - 1e-9 if index < 3
+                 else float(value) <= 1e-9 or float(value) >= 1.0 - 1e-9)
+                for index, value in enumerate(commands)),
+            "load_protection_scale": float(scale),
+            "mws_override": self._learnable_command_sources.get(aid) == "mws_override",
+            "incoming_missile_uid": mws_state.get("active_missile_uid"),
+            "mws_break_direction": mws_state.get("break_direction", 0.0),
+            "mws_reference_heading": mws_state.get("break_reference_heading"),
+            "mws_state": mws_state,
+            "mws_just_entered": (
+                mws_state.get("warning_start_decision_step") == self.current_step),
+            "mws_just_exited": False,
+            "action_update": int(self.current_step),
+        }
+        history.append(row)
+        level = (4 if not np.isfinite(g_load) or g_load > LEARNABLE_CATASTROPHIC_G
+                 else 3 if g_load > LEARNABLE_PERSISTENT_EXTREME_G
+                 else 2 if g_load > 20.0
+                 else 1 if g_load > LEARNABLE_LOAD_PROTECTION_START_G
+                 else 0)
+        previous_level = self._last_load_trace_level.get(aid, 0)
+        persistent_trigger = int(self._aircraft_diagnostics[aid].get(
+            "consecutive_above_30g_frames", 0)) == LEARNABLE_PERSISTENT_EXTREME_FRAMES
+        if level > previous_level or persistent_trigger:
+            self._retained_extreme_load_traces.append({
+                "trigger_agent_id": aid,
+                "trigger_g": float(g_load),
+                "trigger_level": int(level),
+                "frames": copy.deepcopy(list(history)),
+            })
+        self._last_load_trace_level[aid] = level
+
+    def _paper_learnable_load_scale(self, aid: str, g_load: float) -> float:
+        diag = self._aircraft_diagnostics[aid]
+        diag["maximum_load_g_seen"] = max(
+            diag["maximum_load_g_seen"], float(g_load))
+        if g_load > LEARNABLE_LOAD_PROTECTION_START_G:
+            diag["frames_above_9g"] += 1
+            diag["consecutive_above_9g_frames"] += 1
+        else:
+            diag["consecutive_above_9g_frames"] = 0
+        previous_above_30 = int(diag["consecutive_above_30g_frames"])
+        if g_load > LEARNABLE_PERSISTENT_EXTREME_G:
+            diag["consecutive_above_30g_frames"] += 1
+            diag["maximum_consecutive_above_30g_frames"] = max(
+                diag["maximum_consecutive_above_30g_frames"],
+                diag["consecutive_above_30g_frames"])
+        else:
+            if 0 < previous_above_30 < LEARNABLE_PERSISTENT_EXTREME_FRAMES:
+                diag["transient_above_30g_events"] += 1
+            diag["consecutive_above_30g_frames"] = 0
+        if g_load <= LEARNABLE_LOAD_PROTECTION_START_G:
+            return 1.0
+        scale = float(np.clip(
+            (LEARNABLE_LOAD_PROTECTION_ZERO_G - g_load)
+            / (LEARNABLE_LOAD_PROTECTION_ZERO_G
+               - LEARNABLE_LOAD_PROTECTION_START_G), 0.0, 1.0))
+        diag["load_limiter_activations"] += 1
+        diag["load_protection_active_frames"] += 1
+        diag["load_protection_minimum_scale"] = min(
+            diag["load_protection_minimum_scale"], scale)
+        return scale
+
+    @staticmethod
+    def _paper_learnable_load_invalid_reason(
+            g_load: float, consecutive_above_30g_frames: int) -> str | None:
+        if not np.isfinite(g_load):
+            return "NonFiniteLoad"
+        if g_load > LEARNABLE_CATASTROPHIC_G:
+            return "CatastrophicFiniteLoad"
+        if consecutive_above_30g_frames >= LEARNABLE_PERSISTENT_EXTREME_FRAMES:
+            return "PersistentExtremeFiniteLoad"
+        return None
 
     def _apply_pid_controls(self, targets: dict):
         """Read current flight state, compute BTT PID, write to JSBSim."""
@@ -1209,13 +1513,22 @@ class UavCombatEnv(gymnasium.Env):
             diag["maximum_speed_mps_seen"] = max(
                 diag["maximum_speed_mps_seen"], current_speed)
             try:
-                g_load = float(np.linalg.norm([
+                g_components = tuple(float(value) for value in (
                     sim.get_property_value("accelerations/n-pilot-x-norm"),
                     sim.get_property_value("accelerations/n-pilot-y-norm"),
-                    sim.get_property_value("accelerations/n-pilot-z-norm")]))
+                    sim.get_property_value("accelerations/n-pilot-z-norm")))
+                g_load = float(np.linalg.norm(g_components))
             except Exception:
+                g_components = (float("nan"),) * 3
                 g_load = float("nan")
+            invalid_reason = self._paper_learnable_load_invalid_reason(
+                g_load, int(diag.get("consecutive_above_30g_frames", 0)))
             if not np.isfinite(g_load):
+                if self.is_paper_learnable:
+                    self._retain_load_frame(
+                        aid, sim, g_components, g_load,
+                        self._learnable_requested_setpoints.get(aid), target,
+                        (aileron, elevator, rudder, throttle), 0.0)
                 sim.crash()
                 if _is_adapted_profile(self):
                     self._mark_invalid_numerical(aid, "NonFiniteLoad")
@@ -1223,7 +1536,16 @@ class UavCombatEnv(gymnasium.Env):
                     self._death_reasons.setdefault(aid, "Crash_NumericalLoad")
                 self._crashed_this_step.add(aid)
                 continue
-            if (_is_adapted_profile(self)
+            if self.is_paper_learnable and invalid_reason == "CatastrophicFiniteLoad":
+                self._retain_load_frame(
+                    aid, sim, g_components, g_load,
+                    self._learnable_requested_setpoints.get(aid), target,
+                    (aileron, elevator, rudder, throttle), 0.0)
+                sim.crash()
+                self._mark_invalid_numerical(aid, "CatastrophicFiniteLoad")
+                self._crashed_this_step.add(aid)
+                continue
+            if (self.is_paper_minimal
                     and g_load > MINIMAL_EXTREME_LOAD_INVALID_THRESHOLD_G):
                 sim.crash()
                 self._mark_invalid_numerical(aid, "ExtremeFiniteLoad")
@@ -1234,16 +1556,40 @@ class UavCombatEnv(gymnasium.Env):
                 self._death_reasons.setdefault(aid, "Crash_NumericalLoad")
                 self._crashed_this_step.add(aid)
                 continue
-            g_limit = float(self.environment_config.aircraft.maximum_load_g.value)
-            if self.pid_profile in ("paper", "paper_minimal_shared_v1") and g_load > g_limit:
-                minimum_scale = 0.0 if _is_adapted_profile(self) else 0.1
-                scale = float(np.clip(
-                    g_limit / max(g_load, 1e-9), minimum_scale, 1.0))
+            if self.is_paper_learnable:
+                scale = self._paper_learnable_load_scale(aid, g_load)
+                self._retain_load_frame(
+                    aid, sim, g_components, g_load,
+                    self._learnable_requested_setpoints.get(aid), target,
+                    (aileron, elevator, rudder, throttle), scale)
+                invalid_reason = self._paper_learnable_load_invalid_reason(
+                    g_load, self._aircraft_diagnostics[aid][
+                        "consecutive_above_30g_frames"])
+                if invalid_reason == "PersistentExtremeFiniteLoad":
+                    sim.crash()
+                    self._mark_invalid_numerical(
+                        aid, "PersistentExtremeFiniteLoad")
+                    self._crashed_this_step.add(aid)
+                    continue
                 aileron *= scale
                 elevator *= scale
-                if _is_adapted_profile(self):
-                    rudder *= scale
-                diag["load_limiter_activations"] += 1
+                rudder *= scale
+                if g_load >= LEARNABLE_LOAD_PROTECTION_ZERO_G:
+                    throttle = min(throttle, float(
+                        self.environment_config.aircraft.
+                        overspeed_throttle_limit.value))
+                    pid.suppress_directional_memory()
+            else:
+                g_limit = float(self.environment_config.aircraft.maximum_load_g.value)
+                if self.pid_profile in ("paper", "paper_minimal_shared_v1") and g_load > g_limit:
+                    minimum_scale = 0.0 if _is_adapted_profile(self) else 0.1
+                    scale = float(np.clip(
+                        g_limit / max(g_load, 1e-9), minimum_scale, 1.0))
+                    aileron *= scale
+                    elevator *= scale
+                    if _is_adapted_profile(self):
+                        rudder *= scale
+                    diag["load_limiter_activations"] += 1
 
             sim.set_property_value("fcs/aileron-cmd-norm", aileron)
             sim.set_property_value("fcs/elevator-cmd-norm", elevator)
@@ -2437,11 +2783,16 @@ class UavCombatEnv(gymnasium.Env):
         }
         for aid in self.agent_ids:
             sim = self._get_sim(aid)
+            if (self.is_paper_learnable
+                    and (sim is None or not sim.is_alive)):
+                self._clear_learnable_control_state(aid)
             # Return per-step delta and reset counter so callers can safely
             # accumulate without double-counting across env steps.
             delta = self._missile_launch_counts.get(aid, 0)
             self._missile_launch_counts[aid] = 0
             info[aid] = {
+                "agent_id": aid,
+                "team": "blue" if aid.startswith("blue") else "red",
                 "alive": sim is not None and sim.is_alive,
                 "step": self.current_step,
                 "missiles_fired_this_step": delta,
@@ -2454,6 +2805,14 @@ class UavCombatEnv(gymnasium.Env):
                 "fire_control": self._fire_control_states[aid].snapshot(),
                 "evasion": dict(self._evasion_diagnostics.get(aid, {})),
             }
+            if self.is_paper_learnable:
+                mws_state = self._learnable_mws_state.get(
+                    aid, self._empty_learnable_mws_state())
+                info[aid].update({
+                    "mws_warning_generations": int(mws_state.get(
+                        "warning_generation", 0)),
+                    "mws_direction_changes_within_same_missile": 0,
+                })
             if sim is not None and sim.is_alive:
                 _missile, mws_diag = sim.get_missile_warning_diagnostic()
                 info[aid]["mws_threat"] = mws_diag
@@ -2500,6 +2859,20 @@ class UavCombatEnv(gymnasium.Env):
             mws_diag[f"{team}_mws_warning_to_hit_mean_s"] = mws_diag[
                 f"{team}_warning_to_hit_mean_s"]
         info["__mws_diag__"] = mws_diag
+        if self.is_paper_learnable:
+            info["__load_diag__"] = {
+                "invalid_nonfinite_load_count": sum(
+                    "NonFiniteLoad" in reason
+                    for reason in self._invalid_numerical_reasons),
+                "invalid_catastrophic_finite_load_count": sum(
+                    "CatastrophicFiniteLoad" in reason
+                    for reason in self._invalid_numerical_reasons),
+                "invalid_persistent_extreme_finite_load_count": sum(
+                    "PersistentExtremeFiniteLoad" in reason
+                    for reason in self._invalid_numerical_reasons),
+            }
+            info["__extreme_load_traces__"] = copy.deepcopy(
+                self._retained_extreme_load_traces)
         blue_policy_rows = info["__blue_policy_diag__"].get("per_blue", [])
         movement_targets = {
             str(row.get("blue_id")): row.get("assigned_target_id")
@@ -2548,6 +2921,17 @@ class UavCombatEnv(gymnasium.Env):
                 reason in ("Crash_BattleVolume", "Crash_HighAlt", "Crash_LowAlt")
                 for reason in self._death_reasons.values()),
         }
+        if self.is_paper_learnable:
+            info["__episode__"].update({
+                "RedMWSWarningGenerations": int(mws_diag.get(
+                    "red_warning_generations", 0)),
+                "RedMWSDirectionChangesWithinSameMissile": int(mws_diag.get(
+                    "red_direction_changes_within_same_missile", 0)),
+                "RedMWSMaximumContinuousDecisions": int(mws_diag.get(
+                    "red_maximum_continuous_decisions", 0)),
+                "RedMWSTargetHeadingDeltaMaxDeg": float(mws_diag.get(
+                    "red_target_heading_delta_max_deg", 0.0)),
+            })
         return info
 
     # ------------------------------------------------------------------

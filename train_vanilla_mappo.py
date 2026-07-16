@@ -556,10 +556,10 @@ LEARNABILITY_DIAG_CSV_FIELDS = (
     "BlueWarningToTerminalP50S", "BlueWarningToHitMeanS",
     "CompletedEpisodesThisIteration", "NoCompletedEpisodeThisIteration",
     "IterationWallTimeS", "EnvironmentStepsPerSecond",
-    "RedMissileLaunches", "RedMissileHits", "RedMissilePHitFail",
+    "RedMissileLaunches", "RedMissilePHitFail",
     "RedMissileOvershoot", "RedMissileTimeout", "RedMissileTargetDead",
     "RedMissileUnknownTermination", "BlueMissileLaunches",
-    "BlueMissileHits", "BlueMissilePHitFail", "BlueMissileOvershoot",
+    "BlueMissilePHitFail", "BlueMissileOvershoot",
     "BlueMissileTimeout", "BlueMissileTargetDead",
     "BlueMissileUnknownTermination", "RedMissileLifetimeMeanSec",
     "RedMissileLifetimeMedianSec", "RedMissileLifetimeP90Sec",
@@ -580,6 +580,23 @@ LEARNABILITY_DIAG_CSV_FIELDS = (
     "BlueFirstHitStepMean", "EpisodeLengthMean",
     "EpisodeLengthP50", "EpisodeLengthP90", "EstimatedRemainingTimeSec",
     "WorkerRestartCount", "ResumeCount",
+    "RedMaximumGSeen", "BlueMaximumGSeen",
+    "RedFramesAbove9G", "BlueFramesAbove9G",
+    "RedTransientAbove30GEvents", "BlueTransientAbove30GEvents",
+    "RedMaximumConsecutiveAbove30GFrames",
+    "BlueMaximumConsecutiveAbove30GFrames",
+    "RedLoadProtectionActiveFrames", "BlueLoadProtectionActiveFrames",
+    "RedMWSWarningGenerations", "BlueMWSWarningGenerations",
+    "RedMWSDirectionChangesWithinSameMissile",
+    "BlueMWSDirectionChangesWithinSameMissile",
+    "RedSetpointRateLimitActivations", "BlueSetpointRateLimitActivations",
+    "RedRequestedHeadingJumpMaxDeg", "BlueRequestedHeadingJumpMaxDeg",
+    "RedAppliedHeadingJumpMaxDeg", "BlueAppliedHeadingJumpMaxDeg",
+    "RedRequestedPitchJumpMaxDeg", "BlueRequestedPitchJumpMaxDeg",
+    "RedAppliedPitchJumpMaxDeg", "BlueAppliedPitchJumpMaxDeg",
+    "RedMWSMaximumContinuousDecisions", "RedMWSTargetHeadingDeltaMaxDeg",
+    "NonFiniteLoadInvalidEpisodes", "CatastrophicFiniteLoadInvalidEpisodes",
+    "PersistentExtremeFiniteLoadInvalidEpisodes",
 )
 
 CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v6"
@@ -1099,6 +1116,22 @@ def _learnability_iteration_metrics(
             environment_diag["blue_detected_agent_decisions"]),
         "BlueMWSOverrideAgentDecisions": int(
             environment_diag["blue_override_agent_decisions"]),
+        "RedMWSWarningGenerations": int(
+            environment_diag["red_warning_generations"]),
+        "BlueMWSWarningGenerations": 0,
+        "RedMWSDirectionChangesWithinSameMissile": int(
+            environment_diag["red_direction_changes_within_same_missile"]),
+        "BlueMWSDirectionChangesWithinSameMissile": 0,
+        "NonFiniteLoadInvalidEpisodes": int(
+            environment_diag["invalid_nonfinite_load_count"]),
+        "CatastrophicFiniteLoadInvalidEpisodes": int(
+            environment_diag["invalid_catastrophic_finite_load_count"]),
+        "PersistentExtremeFiniteLoadInvalidEpisodes": int(
+            environment_diag["invalid_persistent_extreme_finite_load_count"]),
+        "RedMWSMaximumContinuousDecisions": int(
+            environment_diag["red_maximum_continuous_decisions"]),
+        "RedMWSTargetHeadingDeltaMaxDeg": float(
+            environment_diag["red_target_heading_delta_max_deg"]),
         **{
             f"{prefix}{suffix}": _safe_div(
                 environment_diag[field], environment_diag[f"{field}_count"])
@@ -2672,6 +2705,15 @@ def _apply_preset_vanilla(args, preset: dict):
             setattr(args, key, value)
 
 
+def _validate_preset_resume_semantics(args) -> None:
+    if args.preset != "vanilla_3v3_paper_learnable_1m":
+        return
+    if args.resume_latest or args.resume_from_best:
+        raise ValueError(
+            "the 1m preset starts fresh unless an explicit --resume-state "
+            "path is supplied; --resume-latest/--resume-from-best are disabled")
+
+
 def make_config_from_args(args) -> Config:
     config = Config()
     config.num_red = args.num_red
@@ -2880,6 +2922,7 @@ def main():
         from configs.experiment_presets import get_preset
         preset = get_preset(args.preset)
         _apply_preset_vanilla(args, preset)
+    _validate_preset_resume_semantics(args)
 
     config = make_config_from_args(args)
     if config.launch_quality_file is None:
@@ -3471,8 +3514,22 @@ def main():
                             "red_detected_agent_decisions",
                             "red_override_agent_decisions",
                             "blue_detected_agent_decisions",
-                            "blue_override_agent_decisions"):
+                            "blue_override_agent_decisions",
+                            "red_warning_generations",
+                            "red_direction_changes_within_same_missile"):
                         iter_environment_diag[field] += int(mws_diag.get(field, 0))
+                    iter_environment_diag["red_maximum_continuous_decisions"] = max(
+                        iter_environment_diag["red_maximum_continuous_decisions"],
+                        int(mws_diag.get("red_maximum_continuous_decisions", 0)))
+                    iter_environment_diag["red_target_heading_delta_max_deg"] = max(
+                        iter_environment_diag["red_target_heading_delta_max_deg"],
+                        float(mws_diag.get("red_target_heading_delta_max_deg", 0.0)))
+                    load_diag = inf.get("__load_diag__", {})
+                    for field in (
+                            "invalid_nonfinite_load_count",
+                            "invalid_catastrophic_finite_load_count",
+                            "invalid_persistent_extreme_finite_load_count"):
+                        iter_environment_diag[field] += int(load_diag.get(field, 0))
                     for field in (
                             "red_warning_to_terminal_mean_s",
                             "red_warning_to_terminal_p50_s",
@@ -3691,6 +3748,33 @@ def main():
                 if np.isfinite(speed_limiter_rate) and speed_limiter_rate > 100.0
                 else ""),
         }
+        for team, prefix in (("red", "Red"), ("blue", "Blue")):
+            rows = [row for row in iter_aircraft_diag_records
+                    if row.get("team") == team]
+            def _team_max(field):
+                values = [float(row.get(field, 0.0)) for row in rows]
+                return max(values, default=0.0)
+            learnability_metrics.update({
+                f"{prefix}MaximumGSeen": _team_max("maximum_load_g_seen"),
+                f"{prefix}FramesAbove9G": sum(
+                    int(row.get("frames_above_9g", 0)) for row in rows),
+                f"{prefix}TransientAbove30GEvents": sum(
+                    int(row.get("transient_above_30g_events", 0)) for row in rows),
+                f"{prefix}MaximumConsecutiveAbove30GFrames": _team_max(
+                    "maximum_consecutive_above_30g_frames"),
+                f"{prefix}LoadProtectionActiveFrames": sum(
+                    int(row.get("load_protection_active_frames", 0)) for row in rows),
+                f"{prefix}SetpointRateLimitActivations": sum(
+                    int(row.get("setpoint_rate_limit_activations", 0)) for row in rows),
+                f"{prefix}RequestedHeadingJumpMaxDeg": np.rad2deg(_team_max(
+                    "requested_heading_jump_max_rad")),
+                f"{prefix}AppliedHeadingJumpMaxDeg": np.rad2deg(_team_max(
+                    "applied_heading_jump_max_rad")),
+                f"{prefix}RequestedPitchJumpMaxDeg": np.rad2deg(_team_max(
+                    "requested_pitch_jump_max_rad")),
+                f"{prefix}AppliedPitchJumpMaxDeg": np.rad2deg(_team_max(
+                    "applied_pitch_jump_max_rad")),
+            })
 
         # Average per-component breakdown across completed episodes
         if recent_ep_comps_red:

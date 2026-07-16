@@ -281,6 +281,15 @@ def analyze_diagnostics(rows: list[dict], expected_steps: int,
         health_failures.append("PPO 更新全部跳过")
     if max(_finite_values(rows, "InvalidNumericalEpisodes") or [0.0]) > 0:
         health_failures.append("存在 invalid numerical episode")
+    if max(_finite_values(rows, "WorkerRestartCount") or [0.0]) > 0:
+        health_failures.append("存在 worker restart")
+    for field, label in (
+            ("NonFiniteLoadInvalidEpisodes", "NonFiniteLoad"),
+            ("CatastrophicFiniteLoadInvalidEpisodes", "CatastrophicFiniteLoad"),
+            ("PersistentExtremeFiniteLoadInvalidEpisodes",
+             "PersistentExtremeFiniteLoad")):
+        if max(_finite_values(rows, field) or [0.0]) > 0:
+            health_failures.append(f"存在 {label} invalid episode")
     std_min = min(_finite_values(rows, "StateDependentStdMin") or [0.05])
     std_max = max(_finite_values(rows, "StateDependentStdMax") or [0.6])
     if std_min < 0.05 - 1e-6 or std_max > 0.6 + 1e-6:
@@ -296,8 +305,11 @@ def analyze_diagnostics(rows: list[dict], expected_steps: int,
         health_failures.append("stdout 中存在 timed out")
     if _last(rows, "Step") < expected_steps:
         health_failures.append("实际最终 Step 小于 expected_steps")
-    if rule_audit is not None and rule_audit.get("status") != "PASS":
-        health_failures.append("规则环境审计 FAIL")
+    if rule_audit is not None:
+        audit_status = rule_audit.get(
+            "OverallEnvironmentAudit", rule_audit.get("status"))
+        if audit_status != "PASS":
+            health_failures.append("规则环境审计 FAIL")
     eval_summary = eval_summary or {}
     metadata_fields = (
         "CheckpointSchema", "EnvironmentProfile",
@@ -361,6 +373,14 @@ def analyze_diagnostics(rows: list[dict], expected_steps: int,
             for field in ("ExecutedActionNearBoundFrac",))
         if worsening >= 2:
             warnings.append("战术或优化指标持续恶化")
+        if (_improved(middle.get("RedMeanReward", math.nan),
+                      late.get("RedMeanReward", math.nan))
+                and not _improved(middle.get("geometry_rate", math.nan),
+                                  late.get("geometry_rate", math.nan))
+                and not _improved(middle.get("launches_per_episode", math.nan),
+                                  late.get("launches_per_episode", math.nan))):
+            warnings.append(
+                "dense-reward local optimum: reward rises without geometry or launch improvement")
         if warnings:
             learning_status = "OPTIMIZATION_WARNING"
             learning_reasons.extend(warnings)
