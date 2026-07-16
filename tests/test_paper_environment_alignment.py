@@ -816,6 +816,126 @@ def test_pid_loop_first_sample_has_no_derivative_kick_and_reset_repeats():
     assert loop._last_diagnostic["d"] == 0.0
 
 
+def test_pid_loop_explicit_derivative_suppression_updates_history_not_integral():
+    loop = PIDLoop(0.0, 0.5, 2.0, -100.0, 100.0)
+    loop.step(1.0, 0.5)
+    integral_before = loop._integral
+    loop.step(3.0, 0.5, suppress_derivative=True)
+    assert loop._last_diagnostic["d"] == 0.0
+    assert loop._prev_error == 3.0
+    assert loop._integral > integral_before
+    loop.step(4.0, 0.5)
+    assert loop._last_diagnostic["d"] == pytest.approx(4.0)
+
+
+def test_controller_suppresses_all_derivatives_for_one_setpoint_change_frame():
+    pid = PIDController(1.0 / 60.0, profile="paper")
+    rpy = np.array([0.0, 0.0, 0.0])
+    previous = (0.8156735924, 1.5013160040, 143.0670351)
+    changed = (-0.3480785588, -0.0181200179, 326.4000094)
+    pid.compute_control(rpy, previous[2], *previous)
+    integral_before = (
+        pid._roll_pid._integral,
+        pid._pitch_pid._integral,
+        pid._velocity_pid._integral)
+    pid.compute_control(rpy, previous[2], *changed)
+    diag = pid._last_diagnostic
+    assert diag["setpoint_changed_this_frame"] is True
+    assert diag["derivative_suppressed_for_setpoint_change"] is True
+    assert diag["pitch_setpoint_delta_rad"] == pytest.approx(
+        changed[0] - previous[0])
+    assert diag["heading_setpoint_delta_rad"] == pytest.approx(
+        changed[1] - previous[1])
+    assert diag["velocity_setpoint_delta_mps"] == pytest.approx(
+        changed[2] - previous[2])
+    assert [diag[key]["d"] for key in (
+        "roll_pid", "pitch_pid", "velocity_pid")] == [0.0, 0.0, 0.0]
+    assert any(abs(after) > 0.0 for after in (
+        pid._roll_pid._integral,
+        pid._pitch_pid._integral,
+        pid._velocity_pid._integral))
+    assert integral_before != (
+        pid._roll_pid._integral,
+        pid._pitch_pid._integral,
+        pid._velocity_pid._integral)
+
+    pid.compute_control(
+        np.array([0.01, -0.01, 0.01]), previous[2] + 1.0, *changed)
+    next_diag = pid._last_diagnostic
+    assert next_diag["setpoint_changed_this_frame"] is False
+    assert next_diag["derivative_suppressed_for_setpoint_change"] is False
+    assert any(abs(next_diag[key]["d"]) > 0.0 for key in (
+        "roll_pid", "pitch_pid", "velocity_pid"))
+
+
+@pytest.mark.parametrize("changed_index", [0, 1, 2])
+def test_each_upper_setpoint_channel_triggers_one_frame_suppression(
+        changed_index):
+    pid = PIDController(1.0 / 60.0, profile="paper")
+    base = [0.1, 0.2, 250.0]
+    pid.compute_control(np.zeros(3), 240.0, *base)
+    changed = list(base)
+    changed[changed_index] += (0.1 if changed_index < 2 else 10.0)
+    pid.compute_control(np.zeros(3), 240.0, *changed)
+    assert pid._last_diagnostic[
+        "derivative_suppressed_for_setpoint_change"] is True
+    assert [pid._last_diagnostic[key]["d"] for key in (
+        "roll_pid", "pitch_pid", "velocity_pid")] == [0.0, 0.0, 0.0]
+    pid.compute_control(
+        np.array([0.01, -0.01, 0.01]), 241.0, *changed)
+    assert pid._last_diagnostic[
+        "derivative_suppressed_for_setpoint_change"] is False
+
+
+def test_mws_enter_and_exit_target_changes_each_suppress_exactly_one_frame():
+    pid = PIDController(1.0 / 60.0, profile="paper")
+    state = np.zeros(3)
+    base = (0.1, 0.2, 250.0)
+    mws = (0.0, 1.2, 300.0)
+    pid.compute_control(state, 250.0, *base)
+    pid.compute_control(state, 250.0, *mws)
+    assert pid._last_diagnostic[
+        "derivative_suppressed_for_setpoint_change"] is True
+    pid.compute_control(np.array([0.0, 0.0, 0.01]), 251.0, *mws)
+    assert pid._last_diagnostic[
+        "derivative_suppressed_for_setpoint_change"] is False
+    pid.compute_control(state, 250.0, *base)
+    assert pid._last_diagnostic[
+        "derivative_suppressed_for_setpoint_change"] is True
+    pid.compute_control(np.array([0.0, 0.0, -0.01]), 249.0, *base)
+    assert pid._last_diagnostic[
+        "derivative_suppressed_for_setpoint_change"] is False
+
+
+def test_same_decision_only_first_of_twelve_physics_frames_suppresses_d():
+    pid = PIDController(1.0 / 60.0, profile="paper")
+    base = (0.0, 0.0, 250.0)
+    changed = (0.4, 1.0, 320.0)
+    pid.compute_control(np.zeros(3), 250.0, *base)
+    flags = []
+    for frame in range(12):
+        state = np.array([0.0, 0.0, 0.001 * frame])
+        pid.compute_control(state, 250.0 + frame, *changed)
+        flags.append(pid._last_diagnostic[
+            "derivative_suppressed_for_setpoint_change"])
+    assert flags == [True] + [False] * 11
+
+
+def test_recorded_trace_derivative_values_are_reproducible_without_suppression():
+    dt = 1.0 / 60.0
+    cases = (
+        (0.05, 4.8808817),
+        (0.1, 4.9958556),
+        (0.003, 33.0280871),
+    )
+    for kd, recorded_d in cases:
+        loop = PIDLoop(0.0, 0.0, kd, -100.0, 100.0)
+        loop._prev_error = 0.0
+        error_jump = recorded_d * dt / kd
+        loop.step(error_jump, dt)
+        assert loop._last_diagnostic["d"] == pytest.approx(recorded_d)
+
+
 @pytest.mark.parametrize("first_deg,second_deg,expected_deg", [
     (179.0, -179.0, 2.0),
     (-179.0, 179.0, -2.0),

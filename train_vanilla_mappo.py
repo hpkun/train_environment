@@ -59,6 +59,7 @@ from configs.paper_learnable_3v3_spec import (
     learnable_environment_snapshot,
 )
 from my_uav_env.pid_controller import PAPER_PID_ERROR_DEFINITION
+from my_uav_env.pid_controller import PAPER_PID_DERIVATIVE_SEMANTICS
 
 torch.set_num_threads(1)
 try:
@@ -710,6 +711,9 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "pid_error_definition": environment_snapshot.get(
             "pid_error_definition", {}).get(
                 "value", PAPER_PID_ERROR_DEFINITION),
+        "derivative_semantics": environment_snapshot.get(
+            "derivative_semantics", {}).get(
+                "value", PAPER_PID_DERIVATIVE_SEMANTICS),
         "missile_guidance_mode": config.missile_guidance_mode,
         "altitude_reward_config": asdict(config.altitude_reward_config),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
@@ -799,6 +803,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             "observation_mode", "actor_input_dim",
             "critic_input_dim", "setpoint_rate_limiter",
             "load_command_scaling", "pid_error_definition",
+            "derivative_semantics",
             "extreme_finite_load_guard")
         provenance = {}
         for key in sourced_keys:

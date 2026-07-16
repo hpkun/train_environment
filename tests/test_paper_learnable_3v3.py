@@ -98,6 +98,10 @@ def test_learnable_profile_contract_and_dimensions():
         "operational_v1")
     assert snapshot["pid_error_definition"]["source"] == (
         "paper_unspecified_engineering")
+    assert snapshot["derivative_semantics"]["value"] == (
+        "setpoint_kick_suppressed_error_derivative_v1")
+    assert snapshot["derivative_semantics"]["source"] == (
+        "paper_unspecified_engineering")
     assert snapshot["environment_config"]["pid"]["throttle_base"]["value"] == 0.8
     assert _compute_obs_dim(3, 3, True, "paper_strict") == 60
     assert _compute_global_state_dim(3, "paper_strict") == 30
@@ -408,7 +412,12 @@ def test_extreme_load_trace_retains_last_twelve_frames_and_causal_fields():
             "g_components", "requested_setpoints", "applied_setpoints",
             "previous_applied_setpoints", "pid_commands_before_load_protection",
             "mws_state", "pid_saturation", "load_protection_scale",
-            "action_update"):
+            "action_update", "setpoint_changed_this_frame",
+            "pitch_setpoint_delta_rad", "heading_setpoint_delta_rad",
+            "velocity_setpoint_delta_mps",
+            "derivative_suppressed_for_setpoint_change",
+            "selected_missile_closing_speed_mps",
+            "selected_missile_ttc_s", "candidate_is_approaching"):
         assert field in final
 
 
@@ -885,6 +894,34 @@ def test_old_pid_semantics_fingerprint_is_rejected_by_checkpoint_validation(
     stale_metadata = dict(metadata)
     stale_metadata["environment_config"] = stale_environment
     stale_metadata["environment_config_fingerprint"] = stale_fingerprint
+    payload = {
+        "state_dict": actor.state_dict(),
+        "metadata": stale_metadata,
+        "model_kind": "actor",
+    }
+    with pytest.raises(ValueError, match="environment metadata mismatch"):
+        _unpack_and_validate_checkpoint(payload, metadata, "actor")
+
+
+def test_old_derivative_semantics_fingerprint_is_rejected(tmp_path):
+    config = _learnable_training_config(tmp_path)
+    metadata = _checkpoint_metadata(config, 60, 30)
+    stale_environment = copy.deepcopy(metadata["environment_config"])
+    stale_environment["derivative_semantics"]["value"] = (
+        "raw_error_derivative_including_setpoint_changes_v0")
+    stale_fingerprint_payload = dict(stale_environment)
+    stale_fingerprint_payload.pop("environment_config_fingerprint", None)
+    stale_fingerprint_payload.pop("seed", None)
+    encoded = json.dumps(
+        stale_fingerprint_payload, sort_keys=True, separators=(",", ":"),
+        default=str)
+    stale_fingerprint = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    stale_metadata = dict(metadata)
+    stale_metadata["environment_config"] = stale_environment
+    stale_metadata["environment_config_fingerprint"] = stale_fingerprint
+    stale_metadata["derivative_semantics"] = (
+        "raw_error_derivative_including_setpoint_changes_v0")
+    actor = VanillaActor(obs_dim=60, hidden=8, rnn_hidden=4)
     payload = {
         "state_dict": actor.state_dict(),
         "metadata": stale_metadata,

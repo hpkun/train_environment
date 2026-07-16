@@ -16,7 +16,10 @@ from configs.paper_minimal_3v3_spec import (
     MINIMAL_PAPER_ENVIRONMENT_CONFIG,
     MINIMAL_SCENARIO,
 )
-from my_uav_env.pid_controller import PAPER_PID_ERROR_DEFINITION
+from my_uav_env.pid_controller import (
+    PAPER_PID_DERIVATIVE_SEMANTICS,
+    PAPER_PID_ERROR_DEFINITION,
+)
 
 
 LEARNABILITY_ADAPTATION = "learnability_adaptation"
@@ -145,6 +148,9 @@ LEARNABLE_PROFILE_METADATA = {
         LEARNABILITY_ADAPTATION),
     "pid_error_definition": sv(
         PAPER_PID_ERROR_DEFINITION,
+        PAPER_UNSPECIFIED_ENGINEERING),
+    "derivative_semantics": sv(
+        PAPER_PID_DERIVATIVE_SEMANTICS,
         PAPER_UNSPECIFIED_ENGINEERING),
     "extreme_finite_load_guard": sv(
         "paper_unspecified_numerical_guard_30g_3frames_100g_immediate_v1",

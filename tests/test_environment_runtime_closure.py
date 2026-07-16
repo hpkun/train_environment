@@ -90,7 +90,7 @@ def test_target_body_aspect_distinguishes_front_and_side():
     assert math.isclose(side_az, math.pi / 2)
 
 
-def test_mws_selects_minimum_positive_ttc_then_nearest_fallback():
+def test_mws_selects_minimum_positive_ttc_and_never_falls_back_to_receding():
     target = FakeAircraft("target", [0, 0, 0])
     slow = FakeMissile("slow", [1000, 0, 0], [-100, 0, 0], target)
     fast = FakeMissile("fast", [1500, 0, 0], [-500, 0, 0], target)
@@ -101,8 +101,50 @@ def test_mws_selects_minimum_positive_ttc_then_nearest_fallback():
     receding_far = FakeMissile("far", [500, 0, 0], [100, 0, 0], target)
     selected, diag = select_most_dangerous_missile(
         target, [receding_far, receding_near])
-    assert selected.uid == "near"
-    assert diag["time_to_closest_approach_s"] == ""
+    assert selected is None
+    assert diag is None
+
+
+def test_mws_filters_receding_invalid_and_non_targeting_missiles():
+    target = FakeAircraft("target", [0, 0, 0])
+    other = FakeAircraft("other", [0, 0, 0])
+    approaching = FakeMissile(
+        "approaching", [1000, 0, 0], [-200, 0, 0], target)
+    receding = FakeMissile(
+        "receding", [100, 0, 0], [100, 0, 0], target)
+    invalid = FakeMissile(
+        "invalid", [float("nan"), 0, 0], [-100, 0, 0], target)
+    wrong_target = FakeMissile(
+        "wrong", [50, 0, 0], [-500, 0, 0], other)
+    selected, diag = select_most_dangerous_missile(
+        target, [receding, invalid, wrong_target, approaching])
+    assert selected is approaching
+    assert diag["closing_speed_mps"] > 0.0
+    assert diag["time_to_closest_approach_s"] >= 0.0
+    assert diag["candidate_is_approaching"] is True
+
+
+def test_mws_rejects_negative_ttc_and_exits_when_missile_turns_away():
+    target = FakeAircraft("target", [0, 0, 0])
+    missile = FakeMissile(
+        "missile", [1000, 0, 0], [-200, 0, 0], target)
+    selected, _diag = select_most_dangerous_missile(target, [missile])
+    assert selected is missile
+    missile._velocity[:] = [200, 0, 0]
+    selected, diag = select_most_dangerous_missile(target, [missile])
+    assert selected is None
+    assert diag is None
+
+
+def test_mws_multiple_incoming_tie_breaks_by_ttc_distance_then_uid():
+    target = FakeAircraft("target", [0, 0, 0])
+    later = FakeMissile("later", [1000, 0, 0], [-100, 0, 0], target)
+    nearer_uid_b = FakeMissile("b", [500, 0, 0], [-100, 0, 0], target)
+    nearer_uid_a = FakeMissile("a", [500, 0, 0], [-100, 0, 0], target)
+    selected, diag = select_most_dangerous_missile(
+        target, [later, nearer_uid_b, nearer_uid_a])
+    assert selected is nearer_uid_a
+    assert diag["time_to_closest_approach_s"] == 5.0
 
 
 def test_reset_seed_reproduces_awacs_coarse_track_and_snapshot():

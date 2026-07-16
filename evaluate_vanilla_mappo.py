@@ -16,7 +16,10 @@ import numpy as np
 import torch
 
 from my_uav_env import UavCombatEnv
-from my_uav_env.pid_controller import PAPER_PID_ERROR_DEFINITION
+from my_uav_env.pid_controller import (
+    PAPER_PID_DERIVATIVE_SEMANTICS,
+    PAPER_PID_ERROR_DEFINITION,
+)
 from my_uav_env.alignment.reward_utils import (
     DEFAULT_ALTITUDE_REWARD_CONFIG,
     REWARD_VERSION,
@@ -280,6 +283,9 @@ def _load_actor(args, device: torch.device):
         "pid_error_definition": environment_snapshot.get(
             "pid_error_definition", {}).get(
                 "value", PAPER_PID_ERROR_DEFINITION),
+        "derivative_semantics": environment_snapshot.get(
+            "derivative_semantics", {}).get(
+                "value", PAPER_PID_DERIVATIVE_SEMANTICS),
         "missile_guidance_mode": args.missile_guidance_mode,
         "altitude_reward_config": asdict(
             _minimal_altitude_reward_config()

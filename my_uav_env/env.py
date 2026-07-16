@@ -509,6 +509,7 @@ class UavCombatEnv(gymnasium.Env):
         self._learnable_requested_setpoints: dict[str, tuple[float, float, float]] = {}
         self._learnable_previous_setpoints: dict[str, tuple[float, float, float]] = {}
         self._learnable_command_sources: dict[str, str] = {}
+        self._learnable_selected_mws_diagnostics: dict[str, dict | None] = {}
         self._load_frame_history: dict[str, deque] = {}
         self._retained_extreme_load_traces: list[dict] = []
         self._last_load_trace_level: dict[str, int] = {}
@@ -739,6 +740,8 @@ class UavCombatEnv(gymnasium.Env):
         self._learnable_requested_setpoints = {}
         self._learnable_previous_setpoints = {}
         self._learnable_command_sources = {}
+        self._learnable_selected_mws_diagnostics = {
+            aid: None for aid in self.agent_ids}
         self._load_frame_history = {
             aid: deque(maxlen=12) for aid in self.agent_ids}
         self._retained_extreme_load_traces = []
@@ -1087,6 +1090,7 @@ class UavCombatEnv(gymnasium.Env):
         self._learnable_requested_setpoints.pop(aid, None)
         self._learnable_previous_setpoints.pop(aid, None)
         self._learnable_command_sources.pop(aid, None)
+        self._learnable_selected_mws_diagnostics.pop(aid, None)
 
     def _deactivate_learnable_mws_state(self, aid: str) -> None:
         generation = int(self._learnable_mws_state.get(
@@ -1213,7 +1217,19 @@ class UavCombatEnv(gymnasium.Env):
             #  evasion as scripted behaviour that is NOT learned.
             # =================================================================
             mws_enabled = self._mws_enabled_for_agent(aid)
-            incoming = sim.check_missile_warning() if mws_enabled else None
+            if mws_enabled:
+                if hasattr(sim, "get_missile_warning_diagnostic"):
+                    incoming, incoming_diag = (
+                        sim.get_missile_warning_diagnostic())
+                else:
+                    incoming = sim.check_missile_warning()
+                    incoming_diag = None
+            else:
+                incoming, incoming_diag = None, None
+            if getattr(self, "is_paper_learnable", False):
+                self._learnable_selected_mws_diagnostics[aid] = (
+                    dict(incoming_diag)
+                    if isinstance(incoming_diag, dict) else None)
             if incoming is not None and mws_enabled:
                 team = "blue" if is_blue else "red"
                 mws_counts = getattr(self, "_mws_decision_diagnostics", None)
@@ -1368,6 +1384,7 @@ class UavCombatEnv(gymnasium.Env):
             float(requested[0] - previous_setpoints[0])
             if requested is not None and previous_setpoints is not None else 0.0)
         mws_state = copy.deepcopy(self._learnable_mws_state.get(aid, {}))
+        selected_mws_diag = self._learnable_selected_mws_diagnostics.get(aid)
         pid_diag = copy.deepcopy(getattr(
             self.pid_controllers.get(aid), "_last_diagnostic", {}))
         def _property(name: str) -> float:
@@ -1422,6 +1439,26 @@ class UavCombatEnv(gymnasium.Env):
                 mws_state.get("warning_start_decision_step") == self.current_step),
             "mws_just_exited": False,
             "action_update": int(self.current_step),
+            "setpoint_changed_this_frame": bool(
+                pid_diag.get("setpoint_changed_this_frame", False)),
+            "pitch_setpoint_delta_rad": float(
+                pid_diag.get("pitch_setpoint_delta_rad", 0.0)),
+            "heading_setpoint_delta_rad": float(
+                pid_diag.get("heading_setpoint_delta_rad", 0.0)),
+            "velocity_setpoint_delta_mps": float(
+                pid_diag.get("velocity_setpoint_delta_mps", 0.0)),
+            "derivative_suppressed_for_setpoint_change": bool(
+                pid_diag.get(
+                    "derivative_suppressed_for_setpoint_change", False)),
+            "selected_missile_closing_speed_mps": (
+                selected_mws_diag.get("closing_speed_mps")
+                if isinstance(selected_mws_diag, dict) else None),
+            "selected_missile_ttc_s": (
+                selected_mws_diag.get("time_to_closest_approach_s")
+                if isinstance(selected_mws_diag, dict) else None),
+            "candidate_is_approaching": bool(
+                selected_mws_diag.get("candidate_is_approaching", False))
+                if isinstance(selected_mws_diag, dict) else False,
         }
         history.append(row)
         level = (4 if not np.isfinite(g_load) or g_load > LEARNABLE_CATASTROPHIC_G

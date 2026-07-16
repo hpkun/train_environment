@@ -6,6 +6,10 @@ import numpy as np
 PAPER_EQ13_ZERO_EPS = 1e-12
 PAPER_PID_ERROR_DEFINITION = (
     "paper_quadrant_preserving_azimuth_continuous_elevation_operational_v1")
+PAPER_PID_DERIVATIVE_SEMANTICS = (
+    "setpoint_kick_suppressed_error_derivative_v1")
+SETPOINT_ANGLE_TOLERANCE_RAD = 1e-10
+SETPOINT_VELOCITY_TOLERANCE_MPS = 1e-8
 
 
 class PIDLoop:
@@ -42,12 +46,12 @@ class PIDLoop:
             "integral_enabled": True,
         }
 
-    def step(self, error, dt):
+    def step(self, error, dt, suppress_derivative: bool = False):
         # Proportional
         p = self.kp * error
 
         # Derivative (computed before integral clamp so d-term informs anti-windup)
-        if self._prev_error is None:
+        if self._prev_error is None or suppress_derivative:
             d = 0.0
         else:
             delta_error = float(error - self._prev_error)
@@ -130,6 +134,7 @@ class PIDController:
         self._debug_step = 0          # throttled debug counter
         self._prev_target_heading = None   # for low-pass filter (Fix 2)
         self._prev_roll_error = None        # for D-term guard (clipped-error jump detection)
+        self._previous_upper_targets = None
         if not 0.0 <= float(throttle_base) <= 1.0:
             raise ValueError("throttle_base must be in [0, 1]")
         self.throttle_base = float(throttle_base)
@@ -183,6 +188,7 @@ class PIDController:
         self._velocity_pid.reset()
         self._prev_target_heading = None     # clear heading LPF state
         self._prev_roll_error = None         # clear D-term guard state
+        self._previous_upper_targets = None
         self._last_diagnostic = {}
 
     # ------------------------------------------------------------------
@@ -328,14 +334,50 @@ class PIDController:
             return 0.0, 0.0, 0.0, 0.0
 
         if self.profile in ("paper", "paper_minimal_shared_v1"):
+            current_targets = (
+                float(target_pitch), float(target_heading),
+                float(target_velocity))
+            if self._previous_upper_targets is None:
+                pitch_setpoint_delta = 0.0
+                heading_setpoint_delta = 0.0
+                velocity_setpoint_delta = 0.0
+                setpoint_changed = False
+            else:
+                previous_pitch, previous_heading, previous_velocity = (
+                    self._previous_upper_targets)
+                pitch_setpoint_delta = float(
+                    current_targets[0] - previous_pitch)
+                raw_heading_delta = float(
+                    current_targets[1] - previous_heading)
+                heading_setpoint_delta = float(
+                    (raw_heading_delta + np.pi) % (2.0 * np.pi) - np.pi)
+                if (np.isclose(heading_setpoint_delta, -np.pi)
+                        and raw_heading_delta > 0.0):
+                    heading_setpoint_delta = float(np.pi)
+                velocity_setpoint_delta = float(
+                    current_targets[2] - previous_velocity)
+                setpoint_changed = bool(
+                    abs(pitch_setpoint_delta)
+                    > SETPOINT_ANGLE_TOLERANCE_RAD
+                    or abs(heading_setpoint_delta)
+                    > SETPOINT_ANGLE_TOLERANCE_RAD
+                    or abs(velocity_setpoint_delta)
+                    > SETPOINT_VELOCITY_TOLERANCE_MPS)
+            self._previous_upper_targets = current_targets
             roll_error, pitch_error, d_i_des, d_i_ned, d_b_des, r_bi = (
                 self.paper_direction_errors(
                 current_rpy, target_pitch, target_heading)
             )
-            aileron = self._roll_pid.step(roll_error, self.dt)
-            elevator = self._pitch_pid.step(pitch_error, self.dt)
+            aileron = self._roll_pid.step(
+                roll_error, self.dt,
+                suppress_derivative=setpoint_changed)
+            elevator = self._pitch_pid.step(
+                pitch_error, self.dt,
+                suppress_derivative=setpoint_changed)
             velocity_error = target_velocity - current_velocity
-            correction = self._velocity_pid.step(velocity_error, self.dt)
+            correction = self._velocity_pid.step(
+                velocity_error, self.dt,
+                suppress_derivative=setpoint_changed)
             throttle = float(np.clip(
                 self.throttle_base + correction, 0.0, 1.0))
             unsaturated = (
@@ -348,6 +390,15 @@ class PIDController:
             saturated = (aileron, elevator, 0.0, throttle)
             self._last_diagnostic = {
                 "formula_version": PAPER_PID_ERROR_DEFINITION,
+                "derivative_semantics": PAPER_PID_DERIVATIVE_SEMANTICS,
+                "setpoint_changed_this_frame": bool(setpoint_changed),
+                "pitch_setpoint_delta_rad": float(pitch_setpoint_delta),
+                "heading_setpoint_delta_rad": float(
+                    heading_setpoint_delta),
+                "velocity_setpoint_delta_mps": float(
+                    velocity_setpoint_delta),
+                "derivative_suppressed_for_setpoint_change": bool(
+                    setpoint_changed),
                 "d_I_des": tuple(float(value) for value in d_i_des),
                 "d_I_des_ned": tuple(float(value) for value in d_i_ned),
                 "d_B_des": tuple(float(value) for value in d_b_des),

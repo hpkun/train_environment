@@ -91,31 +91,30 @@ def select_most_dangerous_missile(aircraft, missiles) -> tuple[object | None, di
             continue
         rel = target_pos - np.asarray(missile.get_position(), dtype=np.float64)
         rel_vel = target_vel - np.asarray(missile.get_velocity(), dtype=np.float64)
+        if not np.all(np.isfinite(rel)) or not np.all(np.isfinite(rel_vel)):
+            continue
         distance = float(np.linalg.norm(rel))
-        closing = float(-np.dot(rel, rel_vel) / max(distance, 1e-9))
+        if not np.isfinite(distance) or distance <= 0.0:
+            continue
+        closing = float(-np.dot(rel, rel_vel) / distance)
         rv2 = float(np.dot(rel_vel, rel_vel))
         ttc = float(-np.dot(rel, rel_vel) / rv2) if rv2 > 1e-9 else float("inf")
-        if closing <= 0.0 or ttc < 0.0:
-            ttc = float("inf")
+        if (not np.isfinite(closing) or closing <= 0.0
+                or not np.isfinite(ttc) or ttc < 0.0):
+            continue
         bearing = float(np.arctan2(rel[1], rel[0]))
         elevation = float(np.arctan2(rel[2], max(np.hypot(rel[0], rel[1]), 1e-9)))
         diag = {"missile_id": missile.uid, "distance_m": distance,
                 "relative_velocity": rel_vel.tolist(),
                 "closing_speed_mps": closing,
                 "time_to_closest_approach_s": ttc,
+                "candidate_is_approaching": True,
                 "incoming_bearing_rad": bearing,
                 "incoming_elevation_rad": elevation}
         rows.append((missile, diag))
     if not rows:
         return None, None
-    finite = [row for row in rows if np.isfinite(row[1]["time_to_closest_approach_s"])]
-    has_finite_ttc = bool(finite)
-    candidates = finite if finite else rows
-    candidates.sort(key=lambda row: (
-        row[1]["time_to_closest_approach_s"] if has_finite_ttc else row[1]["distance_m"],
+    rows.sort(key=lambda row: (
+        row[1]["time_to_closest_approach_s"],
         row[1]["distance_m"], row[0].uid))
-    selected, diagnostic = candidates[0]
-    if not np.isfinite(diagnostic["time_to_closest_approach_s"]):
-        diagnostic = dict(diagnostic)
-        diagnostic["time_to_closest_approach_s"] = ""
-    return selected, diagnostic
+    return rows[0]
