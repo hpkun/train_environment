@@ -3,6 +3,7 @@ import pytest
 from aircombat_env_v1.config import load_config
 from aircombat_env_v1.execution import bounded_combined_command
 from aircombat_env_v1.scripts import tune_pid, validate_pid
+from aircombat_env_v1 import validation
 
 
 def test_attitude_integrals_are_always_zero_in_tuning():
@@ -101,10 +102,45 @@ def test_pitch_integral_only_preserves_all_other_tuned_parameters():
     assert candidate["pid"]["speed"]["kd"] == 0.0
 
 
-def test_pitch_integral_grid_explicitly_contains_zero():
-    assert 0.0 in tune_pid.pitch_integral_grid()
+def test_pitch_integral_stage_a_explicitly_contains_zero():
+    assert 0.0 in tune_pid.PITCH_INTEGRAL_VALUES
 
 
 def test_invalid_pitch_integral_candidate_cannot_be_accepted():
     with pytest.raises(RuntimeError, match="no valid pitch integral candidate"):
         tune_pid.require_pitch_integral_candidate(False)
+
+
+def test_stage_a_uses_lexicographic_health_sort_not_cost():
+    worse_health_low_cost = {
+        "pitch_ki": 0.001, "crashed": False, "has_nan_or_inf": False,
+        "failure_reasons": ["pitch_final_error"],
+        "stable_pitch_error_deg": 1.0, "elevator_saturation_ratio": 0.0,
+        "pitch_error_rms_deg": 1.0, "total_cost": 0.0,
+    }
+    healthy_high_cost = {
+        "pitch_ki": 0.0025, "crashed": False, "has_nan_or_inf": False,
+        "failure_reasons": [], "stable_pitch_error_deg": 4.0,
+        "elevator_saturation_ratio": 0.1, "pitch_error_rms_deg": 4.0,
+        "total_cost": 999999.0,
+    }
+    assert tune_pid.select_stage_a_nonzero(
+        [worse_health_low_cost, healthy_high_cost])[0]["pitch_ki"] == 0.0025
+
+
+def test_stage_b_uses_same_quick_cases_as_validate_script():
+    assert tune_pid.quick_cases() == validate_pid.quick_cases()
+    assert tune_pid.quick_cases() == validation.quick_cases()
+
+
+def test_only_quick_eight_of_eight_is_valid():
+    record = {"pitch_ki": 0.001, "quick_passed": 7,
+              "crashed": False, "has_nan_or_inf": False}
+    assert tune_pid.quick_gate_candidate_valid(record) is False
+    record["quick_passed"] = 8
+    assert tune_pid.quick_gate_candidate_valid(record) is True
+
+
+def test_no_valid_candidate_uses_best_attempt_filename():
+    assert tune_pid.candidate_output_name(False) == "best_attempt_config.yaml"
+    assert tune_pid.candidate_output_name(True) == "candidate_config.yaml"

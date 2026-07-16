@@ -25,10 +25,15 @@ from aircombat_env_v1.execution import (bounded_combined_command, run_command_ho
 from aircombat_env_v1.metrics import (aggregate_case_metrics, stable_segment_errors,
                                       trajectory_metrics)
 from aircombat_env_v1.pid import PaperAutopilot
+from aircombat_env_v1.validation import quick_cases, run_validation_case
 
 
 SEED = 20260316
 FAILURE_BASE = 1e6
+PITCH_INTEGRAL_BASELINE = (
+    ROOT / "aircombat_env_v1" / "outputs" / "tuning_20260716_145324_216384"
+    / "candidate_config.yaml")
+PITCH_INTEGRAL_VALUES = (0.0, 0.001, 0.0025, 0.005, 0.01, 0.02)
 
 
 def reset_simulator(simulator, config):
@@ -216,68 +221,89 @@ def write_stage(output, stage, trace, report, config):
     save_config(mark_candidate(copy.deepcopy(config)), output / f"{stage}_candidate.yaml")
 
 
-def pitch_integral_cases():
-    return [
-        {"name": "descent_then_level", "command": "descent_then_level"},
-        {"name": "level", "target": (0.0, 0.0, 250.0)},
-        {"name": "speed_280", "target": (0.0, 0.0, 280.0)},
-        {"name": "heading_+30", "target": (0.0, np.deg2rad(30.0), 250.0)},
-        {"name": "bounded_combined", "dynamic": True},
-    ]
-
-
-def pitch_integral_grid(first_best=None):
-    if first_best is None:
-        return np.linspace(0.0, 0.005, 21)
-    half_width = 0.005 / 20.0
-    lower = max(0.0, float(first_best) - half_width)
-    upper = min(0.005, float(first_best) + half_width)
-    return np.linspace(lower, upper, 11)
-
-
-def evaluate_pitch_integral(simulator, config, pitch_ki, duration):
-    candidate = prepare_pitch_integral_config(config, pitch_ki)
-    results = []
-    for case in pitch_integral_cases():
-        result = run_case(simulator, candidate, case, duration)
-        result["metrics"].update(stable_segment_errors(
-            result["rows"], 10.0, candidate["timing"]["sim_frequency_hz"]))
-        health = []
-        if result["complete"]:
-            health = joint_health_reasons(
-                result["metrics"], candidate["validation_thresholds"], True)
-        result["health_failure_reasons"] = health
-        result["complete"] = result["complete"] and not health
-        if health:
-            result["cost"] += failure_penalty(
-                result["metrics"], result["completed_fraction"])
-        results.append(result)
-    metrics = aggregate_case_metrics(results)
-    stable_keys = ("stable_pitch_error_deg", "stable_heading_error_deg",
-                   "stable_speed_error_mps")
-    for key in stable_keys:
-        metrics[key] = float(max(result["metrics"][key] for result in results))
-    cost = float(np.mean([result["cost"] for result in results]))
-    return cost, metrics, results, candidate
-
-
-def pitch_integral_candidate_valid(pitch_ki, cost, baseline_cost, metrics):
-    return bool(pitch_ki > 0.0 and np.isfinite(cost)
-                and metrics["failed_case_count"] == 0 and cost < baseline_cost)
-
-
 def require_pitch_integral_candidate(valid):
     if not valid:
         raise RuntimeError(
             "refusing --accept-candidate: no valid pitch integral candidate")
 
 
-def write_trajectory(path, rows):
-    fields = list(dict.fromkeys(key for row in rows for key in row))
-    with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+def stage_a_sort_key(record):
+    return (
+        bool(record["crashed"] or record["has_nan_or_inf"]),
+        len(record["failure_reasons"]),
+        record["stable_pitch_error_deg"],
+        record["elevator_saturation_ratio"],
+        record["pitch_error_rms_deg"],
+    )
+
+
+def select_stage_a_nonzero(records):
+    return sorted(
+        (record for record in records if record["pitch_ki"] > 0.0),
+        key=stage_a_sort_key)[:3]
+
+
+def quick_gate_sort_key(record):
+    return (
+        record["descent_stable_pitch_error_deg"],
+        record["total_pitch_error_rms_deg"],
+        record["elevator_saturation_ratio"],
+        record["pitch_ki"],
+    )
+
+
+def quick_gate_candidate_valid(record):
+    return bool(record["pitch_ki"] > 0.0 and record["quick_passed"] == 8
+                and not record["crashed"] and not record["has_nan_or_inf"])
+
+
+def candidate_output_name(valid):
+    return "candidate_config.yaml" if valid else "best_attempt_config.yaml"
+
+
+def evaluate_stage_a(simulator, base, pitch_ki):
+    config = prepare_pitch_integral_config(base, pitch_ki)
+    case = {"task": "descent_then_level", "altitude": 6000,
+            "speed": 250, "dynamic": True}
+    _, metrics = run_validation_case(simulator, config, case, 200.0)
+    return {
+        "pitch_ki": float(pitch_ki), "completed": metrics["completed"],
+        "crashed": metrics["crashed"], "has_nan_or_inf": metrics["has_nan_or_inf"],
+        "stable_pitch_error_deg": metrics["stable_pitch_error_deg"],
+        "stable_heading_error_deg": metrics["stable_heading_error_deg"],
+        "stable_speed_error_mps": metrics["stable_speed_error_mps"],
+        "pitch_error_rms_deg": metrics["pitch_error_rms_deg"],
+        "elevator_saturation_ratio": metrics["elevator_saturation_ratio"],
+        "maximum_alpha_deg": metrics["maximum_alpha_deg"],
+        "maximum_beta_deg": metrics["maximum_beta_deg"],
+        "maximum_load_factor": metrics["maximum_load_factor"],
+        "failure_reasons": metrics["failure_reasons"],
+    }
+
+
+def evaluate_quick_gate(simulator, base, pitch_ki):
+    config = prepare_pitch_integral_config(base, pitch_ki)
+    results = []
+    for case in quick_cases():
+        _, metrics = run_validation_case(simulator, config, case, 200.0)
+        results.append({"task": case["task"], **metrics})
+    descent = next(result for result in results
+                   if result["task"] == "descent_then_level")
+    failed = [result["task"] for result in results if not result["passed"]]
+    record = {
+        "pitch_ki": float(pitch_ki),
+        "quick_passed": sum(result["passed"] for result in results),
+        "failed_cases": failed,
+        "descent_stable_pitch_error_deg": descent["stable_pitch_error_deg"],
+        "total_pitch_error_rms_deg": float(sum(
+            result["pitch_error_rms_deg"] for result in results)),
+        "elevator_saturation_ratio": float(max(
+            result["elevator_saturation_ratio"] for result in results)),
+        "crashed": any(result["crashed"] for result in results),
+        "has_nan_or_inf": any(result["has_nan_or_inf"] for result in results),
+    }
+    record["candidate_valid"] = quick_gate_candidate_valid(record)
+    return record, config
 
 
 def run_pitch_integral_only(args):
@@ -286,89 +312,85 @@ def run_pitch_integral_only(args):
     output.mkdir(parents=True, exist_ok=False)
     base = prepare_pitch_integral_config(load_config(args.config), 0.0)
     simulator = AircraftSimulator(base["timing"]["sim_frequency_hz"])
-    baseline_cost, baseline_metrics, baseline_results, _ = evaluate_pitch_integral(
-        simulator, base, 0.0, args.joint_duration)
-    records = []
-
-    def evaluate_grid(values, refinement_round):
-        evaluated = []
-        for pitch_ki in values:
-            cost, metrics, results, candidate = evaluate_pitch_integral(
-                simulator, base, float(pitch_ki), args.joint_duration)
-            valid = pitch_integral_candidate_valid(
-                float(pitch_ki), cost, baseline_cost, metrics)
-            record = {
-                "refinement_round": refinement_round, "pitch_ki": float(pitch_ki),
-                "total_cost": cost,
-                "failed_case_count": metrics["failed_case_count"],
-                "failed_cases": ";".join(metrics["failed_cases"]),
-                "stable_pitch_error_deg": metrics["stable_pitch_error_deg"],
-                "stable_heading_error_deg": metrics["stable_heading_error_deg"],
-                "stable_speed_error_mps": metrics["stable_speed_error_mps"],
-                "maximum_alpha_deg": metrics["maximum_alpha_deg"],
-                "maximum_beta_deg": metrics["maximum_beta_deg"],
-                "maximum_load_factor": metrics["maximum_load_factor"],
-                "elevator_saturation_ratio": metrics["elevator_saturation_ratio"],
-                "candidate_valid": valid,
-            }
-            records.append(record)
-            evaluated.append((cost, float(pitch_ki), metrics, results, candidate, valid))
-            print(f"pitch.ki={pitch_ki:.7f} cost={cost:.6g} "
-                  f"failed={metrics['failed_case_count']} valid={valid}")
-        return evaluated
-
-    first = evaluate_grid(pitch_integral_grid(), 1)
-    first_best = min(first, key=lambda item: item[0])[1]
-    second = evaluate_grid(pitch_integral_grid(first_best), 2)
-    valid_candidates = [item for item in first + second if item[5]]
-    if valid_candidates:
-        best = min(valid_candidates, key=lambda item: item[0])
-        improved = True
-    else:
-        best = (baseline_cost, 0.0, baseline_metrics, baseline_results, base, False)
-        improved = False
-    best_cost, best_ki, best_metrics, best_results, candidate, valid = best
-    candidate = mark_candidate(prepare_pitch_integral_config(candidate, best_ki))
-    fields = list(records[0])
-    with (output / "pitch_integral_candidates.csv").open(
+    stage_a = [evaluate_stage_a(simulator, base, value)
+               for value in PITCH_INTEGRAL_VALUES]
+    for record in stage_a:
+        print(f"stage A pitch.ki={record['pitch_ki']:.4f} "
+              f"stable_pitch={record['stable_pitch_error_deg']:.4f} "
+              f"failures={record['failure_reasons']}")
+    with (output / "pitch_integral_stage_a.csv").open(
             "w", newline="", encoding="utf-8") as stream:
+        fields = list(stage_a[0])
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
-        writer.writerows(records)
+        writer.writerows({**record, "failure_reasons":
+                          ";".join(record["failure_reasons"])}
+                         for record in stage_a)
+    finalists = [next(record for record in stage_a
+                      if record["pitch_ki"] == 0.0),
+                 *select_stage_a_nonzero(stage_a)]
+    quick_records, configs = [], {}
+    for stage_record in finalists:
+        record, config = evaluate_quick_gate(
+            simulator, base, stage_record["pitch_ki"])
+        quick_records.append(record)
+        configs[record["pitch_ki"]] = config
+        print(f"quick gate pitch.ki={record['pitch_ki']:.4f} "
+              f"passed={record['quick_passed']}/8 failed={record['failed_cases']}")
+    with (output / "pitch_integral_quick_gate.csv").open(
+            "w", newline="", encoding="utf-8") as stream:
+        fields = list(quick_records[0])
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows({**record, "failed_cases": ";".join(record["failed_cases"])}
+                         for record in quick_records)
+    baseline = next(record for record in quick_records
+                    if record["pitch_ki"] == 0.0)
+    valid_nonzero = [record for record in quick_records
+                     if quick_gate_candidate_valid(record)]
+    best_nonzero = (min(valid_nonzero, key=quick_gate_sort_key)
+                    if valid_nonzero else min(
+                        (record for record in quick_records
+                         if record["pitch_ki"] > 0.0),
+                        key=lambda record: (-record["quick_passed"],
+                                            *quick_gate_sort_key(record))))
+    valid = bool(valid_nonzero)
+    best_config = mark_candidate(configs[best_nonzero["pitch_ki"]])
     best_json = {
-        "baseline_pitch_ki": 0.0, "baseline_cost": baseline_cost,
-        "best_pitch_ki": best_ki, "best_cost": best_cost,
-        "improved_over_baseline": improved, "candidate_valid": valid,
-        "failed_case_count": best_metrics["failed_case_count"],
-        "failed_cases": best_metrics["failed_cases"],
+        "baseline_quick_passed": baseline["quick_passed"],
+        "best_nonzero_pitch_ki": best_nonzero["pitch_ki"],
+        "best_nonzero_quick_passed": best_nonzero["quick_passed"],
+        "best_nonzero_failed_cases": best_nonzero["failed_cases"],
+        "descent_baseline_stable_pitch_error_deg":
+            baseline["descent_stable_pitch_error_deg"],
+        "descent_best_stable_pitch_error_deg":
+            best_nonzero["descent_stable_pitch_error_deg"],
+        "acceptance_eligible": valid,
     }
     (output / "pitch_integral_best.json").write_text(
         json.dumps(best_json, indent=2), encoding="utf-8")
-    save_config(candidate, output / "candidate_config.yaml")
-    for result in best_results:
-        write_trajectory(output / f"{result['name']}_best_trajectory.csv",
-                         result["rows"])
+    save_config(best_config, output / candidate_output_name(valid))
     acceptance = {
-        "acceptance_eligible": bool(valid),
-        "all_five_cases_passed": best_metrics["failed_case_count"] == 0,
-        "improved_over_baseline": improved,
-        "best_pitch_ki": best_ki,
+        "acceptance_eligible": valid,
+        "candidate_config_generated": valid,
+        "best_nonzero_pitch_ki": best_nonzero["pitch_ki"],
+        "best_nonzero_quick_passed": best_nonzero["quick_passed"],
     }
     (output / "acceptance.json").write_text(
         json.dumps(acceptance, indent=2), encoding="utf-8")
     if args.accept_candidate:
         require_pitch_integral_candidate(valid)
-        save_config(candidate, args.config)
+        save_config(best_config, args.config)
         print(f"accepted pitch integral candidate into {args.config}")
     if not valid:
-        print("no valid non-zero pitch integral candidate; pitch.ki remains 0")
+        print("no non-zero pitch integral candidate passed quick 8/8")
     print(f"outputs={output}")
     return output
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--roll-duration", type=float, default=30.0)
     parser.add_argument("--pitch-duration", type=float, default=20.0)
     parser.add_argument("--speed-duration", type=float, default=60.0)
@@ -378,6 +400,9 @@ def main():
     parser.add_argument("--accept-candidate", action="store_true")
     parser.add_argument("--pitch-integral-only", action="store_true")
     args = parser.parse_args()
+    if args.config is None:
+        args.config = (PITCH_INTEGRAL_BASELINE if args.pitch_integral_only
+                       else DEFAULT_CONFIG)
     durations = {"roll_pd": args.roll_duration, "pitch_pd": args.pitch_duration,
                  "speed_pi": args.speed_duration}
     if args.joint_duration <= 0:
