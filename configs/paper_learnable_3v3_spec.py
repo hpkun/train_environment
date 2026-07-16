@@ -7,7 +7,6 @@ import json
 
 from configs.brma_mappo_paper_spec import (
     PAPER_EXPLICIT,
-    PAPER_INFERRED,
     ElectroOpticalConfig,
     MissileConfig,
     PaperEnvironmentConfig,
@@ -40,7 +39,7 @@ LEARNABLE_LAUNCH_MAX_RANGE_M = 8_000.0
 LEARNABLE_MISSILE = replace(
     MissileConfig(),
     model=sv("paper_learnable_point_mass", LEARNABILITY_ADAPTATION),
-    maximum_flight_time_s=sv(60.0, PAPER_EXPLICIT),
+    maximum_flight_time_s=sv(60.0, LEARNABILITY_ADAPTATION),
     thrust_time_s=sv(0.0, LEARNABILITY_ADAPTATION),
     specific_impulse_s=sv(0.0, LEARNABILITY_ADAPTATION),
     length_m=sv(0.0, LEARNABILITY_ADAPTATION),
@@ -52,12 +51,12 @@ LEARNABLE_MISSILE = replace(
     minimum_speed_mps=sv(0.0, LEARNABILITY_ADAPTATION),
     arming_time_s=sv(0.25, LEARNABILITY_ADAPTATION),
     density_model=sv("disabled", LEARNABILITY_ADAPTATION),
-    guidance_mode=sv(LEARNABLE_MISSILE_GUIDANCE_MODE, PAPER_INFERRED),
+    guidance_mode=sv(LEARNABLE_MISSILE_GUIDANCE_MODE, LEARNABILITY_ADAPTATION),
 )
 
 LEARNABLE_PAPER_ENVIRONMENT_CONFIG = replace(
     MINIMAL_PAPER_ENVIRONMENT_CONFIG,
-    version=sv(PAPER_LEARNABLE_ENVIRONMENT_PROFILE, PAPER_INFERRED),
+    version=sv(PAPER_LEARNABLE_ENVIRONMENT_PROFILE, LEARNABILITY_ADAPTATION),
     scenario=MINIMAL_SCENARIO,
     electro_optical=ElectroOpticalConfig(
         maximum_range_m=sv(10_000.0, PAPER_EXPLICIT),
@@ -70,19 +69,22 @@ LEARNABLE_PAPER_ENVIRONMENT_CONFIG = replace(
 
 
 LEARNABLE_PROFILE_METADATA = {
-    "environment_profile": sv(PAPER_LEARNABLE_ENVIRONMENT_PROFILE, PAPER_INFERRED),
+    "environment_profile": sv(
+        PAPER_LEARNABLE_ENVIRONMENT_PROFILE, LEARNABILITY_ADAPTATION),
     "profile_provenance": sv(LEARNABILITY_ADAPTATION, LEARNABILITY_ADAPTATION),
     "fire_control_profile": sv(
         "paper_learnable_fire_control_v1", LEARNABILITY_ADAPTATION),
-    "initial_condition_profile": sv("paper_head_on_3v3_v1", PAPER_INFERRED),
+    "initial_condition_profile": sv(
+        "paper_head_on_3v3_v1", LEARNABILITY_ADAPTATION),
     "initial_condition_randomization_mode": sv(
         "deterministic_v1", LEARNABILITY_ADAPTATION),
     "blue_policy_profile": sv(LEARNABLE_BLUE_POLICY_PROFILE, LEARNABILITY_ADAPTATION),
-    "red_mws_mode": sv("scripted_minimal_evasion_v1", PAPER_INFERRED),
+    "red_mws_mode": sv(
+        "scripted_minimal_evasion_v1", LEARNABILITY_ADAPTATION),
     "blue_mws_mode": sv("disabled_fixed_opponent_v1", LEARNABILITY_ADAPTATION),
     "missile_profile": sv(LEARNABLE_MISSILE_GUIDANCE_MODE, LEARNABILITY_ADAPTATION),
     "reward_version": sv(
-        "paper_literal_minimal_unspecified_v1", PAPER_INFERRED),
+        "paper_literal_minimal_unspecified_v1", LEARNABILITY_ADAPTATION),
     "initial_missile_direction_mode": sv("aircraft_body_x_v1", LEARNABILITY_ADAPTATION),
     "initial_missile_speed_mps": sv(
         LEARNABLE_MISSILE_LAUNCH_SPEED_MPS, LEARNABILITY_ADAPTATION),
@@ -102,9 +104,9 @@ LEARNABLE_PROFILE_METADATA = {
         LEARNABILITY_ADAPTATION),
     "target_assignment_mode": sv(
         "initial_fixed_pair_reallocate_on_death_v1", LEARNABILITY_ADAPTATION),
-    "observation_mode": sv("paper_strict", PAPER_INFERRED),
-    "actor_input_dim": sv(60, PAPER_INFERRED),
-    "critic_input_dim": sv(30, PAPER_INFERRED),
+    "observation_mode": sv("paper_strict", LEARNABILITY_ADAPTATION),
+    "actor_input_dim": sv(60, LEARNABILITY_ADAPTATION),
+    "critic_input_dim": sv(30, LEARNABILITY_ADAPTATION),
 }
 
 

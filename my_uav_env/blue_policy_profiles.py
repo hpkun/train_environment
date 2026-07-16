@@ -295,11 +295,14 @@ class BluePolicyController:
             current_step: int,
             selected_missiles: dict[str, str | None] | None = None,
             mws_detected: dict[str, bool] | None = None,
-            own_alive: dict[str, bool] | None = None) -> dict[str, np.ndarray]:
+            own_alive: dict[str, bool] | None = None,
+            assigned_targets: dict[str, str | None] | None = None,
+            ) -> dict[str, np.ndarray]:
         own_positions = own_positions or {}
         own_headings = own_headings or {}
         selected_missiles = selected_missiles or {}
         mws_detected = mws_detected or {}
+        assigned_targets = assigned_targets or {}
         if own_alive is None:
             own_alive = {
                 f"blue_{index}": self._ownship_alive_from_obs(
@@ -344,29 +347,11 @@ class BluePolicyController:
 
                 target_id = self.current_targets.get(blue_id)
                 if self.profile == "paper_learnable_fixed_pair_v1":
-                    previous_target = target_id
-                    if not self._target_alive(
-                            obs, target_id, num_blue, num_red):
-                        replacement, reason = self._lowest_alive_unengaged_target(
-                            obs, num_blue, num_red, engaged_targets or set())
-                        if replacement is not None:
-                            self.current_targets[blue_id] = replacement
-                            self.target_reallocations += 1
-                            self.target_reallocations_after_death += 1
-                            if previous_target is not None:
-                                self.target_switch_counts[blue_id] += 1
-                                self.switch_reason_counts["target_dead"] += 1
-                                self.last_switch_reasons[blue_id] = "target_dead"
-                        else:
-                            self.current_targets[blue_id] = None
-                            if reason == "all_alive_targets_engaged_wait":
-                                self.engaged_wait_agent_decisions += 1
-                            else:
-                                self.no_alive_target_agent_decisions += 1
-                        target_id = self.current_targets.get(blue_id)
-                        assignment_reasons[blue_id] = reason
-                    else:
-                        assignment_reasons[blue_id] = "fixed_pair_alive"
+                    target_id = assigned_targets.get(blue_id)
+                    self.current_targets[blue_id] = target_id
+                    assignment_reasons[blue_id] = (
+                        "environment_assignment"
+                        if target_id is not None else "environment_wait")
                     assignments[blue_id] = target_id
                     target_index = self._target_index(target_id)
                     if target_index is None:

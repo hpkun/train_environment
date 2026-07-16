@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections import Counter
 import numpy as np
 import pytest
 
 from configs.experiment_presets import get_preset
 from configs.paper_learnable_3v3_spec import (
+    LEARNABILITY_ADAPTATION,
     LEARNABLE_MISSILE_LAUNCH_SPEED_MPS,
     LEARNABLE_PAPER_ENVIRONMENT_CONFIG,
     PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
@@ -16,7 +18,12 @@ from my_uav_env.fire_control import FireControlState
 from my_uav_env.simulator import MissileSimulator
 import torch
 from train_vanilla_mappo import (
+    ACTION_DISTRIBUTION_VERSION,
+    CHECKPOINT_SCHEMA_VERSION,
+    ENTROPY_ESTIMATOR_VERSION,
     Config,
+    RolloutBuffer,
+    SubprocVecEnv,
     VanillaActor,
     CentralizedCritic,
     _atomic_torch_save,
@@ -24,10 +31,13 @@ from train_vanilla_mappo import (
     _checkpoint_metadata,
     _compute_global_state_dim,
     _compute_obs_dim,
+    _episode_is_invalid,
+    _learnability_iteration_metrics,
     _run_periodic_evaluation,
     _training_log_fields,
     _validate_training_state,
 )
+from scripts.audit_paper_learnable_3v3 import _mirror_launch_health
 
 
 def _strict_obs() -> dict:
@@ -57,6 +67,13 @@ def test_learnable_profile_contract_and_dimensions():
     assert snapshot["launch_range_m"]["value"] == (1000.0, 8000.0)
     assert snapshot["initial_missile_direction_mode"]["value"] == (
         "aircraft_body_x_v1")
+    for key in (
+            "environment_profile", "profile_provenance", "missile_profile",
+            "initial_missile_direction_mode", "initial_missile_speed_mps",
+            "missile_hit_radius_m", "missile_arming_time_s"):
+        assert snapshot[key]["source"] == LEARNABILITY_ADAPTATION
+    missile = snapshot["environment_config"]["missile"]
+    assert missile["maximum_flight_time_s"]["source"] == LEARNABILITY_ADAPTATION
     assert _compute_obs_dim(3, 3, True, "paper_strict") == 60
     assert _compute_global_state_dim(3, "paper_strict") == 30
     preset = get_preset("vanilla_3v3_paper_learnable_500k")
@@ -66,7 +83,7 @@ def test_learnable_profile_contract_and_dimensions():
     assert "TargetSwitchesWhileAlive" in _training_log_fields()
 
 
-def test_learnable_blue_fixed_pair_reallocates_only_after_death():
+def test_learnable_blue_policy_consumes_environment_assignment_only():
     obs = {f"blue_{i}": _strict_obs() for i in range(3)}
     controller = BluePolicyController("paper_learnable_fixed_pair_v1")
     controller.reset(
@@ -74,16 +91,19 @@ def test_learnable_blue_fixed_pair_reallocates_only_after_death():
         {f"blue_{i}": 0.0 for i in range(3)},
         {f"blue_{i}": 6000.0 for i in range(3)})
     controller.act(
-        obs, 3, 3, {"red_0"}, {}, {f"blue_{i}": 0.0 for i in range(3)}, 1)
+        obs, 3, 3, {"red_0"}, {}, {f"blue_{i}": 0.0 for i in range(3)}, 1,
+        assigned_targets={f"blue_{i}": f"red_{i}" for i in range(3)})
     assert controller.current_targets["blue_0"] == "red_0"
     assert controller.target_switches_while_alive == 0
 
     obs["blue_0"]["alive_mask"][3] = 0.0
     controller.act(
-        obs, 3, 3, {"red_1"}, {}, {f"blue_{i}": 0.2 for i in range(3)}, 2)
+        obs, 3, 3, {"red_1"}, {}, {f"blue_{i}": 0.2 for i in range(3)}, 2,
+        assigned_targets={"blue_0": "red_2", "blue_1": "red_1",
+                          "blue_2": "red_2"})
     assert controller.current_targets["blue_0"] == "red_2"
     diag = controller.snapshot_episode_diagnostics()
-    assert diag["blue_target_reallocations_after_death"] == 1
+    assert diag["blue_target_reallocations_after_death"] == 0
     assert diag["blue_target_switches_while_alive"] == 0
 
 
@@ -278,6 +298,31 @@ def test_learnable_fire_control_range_boundaries(
     assert diag["range_high_blocked"] > 0 if range_m > 8000.0 else True
 
 
+def test_environment_assignment_waits_when_all_live_targets_engaged():
+    env = UavCombatEnv(
+        max_num_red=3, max_num_blue=3, max_steps=1400,
+        environment_profile=PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+    targets = {
+        f"red_{i}": _Aircraft(
+            f"red_{i}", "Red", [3000.0 + i, 0.0, 6000.0],
+            [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+        for i in range(3)}
+    targets["red_0"].is_alive = False
+    env._fire_control_assignments = {"blue_0": "red_0"}
+    env._fire_control_pending_reallocation_after_death = set()
+    env._target_assignment_diagnostics = Counter()
+    env._engaged_targets = {"red_1", "red_2"}
+    assert env._learnable_fire_control_target("blue_0", targets) is None
+    assert env._fire_control_assignments["blue_0"] == "red_0"
+    assert env._target_assignment_diagnostics["engaged_wait_frames"] == 1
+    env._engaged_targets = {"red_2"}
+    replacement = env._learnable_fire_control_target("blue_0", targets)
+    assert replacement.uid == "red_1"
+    assert env._fire_control_assignments["blue_0"] == "red_1"
+    assert env._target_assignment_diagnostics[
+        "target_reallocations_after_death"] == 1
+
+
 def _learnable_training_config(tmp_path) -> Config:
     config = Config()
     config.environment_profile = PAPER_LEARNABLE_ENVIRONMENT_PROFILE
@@ -339,3 +384,119 @@ def test_periodic_eval_marks_final_checkpoint_and_restores_rng(
     assert torch.equal(before, torch.get_rng_state())
     header = (tmp_path / "eval.csv").read_text(encoding="utf-8").splitlines()[0]
     assert "FinalCheckpoint" in header
+
+
+def test_squashed_actor_probability_semantics_and_finite_gradients():
+    torch.manual_seed(7)
+    actor = VanillaActor(obs_dim=60, hidden=16, rnn_hidden=8)
+    obs = torch.randn(4096, 60)
+    hidden = torch.zeros(4096, 8)
+    distribution, _ = actor(obs, hidden)
+    actions = distribution.rsample()
+    assert torch.all(actions > -1.0)
+    assert torch.all(actions < 1.0)
+    old_log_prob = distribution.log_prob(actions).sum(dim=-1)
+    recomputed, _ = actor(obs, hidden)
+    new_log_prob = recomputed.log_prob(actions).sum(dim=-1)
+    assert torch.allclose(old_log_prob, new_log_prob, atol=2e-5, rtol=2e-5)
+    ratio = torch.exp(new_log_prob - old_log_prob)
+    assert torch.allclose(ratio, torch.ones_like(ratio), atol=2e-5, rtol=2e-5)
+    assert torch.allclose(distribution.mode, torch.tanh(distribution.loc))
+    boundary_distribution, _ = actor(obs[:4], hidden[:4])
+    boundary = torch.full_like(actions[:4], 1.0 - 1e-9)
+    assert torch.all(torch.isfinite(boundary_distribution.log_prob(boundary)))
+    loss = -(old_log_prob.mean() + 0.05 * distribution.base_entropy().mean())
+    loss.backward()
+    assert all(
+        parameter.grad is None or torch.all(torch.isfinite(parameter.grad))
+        for parameter in actor.parameters())
+
+
+def test_rollout_buffer_stores_executed_squashed_action_exactly():
+    actor = VanillaActor(obs_dim=60, hidden=8, rnn_hidden=4)
+    obs = torch.zeros(1, 60)
+    hidden = torch.zeros(1, 4)
+    distribution, _ = actor(obs, hidden)
+    action = distribution.sample()[0].detach().numpy()
+    buffer = RolloutBuffer(1, 1, 1, 3, 4)
+    buffer.store_step(
+        0, 0, 0, np.zeros(60, dtype=np.float32), action,
+        float(distribution.log_prob(
+            torch.as_tensor(action)[None]).sum().detach()),
+        True, np.zeros(4, dtype=np.float32), True,
+        policy_mean_action=distribution.mode[0].detach().numpy())
+    env_action = action
+    assert np.array_equal(buffer.actions[0, 0, 0], env_action)
+
+
+def test_first_event_and_configured_hit_radius_metrics():
+    events = [
+        {"red_first_launch_step": 4, "blue_first_launch_step": None,
+         "red_first_hit_step": 9, "blue_first_hit_step": None},
+        {"red_first_launch_step": 8, "blue_first_launch_step": 6,
+         "red_first_hit_step": None, "blue_first_hit_step": 12},
+    ]
+    metrics = _learnability_iteration_metrics(
+        [{"team": "red", "range_m": 200.0},
+         {"team": "red", "range_m": 300.0}], [],
+        Counter(), [20, 30], events, 250.0, 2, 1.0, 10, 100, 7, 0)
+    assert metrics["RedLaunchInsideHitRadiusCount"] == 1
+    assert metrics["RedFirstLaunchStepMean"] == pytest.approx(6.0)
+    assert metrics["BlueFirstLaunchStepMean"] == pytest.approx(6.0)
+    assert metrics["RedFirstHitStepMean"] == pytest.approx(9.0)
+    assert metrics["BlueFirstHitStepMean"] == pytest.approx(12.0)
+    assert metrics["WorkerRestartCount"] == 7
+
+
+def test_worker_restart_transition_is_explicit_and_counted(monkeypatch):
+    class _BrokenRemote:
+        def send(self, _message):
+            raise BrokenPipeError
+
+    vec = SubprocVecEnv.__new__(SubprocVecEnv)
+    vec.remotes = [_BrokenRemote()]
+    vec.processes = []
+    vec._dead_workers = set()
+    vec._env_kwargs = {}
+    vec.worker_restart_count = 4
+    new_obs = {"red_0": _strict_obs(), "blue_0": _strict_obs()}
+    monkeypatch.setattr(vec, "_restart_worker", lambda *_: new_obs)
+    obs, rewards, dones, infos = vec.step([{}])
+    assert vec.worker_restart_count == 5
+    assert all(dones[0].values())
+    assert _episode_is_invalid(infos[0])
+    assert infos[0]["__episode__"]["worker_restart_episode"] is True
+    assert infos[0]["__episode__"]["invalid_numerical_reasons"] == [
+        "WorkerRestart"]
+
+
+def test_checkpoint_schema_rejects_v5_action_distribution(tmp_path):
+    config = _learnable_training_config(tmp_path)
+    metadata = _checkpoint_metadata(config, 60, 30)
+    assert metadata["schema_version"] == CHECKPOINT_SCHEMA_VERSION
+    assert metadata["action_distribution"] == ACTION_DISTRIBUTION_VERSION
+    assert metadata["entropy_estimator"] == ENTROPY_ESTIMATOR_VERSION
+    actor = VanillaActor(obs_dim=60, hidden=8, rnn_hidden=4)
+    critic = CentralizedCritic(global_obs_dim=30, hidden=8)
+    actor_opt = torch.optim.Adam(actor.parameters())
+    critic_opt = torch.optim.Adam(critic.parameters())
+    payload = _build_training_state(
+        actor, critic, actor_opt, critic_opt, config, metadata,
+        {"run_id": "test", "total_steps": 0})
+    payload["checkpoint_metadata"]["schema_version"] = (
+        "vanilla_mappo_paper_env_v5")
+    payload["checkpoint_metadata"]["action_distribution"] = (
+        "state_dependent_diag_gaussian_env_clip_v2")
+    with pytest.raises(ValueError, match="checkpoint schema mismatch"):
+        _validate_training_state(payload, config, metadata)
+
+
+def test_mirror_audit_reports_unilateral_launch_honestly():
+    healthy, note = _mirror_launch_health([{
+        "first_launch_records": {
+            "red": None,
+            "blue": {"range_m": 3000.0, "AO_rad": 0.2, "TA_rad": 2.0},
+        }
+    }])
+    assert healthy is False
+    assert note == "unilateral_launch_before_mirror_match"

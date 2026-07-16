@@ -225,7 +225,7 @@ def _initial_log_std_head_bias() -> float:
 
 
 class SquashedNormal:
-    """Compatibility distribution used by the separate attention/BRMA path."""
+    """Tanh-squashed diagonal Gaussian with stable inverse likelihood."""
 
     def __init__(self, loc: torch.Tensor, scale: torch.Tensor, eps: float = 1e-6):
         self.loc = loc
@@ -259,7 +259,7 @@ class SquashedNormal:
 
 
 class VanillaActor(nn.Module):
-    """Two-layer MLP -> GRU -> diagonal Gaussian mean."""
+    """Two-layer MLP -> GRU -> tanh-squashed diagonal Gaussian."""
 
     def __init__(self, obs_dim: int, action_dim: int = 3,
                  hidden: int = 128, rnn_hidden: int = 128):
@@ -279,7 +279,7 @@ class VanillaActor(nn.Module):
             obs_flat:   (B, obs_dim)  展平观测
             rnn_hidden: (B, rnn_hidden)  GRU 隐藏状态
         Returns:
-            action_dist: torch.distributions.Normal
+            action_dist: SquashedNormal
             rnn_hidden:  (B, rnn_hidden)
         """
         x = F.relu(self.fc_in(obs_flat))
@@ -292,7 +292,7 @@ class VanillaActor(nn.Module):
         log_std = log_std_min + 0.5 * (torch.tanh(raw_log_std) + 1.0) * (
             log_std_max - log_std_min)
         sigma = torch.exp(log_std)
-        return torch.distributions.Normal(action_mean, sigma), rnn_hidden_new
+        return SquashedNormal(action_mean, sigma), rnn_hidden_new
 
 
 class CentralizedCritic(nn.Module):
@@ -481,18 +481,12 @@ LAUNCH_QUALITY_AGG_CSV_FIELDS = (
 )
 
 ACTION_BOUND_CSV_FIELDS = (
-    "RawActionAbsMean",
-    "RawActionAbsMeanPitch",
-    "RawActionAbsMeanHeading",
-    "RawActionAbsMeanVelocity",
-    "RawActionOutOfBoundsFrac",
-    "RawActionOutOfBoundsFracPitch",
-    "RawActionOutOfBoundsFracHeading",
-    "RawActionOutOfBoundsFracVelocity",
-    "EnvActionNearBoundFrac",
-    "EnvActionNearBoundFracPitch",
-    "EnvActionNearBoundFracHeading",
-    "EnvActionNearBoundFracVelocity",
+    "ExecutedActionAbsMean",
+    "ExecutedActionNearBoundFrac",
+    "ExecutedActionNearBoundFracPitch",
+    "ExecutedActionNearBoundFracHeading",
+    "ExecutedActionNearBoundFracVelocity",
+    "PolicyMeanNearBoundFrac",
 )
 
 AIRCRAFT_ENVELOPE_CSV_FIELDS = (
@@ -581,20 +575,22 @@ LEARNABILITY_DIAG_CSV_FIELDS = (
     "BlueMissileSurvivedOneDecisionCount",
     "BlueMissileSurvivedOneDecisionFrac", "RedPNFramesMean",
     "RedPNNonZeroCommandFrac", "BluePNFramesMean",
-    "BluePNNonZeroCommandFrac", "FirstLaunchStepMean",
-    "FirstHitStepMean", "FirstKillStepMean", "EpisodeLengthMean",
+    "BluePNNonZeroCommandFrac", "RedFirstLaunchStepMean",
+    "BlueFirstLaunchStepMean", "RedFirstHitStepMean",
+    "BlueFirstHitStepMean", "EpisodeLengthMean",
     "EpisodeLengthP50", "EpisodeLengthP90", "EstimatedRemainingTimeSec",
     "WorkerRestartCount", "ResumeCount",
 )
 
-CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v5"
+CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v6"
 TRAINING_STATE_SCHEMA_VERSION = "vanilla_mappo_training_state_v1"
-ACTION_DISTRIBUTION_VERSION = "state_dependent_diag_gaussian_env_clip_v2"
+ACTION_DISTRIBUTION_VERSION = "tanh_squashed_diag_gaussian_v1"
+ENTROPY_ESTIMATOR_VERSION = "pre_tanh_base_normal_entropy_v1"
 
 
 def _training_log_fields() -> list[str]:
     return [
-        "Iteration", "Step", "ActorLoss", "CriticLoss", "PolicyEntropy",
+        "Iteration", "Step", "ActorLoss", "CriticLoss", "BaseNormalEntropy",
         *PPO_DIAG_CSV_FIELDS, "RedMeanReward", "RedWinRate", "RedRewardStd",
         "WinRateRecent", "RedMissiles", "BlueMissiles",
         *ROLLOUT_LAYOUT_CSV_FIELDS, "Episodes", "InvalidNumericalEpisodes",
@@ -606,7 +602,8 @@ def _training_log_fields() -> list[str]:
         "KD_Red_MissileOnly", "RWR", "RWRDenominatorZero", "RewardVersion",
         "RewardMode", "EnvironmentProfile", "ObsNormalization", "PIDProfile",
         "PIDThrottleBase", "MissileGuidanceMode", "CheckpointSchema",
-        "ActionDistribution", "EnvironmentConfigFingerprint", "BluePolicyProfile",
+        "ActionDistribution", "EntropyEstimator",
+        "EnvironmentConfigFingerprint", "BluePolicyProfile",
         "RedMWSMode", "BlueMWSMode", "NumRed", "NumBlue", "MaxSteps",
         "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
         *REWARD_COMPONENT_LOG_FIELDS, "ActionStdMean", "ActionStdMin",
@@ -683,6 +680,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "missile_guidance_mode": config.missile_guidance_mode,
         "altitude_reward_config": asdict(config.altitude_reward_config),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
+        "entropy_estimator": ENTROPY_ESTIMATOR_VERSION,
         "algorithm_type": str(config.algorithm_type),
         "environment_version": str(config.environment_version),
         "environment_profile": str(config.environment_profile),
@@ -848,6 +846,11 @@ def _build_training_state(
 def _validate_training_state(payload: dict, config, checkpoint_meta: dict) -> None:
     if payload.get("schema_version") != TRAINING_STATE_SCHEMA_VERSION:
         raise ValueError("training-state schema mismatch")
+    saved_metadata = payload.get("checkpoint_metadata", {})
+    if saved_metadata.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("checkpoint schema mismatch")
+    if saved_metadata.get("action_distribution") != ACTION_DISTRIBUTION_VERSION:
+        raise ValueError("checkpoint action distribution mismatch")
     expected = _training_core_config(config, checkpoint_meta)
     if payload.get("core_config") != expected:
         raise ValueError("training-state core configuration mismatch")
@@ -1001,8 +1004,9 @@ def _launch_diag_metrics(totals: dict) -> dict:
 def _learnability_iteration_metrics(
     launch_records: list[dict], done_records: list[dict],
     environment_diag: Counter, episode_lengths: list[int],
+    completed_episode_events: list[dict], missile_hit_radius_m: float,
     iter_episodes: int, wall_time_s: float, environment_steps: int,
-    remaining_steps: int, resume_count: int,
+    remaining_steps: int, worker_restart_count: int, resume_count: int,
 ) -> dict:
     term = Counter((str(row.get("team", "")),
                     str(row.get("raw_termination_reason", "unknown")))
@@ -1024,7 +1028,8 @@ def _learnability_iteration_metrics(
         lifetimes_team = _numeric_values(dones, "flight_time_sec")
         hits = [row for row in dones if row.get("raw_termination_reason") == "hit"]
         known = {"hit", "p_hit_fail", "overshoot", "timeout", "target_dead"}
-        inside = sum(float(row.get("range_m", float("inf"))) < 100.0
+        inside = sum(
+            float(row.get("range_m", float("inf"))) < missile_hit_radius_m
                      for row in launches)
         one_frame_hits = sum(
             float(row.get("flight_time_sec", float("inf"))) <= 1.0 / 60.0 + 1e-9
@@ -1064,10 +1069,12 @@ def _learnability_iteration_metrics(
             f"{prefix}PNNonZeroCommandFrac": _safe_div(
                 sum(team_pn_nonzero), sum(team_pn_frames)),
         })
-    first_launch = _numeric_values(launch_records, "current_step")
-    hit_records = [
-        row for row in done_records if row.get("raw_termination_reason") == "hit"]
-    first_hit = _numeric_values(hit_records, "termination_step")
+    first_events = {
+        key: _numeric_values(completed_episode_events, key)
+        for key in (
+            "red_first_launch_step", "blue_first_launch_step",
+            "red_first_hit_step", "blue_first_hit_step")
+    }
     result.update({
         "MissileLifetimeMeanS": _mean_or_zero(lifetimes),
         "MissileLifetimeP50S": _percentile_or_zero(lifetimes, 50),
@@ -1108,9 +1115,18 @@ def _learnability_iteration_metrics(
         "IterationWallTimeS": float(wall_time_s),
         "EnvironmentStepsPerSecond": (
             float(environment_steps / wall_time_s) if wall_time_s > 0 else 0.0),
-        "FirstLaunchStepMean": _mean_or_zero(first_launch),
-        "FirstHitStepMean": _mean_or_zero(first_hit),
-        "FirstKillStepMean": _mean_or_zero(first_hit),
+        "RedFirstLaunchStepMean": (
+            float(np.mean(first_events["red_first_launch_step"]))
+            if first_events["red_first_launch_step"] else float("nan")),
+        "BlueFirstLaunchStepMean": (
+            float(np.mean(first_events["blue_first_launch_step"]))
+            if first_events["blue_first_launch_step"] else float("nan")),
+        "RedFirstHitStepMean": (
+            float(np.mean(first_events["red_first_hit_step"]))
+            if first_events["red_first_hit_step"] else float("nan")),
+        "BlueFirstHitStepMean": (
+            float(np.mean(first_events["blue_first_hit_step"]))
+            if first_events["blue_first_hit_step"] else float("nan")),
         "EpisodeLengthMean": (
             float(np.mean(episode_lengths)) if episode_lengths else float("nan")),
         "EpisodeLengthP50": (
@@ -1122,7 +1138,7 @@ def _learnability_iteration_metrics(
         "EstimatedRemainingTimeSec": (
             float(remaining_steps * wall_time_s / environment_steps)
             if environment_steps > 0 else 0.0),
-        "WorkerRestartCount": 0,
+        "WorkerRestartCount": int(worker_restart_count),
         "ResumeCount": int(resume_count),
     })
     return result
@@ -1182,68 +1198,61 @@ def _launch_quality_metrics(
 
 def _empty_action_bound_totals() -> dict:
     return {
-        "raw_abs_sum": 0.0,
-        "raw_dim_abs_sum": np.zeros(3, dtype=np.float64),
+        "executed_abs_sum": 0.0,
         "element_count": 0,
-        "raw_out_of_bounds_count": 0,
-        "raw_dim_out_of_bounds_count": np.zeros(3, dtype=np.int64),
-        "env_near_bound_count": 0,
-        "env_dim_near_bound_count": np.zeros(3, dtype=np.int64),
+        "executed_near_bound_count": 0,
+        "executed_dim_near_bound_count": np.zeros(3, dtype=np.int64),
+        "policy_mean_near_bound_count": 0,
+        "policy_mean_element_count": 0,
         "dim_count": np.zeros(3, dtype=np.int64),
     }
 
 
 def _accumulate_action_bound_totals(
     totals: dict,
-    raw_actions,
-    env_actions,
+    executed_actions,
+    policy_mean_actions,
     threshold: float = 0.999,
 ) -> None:
-    raw_values = np.asarray(raw_actions, dtype=np.float64)
-    env_values = np.asarray(env_actions, dtype=np.float64)
-    if raw_values.size == 0:
+    executed = np.asarray(executed_actions, dtype=np.float64)
+    policy_mean = np.asarray(policy_mean_actions, dtype=np.float64)
+    if executed.size == 0:
         return
-    raw_values = raw_values.reshape(-1, raw_values.shape[-1])
-    env_values = env_values.reshape(-1, env_values.shape[-1])
-    raw_abs = np.abs(raw_values)
-    raw_out_of_bounds = raw_abs > 1.0
-    env_near_bound = np.abs(env_values) >= threshold
-    totals["raw_abs_sum"] += float(raw_abs.sum())
-    totals["element_count"] += int(raw_values.size)
-    totals["raw_out_of_bounds_count"] += int(raw_out_of_bounds.sum())
-    totals["env_near_bound_count"] += int(env_near_bound.sum())
-    dims = min(3, raw_values.shape[-1])
-    totals["raw_dim_abs_sum"][:dims] += raw_abs[:, :dims].sum(axis=0)
-    totals["raw_dim_out_of_bounds_count"][:dims] += raw_out_of_bounds[:, :dims].sum(
+    executed = executed.reshape(-1, executed.shape[-1])
+    policy_mean = policy_mean.reshape(-1, policy_mean.shape[-1])
+    executed_near_bound = np.abs(executed) >= threshold
+    policy_mean_near_bound = np.abs(policy_mean) >= threshold
+    totals["executed_abs_sum"] += float(np.abs(executed).sum())
+    totals["element_count"] += int(executed.size)
+    totals["executed_near_bound_count"] += int(executed_near_bound.sum())
+    totals["policy_mean_near_bound_count"] += int(policy_mean_near_bound.sum())
+    totals["policy_mean_element_count"] += int(policy_mean.size)
+    dims = min(3, executed.shape[-1])
+    totals["executed_dim_near_bound_count"][:dims] += executed_near_bound[:, :dims].sum(
         axis=0).astype(np.int64)
-    totals["env_dim_near_bound_count"][:dims] += env_near_bound[:, :dims].sum(
-        axis=0).astype(np.int64)
-    totals["dim_count"][:dims] += raw_values.shape[0]
+    totals["dim_count"][:dims] += executed.shape[0]
 
 
 def _action_bound_metrics(totals: dict) -> dict:
     elem_count = int(totals["element_count"])
     dim_count = totals["dim_count"]
-    raw_dim_abs = totals["raw_dim_abs_sum"]
-    raw_dim_oob = totals["raw_dim_out_of_bounds_count"]
-    env_dim_near = totals["env_dim_near_bound_count"]
+    executed_dim_near = totals["executed_dim_near_bound_count"]
     if elem_count == 0:
         return {field: float("nan") for field in ACTION_BOUND_CSV_FIELDS}
     return {
-        "RawActionAbsMean": _safe_div(totals["raw_abs_sum"], elem_count),
-        "RawActionAbsMeanPitch": _safe_div(raw_dim_abs[0], dim_count[0]),
-        "RawActionAbsMeanHeading": _safe_div(raw_dim_abs[1], dim_count[1]),
-        "RawActionAbsMeanVelocity": _safe_div(raw_dim_abs[2], dim_count[2]),
-        "RawActionOutOfBoundsFrac": _safe_div(
-            totals["raw_out_of_bounds_count"], elem_count),
-        "RawActionOutOfBoundsFracPitch": _safe_div(raw_dim_oob[0], dim_count[0]),
-        "RawActionOutOfBoundsFracHeading": _safe_div(raw_dim_oob[1], dim_count[1]),
-        "RawActionOutOfBoundsFracVelocity": _safe_div(raw_dim_oob[2], dim_count[2]),
-        "EnvActionNearBoundFrac": _safe_div(
-            totals["env_near_bound_count"], elem_count),
-        "EnvActionNearBoundFracPitch": _safe_div(env_dim_near[0], dim_count[0]),
-        "EnvActionNearBoundFracHeading": _safe_div(env_dim_near[1], dim_count[1]),
-        "EnvActionNearBoundFracVelocity": _safe_div(env_dim_near[2], dim_count[2]),
+        "ExecutedActionAbsMean": _safe_div(
+            totals["executed_abs_sum"], elem_count),
+        "ExecutedActionNearBoundFrac": _safe_div(
+            totals["executed_near_bound_count"], elem_count),
+        "ExecutedActionNearBoundFracPitch": _safe_div(
+            executed_dim_near[0], dim_count[0]),
+        "ExecutedActionNearBoundFracHeading": _safe_div(
+            executed_dim_near[1], dim_count[1]),
+        "ExecutedActionNearBoundFracVelocity": _safe_div(
+            executed_dim_near[2], dim_count[2]),
+        "PolicyMeanNearBoundFrac": _safe_div(
+            totals["policy_mean_near_bound_count"],
+            totals["policy_mean_element_count"]),
     }
 
 
@@ -1381,6 +1390,7 @@ class SubprocVecEnv:
         self._env_kwargs = env_kwargs  # stored for worker restart
         self._base_seed = base_seed
         self._has_reset = False
+        self.worker_restart_count = 0
         ctx = mp.get_context("spawn")
         remotes_tup, work_remotes_tup = zip(*[ctx.Pipe() for _ in range(num_envs)])
         self.remotes = list(remotes_tup)
@@ -1521,6 +1531,7 @@ class SubprocVecEnv:
             for attempt in range(3):
                 try:
                     new_obs = self._restart_worker(i, self._env_kwargs)
+                    self.worker_restart_count += 1
                     results[i] = new_obs
                     print(f"  [INFO] Worker {i} restarted after reset (attempt {attempt+1})", flush=True)
                     restarted = True
@@ -1582,7 +1593,21 @@ class SubprocVecEnv:
         for i in list(self._dead_workers):
             try:
                 new_obs = self._restart_worker(i, self._env_kwargs)
-                results[i] = (new_obs, {}, {aid: True for aid in new_obs}, {})
+                self.worker_restart_count += 1
+                results[i] = (
+                    new_obs,
+                    {aid: 0.0 for aid in new_obs},
+                    {aid: True for aid in new_obs},
+                    {
+                        "__episode__": {
+                            "worker_restart_episode": True,
+                            "invalid_numerical_episode": True,
+                            "invalid_numerical_reasons": ["WorkerRestart"],
+                            "episode_end_reason": "worker_restart",
+                            "winner": "",
+                        }
+                    },
+                )
             except Exception as e:
                 print(f"  [WARN] Failed to restart worker {i}: {e}", flush=True)
 
@@ -1749,6 +1774,8 @@ class RolloutBuffer:
         self.actions = np.zeros((T, E, A, action_dim), dtype=np.float32)
         self.log_probs = np.zeros((T, E, A), dtype=np.float32)
         self.action_stds = np.zeros((T, E, A, action_dim), dtype=np.float32)
+        self.policy_mean_actions = np.zeros(
+            (T, E, A, action_dim), dtype=np.float32)
         self.alive = np.zeros((T, E, A), dtype=bool)
         self.actor_rnn_states_before = np.zeros((T, E, A, H), dtype=np.float32)
         self.actor_sequence_start = np.zeros((T, E, A), dtype=bool)
@@ -1784,13 +1811,17 @@ class RolloutBuffer:
                    log_prob: float, alive: bool,
                    actor_rnn_state_before: np.ndarray,
                    sequence_start: bool,
-                   action_std: np.ndarray | None = None):
+                   action_std: np.ndarray | None = None,
+                   policy_mean_action: np.ndarray | None = None):
         self.obs[step][env_idx][agent_idx] = obs_np
         self.actions[step, env_idx, agent_idx] = action
         self.log_probs[step, env_idx, agent_idx] = log_prob
         if action_std is not None:
             self.action_stds[step, env_idx, agent_idx] = np.asarray(
                 action_std, dtype=np.float32)
+        if policy_mean_action is not None:
+            self.policy_mean_actions[step, env_idx, agent_idx] = np.asarray(
+                policy_mean_action, dtype=np.float32)
         self.alive[step, env_idx, agent_idx] = alive
         self.actor_rnn_states_before[step, env_idx, agent_idx] = np.asarray(
             actor_rnn_state_before, dtype=np.float32)
@@ -2081,7 +2112,7 @@ def _ppo_update_legacy(actor, critic, actor_opt, critic_opt, buffer, config, dev
 
                 new_lp = action_dist.log_prob(act_t.unsqueeze(0)).sum(dim=-1)
                 new_lps.append(new_lp)
-                entropies.append(action_dist.entropy().sum(dim=-1).mean())
+                entropies.append(action_dist.base_entropy().sum(dim=-1).mean())
 
             new_lp = torch.cat(new_lps)
             old_lp = torch.tensor(t_lp, device=device)
@@ -2187,7 +2218,7 @@ def _build_actor_segments(
 def _recompute_segment_log_probs(
     actor: VanillaActor, segment: dict, device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Recompute raw Normal log-probs from the segment's true start hidden."""
+    """Recompute corrected squashed log-probs from the true start hidden."""
     rnn = torch.as_tensor(
         segment["initial_hidden"], dtype=torch.float32,
         device=device).unsqueeze(0)
@@ -2200,7 +2231,7 @@ def _recompute_segment_log_probs(
         distribution, rnn = actor(obs[step].unsqueeze(0), rnn)
         log_probs.append(
             distribution.log_prob(actions[step].unsqueeze(0)).sum(dim=-1))
-        policy_entropies.append(distribution.entropy().sum(dim=-1))
+        policy_entropies.append(distribution.base_entropy().sum(dim=-1))
     return torch.cat(log_probs), torch.cat(policy_entropies)
 
 
@@ -2467,7 +2498,7 @@ def _ppo_update_agent_legacy(actor, critic, actor_opt, critic_opt, buffer, confi
                     new_lps.append(
                         action_dist.log_prob(acts[t].unsqueeze(0)).sum(dim=-1))
                     traj_entropies.append(
-                        action_dist.entropy().sum(dim=-1).mean())
+                        action_dist.base_entropy().sum(dim=-1).mean())
 
                 new_lp = torch.cat(new_lps)
                 ent_avg = torch.stack(traj_entropies).mean()
@@ -2732,6 +2763,7 @@ EVAL_LOG_FIELDS = (
     "Iteration", "Step", "FinalCheckpoint", "Episodes", "RedWins",
     "BlueWins", "Draws", "RedWinRate", "MeanRedReward",
     "EnvironmentProfile", "EnvironmentConfigFingerprint",
+    "ActionDistribution", "EntropyEstimator",
     "MeanRedAlive", "MeanBlueAlive", "RedMissilesFired",
     "BlueMissilesFired", "RedMissileHits", "BlueMissileHits",
     "MissileLifetimeMeanS", "RedMWSDetectedAgentDecisions",
@@ -2791,6 +2823,8 @@ def _run_periodic_evaluation(
             "EnvironmentProfile": config.environment_profile,
             "EnvironmentConfigFingerprint": checkpoint_meta[
                 "environment_config_fingerprint"],
+            "ActionDistribution": ACTION_DISTRIBUTION_VERSION,
+            "EntropyEstimator": ENTROPY_ESTIMATOR_VERSION,
             "MeanRedAlive": float(np.mean([
                 float(row.get("RedAlive", 0)) for row in rows])) if rows else 0.0,
             "MeanBlueAlive": float(np.mean([
@@ -3139,10 +3173,15 @@ def main():
             runtime.get("cumulative_environment_diag", {}))
         cumulative_missile_term.update(runtime.get("cumulative_missile_term", {}))
         last_eval_steps = int(runtime.get("last_eval_steps", -1))
+        vec_env.worker_restart_count += int(
+            runtime.get("worker_restart_count", 0))
         if os.path.exists(config.results_file):
             with open(config.results_file, newline="") as handle:
                 results_log = list(csv.DictReader(handle))
         _restore_rng_state(resume_payload["rng_state"])
+
+    manifest["worker_restart_count"] = int(vec_env.worker_restart_count)
+    _atomic_json_save(manifest, manifest_path)
 
     def _runtime_state(next_iteration: int) -> dict:
         return {
@@ -3173,6 +3212,7 @@ def main():
             "cumulative_environment_diag": dict(cumulative_environment_diag),
             "cumulative_missile_term": dict(cumulative_missile_term),
             "last_eval_steps": int(last_eval_steps),
+            "worker_restart_count": int(vec_env.worker_restart_count),
             "resume_starts_new_episode": True,
             "ResumeEnvironmentReset": True,
         }
@@ -3195,6 +3235,7 @@ def main():
         iter_blue_policy_diag = Counter()
         iter_environment_diag = Counter()
         iter_episode_lengths: list[int] = []
+        iter_episode_first_events: list[dict] = []
         iter_aircraft_diag_records: list[dict] = []
         iter_episode_physics_frames = 0
         iter_invalid_episodes_dropped = 0
@@ -3283,14 +3324,16 @@ def main():
                     action = action_dist.sample()
                     log_prob = action_dist.log_prob(action).sum(dim=-1)
                 action_stds_np = action_dist.scale.cpu().numpy()
+                policy_means_np = action_dist.mode.cpu().numpy()
 
                 actions_np = action.cpu().numpy()
-                env_actions_np = np.clip(actions_np, -1.0, 1.0)
+                env_actions_np = actions_np
                 log_probs_np = log_prob.cpu().numpy()
                 new_rnn_np = new_rnn_a.cpu().numpy()
             else:
                 actions_np = np.array([])
                 env_actions_np = np.array([])
+                policy_means_np = np.array([])
                 log_probs_np = np.array([])
                 new_rnn_np = np.array([])
 
@@ -3338,11 +3381,12 @@ def main():
                     # Get obs_flat for buffer storage
                     obs_flat = all_red_obs_flat[k]
                     buffer.store_step(step, env_idx, agent_idx_i, obs_flat,
-                                      actions_np[k], float(log_probs_np[k]),
+                                      env_actions_np[k], float(log_probs_np[k]),
                                       alive=True,
                                       actor_rnn_state_before=all_rnn_hidden_in[k],
                                       sequence_start=all_sequence_start[k],
-                                      action_std=action_stds_np[k])
+                                      action_std=action_stds_np[k],
+                                      policy_mean_action=policy_means_np[k])
 
                 actions_list.append(env_actions)
 
@@ -3413,10 +3457,7 @@ def main():
                 # ---- episodic settlement AFTER accumulation (terminal r_end is included) ----
                 if all(don.values()):
                     invalid_episode = _episode_is_invalid(inf)
-                    iter_episode_lengths.append(int(
-                        inf.get("__episode__", {}).get(
-                            "EpisodeLength", inf.get("__episode__", {}).get(
-                                "episode_length", 0))))
+                    episode_info = inf.get("__episode__", {})
                     target_diag = inf.get("__target_assignment_diag__", {})
                     for field in (
                             "target_reallocations",
@@ -3468,6 +3509,18 @@ def main():
                             f"total_steps={total_steps} reasons={reasons}",
                             flush=True)
                     else:
+                        iter_episode_lengths.append(int(
+                            episode_info.get(
+                                "EpisodeLength",
+                                episode_info.get("episode_length", 0))))
+                        iter_episode_first_events.append({
+                            key: episode_info.get(key)
+                            for key in (
+                                "red_first_launch_step",
+                                "blue_first_launch_step",
+                                "red_first_hit_step",
+                                "blue_first_hit_step")
+                        })
                         total_episodes += 1
                         iter_episodes += 1
                         outcome = _episode_outcome(red_alive, blue_alive)
@@ -3536,11 +3589,11 @@ def main():
         valid_actor_mask = (
             buffer.alive & buffer.valid_transitions[:, :, np.newaxis])
         iter_action_bound = _empty_action_bound_totals()
-        valid_raw_actions = buffer.actions[valid_actor_mask]
-        if valid_raw_actions.size:
+        valid_executed_actions = buffer.actions[valid_actor_mask]
+        valid_policy_means = buffer.policy_mean_actions[valid_actor_mask]
+        if valid_executed_actions.size:
             _accumulate_action_bound_totals(
-                iter_action_bound, valid_raw_actions,
-                np.clip(valid_raw_actions, -1.0, 1.0))
+                iter_action_bound, valid_executed_actions, valid_policy_means)
         valid_std_values = buffer.action_stds[valid_actor_mask]
         iter_sampled_stds = (
             [valid_std_values] if valid_std_values.size else [])
@@ -3595,10 +3648,15 @@ def main():
         )
         learnability_metrics = _learnability_iteration_metrics(
             iter_launch_quality_records, iter_launch_quality_done_records,
-            iter_environment_diag, iter_episode_lengths, iter_episodes,
+            iter_environment_diag, iter_episode_lengths,
+            iter_episode_first_events,
+            float(checkpoint_meta["missile_hit_radius_m"]), iter_episodes,
             t_elapsed, config.num_envs * num_steps,
             max(config.total_env_steps - total_steps, 0),
+            vec_env.worker_restart_count,
             int(manifest.get("resume_count", 0)))
+        manifest["worker_restart_count"] = int(vec_env.worker_restart_count)
+        _atomic_json_save(manifest, manifest_path)
         cumulative_environment_diag.update(iter_environment_diag)
         cumulative_missile_term.update(
             (str(record.get("team", "")),
@@ -3708,6 +3766,7 @@ def main():
                              config.missile_guidance_mode,
                              CHECKPOINT_SCHEMA_VERSION,
                              ACTION_DISTRIBUTION_VERSION,
+                             ENTROPY_ESTIMATOR_VERSION,
                              checkpoint_meta["environment_config_fingerprint"],
                              config.blue_policy_profile,
                              checkpoint_meta.get("red_mws_mode", ""),
@@ -3810,6 +3869,7 @@ def main():
             "MissileGuidanceMode": config.missile_guidance_mode,
             "CheckpointSchema": CHECKPOINT_SCHEMA_VERSION,
             "ActionDistribution": ACTION_DISTRIBUTION_VERSION,
+            "EntropyEstimator": ENTROPY_ESTIMATOR_VERSION,
             "EnvironmentConfigFingerprint": checkpoint_meta[
                 "environment_config_fingerprint"],
             "BluePolicyProfile": config.blue_policy_profile,
@@ -3841,7 +3901,7 @@ def main():
             "ActionStdGrowthRatio": _result_optional_float(action_std_growth),
             "ActorLoss":      stats["actor_loss"],
             "CriticLoss":     stats["critic_loss"],
-            "PolicyEntropy":  stats["entropy"],
+            "BaseNormalEntropy": stats["entropy"],
             "PolicyLoss":     stats["policy_loss"],
             "EntropyBonus":   stats["entropy_bonus"],
             "ActorUpdateAttempts": stats["ActorUpdateAttempts"],
@@ -3909,7 +3969,7 @@ def main():
               f"ActorLoss={stats['actor_loss']:+.4f} "
               f"CriticLoss={stats['critic_loss']:+.4f} "
               f"EntCoef={_current_entropy_coef(config, total_steps):.4f} "
-              f"PolicyEntropy={stats['entropy']:.4f} "
+              f"BaseNormalEntropy={stats['entropy']:.4f} "
               f"Std={std_stats['action_std_mean']:.4f} | "
               f"LaunchDiag R={launch_diag_metrics['LaunchDiagRedGeometryOk']}/"
               f"{launch_diag_metrics['LaunchDiagRedLaunches']} "

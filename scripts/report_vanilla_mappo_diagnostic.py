@@ -16,7 +16,7 @@ ANALYSIS_FIELDS = [
     "ActorLoss",
     "PolicyLoss",
     "EntropyBonus",
-    "PolicyEntropy",
+    "BaseNormalEntropy",
     "CriticLoss",
     "ActionStdMean",
     "ActionStdMin",
@@ -29,14 +29,12 @@ ANALYSIS_FIELDS = [
     "StateDependentStdMax",
     "StateDependentStdLowerBoundFrac",
     "StateDependentStdUpperBoundFrac",
-    "RawActionOutOfBoundsFrac",
-    "RawActionOutOfBoundsFracPitch",
-    "RawActionOutOfBoundsFracHeading",
-    "RawActionOutOfBoundsFracVelocity",
-    "EnvActionNearBoundFrac",
-    "EnvActionNearBoundFracPitch",
-    "EnvActionNearBoundFracHeading",
-    "EnvActionNearBoundFracVelocity",
+    "ExecutedActionAbsMean",
+    "ExecutedActionNearBoundFrac",
+    "ExecutedActionNearBoundFracPitch",
+    "ExecutedActionNearBoundFracHeading",
+    "ExecutedActionNearBoundFracVelocity",
+    "PolicyMeanNearBoundFrac",
     "ActorUpdatesSkipped",
     "ActorUpdateAttempts",
     "ActorUpdatesApplied",
@@ -77,9 +75,9 @@ ANALYSIS_FIELDS = [
 
 TREND_FIELDS = [
     "ActionStdMean",
-    "PolicyEntropy",
-    "RawActionOutOfBoundsFrac",
-    "EnvActionNearBoundFrac",
+    "BaseNormalEntropy",
+    "ExecutedActionNearBoundFrac",
+    "PolicyMeanNearBoundFrac",
     "RedMeanReward",
     "CriticLoss",
 ]
@@ -228,12 +226,13 @@ def _window_metrics(rows: list[dict]) -> dict:
         "RedAliveMean": _mean(rows, "RedAliveMean"),
         "BlueAliveMean": _mean(rows, "BlueAliveMean"),
         "PolicyLoss": _mean(rows, "PolicyLoss"),
-        "PolicyEntropy": _mean(rows, "PolicyEntropy"),
+        "BaseNormalEntropy": _mean(rows, "BaseNormalEntropy"),
         "EntropyBonus": _mean(rows, "EntropyBonus"),
         "StateDependentStdMean": _mean(rows, "StateDependentStdMean"),
         "StateDependentStdUpperBoundFrac": _mean(
             rows, "StateDependentStdUpperBoundFrac"),
-        "RawActionOutOfBoundsFrac": _mean(rows, "RawActionOutOfBoundsFrac"),
+        "ExecutedActionNearBoundFrac": _mean(
+            rows, "ExecutedActionNearBoundFrac"),
     }
 
 
@@ -344,8 +343,8 @@ def analyze_diagnostics(rows: list[dict], expected_steps: int,
         warnings = []
         if late.get("StateDependentStdUpperBoundFrac", 0.0) > 0.20:
             warnings.append("std 大量贴近上界")
-        middle_oob = middle.get("RawActionOutOfBoundsFrac", math.nan)
-        late_oob = late.get("RawActionOutOfBoundsFrac", math.nan)
+        middle_oob = middle.get("ExecutedActionNearBoundFrac", math.nan)
+        late_oob = late.get("ExecutedActionNearBoundFrac", math.nan)
         if (math.isfinite(late_oob) and (late_oob > 0.25
                 or (math.isfinite(middle_oob) and late_oob > middle_oob + 0.05))):
             warnings.append("raw action 越界率偏高或持续上升")
@@ -359,7 +358,7 @@ def analyze_diagnostics(rows: list[dict], expected_steps: int,
             for field in ("BlueAliveMean",))
         worsening += sum(
             _improved(late.get(field, math.nan), middle.get(field, math.nan), 0.10)
-            for field in ("RawActionOutOfBoundsFrac",))
+            for field in ("ExecutedActionNearBoundFrac",))
         if worsening >= 2:
             warnings.append("战术或优化指标持续恶化")
         if warnings:
@@ -431,10 +430,10 @@ def write_plots(rows: list[dict], plot_dir: str | Path) -> None:
     plot_path.mkdir(parents=True, exist_ok=True)
     specs = {
         "action_std.png": (["ActionStdMean", "ActionStdMin", "ActionStdMax"], "Action std", "std"),
-        "policy_entropy.png": (["PolicyEntropy"], "Policy entropy", "entropy"),
+        "policy_entropy.png": (["BaseNormalEntropy"], "Base Normal entropy", "entropy"),
         "actor_loss_components.png": (["ActorLoss", "PolicyLoss", "EntropyBonus"], "Actor loss components", "loss"),
         "critic_loss.png": (["CriticLoss"], "Critic loss", "loss"),
-        "action_bounds.png": (["RawActionOutOfBoundsFrac", "EnvActionNearBoundFrac"], "Action bounds", "fraction"),
+        "action_bounds.png": (["ExecutedActionNearBoundFrac", "PolicyMeanNearBoundFrac"], "Action saturation", "fraction"),
         "reward.png": (["RedMeanReward"], "Red reward", "reward"),
         "win_rate.png": (["WinRateRecent", "RedWinRate", "WinRateCumul"], "Win rate", "rate"),
         "launch_diagnostics.png": ([

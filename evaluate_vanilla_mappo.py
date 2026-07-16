@@ -39,6 +39,7 @@ from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     CHECKPOINT_SCHEMA_VERSION,
     ACTION_DISTRIBUTION_VERSION,
+    ENTROPY_ESTIMATOR_VERSION,
     ACTION_LOG_STD_INIT,
     ACTION_STD_INIT,
     ACTION_STD_MIN,
@@ -69,7 +70,8 @@ EVALUATION_FIELDNAMES = [
     "BlueDeathsOther", "CheckpointSchema", "NumRed", "NumBlue", "MaxSteps",
     "EnableBlueGCAS", "RewardVersion", "RewardMode", "ObsNormalization",
     "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
-    "ActionDistribution", "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
+    "ActionDistribution", "EntropyEstimator", "AltitudeRewardConfigVersion",
+    "AltitudeRewardConfig",
     "BluePolicyProfile", "EnvironmentProfile", "EnvironmentConfigFingerprint",
     "RedMWSMode", "BlueMWSMode",
     "RedGeometry", "RedLockMature", "BlueGeometry",
@@ -104,7 +106,8 @@ EVALUATION_SUMMARY_FIELDNAMES = [
     "CheckpointSchema", "NumRed", "NumBlue", "MaxSteps", "EnableBlueGCAS",
     "RewardVersion", "RewardMode", "ObsNormalization",
     "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
-    "ActionDistribution", "AltitudeRewardConfigVersion", "AltitudeRewardConfig",
+    "ActionDistribution", "EntropyEstimator", "AltitudeRewardConfigVersion",
+    "AltitudeRewardConfig",
     "BluePolicyProfile",
     "EnvironmentProfile", "EnvironmentConfigFingerprint",
     "RedMWSMode", "BlueMWSMode",
@@ -264,6 +267,7 @@ def _load_actor(args, device: torch.device):
                 PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
             else DEFAULT_ALTITUDE_REWARD_CONFIG),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
+        "entropy_estimator": ENTROPY_ESTIMATOR_VERSION,
         "action_log_std_init": ACTION_LOG_STD_INIT,
         "action_std_init": ACTION_STD_INIT,
         "action_std_bounds": [ACTION_STD_MIN, ACTION_STD_MAX],
@@ -411,9 +415,8 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                                             dtype=torch.float32, device=device)
                     with torch.no_grad():
                         action_dist, new_rnn = actor(obs_t, rnn_t)
-                        raw_act = (action_dist.mean if deterministic
-                                   else action_dist.sample())
-                        act = raw_act.clamp(-1.0, 1.0)
+                        act = (action_dist.mode if deterministic
+                               else action_dist.sample())
                     for k, i in enumerate(alive_indices):
                         actions[red_ids[i]] = act[k].cpu().numpy().astype(np.float32)
                         rnn_a[i] = new_rnn[k].cpu().numpy()
@@ -531,6 +534,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "PIDThrottleBase": float(pid_throttle_base),
             "MissileGuidanceMode": missile_guidance_mode,
             "ActionDistribution": ACTION_DISTRIBUTION_VERSION,
+            "EntropyEstimator": ENTROPY_ESTIMATOR_VERSION,
             "AltitudeRewardConfigVersion": altitude_config.version,
             "AltitudeRewardConfig": json.dumps(
                 asdict(altitude_config), sort_keys=True,
@@ -643,7 +647,8 @@ def _aggregate_evaluation_summary(rows: list[dict]) -> dict:
                 "CheckpointSchema", "NumRed", "NumBlue", "MaxSteps",
                 "EnableBlueGCAS", "RewardVersion", "RewardMode", "ObsNormalization",
                 "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
-                "ActionDistribution", "AltitudeRewardConfigVersion",
+                "ActionDistribution", "EntropyEstimator",
+                "AltitudeRewardConfigVersion",
                 "AltitudeRewardConfig", "BluePolicyProfile", "EnvironmentProfile",
                 "EnvironmentConfigFingerprint", "RedMWSMode", "BlueMWSMode",
             )

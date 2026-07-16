@@ -581,7 +581,7 @@ class UavCombatEnv(gymnasium.Env):
                 num_blue=self.max_num_blue, sim_freq=self.sim_freq,
                 agent_interaction_steps=self.agent_interaction_steps, seed=self._seed,
                 blue_policy_profile=self.blue_policy_profile)
-        if self.is_paper_learnable:
+        if getattr(self, "is_paper_learnable", False):
             self._environment_config_snapshot["initial_jitter_sample"] = copy.deepcopy(
                 self._initial_jitter_by_index)
         self.current_step = 0
@@ -603,6 +603,10 @@ class UavCombatEnv(gymnasium.Env):
             "EpisodeRedTerminalReward": 0.0, "EpisodeBlueTerminalReward": 0.0,
             "EpisodeLength": 0,
             "maximum_live_missiles_observed": 0,
+            "red_first_launch_step": None,
+            "blue_first_launch_step": None,
+            "red_first_hit_step": None,
+            "blue_first_hit_step": None,
         }
         self._terminal_cleanup_done = False
         self._invalid_numerical_episode = False
@@ -786,6 +790,8 @@ class UavCombatEnv(gymnasium.Env):
     def blue_policy_actions(self, blue_obs: dict[str, dict]) -> dict[str, np.ndarray]:
         """Generate actions with this environment's isolated blue controller."""
         engaged = self.refresh_engaged_targets()
+        if getattr(self, "is_paper_learnable", False):
+            self._refresh_learnable_assignments(self.blue_ids, count_wait=False)
         kinematics = self.get_blue_own_kinematics()
         selected_missiles: dict[str, str | None] = {}
         mws_detected: dict[str, bool] = {}
@@ -804,7 +810,10 @@ class UavCombatEnv(gymnasium.Env):
             {aid: data["position"] for aid, data in kinematics.items()},
             {aid: data["heading"] for aid, data in kinematics.items()},
             self.current_step, selected_missiles, mws_detected,
-            own_alive=own_alive)
+            own_alive=own_alive,
+            assigned_targets=(
+                dict(self._fire_control_assignments)
+                if getattr(self, "is_paper_learnable", False) else None))
 
     def set_team_mws_enabled(self, team: str, enabled: bool) -> None:
         """Set an audit-only team MWS gate without changing profile defaults."""
@@ -849,6 +858,8 @@ class UavCombatEnv(gymnasium.Env):
         self._reward_summary_step = {}
         self._sensor_diagnostics_step = []
         self.refresh_engaged_targets()
+        if self.is_paper_learnable:
+            self._refresh_learnable_assignments(self.red_ids, count_wait=False)
 
         # 0. Optional legacy anti-burst guard (off for paper_strict baseline).
         #    The paper defines launch interval/deconfliction, not post-hit
@@ -1309,6 +1320,7 @@ class UavCombatEnv(gymnasium.Env):
 
     def _learnable_fire_control_target(
         self, aid: str, enemies: dict[str, AircraftSimulator],
+        *, count_wait: bool = True,
     ) -> AircraftSimulator | None:
         """Keep a live assignment; after death choose lowest live unengaged."""
         target_id = self._fire_control_assignments.get(aid)
@@ -1323,14 +1335,17 @@ class UavCombatEnv(gymnasium.Env):
             key=lambda enemy: int(enemy.uid.split("_", 1)[1]))
         if not alive:
             self._fire_control_assignments[aid] = None
-            self._target_assignment_diagnostics["no_alive_target_frames"] += 1
+            if count_wait:
+                self._target_assignment_diagnostics[
+                    "no_alive_target_frames"] += 1
             return None
         replacement = next(
             (enemy for enemy in alive if enemy.uid not in self._engaged_targets),
             None)
         if replacement is None:
-            self._fire_control_assignments[aid] = None
-            self._target_assignment_diagnostics["engaged_wait_frames"] += 1
+            if count_wait:
+                self._target_assignment_diagnostics[
+                    "engaged_wait_frames"] += 1
             return None
         self._fire_control_assignments[aid] = replacement.uid
         self._target_assignment_diagnostics["target_reallocations"] += 1
@@ -1339,6 +1354,17 @@ class UavCombatEnv(gymnasium.Env):
                 "target_reallocations_after_death"] += 1
             self._fire_control_pending_reallocation_after_death.discard(aid)
         return replacement
+
+    def _refresh_learnable_assignments(
+        self, agent_ids: list[str], *, count_wait: bool,
+    ) -> None:
+        for aid in agent_ids:
+            sim = self._get_sim(aid)
+            if sim is None or not sim.is_alive:
+                continue
+            enemies = self.red_planes if aid.startswith("blue_") else self.blue_planes
+            self._learnable_fire_control_target(
+                aid, enemies, count_wait=count_wait)
 
     def _check_missile_launch(self):
         """Rule-based missile launch with lock-delay + hot-update deconfliction.
@@ -1384,7 +1410,10 @@ class UavCombatEnv(gymnasium.Env):
             # ---- Find the closest UNENGAGED enemy in the launch cone ----
             enemies = self.red_planes if sim.color == "Blue" else self.blue_planes
             if self.is_paper_learnable:
-                assigned = self._learnable_fire_control_target(aid, enemies)
+                assigned_id = self._fire_control_assignments.get(aid)
+                assigned = enemies.get(assigned_id) if assigned_id is not None else None
+                if assigned is not None and not assigned.is_alive:
+                    assigned = None
                 candidate_enemies = [] if assigned is None else [assigned]
             elif self.is_paper_minimal:
                 try:
@@ -1634,6 +1663,10 @@ class UavCombatEnv(gymnasium.Env):
         state.transition_reason = "automatic_launch"
         parent.num_left_missiles = max(0, parent.num_left_missiles - 1)  # fire-for-effect tracking (capacity 999)
         self._missile_launch_counts[parent.uid] += 1
+        team = "red" if parent.uid.startswith("red") else "blue"
+        first_launch_key = f"{team}_first_launch_step"
+        if self._episode_stats.get(first_launch_key) is None:
+            self._episode_stats[first_launch_key] = int(self.current_step)
 
     def _finalize_launch_quality_record(self, missile: MissileSimulator) -> None:
         """Attach missile termination diagnostics to its launch snapshot."""
@@ -1733,6 +1766,10 @@ class UavCombatEnv(gymnasium.Env):
                 target_id = missile._target_id
                 if target_id not in self._death_reasons:
                     self._death_reasons[target_id] = "Missile_Kill"
+                team = "red" if shooter_id.startswith("red") else "blue"
+                first_hit_key = f"{team}_first_hit_step"
+                if self._episode_stats.get(first_hit_key) is None:
+                    self._episode_stats[first_hit_key] = int(self.current_step)
             if missile.is_done and not was_done_before:
                 self._finalize_launch_quality_record(missile)
 
@@ -2463,9 +2500,20 @@ class UavCombatEnv(gymnasium.Env):
             mws_diag[f"{team}_mws_warning_to_hit_mean_s"] = mws_diag[
                 f"{team}_warning_to_hit_mean_s"]
         info["__mws_diag__"] = mws_diag
+        blue_policy_rows = info["__blue_policy_diag__"].get("per_blue", [])
+        movement_targets = {
+            str(row.get("blue_id")): row.get("assigned_target_id")
+            for row in blue_policy_rows if isinstance(row, dict)
+        }
         info["__target_assignment_diag__"] = {
             **dict(self._target_assignment_diagnostics),
             "fire_control_assignments": dict(self._fire_control_assignments),
+            "movement_target_ids": movement_targets,
+            "movement_matches_fire_control": {
+                aid: movement_targets.get(aid) == target_id
+                for aid, target_id in self._fire_control_assignments.items()
+                if aid.startswith("blue_")
+            },
         }
         n_red_alive = sum(int(s.is_alive) for s in self.red_planes.values())
         n_blue_alive = sum(int(s.is_alive) for s in self.blue_planes.values())

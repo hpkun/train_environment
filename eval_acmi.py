@@ -74,6 +74,7 @@ from train_vanilla_mappo import (
     ACTION_DISTRIBUTION_VERSION,
     ACTION_LOG_STD_INIT,
     CHECKPOINT_SCHEMA_VERSION,
+    ENTROPY_ESTIMATOR_VERSION,
     VanillaActor,
     _classify_death_reason,
     _compute_global_state_dim,
@@ -210,6 +211,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
 
     print(f"pid_throttle_base: {pid_throttle_base}", flush=True)
     print(f"action_distribution: {ACTION_DISTRIBUTION_VERSION}", flush=True)
+    print(f"entropy_estimator: {ENTROPY_ESTIMATOR_VERSION}", flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rnn_hidden_size = 128  # default; overridden by checkpoint auto-inference
@@ -282,6 +284,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                         PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
                     else DEFAULT_ALTITUDE_REWARD_CONFIG),
                 "action_distribution": ACTION_DISTRIBUTION_VERSION,
+                "entropy_estimator": ENTROPY_ESTIMATOR_VERSION,
                 "action_log_std_init": ACTION_LOG_STD_INIT,
                 "actor_hidden_sizes": [128, 128],
                 "actor_rnn_hidden_size": 128,
@@ -423,7 +426,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                     rnn_t = torch.as_tensor(rnn_a[alive_indices], device=device)
                     with torch.no_grad():
                         action_dist, new_rnn = actor(obs_t, rnn_t)
-                        act = action_dist.mean.clamp(-1.0, 1.0)
+                        act = action_dist.mode
                     for k, i in enumerate(alive_indices):
                         actions[red_ids[i]] = act[k].cpu().numpy()
                         rnn_a[i] = new_rnn[k].cpu().numpy()
