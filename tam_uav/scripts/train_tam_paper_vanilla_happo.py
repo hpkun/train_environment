@@ -81,6 +81,9 @@ def parse_args():
                                                 "role_shared_ablation"),
                    default="independent")
     p.add_argument("--hidden-dim", type=int, default=128)
+    p.add_argument("--evaluation-seed-base", type=int, default=None)
+    p.add_argument("--evaluation-perturbation", choices=("none","low","medium","large"),
+                   default="low")
     return p.parse_args()
 
 
@@ -113,6 +116,8 @@ def main():
     steps = episodes = policy_version = 0
     episode_seed_base = int(args.seed)
     next_episode_seed = episode_seed_base
+    evaluation_seed_base = (args.evaluation_seed_base if args.evaluation_seed_base is not None
+                            else episode_seed_base + 100000)
     resumed_from_semantics = None
     if args.resume_checkpoint:
         loaded = load_vanilla_happo_checkpoint(
@@ -125,6 +130,8 @@ def main():
         resumed_from_semantics = loaded["resume_semantics"]
         episode_seed_base, next_episode_seed = resume_seed_state(
             args.seed, episodes, loaded)
+        if args.evaluation_seed_base is None:
+            evaluation_seed_base = episode_seed_base + 100000
     try:
         jsbsim_version = importlib.metadata.version("jsbsim")
     except importlib.metadata.PackageNotFoundError:
@@ -178,8 +185,10 @@ def main():
         launches, hits, structural, boundary, survivors, terminal_agents = 0, 0, 0, 0, 0, 0
         target_violations = nonfinite = 0
         rollout_ended_at_episode_boundary = False
+        rollout_crossed_episode_boundary = False
         reward_component_sums, reward_component_count = {}, 0
         for local_step in range(horizon):
+            rollout_ended_at_episode_boundary = False
             actor_obs, state = flattened_obs(env, obs), env.get_state()
             available_dict = env.get_avail_actions()
             available = np.stack([available_dict[aid] for aid in env.agent_ids])
@@ -218,6 +227,7 @@ def main():
             episode_done = all(bool(term[aid] or trunc[aid]) for aid in env.agent_ids)
             if episode_done:
                 rollout_ended_at_episode_boundary = True
+                rollout_crossed_episode_boundary = True
                 episode_returns.append(episode_return.copy()); winners.append(info["winner"])
                 episode_lengths.append(info["episode_step"])
                 launches += info["missiles_fired"]; hits += info["missile_hits"]
@@ -227,7 +237,11 @@ def main():
                 episodes += 1; episode_id += 1; episode_return.fill(0)
                 next_episode_seed = episode_seed_base + episodes
                 obs, _ = env.reset(seed=next_episode_seed)
-                break
+                # Continue collecting: do NOT break the rollout loop
+        if buffer.pos != horizon:
+            raise RuntimeError(
+                f"buffer.pos ({buffer.pos}) != planned_horizon ({horizon}) "
+                f"at update {trainer.update_count}")
         before = {name: value.detach().clone() for name, value in policy.named_parameters()}
         result = trainer.update(buffer); policy_version += 1
         unchanged = [name for name, value in policy.named_parameters()
@@ -274,7 +288,20 @@ def main():
                "all_critic_heads_changed": all(critic_head_changed.values()),
                "update_expected": json.dumps(update_expected),
                "update_contract_valid": json.dumps(update_contract_valid),
-               "optimization_update_contract_valid": all(update_contract_valid.values())} | result.metrics
+               "optimization_update_contract_valid": all(update_contract_valid.values()),
+               "rollout_planned_horizon": horizon,
+               "rollout_collected_steps": buffer.pos,
+               "rollout_episode_count": len(winners),
+               "rollout_crossed_episode_boundary": rollout_crossed_episode_boundary,
+               "rollout_ended_at_episode_boundary": rollout_ended_at_episode_boundary,
+               "rollout_unique_episode_count": len(set(buffer.episode_ids[:buffer.pos])),
+               "minimum_active_sample_count": min(
+                   result.metrics.get(f"active_sample_count/{aid}", 0) for aid in policy.agent_ids),
+               "maximum_active_sample_count": max(
+                   result.metrics.get(f"active_sample_count/{aid}", 0) for aid in policy.agent_ids),
+               "maximum_approx_kl": max(
+                   result.metrics.get(f"approx_kl/{aid}", 0.0) for aid in policy.agent_ids),
+               } | result.metrics
         for aid in policy.agent_ids:
             row[f"update_expected/{aid}"] = update_expected[aid]
             row[f"actor_changed/{aid}"] = actor_changed[aid]
@@ -310,16 +337,18 @@ def main():
                                                          "next_episode_seed": episode_seed_base + episodes})
         if args.evaluation_interval and (steps % args.evaluation_interval == 0
                                          or steps == args.total_environment_steps):
-            eval_env = make_paper_env(ROOT, args.scenario)
+            eval_env = make_paper_env(ROOT, args.scenario,
+                                       initial_perturbation=args.evaluation_perturbation)
             latest_eval = deterministic_evaluate(eval_env, policy, args.evaluation_episodes,
-                                                 args.seed + 100000 + steps)
+                                                 evaluation_seed_base)
             eval_env.close()
             (output / f"evaluation_{steps}.json").write_text(
                 json.dumps(latest_eval, indent=2), encoding="utf-8")
     if latest_eval is None and args.evaluation_episodes > 0:
-        eval_env = make_paper_env(ROOT, args.scenario)
+        eval_env = make_paper_env(ROOT, args.scenario,
+                                   initial_perturbation=args.evaluation_perturbation)
         latest_eval = deterministic_evaluate(
-            eval_env, policy, args.evaluation_episodes, args.seed + 100000 + steps)
+            eval_env, policy, args.evaluation_episodes, evaluation_seed_base)
         eval_env.close()
         (output / f"evaluation_{steps}.json").write_text(
             json.dumps(latest_eval, indent=2), encoding="utf-8")

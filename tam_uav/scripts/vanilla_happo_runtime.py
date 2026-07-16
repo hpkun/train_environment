@@ -25,9 +25,13 @@ def seed_all(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def make_paper_env(root: Path, scenario: str):
+def make_paper_env(root: Path, scenario: str, *, initial_perturbation=None,
+                   dynamics_backend="jsbsim"):
+    kwargs = {"dynamics_backend": dynamics_backend}
+    if initial_perturbation is not None:
+        kwargs["initial_perturbation"] = initial_perturbation
     return make_env(str(root / "uav_env" / "JSBSim" / "configs" / SCENARIOS[scenario]),
-                    dynamics_backend="jsbsim")
+                    **kwargs)
 
 
 def infer_policy(env, actor_sharing="independent", hidden_dim=128, device="cpu"):

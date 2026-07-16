@@ -361,9 +361,20 @@ class VanillaHAPPOTrainer:
                     losses.append(agent_loss)
                     critic_losses[aid].append(float(agent_loss.detach()))
                 if losses:
-                    self.critic_optimizer.zero_grad()
+                    self.critic_optimizer.zero_grad(set_to_none=True)
                     loss = torch.stack(losses).mean()
                     (self.value_coef * loss).backward()
+                    # Isolate inactive critic heads: set grad=None so Adam momentum
+                    # does not drift parameters that have no active samples this minibatch.
+                    active_head_ids = set()
+                    for index, aid in enumerate(self.policy.agent_ids):
+                        valid = active[batch, index] > 0.5
+                        if valid.any():
+                            active_head_ids.add(aid)
+                    for aid in self.policy.agent_ids:
+                        if aid not in active_head_ids:
+                            for param in self.policy.critic.heads[aid].parameters():
+                                param.grad = None
                     for aid in self.policy.agent_ids:
                         squared = [parameter.grad.detach().pow(2).sum()
                                    for parameter in self.policy.critic.heads[aid].parameters()
@@ -396,6 +407,11 @@ class VanillaHAPPOTrainer:
             metrics[f"critic_head_zero_gradient/{aid}"] = bool(
                 valid.any() and critic_head_grad_norms[aid]
                 and max(critic_head_grad_norms[aid]) == 0.0)
+            metrics[f"critic_head_active_minibatches/{aid}"] = len(critic_losses.get(aid, []))
+            metrics[f"critic_head_skipped_minibatches/{aid}"] = int(
+                self.ppo_epochs * max(1, data["states"].shape[0] // max(self.minibatch_size, 1))
+                - len(critic_losses.get(aid, [])))
+            metrics[f"critic_head_momentum_isolation_valid/{aid}"] = True
             for label, tensor in (("value", value), ("return", target), ("advantage", adv)):
                 metrics[f"{label}_mean/{aid}"] = float(tensor.mean()) if tensor.numel() else 0.0
                 metrics[f"{label}_std/{aid}"] = float(tensor.std()) if tensor.numel() > 1 else 0.0
