@@ -1,0 +1,31 @@
+controller_structure_source: BRMA-MAPPO Section 2.4
+simulation_timing_source: TAM-HAPPO Section 4.2
+gain_source: tuned_on_local_jsbsim_f16
+paper_gain_values_available: false
+initial_guess_only: true
+paper_reported: false
+
+initial_state:
+  altitude_m: 6000
+  speed_mps: 250
+  heading_deg: 0
+  roll_deg: 0
+  pitch_deg: 0
+
+timing:
+  sim_frequency_hz: 60
+  decision_frequency_hz: 5
+  physics_steps_per_decision: 12
+
+trim:
+  elevator_trim: 0.0
+  throttle_base: 0.3
+
+actuator_sign_elevator: -1
+
+pid:
+  roll: {kp: 0.8, ki: 0.01, kd: 0.03}
+  pitch: {kp: 0.8, ki: 0.01, kd: 0.03}
+  speed: {kp: 0.01, ki: 0.001, kd: 0.0}
+  integral_error_limits: [0.35, 0.25, 40.0]
+  derivative_filter_tau: 0.05
