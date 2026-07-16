@@ -19,6 +19,7 @@ from configs.paper_minimal_3v3_spec import (
 
 
 LEARNABILITY_ADAPTATION = "learnability_adaptation"
+PAPER_UNSPECIFIED_ENGINEERING = "paper_unspecified_engineering"
 PAPER_LEARNABLE_ENVIRONMENT_PROFILE = "paper_learnable_3v3_v1"
 LEARNABLE_BLUE_POLICY_PROFILE = "paper_learnable_fixed_pair_v1"
 LEARNABLE_MISSILE_GUIDANCE_MODE = "paper_learnable_point_mass_v1"
@@ -32,8 +33,7 @@ LEARNABLE_MISSILE_HIT_RADIUS_M = 100.0
 LEARNABLE_MISSILE_OVERSHOOT_WINDOW_S = 0.5
 LEARNABLE_MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M = 50.0
 LEARNABLE_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS = 1.0
-LEARNABLE_LAUNCH_MIN_RANGE_M = 1_000.0
-LEARNABLE_LAUNCH_MAX_RANGE_M = 8_000.0
+LEARNABLE_PID_THROTTLE_BASE = 0.8
 LEARNABLE_LOAD_PROTECTION_START_G = 9.0
 LEARNABLE_PERSISTENT_EXTREME_G = 30.0
 LEARNABLE_PERSISTENT_EXTREME_FRAMES = 3
@@ -56,6 +56,25 @@ LEARNABLE_MISSILE = replace(
     arming_time_s=sv(0.25, LEARNABILITY_ADAPTATION),
     density_model=sv("disabled", LEARNABILITY_ADAPTATION),
     guidance_mode=sv(LEARNABLE_MISSILE_GUIDANCE_MODE, LEARNABILITY_ADAPTATION),
+    maximum_overload_g=sv(30.0, LEARNABILITY_ADAPTATION),
+)
+
+LEARNABLE_PID = replace(
+    MINIMAL_PAPER_ENVIRONMENT_CONFIG.pid,
+    roll_gains=sv(
+        MINIMAL_PAPER_ENVIRONMENT_CONFIG.pid.roll_gains.value,
+        PAPER_UNSPECIFIED_ENGINEERING),
+    pitch_gains=sv(
+        MINIMAL_PAPER_ENVIRONMENT_CONFIG.pid.pitch_gains.value,
+        PAPER_UNSPECIFIED_ENGINEERING),
+    speed_gains=sv(
+        MINIMAL_PAPER_ENVIRONMENT_CONFIG.pid.speed_gains.value,
+        PAPER_UNSPECIFIED_ENGINEERING),
+    integral_error_limits=sv(
+        MINIMAL_PAPER_ENVIRONMENT_CONFIG.pid.integral_error_limits.value,
+        PAPER_UNSPECIFIED_ENGINEERING),
+    throttle_base=sv(
+        LEARNABLE_PID_THROTTLE_BASE, PAPER_UNSPECIFIED_ENGINEERING),
 )
 
 LEARNABLE_PAPER_ENVIRONMENT_CONFIG = replace(
@@ -65,10 +84,10 @@ LEARNABLE_PAPER_ENVIRONMENT_CONFIG = replace(
     electro_optical=ElectroOpticalConfig(
         maximum_range_m=sv(10_000.0, PAPER_EXPLICIT),
         half_angle_rad=sv(0.7853981633974483, LEARNABILITY_ADAPTATION),
-        minimum_launch_range_m=sv(
-            LEARNABLE_LAUNCH_MIN_RANGE_M, LEARNABILITY_ADAPTATION),
+        minimum_launch_range_m=sv(0.0, PAPER_UNSPECIFIED_ENGINEERING),
     ),
     missile=LEARNABLE_MISSILE,
+    pid=LEARNABLE_PID,
 )
 
 
@@ -103,9 +122,13 @@ LEARNABLE_PROFILE_METADATA = {
     "missile_positive_closing_threshold_mps": sv(
         LEARNABLE_MISSILE_POSITIVE_CLOSING_THRESHOLD_MPS,
         LEARNABILITY_ADAPTATION),
-    "launch_range_m": sv(
-        (LEARNABLE_LAUNCH_MIN_RANGE_M, LEARNABLE_LAUNCH_MAX_RANGE_M),
-        LEARNABILITY_ADAPTATION),
+    "launch_range_m": sv((0.0, 10_000.0), PAPER_EXPLICIT),
+    "launch_deconfliction": sv(
+        "paper_launch_deconfliction_live_missile_v1",
+        PAPER_UNSPECIFIED_ENGINEERING),
+    "missile_los_definition": sv(
+        "paper_eq10_quadrant_preserving_operational_v1",
+        PAPER_UNSPECIFIED_ENGINEERING),
     "target_assignment_mode": sv(
         "initial_fixed_pair_reallocate_on_death_v1", LEARNABILITY_ADAPTATION),
     "observation_mode": sv("paper_strict", LEARNABILITY_ADAPTATION),
@@ -118,7 +141,8 @@ LEARNABLE_PROFILE_METADATA = {
         "disabled_for_paper_eq12_14",
         LEARNABILITY_ADAPTATION),
     "pid_error_definition": sv(
-        "paper_eq13_principal_arctan_ratio_v1", LEARNABILITY_ADAPTATION),
+        "paper_eq13_quadrant_preserving_operational_v1",
+        PAPER_UNSPECIFIED_ENGINEERING),
     "extreme_finite_load_guard": sv(
         "paper_unspecified_numerical_guard_30g_3frames_100g_immediate_v1",
         LEARNABILITY_ADAPTATION),

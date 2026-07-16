@@ -27,7 +27,7 @@ from configs.paper_minimal_3v3_spec import (
 from configs.paper_learnable_3v3_spec import (
     LEARNABLE_BLUE_POLICY_PROFILE,
     LEARNABLE_INITIALIZATION_MODES,
-    LEARNABLE_LAUNCH_MAX_RANGE_M,
+    LEARNABLE_PID_THROTTLE_BASE,
     LEARNABLE_MISSILE_GUIDANCE_MODE,
     LEARNABLE_MISSILE_LAUNCH_SPEED_MPS,
     LEARNABLE_MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M,
@@ -361,8 +361,7 @@ class UavCombatEnv(gymnasium.Env):
         self.missile_launch_min_range = float(
             self.environment_config.electro_optical.minimum_launch_range_m.value)
         self.missile_launch_max_range = (
-            LEARNABLE_LAUNCH_MAX_RANGE_M if self.is_paper_learnable
-            else float(self.environment_config.electro_optical.maximum_range_m.value))
+            float(self.environment_config.electro_optical.maximum_range_m.value))
         if pid_profile not in ("paper", "engineering_safe", "paper_minimal_shared_v1"):
             raise ValueError(
                 "pid_profile must be 'paper', 'engineering_safe', or "
@@ -370,7 +369,9 @@ class UavCombatEnv(gymnasium.Env):
         self.pid_profile = pid_profile
         if not 0.0 <= float(pid_throttle_base) <= 1.0:
             raise ValueError("pid_throttle_base must be in [0, 1]")
-        self.pid_throttle_base = float(pid_throttle_base)
+        self.pid_throttle_base = (
+            LEARNABLE_PID_THROTTLE_BASE if self.is_paper_learnable
+            else float(pid_throttle_base))
         if reward_mode not in (
                 "paper_joint", "engineering_local", "paper_minimal_joint_v1"):
             raise ValueError(
@@ -1733,39 +1734,27 @@ class UavCombatEnv(gymnasium.Env):
                 aid, enemies, count_wait=count_wait)
 
     def _check_missile_launch(self):
-        """Rule-based missile launch with lock-delay + hot-update deconfliction.
-
-        For each armed agent, finds the closest **unengaged** enemy within the
-        sensor cone (AO < 45°, R ∈ [0.5, 10] km, TA > 90° rear-hemisphere).
-        The target must be continuously tracked for 0.25 s before the weapon
-        is released. Launch cooldown is 0.5 s. Both are stored as physics-frame
-        counts derived from ``sim_freq``.
-
-        **Hot-update engaged-targets gate (paper §2.1.3):**
-        Uses a single shared ``self._engaged_targets`` set (pre-populated by
-        ``refresh_engaged_targets()`` from in-flight missiles, and optionally
-        extended by the caller with flight-assigned targets).  When an agent
-        launches, the target is **immediately** added to this set so that
-        subsequent agents in the same physics frame see it and skip that
-        target — preventing same-frame double-launch.
-        """
+        """Advance the single automatic EO-track and launch state machine."""
         for aid in self.agent_ids:
             team = "red" if aid.startswith("red") else "blue"
             diag = self._launch_diag_step[team]
             diag["scan_frames"] += 1
             sim = self._get_sim(aid)
+            state = self._fire_control_states.setdefault(aid, FireControlState())
+            if self._missile_cooldown.get(aid, 0) > 0:
+                self._missile_cooldown[aid] -= 1
             if sim is None or not sim.is_alive:
                 self._lock_timer[aid] = 0
                 self._lock_target[aid] = None
-                continue
-            if sim.num_left_missiles <= 0:
-                self._lock_timer[aid] = 0
-                self._lock_target[aid] = None
+                state.current_target_id = None
+                state.continuous_detection_frames = 0
+                state.lock_mature = False
+                state.cooldown_frames_remaining = int(
+                    self._missile_cooldown.get(aid, 0))
+                state.detection_state = "shooter_dead"
+                state.blocked_reason = "shooter_dead"
                 continue
             diag["alive_shooters"] += 1
-            # Decrement cooldown every physics frame
-            if self._missile_cooldown[aid] > 0:
-                self._missile_cooldown[aid] -= 1
 
             # ---- Shared engaged-targets set (hot-updated across agents) ----
             # Uses self._engaged_targets directly — no per-agent recomputation.
@@ -1773,7 +1762,8 @@ class UavCombatEnv(gymnasium.Env):
             # missile tracking them AND targets flight-assigned by the
             # coordinated-actions allocator.
 
-            # ---- Find the closest UNENGAGED enemy in the launch cone ----
+            # Select one target for continuous EO tracking. TA and live-missile
+            # deconfliction are checked only at the launch instant.
             enemies = self.red_planes if sim.color == "Blue" else self.blue_planes
             if self.is_paper_learnable:
                 assigned_id = self._fire_control_assignments.get(aid)
@@ -1793,18 +1783,12 @@ class UavCombatEnv(gymnasium.Env):
                 candidate_enemies = list(enemies.values())
             best_enemy = None
             best_distance = float("inf")
+            best_ta = float("nan")
 
             for enemy_sim in candidate_enemies:
                 if not enemy_sim.is_alive:
                     continue
                 diag["alive_enemy_pairs"] += 1
-                # --- Target-deconfliction: skip enemies already engaged ---
-                if enemy_sim.uid in self._engaged_targets:
-                    diag["engaged_blocked"] += 1
-                    if self.is_paper_learnable:
-                        self._target_assignment_diagnostics[
-                            "engaged_wait_frames"] += 1
-                    continue
                 diag["unengaged_enemy_pairs"] += 1
 
                 ego_pos = sim.get_position()
@@ -1815,13 +1799,12 @@ class UavCombatEnv(gymnasium.Env):
                 R = compute_3d_range(ego_pos, enm_pos)
                 eo_visible = self._is_detected_by_electro_optical(sim, enemy_sim)
                 if self.is_paper_learnable:
-                    if R < self.missile_launch_min_range:
+                    if not np.isfinite(R) or R <= 0.0:
                         diag["range_low_blocked"] += 1
                     if R > self.missile_launch_max_range:
                         diag["range_high_blocked"] += 1
-                    range_ok = (
-                        self.missile_launch_min_range <= R
-                        <= self.missile_launch_max_range and eo_visible)
+                    range_ok = bool(
+                        np.isfinite(R) and 0.0 < R <= self.missile_launch_max_range)
                     ao_ok = AO <= self.missile_launch_ao_thresh
                 else:
                     range_ok = self.missile_launch_min_range < R and eo_visible
@@ -1835,24 +1818,14 @@ class UavCombatEnv(gymnasium.Env):
                 if ta_ok:
                     diag["ta_ok_pairs"] += 1
 
-                in_cone = (ao_ok and range_ok and ta_ok)
-                if in_cone:
+                continuous_eo_ok = bool(ao_ok and range_ok and eo_visible)
+                if continuous_eo_ok and ta_ok:
                     diag["geometry_ok_pairs"] += 1
 
-                if in_cone and R < best_distance:
+                if continuous_eo_ok and R < best_distance:
                     best_distance = R
                     best_enemy = enemy_sim
-
-            # ---- Lock-delay state machine ----
-            # If the currently locked target becomes engaged, abandon the
-            # lock immediately so the agent can start building a new lock
-            # on the next-best unengaged target.
-            if (best_enemy is not None
-                    and self._lock_target.get(aid) is not None
-                    and self._lock_target[aid] in self._engaged_targets):
-                # Previously locked target is now engaged — force reset
-                self._lock_timer[aid] = 0
-                self._lock_target[aid] = None
+                    best_ta = TA
 
             if best_enemy is not None:
                 if self._lock_target.get(aid) == best_enemy.uid:
@@ -1871,20 +1844,35 @@ class UavCombatEnv(gymnasium.Env):
                 self._lock_timer[aid] = 0
                 self._lock_target[aid] = None
 
-            # ---- Launch when lock mature and weapon ready ----
-            # (best_enemy is already guaranteed unengaged by the filter above)
-            on_kill_cooldown = self.enable_kill_cooldown_gate and aid in self._agents_deny_kill
+            on_kill_cooldown = bool(
+                not self.is_paper_learnable
+                and self.enable_kill_cooldown_gate
+                and aid in self._agents_deny_kill)
             lock_mature = (best_enemy is not None
                            and self._lock_timer[aid] >= self.missile_lock_delay_frames)
+            ta_ok_at_launch = bool(
+                best_enemy is not None
+                and best_ta > self.environment_config.fire_control.rear_hemisphere_ta_rad.value)
+            engaged_blocked = bool(
+                best_enemy is not None
+                and best_enemy.uid in self._engaged_targets)
             if lock_mature:
                 diag["lock_mature_pairs"] += 1
                 if self._missile_cooldown[aid] != 0:
                     diag["cooldown_blocked"] += 1
+                if engaged_blocked:
+                    diag["engaged_blocked"] += 1
+                    if self.is_paper_learnable:
+                        self._target_assignment_diagnostics[
+                            "engaged_wait_frames"] += 1
                 if on_kill_cooldown:
                     diag["kill_cooldown_blocked"] += 1
             if (best_enemy is not None
-                    and self._lock_timer[aid] >= self.missile_lock_delay_frames
+                    and lock_mature
+                    and ta_ok_at_launch
                     and self._missile_cooldown[aid] == 0
+                    and not engaged_blocked
+                    and sim.num_left_missiles > 0
                     and not on_kill_cooldown):
                 launch_quality = self._build_launch_quality_record(
                     sim, best_enemy, best_distance)
@@ -1894,12 +1882,7 @@ class UavCombatEnv(gymnasium.Env):
                 # Subsequent agents in the same physics frame will see this
                 # and skip the target, preventing same-frame double-launch.
                 self._engaged_targets.add(best_enemy.uid)
-                # Reset lock after launch (must re-acquire)
-                self._lock_timer[aid] = 0
-                self._lock_target[aid] = None
-                # Cooldown is set inside _launch_missile
 
-            state = self._fire_control_states.setdefault(aid, FireControlState())
             state.current_target_id = self._lock_target.get(aid)
             state.continuous_detection_frames = int(self._lock_timer.get(aid, 0))
             state.lock_mature = bool(lock_mature)
@@ -1909,10 +1892,18 @@ class UavCombatEnv(gymnasium.Env):
             elif lock_mature and state.cooldown_frames_remaining > 0:
                 state.detection_state = "cooldown"
                 state.blocked_reason = "cooldown"
+            elif lock_mature and not ta_ok_at_launch:
+                state.detection_state = "locked_waiting_rear_hemisphere"
+                state.blocked_reason = "ta_not_rear_hemisphere"
+            elif lock_mature and engaged_blocked:
+                state.detection_state = "locked_deconflicted"
+                state.blocked_reason = "live_missile_on_target"
             elif lock_mature:
                 state.detection_state = "ready_to_launch"
+                state.blocked_reason = ""
             else:
                 state.detection_state = "tracking"
+                state.blocked_reason = ""
 
     def _build_launch_quality_record(
         self,
@@ -2045,6 +2036,8 @@ class UavCombatEnv(gymnasium.Env):
             reason = raw_reason
         elif raw_reason in ("p_hit_fail", "low_speed", "overshoot", "target_dead"):
             reason = "miss"
+        elif raw_reason == "numerical_invalid":
+            reason = "numerical_invalid"
         else:
             reason = "unknown"
         target_alive = ""
@@ -2097,6 +2090,11 @@ class UavCombatEnv(gymnasium.Env):
                 reason = missile._termination_reason or "unknown"
                 self._missile_term_reasons[team][reason] = \
                     self._missile_term_reasons[team].get(reason, 0) + 1
+                if reason == "numerical_invalid":
+                    self._invalid_numerical_episode = True
+                    label = f"{mid}:MissileNumericalInvalid"
+                    if label not in self._invalid_numerical_reasons:
+                        self._invalid_numerical_reasons.append(label)
             if missile.is_success and not missile._kill_rewarded:
                 shooter_id = missile._parent_id
 

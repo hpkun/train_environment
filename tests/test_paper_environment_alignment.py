@@ -11,7 +11,7 @@ import rule_based_agent as rule_agent
 from my_uav_env import UavCombatEnv
 from my_uav_env.alignment.los_geometry import compute_body_x_q_los
 from my_uav_env.alignment.launch_quality import LAUNCH_QUALITY_FIELDS, make_launch_quality_record
-from my_uav_env.pid_controller import PIDController, PIDLoop, paper_arctan_ratio
+from my_uav_env.pid_controller import PIDController, PIDLoop
 from my_uav_env.simulator import (
     MissileSimulator,
     compute_los_angles_and_rates,
@@ -189,7 +189,7 @@ def test_paper_default_disables_legacy_post_hit_kill_gates():
 
 def test_legacy_post_hit_kill_gates_are_explicitly_guarded():
     source = Path("my_uav_env/env.py").read_text(encoding="utf-8")
-    assert "on_kill_cooldown = self.enable_kill_cooldown_gate" in source
+    assert "and self.enable_kill_cooldown_gate" in source
     assert "if self.enable_kill_cooldown_gate and shooter_id in self._agents_deny_kill" in source
     assert "self.enable_single_kill_per_step_gate" in source
 
@@ -662,7 +662,7 @@ def test_pid_channels_rudder_and_reset_match_paper_interface():
     assert pid._prev_target_heading is None
 
 
-def test_paper_pid_eq13_direction_errors_use_x_denominator():
+def test_paper_pid_eq13_direction_errors_preserve_quadrants():
     zero = np.zeros(3)
     roll_error, pitch_error, *_ = PIDController.paper_direction_errors(
         zero, 0.0, 0.0)
@@ -681,39 +681,20 @@ def test_paper_pid_eq13_direction_errors_use_x_denominator():
     roll_error, pitch_error, *_ = PIDController.paper_direction_errors(
         zero, math.radians(10.0), 0.0)
     assert math.isclose(roll_error, 0.0, abs_tol=1e-9)
-    assert math.isclose(pitch_error, math.radians(10.0), abs_tol=1e-9)
+    assert math.isclose(pitch_error, math.radians(-10.0), abs_tol=1e-9)
 
 
-@pytest.mark.parametrize("numerator,denominator,expected", [
-    (1.0, 2.0, math.atan(0.5)),
-    (-1.0, 2.0, math.atan(-0.5)),
-    (1.0, -2.0, math.atan(-0.5)),
-    (-1.0, -2.0, math.atan(0.5)),
-    (0.0, 2.0, 0.0),
-    (1.0, 1e-15, math.pi / 2.0),
-    (1.0, -1e-15, -math.pi / 2.0),
-    (-1.0, 1e-15, -math.pi / 2.0),
-    (-1.0, -1e-15, math.pi / 2.0),
+@pytest.mark.parametrize("heading,expected", [
+    (math.radians(45), math.radians(45)),
+    (math.radians(135), math.radians(135)),
+    (math.radians(-135), math.radians(-135)),
+    (math.radians(-45), math.radians(-45)),
 ])
-def test_paper_arctan_ratio_principal_values(numerator, denominator, expected):
-    value = paper_arctan_ratio(numerator, denominator)
-    assert math.isfinite(value)
-    assert -math.pi / 2 <= value <= math.pi / 2
-    assert value == pytest.approx(expected)
-
-
-def test_paper_arctan_ratio_degenerate_and_not_atan2_branch():
-    value, degenerate = paper_arctan_ratio(
-        1e-15, -1e-15, return_degenerate=True)
-    assert value == 0.0
-    assert degenerate is True
-    principal = paper_arctan_ratio(0.1, -1.0)
-    assert principal == pytest.approx(math.atan(-0.1))
-    assert principal != pytest.approx(math.atan2(0.1, -1.0))
-    # Crossing y=0 behind the body stays on the principal branch rather than
-    # jumping between +pi and -pi as atan2 does.
-    values = [paper_arctan_ratio(y, -1.0) for y in np.linspace(-1e-4, 1e-4, 21)]
-    assert max(abs(np.diff(values))) < 1e-4
+def test_paper_eq13_preserves_heading_quadrants(heading, expected):
+    e_phi, e_theta, *_ = PIDController.paper_direction_errors(
+        np.zeros(3), 0.0, heading)
+    assert e_phi == pytest.approx(expected)
+    assert e_theta == pytest.approx(0.0)
 
 
 def test_paper_eq12_coordinate_equivalence_random_1000():
@@ -724,7 +705,7 @@ def test_paper_eq12_coordinate_equivalence_random_1000():
                           [math.pi, 1.4, math.pi])
         target_pitch = float(rng.uniform(-math.pi / 2, math.pi / 2))
         target_heading = float(rng.uniform(-math.pi, math.pi))
-        _, _, d_ned, d_body_down, d_body_paper, r_bi = (
+        _, _, d_neu, d_ned, d_body, r_bi = (
             PIDController.paper_direction_errors(
                 rpy, target_pitch, target_heading))
         d_paper = np.array([
@@ -732,38 +713,37 @@ def test_paper_eq12_coordinate_equivalence_random_1000():
             math.cos(target_pitch) * math.sin(target_heading),
             math.sin(target_pitch),
         ])
+        assert np.allclose(d_neu, d_paper, atol=1e-12)
         assert np.allclose(d_ned, z_flip @ d_paper, atol=1e-12)
-        assert np.allclose(d_body_down, r_bi @ z_flip @ d_paper, atol=1e-12)
-        assert np.allclose(d_body_paper, z_flip @ r_bi @ z_flip @ d_paper,
-                           atol=1e-12)
+        assert np.allclose(d_body, r_bi @ z_flip @ d_paper, atol=1e-12)
 
 
 @pytest.mark.parametrize("pitch,heading,expected", [
     (0.0, 0.0, [1.0, 0.0, 0.0]),
     (0.0, math.pi / 2, [0.0, 1.0, 0.0]),
-    (math.pi / 6, 0.0, [math.sqrt(3) / 2, 0.0, 0.5]),
-    (-math.pi / 6, 0.0, [math.sqrt(3) / 2, 0.0, -0.5]),
+    (math.pi / 6, 0.0, [math.sqrt(3) / 2, 0.0, -0.5]),
+    (-math.pi / 6, 0.0, [math.sqrt(3) / 2, 0.0, 0.5]),
 ])
 def test_paper_eq12_cardinal_directions(pitch, heading, expected):
-    *_, d_body_paper, _ = PIDController.paper_direction_errors(
+    *_, d_body, _ = PIDController.paper_direction_errors(
         np.zeros(3), pitch, heading)
-    assert np.allclose(d_body_paper, expected, atol=1e-12)
+    assert np.allclose(d_body, expected, atol=1e-12)
 
 
 def test_paper_eq13_mirror_error_signs():
     original = np.array([0.7, 0.2, -0.3])
     mirrored = np.array([0.7, -0.2, -0.3])
-    phi = paper_arctan_ratio(original[1], original[0])
-    theta = paper_arctan_ratio(original[2], original[0])
-    assert paper_arctan_ratio(mirrored[1], mirrored[0]) == pytest.approx(-phi)
-    assert paper_arctan_ratio(mirrored[2], mirrored[0]) == pytest.approx(theta)
+    phi = np.arctan2(original[1], original[0])
+    theta = np.arctan2(original[2], original[0])
+    assert np.arctan2(mirrored[1], mirrored[0]) == pytest.approx(-phi)
+    assert np.arctan2(mirrored[2], mirrored[0]) == pytest.approx(theta)
 
 
-def test_paper_eq13_rear_target_and_body_x_zero_use_principal_branch():
+def test_paper_eq13_rear_target_and_body_x_zero_are_operational():
     zero = np.zeros(3)
     rear_roll, rear_pitch, *_ = PIDController.paper_direction_errors(
         zero, 0.0, math.pi)
-    assert rear_roll == pytest.approx(0.0, abs=1e-12)
+    assert rear_roll == pytest.approx(math.pi, abs=1e-12)
     assert rear_pitch == pytest.approx(0.0, abs=1e-12)
 
     left, *_ = PIDController.paper_direction_errors(
@@ -780,6 +760,27 @@ def test_paper_eq13_rear_target_and_body_x_zero_use_principal_branch():
             np.array([300.0, 0.0, 0.0]))
         assert np.isfinite(controls).all()
         assert np.max(np.abs(controls)) <= 1.0
+
+
+@pytest.mark.parametrize("current_deg,target_deg,expected_deg", [
+    (179.0, -179.0, 2.0),
+    (-179.0, 179.0, -2.0),
+])
+def test_paper_eq13_heading_crosses_pi_on_short_direction(
+        current_deg, target_deg, expected_deg):
+    e_phi, e_theta, *_ = PIDController.paper_direction_errors(
+        np.array([0.0, 0.0, math.radians(current_deg)]),
+        0.0, math.radians(target_deg))
+    assert math.degrees(e_phi) == pytest.approx(expected_deg)
+    assert e_theta == pytest.approx(0.0)
+
+
+def test_pid_loop_angular_derivative_wraps_branch_jump():
+    loop = PIDLoop(0.0, 0.0, 1.0, -100.0, 100.0,
+                   angular_error=True)
+    loop._prev_error = math.pi - 0.01
+    loop.step(-math.pi + 0.01, 1.0)
+    assert loop._last_diagnostic["d"] == pytest.approx(0.02)
 
 
 def test_pid_loop_bounded_integral_saturation_and_reset_diagnostics():
@@ -805,7 +806,8 @@ def test_paper_eq14_diagnostics_and_channel_contract():
         np.zeros(3), 200.0, math.radians(5), math.radians(10), 225.0)
     diag = pid._last_diagnostic
     assert controls[2] == 0.0
-    assert diag["formula_version"] == "paper_eq12_14_principal_arctan_ratio_v1"
+    assert diag["formula_version"] == (
+        "paper_eq13_quadrant_preserving_operational_v1")
     assert diag["e_velocity"] == pytest.approx(25.0)
     assert set(("p", "i", "d", "unsaturated", "saturated",
                 "integral_enabled")) <= set(diag["roll_pid"])
@@ -1387,6 +1389,82 @@ def test_missile_eq10_eq11_and_eq9_match_direct_geometry():
     assert n_mh == 0.0
 
 
+@pytest.mark.parametrize("relative_position,expected_beta", [
+    ([1.0, 1.0, 0.0], math.pi / 4),
+    ([-1.0, 1.0, 0.0], 3 * math.pi / 4),
+    ([-1.0, -1.0, 0.0], -3 * math.pi / 4),
+    ([1.0, -1.0, 0.0], -math.pi / 4),
+])
+def test_missile_eq10_los_preserves_four_quadrants(
+        relative_position, expected_beta):
+    beta, epsilon, beta_dot, epsilon_dot = compute_los_angles_and_rates(
+        relative_position, [0.0, 0.0, 0.0])
+    assert beta == pytest.approx(expected_beta)
+    assert epsilon == pytest.approx(0.0)
+    assert np.isfinite([beta_dot, epsilon_dot]).all()
+
+
+def test_missile_los_rejects_nonfinite_and_handles_vertical_geometry():
+    values = compute_los_angles_and_rates(
+        [1e-12, -1e-12, 1000.0], [1.0, 2.0, 3.0])
+    assert np.isfinite(values).all()
+    with pytest.raises(FloatingPointError):
+        compute_los_angles_and_rates(
+            [float("nan"), 0.0, 0.0], [0.0, 0.0, 0.0])
+
+
+def test_missile_eq9_composite_limit_is_single_and_direction_preserving(
+        monkeypatch):
+    missile = MissileSimulator(
+        dt=1.0 / 60.0,
+        guidance_mode="paper_learnable_point_mass_v1")
+    missile._position[:] = 0.0
+    missile._velocity[:] = [800.0, 0.0, 0.0]
+    missile.target_aircraft = _FakeSim(
+        [5000.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    monkeypatch.setattr(
+        "my_uav_env.simulator.compute_paper_eq9_overloads",
+        lambda *_args, **_kwargs: (40.0, 30.0))
+    command, _ = missile._guidance()
+    assert np.linalg.norm(command) == pytest.approx(30.0)
+    assert command == pytest.approx([24.0, 18.0])
+    assert command[0] / command[1] == pytest.approx(4.0 / 3.0)
+
+
+@pytest.mark.parametrize("velocity,expected", [
+    ([800.0, 0.0, 0.0], 1.0),
+    ([-800.0, 0.0, 0.0], 0.05),
+    ([0.0, 800.0, 0.0], 0.05),
+    ([400.0, 400.0 * math.sqrt(3.0), 0.0], 0.525),
+])
+def test_missile_hit_probability_matches_paper_formula(velocity, expected):
+    missile = MissileSimulator(dt=1.0 / 60.0)
+    missile._position[:] = 0.0
+    missile._velocity[:] = velocity
+    missile.target_aircraft = _FakeSim(
+        [1000.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    assert missile._hit_probability() == pytest.approx(expected)
+
+
+def test_missile_hit_probability_rng_boundary_is_deterministic():
+    class FixedRng:
+        def __init__(self, value):
+            self.value = value
+
+        def random(self):
+            return self.value
+
+    missile = MissileSimulator(dt=1.0 / 60.0)
+    missile._position[:] = 0.0
+    missile._velocity[:] = [400.0, 400.0 * math.sqrt(3.0), 0.0]
+    missile.target_aircraft = _FakeSim(
+        [1000.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    missile.rng = FixedRng(0.524999)
+    assert missile._roll_hit_probability() is True
+    missile.rng = FixedRng(0.525)
+    assert missile._roll_hit_probability() is False
+
+
 def test_missile_eq9_vertical_and_general_3d_match_literal_formula():
     for relative_position, relative_velocity, missile_velocity in (
         ([1000.0, 0.0, 100.0], [0.0, 0.0, 10.0], [300.0, 0.0, 0.0]),
@@ -1447,15 +1525,28 @@ def test_missile_probability_failure_terminates_with_raw_reason():
     assert missile._termination_reason == "p_hit_fail"
 
 
+def test_missile_nonfinite_geometry_terminates_as_numerical_invalid():
+    missile = MissileSimulator(dt=1.0 / 60.0)
+    missile.target_aircraft = _FakeSim(
+        [float("nan"), 0.0, 0.0], [0.0, 0.0, 0.0])
+    missile._status = MissileSimulator.LAUNCHED
+    missile._t = 0.0
+
+    missile.run()
+
+    assert missile.is_done
+    assert missile._termination_reason == "numerical_invalid"
+
+
 def test_checkpoint_metadata_rejects_legacy_and_mismatched_semantics():
     cfg = Config()
     obs_dim = _compute_obs_dim(3, 3, is_red=True, obs_mode="paper_strict")
     global_dim = _compute_global_state_dim(3, "paper_strict")
     metadata = _checkpoint_metadata(cfg, obs_dim, global_dim)
     state = VanillaActor(obs_dim).state_dict()
-    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v7"
+    assert metadata["schema_version"] == "vanilla_mappo_paper_env_v8"
     assert metadata["pid_error_definition"] == (
-        "paper_eq13_principal_arctan_ratio_v1")
+        "paper_eq13_quadrant_preserving_operational_v1")
     assert metadata["schema_version"] == CHECKPOINT_SCHEMA_VERSION
     assert metadata["action_distribution"] == ACTION_DISTRIBUTION_VERSION
     assert metadata["actor_obs_dim"] == 60

@@ -19,6 +19,9 @@ def compute_los_angles_and_rates(relative_position, relative_velocity,
     """Paper Eq.10/Eq.11 LOS angles and rates for missile-to-target vectors."""
     r = np.asarray(relative_position, dtype=np.float64)
     r_dot = np.asarray(relative_velocity, dtype=np.float64)
+    if r.shape != (3,) or r_dot.shape != (3,) or not np.all(
+            np.isfinite(np.concatenate([r, r_dot]))):
+        raise FloatingPointError("non-finite LOS input")
     rx, ry, rz = r
     rdx, rdy, rdz = r_dot
     horizontal_sq = float(rx * rx + ry * ry)
@@ -31,9 +34,10 @@ def compute_los_angles_and_rates(relative_position, relative_velocity,
         (horizontal_sq * rdz - rz * (rdx * rx + rdy * ry))
         / max(range_sq * horizontal, epsilon)
     )
-    values = np.nan_to_num(
-        [beta, epsilon_angle, beta_dot, epsilon_dot],
-        nan=0.0, posinf=0.0, neginf=0.0)
+    values = np.asarray(
+        [beta, epsilon_angle, beta_dot, epsilon_dot], dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        raise FloatingPointError("non-finite LOS output")
     return tuple(float(value) for value in values)
 
 
@@ -44,6 +48,8 @@ def compute_paper_eq9_overloads(relative_position, relative_velocity,
     beta, los_epsilon, beta_dot, epsilon_dot = compute_los_angles_and_rates(
         relative_position, relative_velocity, epsilon=epsilon)
     velocity = np.asarray(missile_velocity, dtype=np.float64)
+    if velocity.shape != (3,) or not np.all(np.isfinite(velocity)):
+        raise FloatingPointError("non-finite missile velocity")
     speed = float(np.linalg.norm(velocity))
     if speed <= epsilon:
         return 0.0, 0.0
@@ -59,7 +65,9 @@ def compute_paper_eq9_overloads(relative_position, relative_velocity,
     n_mh = (
         speed / gravity * navigation_constant / cos_sum * epsilon_dot
     )
-    values = np.nan_to_num([n_mc, n_mh], nan=0.0, posinf=0.0, neginf=0.0)
+    values = np.asarray([n_mc, n_mh], dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        raise FloatingPointError("non-finite Eq.9 command")
     return float(values[0]), float(values[1])
 
 # jsbsim is imported at module level.  JSBSim's C++ startup banner is printed
@@ -775,17 +783,24 @@ class MissileSimulator(BaseSimulator):
 
     def run(self):
         self._t += self.dt
-        action, distance = self._guidance()
-        command_norm = float(np.linalg.norm(action))
-        self._pn_guidance_frames += 1
-        self._pn_nonzero_command_frames += int(command_norm > 1e-9)
-        self._maximum_command_g = max(self._maximum_command_g, command_norm)
-        previous_distance = self._distance_pre
-        increasing = bool(distance > previous_distance)
-        self._distance_increment.append(increasing)
-        self._distance_pre = distance
-        diagnostic = self._intercept_diagnostic(
-            action, distance, previous_distance)
+        zero_action = np.zeros(2, dtype=np.float64)
+        if self.target_aircraft is None or not self.target_aircraft.is_alive:
+            self._status = MissileSimulator.MISS
+            self._termination_reason = "target_dead"
+            return
+
+        distance = float(np.linalg.norm(
+            self.target_aircraft.get_position() - self.get_position()))
+        if not np.isfinite(distance):
+            self._status = MissileSimulator.MISS
+            self._termination_reason = "numerical_invalid"
+            return
+        if self._t > self._t_max:
+            self._status = MissileSimulator.MISS
+            self._termination_reason = "timeout"
+            self._emit_trajectory_sample(self._intercept_diagnostic(
+                zero_action, distance, self._distance_pre))
+            return
 
         armed = (
             self.guidance_mode == "paper_minimal_point_mass_v1"
@@ -795,23 +810,54 @@ class MissileSimulator(BaseSimulator):
                     "paper_minimal_point_mass_v1",
                     "paper_learnable_point_mass_v1")
                 and self._t > self._t_arm))
-        if distance < self._Rc and self.target_aircraft.is_alive and armed:
-            # Paper: P_hit = 0.05 + 0.95 · dir_match — probabilistic kill filter
-            # even when the physical missile reaches the target.
+        if armed and distance <= self._Rc:
             if self._roll_hit_probability():
                 self._status = MissileSimulator.HIT
                 self.target_aircraft.shotdown()
                 self._termination_reason = "hit"
             else:
-                self._status = MissileSimulator.MISS  # warhead fails, target survives
+                self._status = MissileSimulator.MISS
                 self._termination_reason = "p_hit_fail"
-        elif self._t > self._t_max:
+            self._emit_trajectory_sample(self._intercept_diagnostic(
+                zero_action, distance, self._distance_pre))
+            return
+
+        try:
+            action, _ = self._guidance()
+        except (FloatingPointError, ValueError, OverflowError):
             self._status = MissileSimulator.MISS
-            self._termination_reason = "timeout"
-        elif (self.guidance_mode not in (
+            self._termination_reason = "numerical_invalid"
+            return
+        command_norm = float(np.linalg.norm(action))
+        if not np.isfinite(command_norm):
+            self._status = MissileSimulator.MISS
+            self._termination_reason = "numerical_invalid"
+            return
+        self._pn_guidance_frames += 1
+        self._pn_nonzero_command_frames += int(command_norm > 1e-9)
+        self._maximum_command_g = max(self._maximum_command_g, command_norm)
+        previous_distance = self._distance_pre
+        self._state_trans(action)
+        state = np.concatenate([
+            np.asarray(self.get_position(), dtype=np.float64),
+            np.asarray(self.get_velocity(), dtype=np.float64)])
+        if not np.all(np.isfinite(state)):
+            self._status = MissileSimulator.MISS
+            self._termination_reason = "numerical_invalid"
+            return
+
+        distance = float(np.linalg.norm(
+            self.target_aircraft.get_position() - self.get_position()))
+        increasing = bool(distance > previous_distance)
+        self._distance_increment.append(increasing)
+        self._distance_pre = distance
+        diagnostic = self._intercept_diagnostic(
+            action, distance, previous_distance)
+
+        if (self.guidance_mode not in (
                 "paper_minimal_point_mass_v1",
                 "paper_learnable_point_mass_v1")
-              and np.linalg.norm(self.get_velocity()) < self._v_min):
+                and np.linalg.norm(self.get_velocity()) < self._v_min):
             self._status = MissileSimulator.MISS
             self._termination_reason = "low_speed"
         elif (self.guidance_mode in (
@@ -827,13 +873,6 @@ class MissileSimulator(BaseSimulator):
               and np.sum(self._distance_increment) >= self._distance_increment.maxlen):
             self._status = MissileSimulator.MISS
             self._termination_reason = "overshoot"
-        elif not self.target_aircraft.is_alive:
-            self._status = MissileSimulator.MISS
-            self._termination_reason = "target_dead"
-        else:
-            self._emit_trajectory_sample(diagnostic)
-            self._state_trans(action)
-            return
         self._emit_trajectory_sample(diagnostic)
 
     def _intercept_diagnostic(self, action, distance: float,
@@ -910,6 +949,10 @@ class MissileSimulator(BaseSimulator):
         P_hit = 0.05 + 0.95 * max(0, Vm dot Los / (|Vm| |Los|)).
         This replaces the previous heading-difference approximation.
         """
+        return float(self.rng.random()) < self._hit_probability()
+
+    def _hit_probability(self) -> float:
+        """Return the paper hit probability for the current geometry."""
         vm = self.get_velocity()
         los = self.target_aircraft.get_position() - self.get_position()
         vm_norm = float(np.linalg.norm(vm))
@@ -920,11 +963,10 @@ class MissileSimulator(BaseSimulator):
         elif vm_norm < 1e-8:
             directional_match = 0.0
         else:
-            directional_match = float(np.dot(vm, los) / (vm_norm * los_norm + 1e-8))
-            directional_match = max(0.0, directional_match)
+            directional_match = float(np.dot(vm, los) / (vm_norm * los_norm))
+            directional_match = float(np.clip(directional_match, 0.0, 1.0))
 
-        P_hit = 0.05 + 0.95 * directional_match
-        return float(self.rng.random()) < P_hit
+        return float(0.05 + 0.95 * directional_match)
 
     def detach_references(self):
         """Remove this missile from aircraft-owned lists after termination."""
@@ -979,13 +1021,17 @@ class MissileSimulator(BaseSimulator):
                 (x_t - x_m) * (dx_t - dx_m) + (y_t - y_m) * (dy_t - dy_m))) / (Rxyz ** 2 * Rxy + 1e-8)
             ny = self.K * v_m / self._g * np.cos(theta_m) * dbeta
             nz = self.K * v_m / self._g * deps + np.cos(theta_m)
-        command = np.clip(
-            np.asarray([ny, nz], dtype=np.float64),
-            -self._nyz_max, self._nyz_max)
-        if self.guidance_mode == "paper_learnable_point_mass_v1":
+        command = np.asarray([ny, nz], dtype=np.float64)
+        if self.guidance_mode in (
+                "paper_eq9", "paper_minimal_point_mass_v1",
+                "paper_learnable_point_mass_v1"):
             norm = float(np.linalg.norm(command))
+            if not np.isfinite(norm):
+                raise FloatingPointError("non-finite PN command")
             if norm > self._nyz_max:
                 command *= self._nyz_max / norm
+        else:
+            command = np.clip(command, -self._nyz_max, self._nyz_max)
         return command, Rxyz
 
     def _state_trans(self, action):

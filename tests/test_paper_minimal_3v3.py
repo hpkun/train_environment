@@ -362,7 +362,8 @@ def test_minimal_missile_rng_is_reproducible_and_independent_by_team_pair():
 def _causal_overshoot_missile():
     class Target:
         is_alive = True
-        def get_position(self): return np.array([1000.0, 0.0, 0.0])
+        def __init__(self): self.position = np.array([1000.0, 0.0, 0.0])
+        def get_position(self): return self.position
         def get_velocity(self): return np.zeros(3)
     missile = MissileSimulator(
         dt=0.1, guidance_mode="paper_minimal_point_mass_v1",
@@ -386,7 +387,8 @@ def test_minimal_missile_overshoot_requires_prior_positive_closing():
     missile._velocity[:] = [-100.0, 0.0, 0.0]
     distances = iter([1000.0, 1100.0, 1200.0, 1300.0])
     missile._guidance = lambda: (np.zeros(2), next(distances))
-    for _ in range(4):
+    for distance in (1000.0, 1100.0, 1200.0, 1300.0):
+        missile.target_aircraft.position[0] = distance
         missile.run()
     assert not missile.is_done
     assert not missile._has_ever_positive_closing
@@ -398,7 +400,8 @@ def test_minimal_missile_short_increase_inside_50m_does_not_overshoot():
     missile._guidance = lambda: (np.zeros(2), next(distances))
     missile.run()
     missile._velocity[:] = [-100.0, 0.0, 0.0]
-    for _ in range(3):
+    for distance in (1020.0, 1030.0, 1040.0):
+        missile.target_aircraft.position[0] = distance
         missile.run()
     assert not missile.is_done
 
@@ -409,9 +412,11 @@ def test_minimal_missile_true_overshoot_persists_for_window():
     missile._guidance = lambda: (np.zeros(2), next(distances))
     missile.run()
     missile._velocity[:] = [-100.0, 0.0, 0.0]
-    for _ in range(2):
+    for distance in (1060.0, 1070.0):
+        missile.target_aircraft.position[0] = distance
         missile.run()
         assert not missile.is_done
+    missile.target_aircraft.position[0] = 1080.0
     missile.run()
     assert missile.is_done
     assert missile._termination_reason == "overshoot"
@@ -647,7 +652,7 @@ def test_minimal_nonfinite_load_is_invalid(g_load):
     assert any("NonFiniteLoad" in reason for reason in result["reasons"])
 
 
-def test_minimal_engaged_target_blocks_fixed_pair_lock():
+def test_minimal_engaged_target_does_not_reset_continuous_eo_tracking():
     env = UavCombatEnv(
         max_num_red=3, max_num_blue=3,
         environment_profile=PAPER_MINIMAL_ENVIRONMENT_PROFILE,
@@ -657,8 +662,9 @@ def test_minimal_engaged_target_blocks_fixed_pair_lock():
         env.agent_ids = ["red_0"]
         env._engaged_targets = {"blue_0"}
         env._check_missile_launch()
-        assert env._lock_target["red_0"] is None
-        assert env._launch_diag_step["red"]["engaged_blocked"] == 1
+        assert env._lock_target["red_0"] == "blue_0"
+        assert env._lock_timer["red_0"] == 1
+        assert env._launch_diag_step["red"]["engaged_blocked"] == 0
     finally:
         env.close()
 

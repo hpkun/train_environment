@@ -236,6 +236,9 @@ def run_case(seed: int, scenario: str, max_steps: int = 1400) -> dict:
                       for record in all_done_records)
             for team in ("red", "blue")
         }
+        missile_numerical_invalid_count = sum(
+            record.get("raw_termination_reason") == "numerical_invalid"
+            for record in all_done_records)
         inside_radius = sum(
             float(record.get("range_m", np.inf)) < LEARNABLE_MISSILE_HIT_RADIUS_M
             for record in all_launch_records)
@@ -277,6 +280,8 @@ def run_case(seed: int, scenario: str, max_steps: int = 1400) -> dict:
             "blue_launches": launches["blue"],
             "red_hits": hits["red"],
             "blue_hits": hits["blue"],
+            "missile_numerical_invalid_count": int(
+                missile_numerical_invalid_count),
             "launch_inside_hit_radius_count": int(inside_radius),
             "one_physics_frame_hit_count": int(one_frame_hits),
             "missiles_survived_one_decision_count": int(survived_decision),
@@ -327,9 +332,10 @@ def main() -> None:
                 for row in mirror_rows)
         and all(np.rad2deg(row["final_mirror_errors"]["attitude_rad"]) <= 0.1
                 for row in mirror_rows))
-    load_health = all(
-        row["mirror_errors"]["load_scale"] <= 1e-6
-        for row in mirror_rows)
+    numerical_health = all(
+        row["finite"] and row["invalid_episode"] == 0
+        and row["missile_numerical_invalid_count"] == 0
+        for row in rows)
     missile_trajectory_health = run_trajectory_audit()["MissileTrajectoryHealth"]
     report = {
         "profile": PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
@@ -341,14 +347,13 @@ def main() -> None:
         "FireControlClosureBlue": _closure(
             by_scenario["blue_fixed_vs_red_straight"], "blue"),
         "MirrorDynamicsHealth": "PASS" if mirror_health else "FAIL",
-        "LoadControlHealth": "PASS" if load_health else "FAIL",
+        "NumericalHealth": "PASS" if numerical_health else "FAIL",
         "MissileTrajectoryHealth": missile_trajectory_health,
     }
     report["OverallEnvironmentAudit"] = "PASS" if all(
         report[key] == "PASS" for key in (
             "FireControlClosureRed", "FireControlClosureBlue",
-            "MirrorDynamicsHealth", "LoadControlHealth",
-            "MissileTrajectoryHealth")) else "FAIL"
+            "NumericalHealth", "MissileTrajectoryHealth")) else "FAIL"
     encoded = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:

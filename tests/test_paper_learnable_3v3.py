@@ -71,7 +71,7 @@ def test_learnable_profile_contract_and_dimensions():
         blue_policy_profile="paper_learnable_fixed_pair_v1", seed=3,
         initial_condition_randomization_mode="deterministic_v1")
     assert snapshot["profile_provenance"]["value"] == "learnability_adaptation"
-    assert snapshot["launch_range_m"]["value"] == (1000.0, 8000.0)
+    assert snapshot["launch_range_m"]["value"] == (0.0, 10_000.0)
     assert snapshot["initial_missile_direction_mode"]["value"] == (
         "aircraft_body_x_v1")
     for key in (
@@ -86,7 +86,8 @@ def test_learnable_profile_contract_and_dimensions():
     assert snapshot["load_command_scaling"]["value"] == (
         "disabled_for_paper_eq12_14")
     assert snapshot["pid_error_definition"]["value"] == (
-        "paper_eq13_principal_arctan_ratio_v1")
+        "paper_eq13_quadrant_preserving_operational_v1")
+    assert snapshot["environment_config"]["pid"]["throttle_base"]["value"] == 0.8
     assert _compute_obs_dim(3, 3, True, "paper_strict") == 60
     assert _compute_global_state_dim(3, "paper_strict") == 30
     preset = get_preset("vanilla_3v3_paper_learnable_500k")
@@ -272,6 +273,24 @@ def test_invalid_trace_jsonl_preserves_twelve_frames_and_context(tmp_path):
     assert record["physics_frames"][-1]["g_load_total"] is None
 
 
+def test_invalid_trace_without_matching_agent_never_uses_unknown(tmp_path):
+    path = tmp_path / "fallback_trace.jsonl"
+    _append_invalid_trace_jsonl(
+        str(path), run_id="audit-run", seed=3, total_step=1, env_index=0,
+        episode_info={
+            "EpisodeLength": 1,
+            "invalid_numerical_reasons": ["red_1:NonFiniteState"],
+        },
+        traces=[{
+            "trigger_agent_id": "red_0",
+            "trigger_level": "numerical_invalid",
+            "frames": [],
+        }])
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["invalid_reason"] == "NonFiniteState"
+    assert record["invalid_reason"] != "unknown"
+
+
 @pytest.mark.parametrize("aid", ["red_0", "blue_0"])
 def test_learnable_setpoints_pass_through_without_rate_limiting(aid):
     env = UavCombatEnv(
@@ -448,7 +467,9 @@ def test_learnable_missile_terminal_reasons_are_distinct(reason):
     missile._state_trans = lambda _action: None
     missile._t = 0.3
     if reason in ("hit", "p_hit_fail"):
-        missile._guidance = lambda: (np.zeros(2), 50.0)
+        target.position[:] = [50.0, 0.0, 6000.0]
+        missile._guidance = lambda: pytest.fail(
+            "contact frame must terminate before PN guidance")
         missile._roll_hit_probability = lambda: reason == "hit"
         missile.run()
     elif reason == "timeout":
@@ -491,8 +512,9 @@ def test_learnable_jitter_is_reproducible_and_mirrored():
 
 
 @pytest.mark.parametrize("range_m,expected_launch", [
-    (999.0, False), (1000.0, True), (3000.0, True),
-    (5000.0, True), (8000.0, True), (8001.0, False),
+    (0.0, False), (100.0, True), (999.0, True), (1000.0, True),
+    (8000.0, True), (8001.0, True), (10_000.0, True),
+    (10_000.1, False),
 ])
 def test_learnable_fire_control_range_boundaries(
         monkeypatch, range_m, expected_launch):
@@ -539,8 +561,132 @@ def test_learnable_fire_control_range_boundaries(
         env._check_missile_launch()
     assert bool(launches) is expected_launch
     diag = env._launch_diag_step["blue"]
-    assert diag["range_low_blocked"] > 0 if range_m < 1000.0 else True
-    assert diag["range_high_blocked"] > 0 if range_m > 8000.0 else True
+    assert diag["range_low_blocked"] > 0 if range_m <= 0.0 else True
+    assert diag["range_high_blocked"] > 0 if range_m > 10_000.0 else True
+
+
+def test_learnable_fire_control_tracks_before_ta_and_enforces_cooldown(
+        monkeypatch):
+    env = UavCombatEnv(
+        max_num_red=3, max_num_blue=3, max_steps=1400,
+        environment_profile=PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+    shooter = _Aircraft(
+        "blue_0", "Blue", [0.0, 0.0, 6000.0], [300.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0])
+    target = _Aircraft(
+        "red_0", "Red", [5000.0, 0.0, 6000.0], [-300.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0])
+    shooter.num_left_missiles = 999
+    env.blue_planes = {"blue_0": shooter}
+    env.red_planes = {"red_0": target}
+    env.agent_ids = ["blue_0"]
+    env._lock_timer = {"blue_0": 0}
+    env._lock_target = {"blue_0": None}
+    env._missile_cooldown = {"blue_0": 0}
+    env._fire_control_states = {"blue_0": FireControlState()}
+    env._fire_control_assignments = {"blue_0": "red_0"}
+    env._target_assignment_diagnostics = Counter()
+    env._engaged_targets = set()
+    env._launch_diag_step = make_empty_launch_diag()
+    env._agents_deny_kill = set()
+    visible = {"value": True}
+    ta = {"value": 0.0}
+    monkeypatch.setattr(
+        env, "_is_detected_by_electro_optical",
+        lambda *_: visible["value"])
+    monkeypatch.setattr("my_uav_env.env.compute_3d_range", lambda *_: 5000.0)
+    monkeypatch.setattr("my_uav_env.env.compute_body_x_q_los", lambda *_: 0.0)
+    monkeypatch.setattr(
+        "my_uav_env.env.get2d_heading_AO_TA_R",
+        lambda *_: (0.0, ta["value"], 5000.0))
+    launches = []
+    def launch(parent, enemy, _quality):
+        launches.append((parent.uid, enemy.uid))
+        env._missile_cooldown[parent.uid] = env.missile_cooldown_frames
+    monkeypatch.setattr(env, "_launch_missile", launch)
+
+    for _ in range(14):
+        env._check_missile_launch()
+    assert launches == []
+    assert env._lock_timer["blue_0"] == 14
+    env._check_missile_launch()
+    assert launches == []
+    assert env._lock_timer["blue_0"] == 15
+    assert env._fire_control_states["blue_0"].lock_mature is True
+
+    ta["value"] = np.pi
+    env._check_missile_launch()
+    assert len(launches) == 1
+    assert env._lock_timer["blue_0"] == 16
+    env._engaged_targets.clear()
+    for _ in range(env.missile_cooldown_frames - 1):
+        env._check_missile_launch()
+    assert len(launches) == 1
+    env._check_missile_launch()
+    assert len(launches) == 2
+
+    visible["value"] = False
+    env._check_missile_launch()
+    assert env._lock_target["blue_0"] is None
+    assert env._lock_timer["blue_0"] == 0
+
+
+def test_learnable_same_frame_live_missile_deconfliction(monkeypatch):
+    env = UavCombatEnv(
+        max_num_red=3, max_num_blue=3, max_steps=1400,
+        environment_profile=PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
+    shooters = {
+        f"blue_{i}": _Aircraft(
+            f"blue_{i}", "Blue", [0.0, float(i), 6000.0],
+            [300.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+        for i in range(2)}
+    target = _Aircraft(
+        "red_0", "Red", [5000.0, 0.0, 6000.0], [-300.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0])
+    for shooter in shooters.values():
+        shooter.num_left_missiles = 999
+    env.blue_planes = shooters
+    env.red_planes = {"red_0": target}
+    env.agent_ids = list(shooters)
+    env._lock_timer = {aid: 14 for aid in shooters}
+    env._lock_target = {aid: "red_0" for aid in shooters}
+    env._missile_cooldown = {aid: 0 for aid in shooters}
+    env._fire_control_states = {aid: FireControlState() for aid in shooters}
+    env._fire_control_assignments = {aid: "red_0" for aid in shooters}
+    env._target_assignment_diagnostics = Counter()
+    env._engaged_targets = {"blue_0"}  # A red missile must not block blue fire.
+    env._launch_diag_step = make_empty_launch_diag()
+    env._agents_deny_kill = set()
+    monkeypatch.setattr(env, "_is_detected_by_electro_optical", lambda *_: True)
+    monkeypatch.setattr("my_uav_env.env.compute_3d_range", lambda *_: 5000.0)
+    monkeypatch.setattr("my_uav_env.env.compute_body_x_q_los", lambda *_: 0.0)
+    monkeypatch.setattr(
+        "my_uav_env.env.get2d_heading_AO_TA_R",
+        lambda *_: (0.0, np.pi, 5000.0))
+    launches = []
+    monkeypatch.setattr(
+        env, "_launch_missile",
+        lambda parent, enemy, _quality: launches.append(
+            (parent.uid, enemy.uid)))
+    env._check_missile_launch()
+    assert len(launches) == 1
+    assert launches[0][1] == "red_0"
+    assert env._engaged_targets == {"blue_0", "red_0"}
+
+    second_target = _Aircraft(
+        "red_1", "Red", [5000.0, 10.0, 6000.0], [-300.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0])
+    env.red_planes["red_1"] = second_target
+    env._fire_control_assignments = {
+        "blue_0": "red_0", "blue_1": "red_1"}
+    env._lock_timer = {aid: 14 for aid in shooters}
+    env._lock_target = {
+        "blue_0": "red_0", "blue_1": "red_1"}
+    env._missile_cooldown = {aid: 0 for aid in shooters}
+    env._engaged_targets.clear()
+    launches.clear()
+    env._check_missile_launch()
+    assert sorted(target_id for _, target_id in launches) == ["red_0", "red_1"]
 
 
 def test_environment_assignment_waits_when_all_live_targets_engaged():
@@ -742,3 +888,13 @@ def test_mirror_audit_heading_error_is_circular_and_has_no_launch_gate():
     source = open(
         "scripts/audit_paper_learnable_3v3.py", encoding="utf-8").read()
     assert "_mirror_launch_health" not in source
+def test_fire_control_state_uses_paper_diagnostic_field_names():
+    state = FireControlState()
+    state.current_target_id = "blue_1"
+    state.continuous_detection_frames = 15
+    state.cooldown_frames_remaining = 30
+    snapshot = state.snapshot()
+    assert snapshot["tracked_target_id"] == "blue_1"
+    assert snapshot["continuous_eo_detection_frames"] == 15
+    assert snapshot["launch_cooldown_frames"] == 30
+

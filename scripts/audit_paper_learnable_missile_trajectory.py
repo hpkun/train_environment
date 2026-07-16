@@ -61,11 +61,16 @@ def _angle_deg(first: np.ndarray, second: np.ndarray) -> float:
     return float(np.rad2deg(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
 
-def audit_case(name: str, target_position: list[float]) -> dict:
+def audit_case(
+        name: str, target_position: list[float],
+        target_velocity: list[float] | None = None,
+        target_heading: float = math.pi) -> dict:
     parent = _Aircraft(
         "red_0", "Red", [0.0, 0.0, 6000.0], [300.0, 0.0, 0.0], 0.0)
     target = _Aircraft(
-        "blue_0", "Blue", target_position, [-300.0, 0.0, 0.0], math.pi)
+        "blue_0", "Blue", target_position,
+        [-300.0, 0.0, 0.0] if target_velocity is None else target_velocity,
+        target_heading)
     initial_target_position = target.position.copy()
     initial_los = target.position - parent.position
     samples: list[dict] = []
@@ -137,7 +142,14 @@ def run_audit() -> dict:
         audit_case("head_on_3km", [3000.0, 0.0, 6000.0]),
         audit_case("head_on_5km", [5000.0, 0.0, 6000.0]),
         audit_case("head_on_8km", [8000.0, 0.0, 6000.0]),
+        audit_case("head_on_10km", [10_000.0, 0.0, 6000.0]),
         audit_case("off_axis_5km", [4800.0, 1200.0, 6700.0]),
+        audit_case(
+            "tail_chase_5km", [5000.0, 0.0, 6000.0],
+            [200.0, 0.0, 0.0], 0.0),
+        audit_case(
+            "crossing_5km", [5000.0, -1000.0, 6000.0],
+            [0.0, 300.0, 0.0], math.pi / 2),
     ]
     off_axis = next(row for row in rows if row["scenario"] == "off_axis_5km")
     report = {

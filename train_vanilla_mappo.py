@@ -54,6 +54,7 @@ from configs.paper_minimal_3v3_spec import (
 from configs.paper_learnable_3v3_spec import (
     LEARNABLE_INITIALIZATION_MODES,
     LEARNABLE_MISSILE_GUIDANCE_MODE,
+    LEARNABLE_PID_THROTTLE_BASE,
     PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
     learnable_environment_snapshot,
 )
@@ -610,7 +611,7 @@ LEARNABILITY_DIAG_CSV_FIELDS = (
     "PersistentExtremeFiniteLoadInvalidEpisodes",
 )
 
-CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v7"
+CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v8"
 TRAINING_STATE_SCHEMA_VERSION = "vanilla_mappo_training_state_v1"
 ACTION_DISTRIBUTION_VERSION = "tanh_squashed_diag_gaussian_v1"
 ENTROPY_ESTIMATOR_VERSION = "pre_tanh_base_normal_entropy_v1"
@@ -705,7 +706,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "reward_mode": config.reward_mode,
         "pid_profile": config.pid_profile,
         "pid_throttle_base": float(config.pid_throttle_base),
-        "pid_error_definition": "paper_eq13_principal_arctan_ratio_v1",
+        "pid_error_definition": "paper_eq13_quadrant_preserving_operational_v1",
         "missile_guidance_mode": config.missile_guidance_mode,
         "altitude_reward_config": asdict(config.altitude_reward_config),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
@@ -789,6 +790,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             "missile_overshoot_window_s",
             "missile_overshoot_distance_hysteresis_m",
             "missile_positive_closing_threshold_mps", "launch_range_m",
+            "launch_deconfliction", "missile_los_definition",
             "fire_control_profile", "reward_version", "target_assignment_mode",
             "observation_mode", "actor_input_dim",
             "critic_input_dim", "setpoint_rate_limiter",
@@ -800,6 +802,9 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             metadata[key] = sourced["value"]
             provenance[key] = sourced["source"]
         metadata["profile_provenance_fields"] = provenance
+        metadata["pid_throttle_base"] = float(
+            environment_snapshot["environment_config"]["pid"][
+                "throttle_base"]["value"])
     return metadata
 
 
@@ -954,6 +959,9 @@ def _append_invalid_trace_jsonl(
             agent_id = str(trace.get("trigger_agent_id", ""))
             matching = [reason for reason in reasons
                         if reason.startswith(f"{agent_id}:")]
+            fallback_reason = (
+                reasons[0].split(":", 1)[-1] if reasons
+                else trace.get("invalid_reason", "numerical_invalid"))
             record = {
                 "run_id": run_id,
                 "seed": seed,
@@ -963,8 +971,7 @@ def _append_invalid_trace_jsonl(
                 "agent_id": agent_id,
                 "team": "blue" if agent_id.startswith("blue") else "red",
                 "invalid_reason": (matching[0].split(":", 1)[1]
-                                   if matching else trace.get(
-                                       "invalid_reason", "unknown")),
+                                   if matching else fallback_reason),
                 "trigger_g": trace.get("trigger_g"),
                 "trigger_level": trace.get("trigger_level"),
                 "physics_frames": trace.get("frames", []),
@@ -3000,6 +3007,8 @@ def main():
     _validate_preset_resume_semantics(args)
 
     config = make_config_from_args(args)
+    if config.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
+        config.pid_throttle_base = LEARNABLE_PID_THROTTLE_BASE
     if config.launch_quality_file is None:
         config.launch_quality_file = _default_launch_quality_file(config.results_file)
     if config.eval_log_file is None:

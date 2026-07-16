@@ -28,6 +28,7 @@ from configs.paper_minimal_3v3_spec import (
 from configs.paper_learnable_3v3_spec import (
     LEARNABLE_INITIALIZATION_MODES,
     LEARNABLE_MISSILE_GUIDANCE_MODE,
+    LEARNABLE_PID_THROTTLE_BASE,
     PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
     learnable_environment_snapshot,
 )
@@ -93,12 +94,16 @@ EVALUATION_FIELDNAMES = [
     "MissileLifetimeMeanS",
     "RedMaximumGSeen", "BlueMaximumGSeen",
     "RedFramesAbove9G", "BlueFramesAbove9G",
+    "RedMaximumConsecutiveAbove9GFrames",
+    "BlueMaximumConsecutiveAbove9GFrames",
+    "RedEpisodeEverExceeded9G", "BlueEpisodeEverExceeded9G",
     "RedTransientAbove30GEvents", "BlueTransientAbove30GEvents",
     "RedMaximumConsecutiveAbove30GFrames",
     "BlueMaximumConsecutiveAbove30GFrames",
     "RedLoadProtectionActiveFrames", "BlueLoadProtectionActiveFrames",
     "RedMWSWarningGenerations",
     "RedMWSDirectionChangesWithinSameMissile",
+    "RedMWSSuppressedDirectionFlipAttempts",
     "RedMWSMaximumContinuousDecisions", "RedMWSTargetHeadingDeltaMaxDeg",
     "RedSetpointRateLimitActivations", "BlueSetpointRateLimitActivations",
     "NonFiniteLoadInvalidEpisodes", "CatastrophicFiniteLoadInvalidEpisodes",
@@ -599,6 +604,16 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "BlueMaximumGSeen": team_diag(blue_ids, "maximum_load_g_seen"),
             "RedFramesAbove9G": team_diag(red_ids, "frames_above_9g", sum),
             "BlueFramesAbove9G": team_diag(blue_ids, "frames_above_9g", sum),
+            "RedMaximumConsecutiveAbove9GFrames": team_diag(
+                red_ids, "maximum_consecutive_above_9g_frames"),
+            "BlueMaximumConsecutiveAbove9GFrames": team_diag(
+                blue_ids, "maximum_consecutive_above_9g_frames"),
+            "RedEpisodeEverExceeded9G": int(any(
+                info.get(aid, {}).get("episode_ever_exceeded_9g", False)
+                for aid in red_ids)),
+            "BlueEpisodeEverExceeded9G": int(any(
+                info.get(aid, {}).get("episode_ever_exceeded_9g", False)
+                for aid in blue_ids)),
             "RedTransientAbove30GEvents": team_diag(
                 red_ids, "transient_above_30g_events", sum),
             "BlueTransientAbove30GEvents": team_diag(
@@ -615,6 +630,8 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                 "red_warning_generations", 0)),
             "RedMWSDirectionChangesWithinSameMissile": int(mws_diag.get(
                 "red_direction_changes_within_same_missile", 0)),
+            "RedMWSSuppressedDirectionFlipAttempts": int(mws_diag.get(
+                "red_suppressed_direction_flip_attempts", 0)),
             "RedMWSMaximumContinuousDecisions": int(mws_diag.get(
                 "red_maximum_continuous_decisions", 0)),
             "RedMWSTargetHeadingDeltaMaxDeg": float(mws_diag.get(
@@ -734,6 +751,8 @@ def _write_and_print_summary(rows: list[dict], output_path: str,
 
 def main():
     args = parse_args()
+    if args.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
+        args.pid_throttle_base = LEARNABLE_PID_THROTTLE_BASE
     _set_seed(args.seed)
     device = _select_device(args.device)
     actor, rnn_hidden_size, _checkpoint = _load_actor(args, device)
