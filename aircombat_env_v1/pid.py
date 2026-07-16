@@ -67,11 +67,15 @@ class PIDLoop:
 class PaperAutopilot:
     """Literal three-channel paper controller; rudder is fixed at zero."""
 
-    def __init__(self, roll_gains, pitch_gains, speed_gains, throttle_base,
-                 actuator_sign_elevator, integral_error_limits=(0.35, 0.25, 40.0),
+    def __init__(self, roll_gains, pitch_gains, speed_gains, elevator_trim,
+                 throttle_base, actuator_sign_elevator,
+                 integral_error_limits=(0.35, 0.25, 40.0),
                  derivative_filter_tau=0.05):
+        self.elevator_trim = float(elevator_trim)
         self.throttle_base = float(throttle_base)
         self.actuator_sign_elevator = float(actuator_sign_elevator)
+        if not -1.0 <= self.elevator_trim <= 1.0:
+            raise ValueError("elevator_trim must be in [-1, 1]")
         if not 0.0 <= self.throttle_base <= 1.0:
             raise ValueError("throttle_base must be in [0, 1]")
         if self.actuator_sign_elevator not in (-1.0, 1.0):
@@ -91,6 +95,7 @@ class PaperAutopilot:
     def from_config(cls, config):
         pid = config["pid"]
         return cls(pid["roll"], pid["pitch"], pid["speed"],
+                   config["trim"]["elevator_trim"],
                    config["trim"]["throttle_base"],
                    config["actuator_sign_elevator"],
                    tuple(pid["integral_error_limits"]),
@@ -113,7 +118,10 @@ class PaperAutopilot:
             current_roll, current_pitch, current_heading,
             target_pitch, target_heading)
         aileron = self.roll_pid.step(e_roll, dt)
-        elevator = self.actuator_sign_elevator * self.pitch_pid.step(e_pitch, dt)
+        elevator = float(np.clip(
+            self.elevator_trim
+            + self.actuator_sign_elevator * self.pitch_pid.step(e_pitch, dt),
+            -1.0, 1.0))
         speed_correction = self.speed_pid.step(
             target_true_airspeed - current_true_airspeed, dt)
         throttle = float(np.clip(self.throttle_base + speed_correction, 0.0, 1.0))

@@ -1,38 +1,57 @@
-# PID design boundary
+# PID design and acceptance boundary
 
-This directory implements only the flight-control structure described in
-BRMA-MAPPO Section 2.4. It does not implement reinforcement learning, combat,
-weapons, sensors, rewards, or multi-agent behavior.
+This package implements only a JSBSim F-16 flight-control experiment. It has
+no reinforcement learning, combat, rewards, weapons, sensors, or multi-agent
+behavior.
 
-## Explicitly stated by the paper
+## Paper structure versus local engineering
 
-The command consists of target pitch, target heading, and target speed. The
-target direction vector is
-`[cos(theta)cos(psi), cos(theta)sin(psi), sin(theta)]` in the paper's z-up
-inertial coordinates. It is transformed into body coordinates; roll and pitch
-direction errors are computed with `atan2(y, x)` and `atan2(z_up, x)`.
+The controller structure comes from BRMA-MAPPO Section 2.4: target pitch,
+heading, and speed define a desired direction; that direction is transformed
+to body coordinates; roll, pitch, and speed PID channels drive aileron,
+elevator, and throttle; rudder has no feedback. Integral limiting and actuator
+saturation belong to this reported structure.
 
-The structure has roll, pitch, and speed PID channels. Rudder has no feedback
-and remains zero. Integral limiting and actuator saturation are part of the
-reported structure.
+The numerical PID gains are not paper parameters. Elevator trim, throttle
+base, integral thresholds, derivative filtering, actuator signs, PID frequency,
+and all validation thresholds are local engineering choices for this JSBSim
+F-16 model or results of offline experiments.
 
-## Not specified by the paper
+JSBSim uses NED and aerospace body z-down. The paper's z-up desired vector is
+therefore sign-flipped on entry to NED and body z is negated before evaluating
+the published pitch error. Closed-loop elevator output is local trim plus the
+signed pitch PID increment, clipped to `[-1, 1]`.
 
-The numerical PID gains, throttle base, integral-separation thresholds,
-derivative filter, F-16 actuator signs, and PID execution frequency are not
-reported. Every such value in `f16_pid_v1.yaml` is therefore an engineering
-choice or a result of offline tuning on the local JSBSim F-16, never a paper
-gain. `initial_guess_only` remains true until the scripts produce accepted
-local results.
+## Dual-frequency execution
 
-## Coordinate and actuator conventions
+JSBSim physics and PID both run at 60 Hz. The high-level command interface is
+called at 5 Hz, and each target is held for exactly 12 physics/PID frames. A
+“5 Hz update” means the decision interface is invoked every 0.2 seconds; it
+does not mean the command value must change every 0.2 seconds. The deterministic
+combined task changes heading every 3 seconds, pitch every 4 seconds, and speed
+every 5 seconds.
 
-JSBSim and this package use NED and aerospace body z-down axes. Consequently,
-the target vector's z component changes sign on entry to NED, and body z is
-negated before evaluating the paper's pitch error. The initial elevator sign
-is an engineering hypothesis; `check_actuator_signs.py` reports measured
-directions but deliberately does not change configuration.
+## Parameter lifecycle
 
-The 60 Hz physics/PID frequency and 5 Hz command frequency follow the local
-interpretation recorded in the configuration. The timing structure is cited
-to TAM-HAPPO Section 4.2; numerical PID behavior is still locally engineered.
+`parameter_status` has exactly three states:
+
+- `initial_guess`: engineering starting values, not experimentally accepted.
+- `candidate`: trim or PID optimization was accepted, but complete validation
+  has not passed.
+- `validated`: all 72 short cases and all eight representative 200-second long
+  cases passed the configured local thresholds.
+
+Trim and tuning scripts emit candidate YAML by default. Their explicit accept
+flags can update the formal configuration only to `candidate`. Only
+`validate_pid.py --mark-validated` can set `validated`, and it refuses when any
+short or long case fails.
+
+## Metrics
+
+Tuning records roll, pitch, and speed errors separately, normalized by 30 deg,
+10 deg, and 50 m/s. Control energy uses increments around the trim point:
+aileron, `elevator-elevator_trim`, rudder, and
+`throttle-throttle_base`. Step overshoot is measured only after the response
+first reaches its target; settling requires the error to remain within its
+channel tolerance through the end of that step segment. Heading calculations
+use circular angle differences.

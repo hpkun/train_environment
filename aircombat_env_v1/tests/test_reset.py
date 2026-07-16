@@ -64,4 +64,4 @@ def test_reset_reuses_the_same_fdm(monkeypatch):
     simulator.reset(altitude_m=7000.0)
     assert simulator.fdm is original
     assert FakeFDM.constructions == 1
-    assert simulator.fdm.reset_calls == 2
+    assert simulator.fdm.reset_calls == 3  # two cold-start passes, then one reset

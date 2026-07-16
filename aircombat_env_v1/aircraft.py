@@ -34,6 +34,7 @@ class AircraftSimulator:
         if not self.fdm.load_model(self.model):
             raise RuntimeError(f"failed to load JSBSim model {self.model!r}")
         self.fdm.set_dt(self.dt)
+        self._has_initialized = False
 
     def get_property(self, name):
         return float(self.fdm.get_property_value(name))
@@ -45,7 +46,6 @@ class AircraftSimulator:
               roll_deg=0.0, pitch_deg=0.0, latitude_deg=60.0,
               longitude_deg=120.0, elevator_trim=0.0, throttle_base=0.3):
         """Reset initial conditions without constructing another FGFDMExec."""
-        self.fdm.reset_to_initial_conditions(0)
         initial = {
             "ic/long-gc-deg": longitude_deg,
             "ic/lat-geod-deg": latitude_deg,
@@ -62,14 +62,22 @@ class AircraftSimulator:
             "ic/roc-fpm": 0.0,
             "ic/terrain-elevation-ft": 0.0,
         }
-        for name, value in initial.items():
-            self.set_property(name, value)
-        if not self.fdm.run_ic():
-            raise RuntimeError("JSBSim failed to initialize")
-        propulsion = self.fdm.get_propulsion()
-        for index in range(propulsion.get_num_engines()):
-            propulsion.get_engine(index).init_running()
-        propulsion.get_steady_state()
+        # The first engine/FCS initialization of a newly loaded FDM differs
+        # slightly from later resets. Prime it once through this same path so
+        # the first recorded episode and every reused episode are reproducible.
+        passes = 1 if self._has_initialized else 2
+        for _ in range(passes):
+            self.fdm.reset_to_initial_conditions(0)
+            for name, value in initial.items():
+                self.set_property(name, value)
+            self.set_controls(0.0, elevator_trim, 0.0, throttle_base)
+            if not self.fdm.run_ic():
+                raise RuntimeError("JSBSim failed to initialize")
+            propulsion = self.fdm.get_propulsion()
+            for index in range(propulsion.get_num_engines()):
+                propulsion.get_engine(index).init_running()
+            propulsion.get_steady_state()
+        self._has_initialized = True
         self.set_controls(0.0, elevator_trim, 0.0, throttle_base)
         return self.state()
 

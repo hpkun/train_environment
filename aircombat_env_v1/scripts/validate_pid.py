@@ -1,10 +1,11 @@
-"""Validate eight command tasks over the required altitude/speed matrix."""
+"""Run 72 short responses and eight representative long stability cases."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -16,19 +17,26 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from aircombat_env_v1.aircraft import AircraftSimulator
-from aircombat_env_v1.config import load_config
-from aircombat_env_v1.geometry import paper_direction_errors
+from aircombat_env_v1.config import DEFAULT_CONFIG, load_config, save_config
+from aircombat_env_v1.execution import run_command_hold
+from aircombat_env_v1.metrics import step_response_metrics, trajectory_metrics
 from aircombat_env_v1.pid import PaperAutopilot
 
 
 FIELDS = ["time", "target_pitch", "target_heading", "target_true_airspeed",
           "aileron", "elevator", "rudder", "throttle", "roll", "pitch",
-          "heading", "p", "q", "r", "altitude", "true_airspeed", "alpha",
-          "beta", "load_factor"]
+          "heading", "p", "q", "r", "altitude", "true_airspeed", "v_north",
+          "v_east", "v_down", "longitude", "latitude", "alpha", "beta",
+          "load_factor"]
+TASKS = ("level", "left_turn", "right_turn", "climb", "descent",
+         "accelerate", "decelerate", "combined")
+LONG_CASES = (("level", 6000, 250), ("left_turn", 6000, 250),
+              ("right_turn", 6000, 250), ("climb", 6000, 250),
+              ("descent", 6000, 250), ("combined", 6000, 250),
+              ("level", 5000, 220), ("level", 7000, 300))
 
 
-def command(task, elapsed, base_speed):
-    phase = int(elapsed / 0.2)
+def command_at_decision_step(task, decision_step, base_speed):
     if task == "level":
         return 0.0, 0.0, base_speed
     if task == "left_turn":
@@ -46,123 +54,120 @@ def command(task, elapsed, base_speed):
     if task == "combined":
         headings = (0.0, np.deg2rad(30.0), np.deg2rad(-30.0))
         pitches = (0.0, np.deg2rad(8.0), np.deg2rad(-8.0))
-        return pitches[(phase // 15) % 3], headings[(phase // 20) % 3], (
-            base_speed + (-20.0, 0.0, 20.0)[(phase // 25) % 3])
+        speeds = (base_speed, base_speed + 20.0, base_speed - 20.0)
+        return (pitches[(decision_step // 20) % 3],
+                headings[(decision_step // 15) % 3],
+                speeds[(decision_step // 25) % 3])
     raise ValueError(f"unknown task: {task}")
 
 
-def settling_time(rows, tolerance=0.05):
-    errors = []
-    for row in rows:
-        roll_error, pitch_error = paper_direction_errors(
-            row["roll"], row["pitch"], row["heading"],
-            row["target_pitch"], row["target_heading"])
-        speed_error = (row["target_true_airspeed"] - row["true_airspeed"]) / 50.0
-        errors.append(max(abs(roll_error), abs(pitch_error), abs(speed_error)))
-    for index in range(len(errors)):
-        if max(errors[index:], default=0.0) <= tolerance:
-            return rows[index]["time"] - rows[0]["time"]
-    return None
+def failure_reasons(metrics, thresholds, long_run):
+    checks = [
+        (thresholds["no_nan_or_inf"] and metrics["has_nan_or_inf"], "nan_or_inf"),
+        (thresholds["no_crash"] and metrics["crashed"], "crash_or_simulation_failure"),
+        (metrics["heading_final_error_deg"] > thresholds["heading_final_error_deg"],
+         "heading_final_error"),
+        (metrics["pitch_final_error_deg"] > thresholds["pitch_final_error_deg"],
+         "pitch_final_error"),
+        (metrics["speed_final_error_mps"] > thresholds["speed_final_error_mps"],
+         "speed_final_error"),
+        (metrics["aileron_saturation_ratio"] > thresholds["aileron_saturation_ratio"],
+         "aileron_saturation"),
+        (metrics["elevator_saturation_ratio"] > thresholds["elevator_saturation_ratio"],
+         "elevator_saturation"),
+        (metrics["throttle_saturation_ratio"] > thresholds["throttle_saturation_ratio"],
+         "throttle_saturation"),
+        (metrics["maximum_alpha_deg"] > thresholds["maximum_alpha_deg"], "maximum_alpha"),
+        (metrics["maximum_beta_deg"] > thresholds["maximum_beta_deg"], "maximum_beta"),
+        (metrics["maximum_load_factor"] > thresholds["maximum_load_factor"],
+         "maximum_load_factor"),
+        (long_run and metrics["altitude_loss_m"] > thresholds["long_run_altitude_loss_m"],
+         "long_run_altitude_loss"),
+    ]
+    return [reason for failed, reason in checks if failed]
 
 
-def metrics(rows, initial_altitude, crashed, nonfinite, dt):
-    error_integral = max_overshoot = 0.0
-    previous = None
-    saturated = 0
-    for row in rows:
-        roll_error, pitch_error = paper_direction_errors(
-            row["roll"], row["pitch"], row["heading"],
-            row["target_pitch"], row["target_heading"])
-        speed_error = (row["target_true_airspeed"] - row["true_airspeed"]) / 50.0
-        errors = np.array([roll_error, pitch_error, speed_error])
-        error_integral += float(np.abs(errors).sum()) * dt
-        if previous is not None:
-            max_overshoot = max(max_overshoot,
-                                float(np.max(np.maximum(0.0, -(errors * previous)))))
-        previous = errors
-        saturated += int(abs(row["aileron"]) > 0.999
-                         or abs(row["elevator"]) > 0.999
-                         or row["throttle"] < 0.001 or row["throttle"] > 0.999)
-    return {
-        "tracking_error_integral": error_integral,
-        "maximum_overshoot": max_overshoot,
-        "settling_time_s": settling_time(rows),
-        "saturation_ratio": saturated / max(1, len(rows)),
-        "maximum_alpha_deg": max((abs(np.rad2deg(r["alpha"])) for r in rows), default=0.0),
-        "maximum_beta_deg": max((abs(np.rad2deg(r["beta"])) for r in rows), default=0.0),
-        "maximum_load_factor": max((abs(r["load_factor"]) for r in rows), default=0.0),
-        "altitude_loss_m": max(0.0, initial_altitude
-                               - min((r["altitude"] for r in rows), default=initial_altitude)),
-        "crashed": crashed,
-        "has_nan_or_inf": nonfinite,
-    }
-
-
-def run_case(simulator, config, task, altitude, speed, duration):
+def run_case(simulator, config, task, altitude, speed, duration, long_run):
     controller = PaperAutopilot.from_config(config)
-    simulator.reset(altitude_m=altitude, speed_mps=speed,
-                    elevator_trim=config["trim"]["elevator_trim"],
-                    throttle_base=config["trim"]["throttle_base"])
-    rows, crashed, nonfinite = [], False, False
-    for index in range(round(duration / simulator.dt)):
-        state = simulator.state()
-        target = command(task, index * simulator.dt, speed)
-        controls = controller.step(
-            state["roll"], state["pitch"], state["heading"],
-            state["true_airspeed"], *target, simulator.dt)
-        simulator.set_controls(*controls)
-        try:
-            state = simulator.run()
-        except RuntimeError:
-            crashed = True
+    initial = simulator.reset(altitude_m=altitude, speed_mps=speed,
+                              elevator_trim=config["trim"]["elevator_trim"],
+                              throttle_base=config["trim"]["throttle_base"])
+    decision_hz = config["timing"]["decision_frequency_hz"]
+    hold = config["timing"]["physics_steps_per_decision"]
+    rows, failure = [], None
+    for decision in range(max(1, math.ceil(duration * decision_hz))):
+        target = command_at_decision_step(task, decision, speed)
+        held_rows, failure = run_command_hold(simulator, controller, target, hold)
+        rows.extend(held_rows)
+        if failure:
             break
-        values = tuple(state.values()) + tuple(controls)
-        if not np.all(np.isfinite(values)):
-            nonfinite = True
-            break
-        row = {field: state.get(field) for field in FIELDS}
-        row.update(target_pitch=target[0], target_heading=target[1],
-                   target_true_airspeed=target[2], aileron=controls[0],
-                   elevator=controls[1], rudder=controls[2], throttle=controls[3])
-        rows.append(row)
-        if state["altitude"] < 1000.0 or state["true_airspeed"] < 120.0:
-            crashed = True
-            break
-    return rows, metrics(rows, altitude, crashed, nonfinite, simulator.dt)
+    result = trajectory_metrics(rows, config, altitude, failure)
+    result.update(step_response_metrics(rows, initial))
+    reasons = failure_reasons(result, config["validation_thresholds"], long_run)
+    result.update(passed=not reasons, failure_reasons=reasons)
+    return rows, result
+
+
+def write_case(output, name, rows):
+    with (output / f"{name}.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=FIELDS, extrasaction="ignore")
+        writer.writeheader(); writer.writerows(rows)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--duration", type=float, default=20.0)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--short-duration", type=float, default=40.0)
+    parser.add_argument("--long-duration", type=float, default=200.0)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--mark-validated", action="store_true")
     args = parser.parse_args()
-    if args.duration <= 0:
-        parser.error("duration must be positive")
-    config = load_config()
+    if args.short_duration <= 0 or args.long_duration <= 0:
+        parser.error("durations must be positive")
+    config = load_config(args.config)
     output = args.output or (ROOT / "aircombat_env_v1" / "outputs" /
                              f"validation_{datetime.now():%Y%m%d_%H%M%S_%f}")
     output.mkdir(parents=True, exist_ok=False)
     simulator = AircraftSimulator(config["timing"]["sim_frequency_hz"])
-    tasks = ("level", "left_turn", "right_turn", "climb", "descent",
-             "accelerate", "decelerate", "combined")
-    summary = []
+    short_results, long_results = [], []
     for altitude in (5000, 6000, 7000):
         for speed in (220, 250, 300):
-            for task in tasks:
+            for task in TASKS:
                 rows, result = run_case(
-                    simulator, config, task, altitude, speed, args.duration)
-                name = f"{task}_h{altitude}_v{speed}"
-                with (output / f"{name}.csv").open(
-                        "w", newline="", encoding="utf-8") as stream:
-                    writer = csv.DictWriter(stream, fieldnames=FIELDS)
-                    writer.writeheader()
-                    writer.writerows(rows)
-                result.update(task=task, altitude_m=altitude, speed_mps=speed,
-                              csv=f"{name}.csv")
-                summary.append(result)
-                print(name)
-    (output / "summary.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8")
+                    simulator, config, task, altitude, speed, args.short_duration, False)
+                name = f"short_{task}_h{altitude}_v{speed}"
+                write_case(output, name, rows)
+                result.update(kind="short", task=task, altitude_m=altitude,
+                              speed_mps=speed, csv=f"{name}.csv")
+                short_results.append(result)
+                print(f"{name}: {'PASS' if result['passed'] else 'FAIL'}")
+    for task, altitude, speed in LONG_CASES:
+        rows, result = run_case(
+            simulator, config, task, altitude, speed, args.long_duration, True)
+        name = f"long_{task}_h{altitude}_v{speed}"
+        write_case(output, name, rows)
+        result.update(kind="long", task=task, altitude_m=altitude,
+                      speed_mps=speed, csv=f"{name}.csv")
+        long_results.append(result)
+        print(f"{name}: {'PASS' if result['passed'] else 'FAIL'}")
+    summary = {
+        "short_cases_total": len(short_results),
+        "short_cases_passed": sum(result["passed"] for result in short_results),
+        "long_cases_total": len(long_results),
+        "long_cases_passed": sum(result["passed"] for result in long_results),
+        "all_short_passed": all(result["passed"] for result in short_results),
+        "all_long_passed": all(result["passed"] for result in long_results),
+        "short_cases": short_results, "long_cases": long_results,
+    }
+    summary["overall_passed"] = summary["all_short_passed"] and summary["all_long_passed"]
+    (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if args.mark_validated:
+        if not summary["overall_passed"]:
+            raise RuntimeError("refusing --mark-validated because validation did not pass")
+        config["parameter_status"] = "validated"
+        config["gain_source"] = "offline_tuned_on_local_jsbsim_f16"
+        save_config(config, args.config)
+        print(f"marked validated: {args.config}")
     print(f"summary: {output / 'summary.json'}")
 
 
