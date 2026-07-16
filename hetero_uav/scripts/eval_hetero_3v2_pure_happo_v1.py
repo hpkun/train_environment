@@ -1,4 +1,4 @@
-"""Deterministic evaluation for a formal-v1 Pure HAPPO checkpoint."""
+"""Deterministic evaluation for a formal V1/V2 Pure HAPPO checkpoint."""
 from __future__ import annotations
 
 import argparse, json, os, sys
@@ -14,20 +14,41 @@ from algorithms.pure_happo import ALGORITHM_CONTRACT, PureHAPPOPolicy
 from uav_env.make_env import make_env
 from uav_env.JSBSim.formal_v1.contract import ENV_TYPE
 from uav_env.JSBSim.formal_v1.reward import REWARD_CONTRACT_VERSION
+from uav_env.JSBSim.formal_v2.contract import (
+    ENV_TYPE as V2_ENV_TYPE,
+    OBSERVATION_CONTRACT as V2_OBSERVATION_CONTRACT,
+    REWARD_CONTRACT_VERSION as V2_REWARD_CONTRACT_VERSION,
+)
 
 
-def _validate_checkpoint_meta(meta: dict) -> None:
-    if meta.get("formal_contract") != ENV_TYPE or meta.get("credit_mode") != "shared_alive_team_mean":
-        raise ValueError("checkpoint is not a formal-v1 shared-credit checkpoint")
-    if meta.get("reward_contract", {}).get("version") != REWARD_CONTRACT_VERSION:
-        raise ValueError("checkpoint does not use the current formal role-reward contract")
+def _validate_checkpoint_meta(
+    meta: dict, expected_formal_contract: str | None = None,
+) -> None:
+    formal_contract = meta.get("formal_contract")
+    if expected_formal_contract is not None and formal_contract != expected_formal_contract:
+        raise ValueError(
+            f"checkpoint formal_contract={formal_contract!r} does not match "
+            f"environment {expected_formal_contract!r}")
+    if formal_contract not in {ENV_TYPE, V2_ENV_TYPE}:
+        raise ValueError("checkpoint is not a supported formal V1/V2 checkpoint")
+    if meta.get("credit_mode") != "shared_alive_team_mean":
+        raise ValueError("checkpoint is not a formal shared-credit checkpoint")
+    if formal_contract == V2_ENV_TYPE:
+        if meta.get("reward_contract") != V2_REWARD_CONTRACT_VERSION:
+            raise ValueError("checkpoint reward_contract is not formal V2")
+        if meta.get("observation_contract") != V2_OBSERVATION_CONTRACT:
+            raise ValueError("checkpoint observation_contract is not formal V2")
+        dimensions = {"actor_obs_dim": 73, "critic_state_dim": 219}
+    else:
+        if meta.get("reward_contract", {}).get("version") != REWARD_CONTRACT_VERSION:
+            raise ValueError("checkpoint does not use the current formal V1 reward contract")
+        dimensions = {"actor_obs_dim": 68, "critic_state_dim": 204}
     expected = {
         "algorithm_contract": ALGORITHM_CONTRACT,
         "policy_distribution": "tanh_squashed_gaussian_raw_action",
         "critic_contract": "centralized_shared_scalar_v",
         "gae_contract": "separated_termination_truncation",
-        "actor_obs_dim": 68, "critic_state_dim": 204, "action_dim": 3,
-        "num_agents": 3,
+        **dimensions, "action_dim": 3, "num_agents": 3,
     }
     for key, value in expected.items():
         if meta.get(key) != value:
@@ -46,7 +67,14 @@ def main():
     env = make_env(str(ROOT / a.config) if not Path(a.config).is_absolute() else a.config)
     model = Path(a.checkpoint); model = model if model.is_absolute() else ROOT / model
     meta = json.loads((model.parent / "meta.json").read_text(encoding="utf-8"))
-    _validate_checkpoint_meta(meta)
+    _validate_checkpoint_meta(meta, env.formal_contract)
+    for key, actual in (
+            ("actor_obs_dim", env.actor_obs_dim),
+            ("critic_state_dim", env.critic_state_dim),
+            ("action_dim", env.action_dim)):
+        if int(meta[key]) != int(actual):
+            raise ValueError(
+                f"checkpoint {key}={meta[key]} does not match environment {actual}")
     policy = PureHAPPOPolicy(meta["actor_obs_dim"], meta["critic_state_dim"],
                              meta["action_dim"], meta["num_agents"]).to(a.device)
     policy.load_state_dict(torch.load(model, map_location=a.device, weights_only=True)); policy.eval()

@@ -39,6 +39,10 @@ def make_env(config_path: str | None = None, **kwargs):
         from .JSBSim.formal_v1 import make_formal_env
 
         return make_formal_env(env_type=env_type, **config)
+    if env_type == "hetero_3v2_pure_happo_v2":
+        from .JSBSim.formal_v2 import make_formal_env
+
+        return make_formal_env(env_type=env_type, **config)
     if env_type != "hetero":
         raise ValueError(f"Unknown env_type: {env_type}")
     from .JSBSim.envs.hetero_uav_env import HeteroUAVEnv

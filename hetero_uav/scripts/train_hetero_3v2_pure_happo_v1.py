@@ -27,6 +27,16 @@ from uav_env.JSBSim.formal_v1.contract import ACTION_DIM, ENV_TYPE
 from uav_env.JSBSim.formal_v1.reward import (
     EVENT_REWARDS, GLOBAL_REWARD_SCALE, MAV_WEIGHTS, REWARD_CONTRACT_VERSION, UAV_WEIGHTS,
 )
+from uav_env.JSBSim.formal_v2.contract import (
+    ENV_TYPE as V2_ENV_TYPE,
+    OBSERVATION_CONTRACT as V2_OBSERVATION_CONTRACT,
+    REWARD_CONTRACT_VERSION as V2_REWARD_CONTRACT_VERSION,
+)
+from uav_env.JSBSim.formal_v2.reward import (
+    MAV_SAFETY_WEIGHTS as V2_MAV_SAFETY_WEIGHTS,
+    MAV_SUPPORT_WEIGHTS as V2_MAV_SUPPORT_WEIGHTS,
+    UAV_WEIGHTS as V2_UAV_WEIGHTS,
+)
 
 
 def _args(argv=None):
@@ -151,6 +161,7 @@ def _save_train_state(path: Path, policy, trainer, *, meta: dict, total_steps: i
         "training_hyperparameters": dict(meta["training_hyperparameters"]),
         "formal_contract": meta["formal_contract"],
         "reward_contract": meta["reward_contract"],
+        "observation_contract": meta.get("observation_contract"),
         "algorithm_contract": meta["algorithm_contract"],
         "actor_obs_dim": int(meta["actor_obs_dim"]),
         "critic_state_dim": int(meta["critic_state_dim"]),
@@ -203,6 +214,8 @@ def _validate_resume_state(state: dict, meta: dict, output: Path) -> None:
         "training_hyperparameters": meta["training_hyperparameters"],
         "run_identity": str(output.resolve()),
     }
+    if meta.get("observation_contract") is not None:
+        expected["observation_contract"] = meta["observation_contract"]
     for key, value in expected.items():
         if state.get(key) != value:
             raise ValueError(f"incompatible resume state {key}: {state.get(key)!r} != {value!r}")
@@ -244,6 +257,38 @@ def _finite_float(value) -> float:
     return result if np.isfinite(result) else 0.0
 
 
+def _contract_meta(env) -> dict:
+    common = {
+        "formal_contract": env.formal_contract,
+        "actor_obs_dim": int(env.actor_obs_dim),
+        "critic_state_dim": int(env.critic_state_dim),
+        "action_dim": int(env.action_dim),
+        "num_agents": len(env.red_ids),
+    }
+    if env.formal_contract == V2_ENV_TYPE:
+        return {
+            **common,
+            "observation_contract": V2_OBSERVATION_CONTRACT,
+            "reward_contract": V2_REWARD_CONTRACT_VERSION,
+            "reward_contract_details": {
+                "uav_weights": V2_UAV_WEIGHTS,
+                "mav_safety_weights": V2_MAV_SAFETY_WEIGHTS,
+                "mav_support_weights": V2_MAV_SUPPORT_WEIGHTS,
+                "event_rewards": EVENT_REWARDS,
+            },
+        }
+    return {
+        **common,
+        "reward_contract": {
+            "version": REWARD_CONTRACT_VERSION,
+            "global_reward_scale": GLOBAL_REWARD_SCALE,
+            "uav_weights": UAV_WEIGHTS,
+            "mav_weights": MAV_WEIGHTS,
+            "event_rewards": EVENT_REWARDS,
+        },
+    }
+
+
 def main():
     args = _args()
     if args.rollout_length <= 0 or args.total_env_steps <= 0:
@@ -259,8 +304,8 @@ def main():
     resume_path = Path(args.resume_from).resolve() if args.resume_from else None
     _prepare_output_dir(output, resume_path)
     env = make_env(str(config))
-    if env.config.get("env_type") != ENV_TYPE or env.action_dim != ACTION_DIM:
-        raise ValueError("formal runner accepts only hetero_3v2_pure_happo_v1 Box(3)")
+    if env.formal_contract not in {ENV_TYPE, V2_ENV_TYPE} or env.action_dim != ACTION_DIM:
+        raise ValueError("formal runner accepts only formal V1/V2 Box(3) contracts")
     requested_device = str(args.device)
     if requested_device.startswith("cuda") and not torch.cuda.is_available():
         raise ValueError(f"CUDA requested but unavailable: {requested_device}")
@@ -275,10 +320,8 @@ def main():
         gae_lambda=args.gae_lambda, seed=args.seed)
     requested_rollouts = _planned_rollout_count(args.total_env_steps, args.rollout_length)
     planned_actual_steps = requested_rollouts * args.rollout_length
-    meta = {"formal_contract": ENV_TYPE, "policy_arch": "pure_happo",
-            "credit_mode": "shared_alive_team_mean", "actor_obs_dim": env.actor_obs_dim,
-            "critic_state_dim": env.critic_state_dim, "action_dim": ACTION_DIM,
-            "num_agents": len(env.red_ids), "config": str(config),
+    meta = {**_contract_meta(env), "policy_arch": "pure_happo",
+            "credit_mode": "shared_alive_team_mean", "config": str(config),
             "seed": int(args.seed), "run_identity": str(output.resolve()),
             "requested_device": requested_device, "actual_device": str(device),
             "requested_total_env_steps": int(args.total_env_steps),
@@ -288,12 +331,7 @@ def main():
             "policy_distribution": "tanh_squashed_gaussian_raw_action",
             "critic_contract": "centralized_shared_scalar_v",
             "gae_contract": "separated_termination_truncation"}
-    meta["reward_contract"] = {
-        "version": REWARD_CONTRACT_VERSION,
-        "global_reward_scale": GLOBAL_REWARD_SCALE,
-        "uav_weights": UAV_WEIGHTS, "mav_weights": MAV_WEIGHTS,
-        "event_rewards": EVENT_REWARDS,
-    }
+    is_v2 = env.formal_contract == V2_ENV_TYPE
     log_path = output / "train_log.csv"
     fields = [
         "record_type", "iteration", "total_steps", "episodes_completed", "avg_role_reward_mav",
@@ -321,6 +359,13 @@ def main():
         "red_geometry_samples", "red_range_rate", "red_ata_rate", "red_ta_rate",
         "red_geometry_rate", "action_saturation", "finite",
     ]
+    if is_v2:
+        fields.extend([
+            "mav_safety_distance", "mav_safety_threat", "mav_safety_aspect",
+            "mav_support", "mav_awareness", "mav_shared_information_metric",
+            "mav_event", "mav_total", "uav_height", "uav_dodge_angle",
+            "uav_dodge_speed", "uav_event", "uav_total",
+        ])
     for role in ("mav", "uav"):
         for dimension in ("pitch", "heading", "speed"):
             fields.extend((f"{role}_action_mean_{dimension}",
@@ -389,7 +434,7 @@ def main():
                 restored_buffer = restored_stats = restored_counts = restored_completed = None
             else:
                 buffer = HAPPORolloutBuffer(length, len(env.red_ids), env.actor_obs_dim,
-                                            env.critic_state_dim, ACTION_DIM, [0, 1, 1])
+                                            env.critic_state_dim, env.action_dim, [0, 1, 1])
                 stats = defaultdict(list)
                 counts = defaultdict(int)
                 completed = []
@@ -425,6 +470,18 @@ def main():
                 for key in ("dense", "flight", "speed", "angle", "distance", "dodge"):
                     stats[f"uav_{key}"].append(float(np.mean([
                         components[aid].get(key, 0.0) for aid in ("red_1", "red_2")])))
+                if is_v2:
+                    for key in (
+                            "mav_safety_distance", "mav_safety_threat",
+                            "mav_safety_aspect", "mav_support", "mav_awareness",
+                            "mav_shared_information_metric", "mav_event", "mav_total"):
+                        stats[key].append(float(mav.get(key, 0.0)))
+                    for key in (
+                            "uav_height", "uav_dodge_angle", "uav_dodge_speed",
+                            "uav_event", "uav_total"):
+                        stats[key].append(float(np.mean([
+                            components[aid].get(key, 0.0)
+                            for aid in ("red_1", "red_2")])))
                 event_values = np.asarray([components[aid].get("event", 0.0) for aid in env.red_ids])
                 stats["team_event"].append(float((event_values * active).sum() / max(active.sum(), 1.0)))
                 stats["saturation"].append(float(np.mean(np.abs(actions[active > 0.5]) > 0.95))
@@ -545,6 +602,16 @@ def main():
                    "action_saturation": mean("saturation"),
                    "finite": int(all(torch.isfinite(parameter).all().item()
                                      for parameter in policy.parameters()))}
+            if is_v2:
+                row.update({
+                    key: mean(key) for key in (
+                        "mav_safety_distance", "mav_safety_threat",
+                        "mav_safety_aspect", "mav_support", "mav_awareness",
+                        "mav_shared_information_metric", "mav_event", "mav_total",
+                        "uav_height", "uav_dodge_angle", "uav_dodge_speed",
+                        "uav_event", "uav_total",
+                    )
+                })
             for role in ("mav", "uav"):
                 for dimension in ("pitch", "heading", "speed"):
                     row[f"{role}_action_mean_{dimension}"] = metric(
@@ -604,7 +671,8 @@ def main():
                     _save(policy, output / "checkpoints" / f"step_{requested_step:06d}",
                           checkpoint_meta)
                     saved_checkpoint_steps.add(requested_step)
-            print(f"[formal-v1] it={iteration:04d} steps={total_steps}/{args.total_env_steps} "
+            print(f"[{env.formal_contract}] it={iteration:04d} "
+                  f"steps={total_steps}/{args.total_env_steps} "
                   f"reward:M/U={row['avg_role_reward_mav']:+.3f}/{row['avg_role_reward_uav']:+.3f} "
                   f"launch:R/B={row['red_launches']}/{row['blue_launches']}", flush=True)
     _save(policy, output / "latest", {

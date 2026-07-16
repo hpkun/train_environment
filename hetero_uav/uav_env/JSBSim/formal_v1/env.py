@@ -27,8 +27,34 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, **config):
-        validate_formal_config(config)
+        env_type = str(config.get("env_type", ""))
+        if env_type == "hetero_3v2_pure_happo_v2":
+            from ..formal_v2.contract import (
+                ACTOR_OBS_DIM as contract_actor_obs_dim,
+                CRITIC_STATE_DIM as contract_critic_state_dim,
+                ENV_TYPE as formal_contract,
+                OBSERVATION_CONTRACT as observation_contract,
+                REWARD_CONTRACT_VERSION as reward_contract,
+                validate_formal_config as validate_config,
+            )
+            from ..formal_v2.observation import build_team_observations as observation_builder
+            from ..formal_v2.reward import compute_role_rewards as reward_builder
+        else:
+            contract_actor_obs_dim = ACTOR_OBS_DIM
+            contract_critic_state_dim = CRITIC_STATE_DIM
+            formal_contract = "hetero_3v2_pure_happo_v1"
+            observation_contract = "formal_entity_v1"
+            from .reward import REWARD_CONTRACT_VERSION as reward_contract
+            validate_config = validate_formal_config
+            observation_builder = build_team_observations
+            reward_builder = compute_role_rewards
+        validate_config(config)
         self.config = dict(config)
+        self.formal_contract = formal_contract
+        self.observation_contract = observation_contract
+        self.reward_contract = reward_contract
+        self._observation_builder = observation_builder
+        self._reward_builder = reward_builder
         self.red_ids = list(RED_IDS)
         self.blue_ids = list(BLUE_IDS)
         self.agent_ids = self.red_ids
@@ -46,8 +72,8 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.missile_config = dict(missile)
         self.origin = (120.02, 60.0, 0.0)
         self.action_dim = ACTION_DIM
-        self.actor_obs_dim = ACTOR_OBS_DIM
-        self.critic_state_dim = CRITIC_STATE_DIM
+        self.actor_obs_dim = contract_actor_obs_dim
+        self.critic_state_dim = contract_critic_state_dim
         self.action_space = gym.spaces.Dict({
             aid: gym.spaces.Box(-1.0, 1.0, shape=(ACTION_DIM,), dtype=np.float32)
             for aid in self.red_ids
@@ -58,7 +84,11 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
                 "allies": gym.spaces.Box(-1, 1, shape=(2, 11), dtype=np.float32),
                 "enemies": gym.spaces.Box(-1, 1, shape=(2, 14), dtype=np.float32),
                 "incoming_missile": gym.spaces.Box(-1, 1, shape=(7,), dtype=np.float32),
-                "flat": gym.spaces.Box(-1, 1, shape=(ACTOR_OBS_DIM,), dtype=np.float32),
+                **({"fire_control": gym.spaces.Box(
+                    0, 1, shape=(5,), dtype=np.float32)}
+                   if self.formal_contract == "hetero_3v2_pure_happo_v2" else {}),
+                "flat": gym.spaces.Box(
+                    -1, 1, shape=(self.actor_obs_dim,), dtype=np.float32),
             }) for aid in self.red_ids
         })
         self.aircraft: dict[str, AircraftSimulator] = {}
@@ -73,8 +103,9 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.newly_dead: set[str] = set()
         self.selected_targets: dict[str, str | None] = {}
         self.last_control_targets: dict[str, tuple[float, float, float] | None] = {}
-        self.last_critic_state = np.zeros(CRITIC_STATE_DIM, np.float32)
+        self.last_critic_state = np.zeros(self.critic_state_dim, np.float32)
         self.previous_missile_risk = {aid: 0.0 for aid in self.red_ids}
+        self.previous_missile_speed: dict[str, float] = {}
         self.last_fire_gates: dict[str, dict] = {}
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -107,9 +138,10 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.selected_targets = {aid: None for aid in self.aircraft}
         self.last_control_targets = {aid: None for aid in self.aircraft}
         self.previous_missile_risk = {aid: 0.0 for aid in self.red_ids}
+        self.previous_missile_speed = {}
         self.last_fire_gates = {}
         self.audit_initial_perturbation = perturbation
-        obs, self.last_critic_state = build_team_observations(self)
+        obs, self.last_critic_state = self._observation_builder(self)
         return obs, self._info([], {})
 
     def step(self, actions: dict[str, Any]):
@@ -170,7 +202,7 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
             if was_alive and not self.aircraft[aid].is_alive:
                 self.newly_dead.add(aid)
         self.step_count += 1
-        rewards, reward_components = compute_role_rewards(
+        rewards, reward_components = self._reward_builder(
             self, self.selected_targets, missile_events)
         for aid in self.red_ids:
             self.previous_missile_risk[aid] = float(
@@ -191,7 +223,7 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
             outcome, reason = "draw", "timeout"
         else:
             outcome, reason = "ongoing", ""
-        observations, self.last_critic_state = build_team_observations(self)
+        observations, self.last_critic_state = self._observation_builder(self)
         terminations = {aid: terminated for aid in self.red_ids}
         truncations = {aid: truncated for aid in self.red_ids}
         info = self._info(launch_records + missile_events, reward_components,
@@ -240,7 +272,9 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
     def _info(self, step_events: list[dict], reward_components: dict,
               alive_before: dict | None = None) -> dict:
         return {
-            "formal_contract": "hetero_3v2_pure_happo_v1",
+            "formal_contract": self.formal_contract,
+            "observation_contract": self.observation_contract,
+            "reward_contract": self.reward_contract,
             "critic_state": self.last_critic_state.copy(),
             "active_mask": np.asarray([self.aircraft[aid].is_alive for aid in self.red_ids], np.float32),
             "alive_before_mask": np.asarray([

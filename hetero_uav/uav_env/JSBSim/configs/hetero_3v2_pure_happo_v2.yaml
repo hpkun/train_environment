@@ -1,0 +1,32 @@
+env_type: hetero_3v2_pure_happo_v2
+scenario: 3v2
+sim_freq: 60
+decision_freq: 5
+agent_interaction_steps: 12
+max_steps: 1000
+action_mode: continuous_high_level_pid
+credit_mode: shared_alive_team_mean
+suppress_jsbsim_output: true
+
+sensing:
+  uav_direct_range_m: 10000.0
+  mav_range_m: 80000.0
+
+missile:
+  attack_range_m: 14000.0
+  attack_interval_sec: 25.0
+  launch_ata_deg: 60.0
+  launch_ta_deg: 90.0
+  navigation_gain: 3.0
+  max_overload_g: 30.0
+  speed_mps: 600.0
+  hit_radius_m: 300.0
+  arming_time_sec: 0.2
+  max_flight_time_sec: 60.0
+
+scripted_evasion: false
+blue_gcas: false
+role_local_credit: false
+brma_overlay: false
+communication_dropout: false
+random_hit: false
