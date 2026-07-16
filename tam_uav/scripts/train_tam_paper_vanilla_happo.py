@@ -52,7 +52,12 @@ def agent_update_contract(active_count, actor_changed, critic_head_changed,
     return expected, bool(actor_valid and critic_valid)
 
 
-def parse_args():
+def should_run_evaluation(interval, episodes, steps, total_steps):
+    return bool(interval > 0 and episodes > 0
+                and (steps % interval == 0 or steps == total_steps))
+
+
+def parse_args(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--scenario", choices=("2v2", "3v2", "5v4"), default="2v2")
     p.add_argument("--seed", type=int, default=2026)
@@ -84,7 +89,7 @@ def parse_args():
     p.add_argument("--evaluation-seed-base", type=int, default=None)
     p.add_argument("--evaluation-perturbation", choices=("none","low","medium","large"),
                    default="low")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def main():
@@ -155,6 +160,9 @@ def main():
         "requested_seed": int(args.seed),
         "restored_seed": episode_seed_base,
         "next_episode_reset_seed": next_episode_seed,
+        "evaluation_seed_base": int(evaluation_seed_base),
+        "evaluation_perturbation": args.evaluation_perturbation,
+        "evaluation_protocol": "fixed_seed_low_perturbation",
         "actor_sharing_label": ("formal_independent" if args.actor_sharing == "independent"
                                 else "parameter_sharing_ablation"),
     }
@@ -185,7 +193,6 @@ def main():
         launches, hits, structural, boundary, survivors, terminal_agents = 0, 0, 0, 0, 0, 0
         target_violations = nonfinite = 0
         rollout_ended_at_episode_boundary = False
-        rollout_crossed_episode_boundary = False
         reward_component_sums, reward_component_count = {}, 0
         for local_step in range(horizon):
             rollout_ended_at_episode_boundary = False
@@ -227,7 +234,6 @@ def main():
             episode_done = all(bool(term[aid] or trunc[aid]) for aid in env.agent_ids)
             if episode_done:
                 rollout_ended_at_episode_boundary = True
-                rollout_crossed_episode_boundary = True
                 episode_returns.append(episode_return.copy()); winners.append(info["winner"])
                 episode_lengths.append(info["episode_step"])
                 launches += info["missiles_fired"]; hits += info["missile_hits"]
@@ -292,12 +298,8 @@ def main():
                "rollout_planned_horizon": horizon,
                "rollout_collected_steps": buffer.pos,
                "rollout_episode_count": len(winners),
-               "rollout_crossed_episode_boundary": rollout_crossed_episode_boundary,
                "rollout_ended_at_episode_boundary": rollout_ended_at_episode_boundary,
-               "rollout_unique_episode_count": len(set(buffer.episode_ids[:buffer.pos])),
                "minimum_active_sample_count": min(
-                   result.metrics.get(f"active_sample_count/{aid}", 0) for aid in policy.agent_ids),
-               "maximum_active_sample_count": max(
                    result.metrics.get(f"active_sample_count/{aid}", 0) for aid in policy.agent_ids),
                "maximum_approx_kl": max(
                    result.metrics.get(f"approx_kl/{aid}", 0.0) for aid in policy.agent_ids),
@@ -335,8 +337,9 @@ def main():
                                           seed_schedule={"episode_seed_base": episode_seed_base,
                                                          "next_episode": episodes,
                                                          "next_episode_seed": episode_seed_base + episodes})
-        if args.evaluation_interval and (steps % args.evaluation_interval == 0
-                                         or steps == args.total_environment_steps):
+        if should_run_evaluation(
+                args.evaluation_interval, args.evaluation_episodes,
+                steps, args.total_environment_steps):
             eval_env = make_paper_env(ROOT, args.scenario,
                                        initial_perturbation=args.evaluation_perturbation)
             latest_eval = deterministic_evaluate(eval_env, policy, args.evaluation_episodes,
@@ -344,14 +347,6 @@ def main():
             eval_env.close()
             (output / f"evaluation_{steps}.json").write_text(
                 json.dumps(latest_eval, indent=2), encoding="utf-8")
-    if latest_eval is None and args.evaluation_episodes > 0:
-        eval_env = make_paper_env(ROOT, args.scenario,
-                                   initial_perturbation=args.evaluation_perturbation)
-        latest_eval = deterministic_evaluate(
-            eval_env, policy, args.evaluation_episodes, evaluation_seed_base)
-        eval_env.close()
-        (output / f"evaluation_{steps}.json").write_text(
-            json.dumps(latest_eval, indent=2), encoding="utf-8")
     final_checkpoint = output / "checkpoint_final.pt"
     save_vanilla_happo_checkpoint(final_checkpoint, policy, trainer,
                                   environment_steps=steps, episodes=episodes,

@@ -407,11 +407,6 @@ class VanillaHAPPOTrainer:
             metrics[f"critic_head_zero_gradient/{aid}"] = bool(
                 valid.any() and critic_head_grad_norms[aid]
                 and max(critic_head_grad_norms[aid]) == 0.0)
-            metrics[f"critic_head_active_minibatches/{aid}"] = len(critic_losses.get(aid, []))
-            metrics[f"critic_head_skipped_minibatches/{aid}"] = int(
-                self.ppo_epochs * max(1, data["states"].shape[0] // max(self.minibatch_size, 1))
-                - len(critic_losses.get(aid, [])))
-            metrics[f"critic_head_momentum_isolation_valid/{aid}"] = True
             for label, tensor in (("value", value), ("return", target), ("advantage", adv)):
                 metrics[f"{label}_mean/{aid}"] = float(tensor.mean()) if tensor.numel() else 0.0
                 metrics[f"{label}_std/{aid}"] = float(tensor.std()) if tensor.numel() > 1 else 0.0

@@ -19,7 +19,9 @@ from scripts.tam_output_paths import resolve_tam_output
 from scripts.vanilla_happo_runtime import update_side_timing
 from scripts.vanilla_happo_runtime import seed_all
 from scripts.train_tam_paper_vanilla_happo import (
-    agent_update_contract, is_episode_boundary, resume_seed_state)
+    agent_update_contract, is_episode_boundary, resume_seed_state,
+    should_run_evaluation)
+from scripts.eval_tam_paper_vanilla_happo import parse_args as parse_eval_args
 
 
 def make_policy(n=3, hidden=16, sharing="independent"):
@@ -53,6 +55,56 @@ def make_buffer(policy, length=8, inactive_agent=None):
                    available_actions=available, agent_alive=active,
                    episode_id=0, decision_step=step, policy_version=0)
     return buffer
+
+
+def test_fixed_horizon_collects_across_episode_boundaries_before_one_update():
+    policy = make_policy(1)
+    buffer = VanillaHAPPORolloutBuffer(8, 1, 5, 8)
+    available = np.ones((1, 4, 40), np.float32)
+    episode_id = 0
+    for step in range(8):
+        obs = np.zeros((1, 5), np.float32)
+        state = np.zeros(8, np.float32)
+        with torch.no_grad():
+            out = policy.act(obs, state, available)
+        episode_end = step % 3 == 2
+        buffer.add(
+            obs=obs, state=state, actions=out["actions"].numpy(),
+            log_probs=out["log_probs"].numpy(), rewards=np.ones(1),
+            value=out["value"].numpy(), next_value=out["value"].numpy(),
+            terminated=np.array([episode_end]), truncated=np.zeros(1),
+            active_masks=np.ones(1), available_actions=available,
+            agent_alive=np.ones(1), episode_id=episode_id,
+            decision_step=step % 3, policy_version=0)
+        if episode_end:
+            episode_id += 1
+    trainer = VanillaHAPPOTrainer(policy, ppo_epochs=1)
+    trainer.update(buffer)
+    assert buffer.pos == 8
+    assert buffer.episode_ids[:buffer.pos].tolist() == [0, 0, 0, 1, 1, 1, 2, 2]
+    assert trainer.update_count == 1
+
+
+def test_gae_does_not_propagate_across_episode_ids_and_keeps_bootstrap_semantics():
+    buffer = VanillaHAPPORolloutBuffer(4, 1, 2, 3)
+    available = np.ones((1, 4, 40), np.float32)
+    for step, episode_id in enumerate((0, 0, 1, 1)):
+        truncated = float(step == 1)
+        terminated = float(step == 3)
+        next_value = 5.0 if truncated else 100.0 if terminated else 0.0
+        buffer.add(
+            obs=np.zeros((1, 2)), state=np.zeros(3), actions=np.zeros((1, 4)),
+            log_probs=np.zeros(1), rewards=np.array([1.0 if episode_id == 0 else 10.0]),
+            value=np.zeros(1), next_value=np.array([next_value]),
+            terminated=np.array([terminated]), truncated=np.array([truncated]),
+            active_masks=np.ones(1), available_actions=available,
+            agent_alive=np.ones(1), episode_id=episode_id,
+            decision_step=step % 2, policy_version=0)
+    advantages, _ = buffer.compute_gae(gamma=0.9, gae_lambda=1.0)
+    assert advantages[1, 0] == pytest.approx(1.0 + 0.9 * 5.0)
+    assert advantages[0, 0] == pytest.approx(1.0 + 0.9 * advantages[1, 0])
+    assert advantages[3, 0] == pytest.approx(10.0)
+    assert advantages[1, 0] != pytest.approx(1.0 + 0.9 * 5.0 + 0.9 * 10.0)
 
 
 def test_critic_has_shared_backbone_independent_heads_and_vector_shapes():
@@ -180,6 +232,29 @@ def test_fully_inactive_agent_head_receives_no_critic_gradient():
     VanillaHAPPOTrainer(policy, ppo_epochs=2).update(buffer)
     for key, value in policy.critic.heads["red_1"].state_dict().items():
         torch.testing.assert_close(value, before[key])
+
+
+def test_adam_state_does_not_move_inactive_critic_head_on_second_update():
+    policy = make_policy(2)
+    trainer = VanillaHAPPOTrainer(policy, ppo_epochs=2, minibatch_size=4)
+    trainer.update(make_buffer(policy, length=8))
+    for parameter in policy.critic.heads["red_1"].parameters():
+        assert parameter in trainer.critic_optimizer.state
+        assert trainer.critic_optimizer.state[parameter]
+    inactive_buffer = make_buffer(policy, length=8, inactive_agent=1)
+    red_1_before = copy.deepcopy(policy.critic.heads["red_1"].state_dict())
+    red_0_before = copy.deepcopy(policy.critic.heads["red_0"].state_dict())
+    backbone_before = copy.deepcopy(policy.critic.backbone.state_dict())
+    result = trainer.update(inactive_buffer)
+    for key, value in policy.critic.heads["red_1"].state_dict().items():
+        torch.testing.assert_close(value, red_1_before[key], rtol=0, atol=0)
+    red_0_changed = any(not torch.equal(value, red_0_before[key])
+                        for key, value in policy.critic.heads["red_0"].state_dict().items())
+    backbone_changed = any(not torch.equal(value, backbone_before[key])
+                           for key, value in policy.critic.backbone.state_dict().items())
+    assert red_0_changed or backbone_changed
+    assert result.metrics["active_sample_count/red_1"] == 0
+    assert "critic_head_momentum_isolation_valid/red_1" not in result.metrics
 
 
 def test_inactive_agent_is_not_expected_to_change_and_optimization_contract_passes():
@@ -388,6 +463,18 @@ def test_output_path_guard_rejects_symlink_escape_when_supported(tmp_path):
         pytest.skip("directory symlinks are unavailable on this Windows host")
     with pytest.raises(ValueError, match="inside tam_uav"):
         resolve_tam_output(root, "linked/result.json")
+
+
+def test_independent_eval_perturbation_argument_and_zero_episode_skip_contract():
+    assert parse_eval_args([]).perturbation == "low"
+    assert parse_eval_args(["--perturbation", "medium"]).perturbation == "medium"
+    source = (Path(__file__).parents[1] /
+              "scripts/eval_tam_paper_vanilla_happo.py").read_text()
+    assert "initial_perturbation=args.perturbation" in source
+    assert should_run_evaluation(1024, 4, 1024, 2048)
+    assert not should_run_evaluation(1024, 0, 1024, 2048)
+    assert not should_run_evaluation(0, 4, 2048, 2048)
+    assert not should_run_evaluation(1024, 4, 512, 2048)
 
 
 def test_readiness_audit_uses_evidence_and_environment_hashes():

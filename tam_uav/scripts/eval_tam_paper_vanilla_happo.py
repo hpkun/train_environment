@@ -16,7 +16,7 @@ from scripts.vanilla_happo_runtime import (deterministic_evaluate, infer_policy,
                                            make_paper_env, seed_all)
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenario", choices=("2v2", "3v2", "5v4"), default="2v2")
     parser.add_argument("--baseline", choices=("neutral", "random", "rule",
@@ -27,10 +27,17 @@ def main():
     parser.add_argument("--seed", type=int, default=3026)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default="outputs/tam_paper_vanilla_happo/evaluation.json")
-    args = parser.parse_args()
+    parser.add_argument("--perturbation", choices=("none", "low", "medium", "large"),
+                        default="low")
+    return parser.parse_args(argv)
+
+
+def main():
+    args = parse_args()
     import torch
     device = args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu"
-    env = make_paper_env(ROOT, args.scenario)
+    env = make_paper_env(
+        ROOT, args.scenario, initial_perturbation=args.perturbation)
     metadata = None
     if args.baseline == "trained_happo":
         if not args.checkpoint:
