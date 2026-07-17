@@ -88,7 +88,9 @@ def parse_args(argv=None):
     p.add_argument("--hidden-dim", type=int, default=128)
     p.add_argument("--evaluation-seed-base", type=int, default=None)
     p.add_argument("--evaluation-perturbation", choices=("none","low","medium","large"),
-                   default="low")
+                   default="none",
+                   help=("none: nominal Table 5-7 evaluation; "
+                         "low/medium/large: 5v4 generalization evaluation"))
     return p.parse_args(argv)
 
 
@@ -162,7 +164,9 @@ def main():
         "next_episode_reset_seed": next_episode_seed,
         "evaluation_seed_base": int(evaluation_seed_base),
         "evaluation_perturbation": args.evaluation_perturbation,
-        "evaluation_protocol": "fixed_seed_low_perturbation",
+        "evaluation_protocol": (
+            "fixed_seed_nominal" if args.evaluation_perturbation == "none"
+            else f"fixed_seed_{args.evaluation_perturbation}_generalization"),
         "actor_sharing_label": ("formal_independent" if args.actor_sharing == "independent"
                                 else "parameter_sharing_ablation"),
     }

@@ -52,7 +52,6 @@ PARAMETER_CONSUMERS = {
     "missile_length_m": "paper.missile published metadata only; not used in point-mass dynamics",
     "missile_diameter_m": "paper.missile published metadata only; not used in point-mass dynamics",
     "minimum_safe_altitude_m": "paper.reward",
-    "structural_limit_grace_s": "paper.task",
     "mav_detection_range_m": "core.aircraft_types",
     "uav_direct_detection_range_m": "core.aircraft_types",
 }

@@ -14,14 +14,14 @@ if str(ROOT) not in sys.path:
 
 ENVIRONMENT_HASHES = {
     "uav_env/JSBSim/paper/env.py": "9a9ae99738ba9a8ea8fefeef99f941c345fb96e5c41eb4e4492cc347c8f884ba",
-    "uav_env/JSBSim/paper/task.py": "c9d38d9868653bec505a7e0203a1cd78a4fffad068d6dacbad7b2496264b7648",
+    "uav_env/JSBSim/paper/task.py": "ccc144a245b9c87477de2edf8412b3e18c4fecf80cc32a7e1707fea8b0ceb7de",
     "uav_env/JSBSim/paper/reward.py": "8f06d7f3279c016cb82d1e790e866ca1f07aabcd2934e5f5180f25d4f2a86a80",
     "uav_env/JSBSim/paper/observation.py": "92b76c39b443e7849fcb34f005c5494a33ee9158338276f86c603431a35fd7af",
     "uav_env/JSBSim/paper/missile.py": "84524ddb491a89ba482db9d84ad5f1240c8d272f65ceaee690b5784803451638",
-    "uav_env/JSBSim/paper/weapon.py": "6a2f6c17eba59f0caa2049fed3d5894111171d7ee27b824c16c9b63c9b5d8e8d",
-    "uav_env/JSBSim/configs/tam_paper_env_v1_2v2.yaml": "0b5b23e3c4d5fc3f3c182741f2e554ae8d34bd747369b1dd1bfd3405356a451a",
-    "uav_env/JSBSim/configs/tam_paper_env_v1_3v2.yaml": "433ad2bc06124196017077b252cc8745629b9c416a81cd3d0711352670f4ef07",
-    "uav_env/JSBSim/configs/tam_paper_env_v1_5v4.yaml": "37e767aedcf628cd11593ad0805237fc482859c05017fae6ac4daa38044021e2",
+    "uav_env/JSBSim/paper/weapon.py": "45cb936eebc53bdfeb147fb5fe73de9e6bfa71587ab15b6af8b3a6710a0a737c",
+    "uav_env/JSBSim/configs/tam_paper_env_v1_2v2.yaml": "595653b8197cff513c044055966febca1d2c2997ae1c4cb6d8579ef68294df94",
+    "uav_env/JSBSim/configs/tam_paper_env_v1_3v2.yaml": "eebc364c006017624efc60b2e0480964ccd848b820c9cbd20103a69f4434734b",
+    "uav_env/JSBSim/configs/tam_paper_env_v1_5v4.yaml": "d83e52bd547a5825bea89e3784c1392b1f26a7d0b886b6c008ca91fdf920b30c",
 }
 
 

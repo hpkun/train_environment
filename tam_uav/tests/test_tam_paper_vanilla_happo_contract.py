@@ -23,6 +23,9 @@ from scripts.train_tam_paper_vanilla_happo import (
     agent_update_contract, is_episode_boundary, resume_seed_state,
     should_run_evaluation)
 from scripts.eval_tam_paper_vanilla_happo import parse_args as parse_eval_args
+from scripts.run_tam_paper_baseline_diagnosis import (
+    parse_args as parse_baseline_diagnosis_args)
+from scripts.train_tam_paper_vanilla_happo import parse_args as parse_train_args
 
 
 def make_policy(n=3, hidden=16, sharing="independent"):
@@ -505,8 +508,10 @@ def test_output_path_guard_rejects_symlink_escape_when_supported(tmp_path):
 
 
 def test_independent_eval_perturbation_argument_and_zero_episode_skip_contract():
-    assert parse_eval_args([]).perturbation == "low"
+    assert parse_eval_args([]).perturbation == "none"
     assert parse_eval_args(["--perturbation", "medium"]).perturbation == "medium"
+    assert parse_train_args([]).evaluation_perturbation == "none"
+    assert parse_baseline_diagnosis_args([]).perturbation == "none"
     source = (Path(__file__).parents[1] /
               "scripts/eval_tam_paper_vanilla_happo.py").read_text()
     assert "initial_perturbation=args.perturbation" in source

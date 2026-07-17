@@ -32,7 +32,6 @@ inferred_parameters:
   altitude_norm_m: 12000.0
   situation_height_norm_m: 12000.0
   max_incoming_missiles: 8
-  minimum_launch_range_m: 300.0
   missile_initial_speed_mps: 500.0
   powered_duration_s: 3.0
   powered_acceleration_mps2: 110.0
@@ -51,7 +50,6 @@ inferred_parameters:
   mav_team_kill_bonus: 200.0
   mav_team_kill_bonus_cap: 400.0
   reward_global_scale: 1.0
-  structural_limit_grace_s: 0.2
 initial_perturbation_levels:
   low: {altitude_m: 500.0, longitude_deg: 0.005, latitude_deg: 0.005, heading_deg: 5.0, speed_mps: 20.0}
   medium: {altitude_m: 1000.0, longitude_deg: 0.01, latitude_deg: 0.01, heading_deg: 10.0, speed_mps: 35.0}

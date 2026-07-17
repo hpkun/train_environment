@@ -20,6 +20,32 @@ PAPER_CONFIGS = {
     "tam_paper_env_v1_3v2.yaml": (3, 2, 1),
     "tam_paper_env_v1_5v4.yaml": (5, 4, 1),
 }
+TABLE_INITIAL_STATES = {
+    "tam_paper_env_v1_2v2.yaml": {
+        "red_0": (120.0, 60.0, 6000.0, 250.0, 0.0),
+        "red_1": (120.02, 60.0, 6000.0, 250.0, 0.0),
+        "blue_0": (120.0, 60.2, 6000.0, 250.0, 180.0),
+        "blue_1": (120.02, 60.2, 6000.0, 250.0, 180.0),
+    },
+    "tam_paper_env_v1_3v2.yaml": {
+        "red_0": (120.02, 59.98, 6000.0, 250.0, 0.0),
+        "red_1": (120.0, 60.0, 6000.0, 250.0, 0.0),
+        "red_2": (120.04, 60.0, 6000.0, 250.0, 0.0),
+        "blue_0": (120.0, 60.2, 6000.0, 250.0, 180.0),
+        "blue_1": (120.04, 60.2, 6000.0, 250.0, 180.0),
+    },
+    "tam_paper_env_v1_5v4.yaml": {
+        "red_0": (120.0, 60.0, 6700.0, 250.0, 0.0),
+        "red_1": (119.98, 60.02, 6000.0, 250.0, 0.0),
+        "red_2": (120.02, 60.02, 6000.0, 250.0, 0.0),
+        "red_3": (119.99, 59.98, 6000.0, 250.0, 0.0),
+        "red_4": (120.01, 59.98, 6000.0, 250.0, 0.0),
+        "blue_0": (119.98, 60.15, 6000.0, 250.0, 180.0),
+        "blue_1": (120.02, 60.15, 6000.0, 250.0, 180.0),
+        "blue_2": (119.99, 60.19, 6000.0, 250.0, 180.0),
+        "blue_3": (120.01, 60.19, 6000.0, 250.0, 180.0),
+    },
+}
 
 
 @pytest.mark.parametrize(("name", "red", "blue", "mavs"), [
@@ -35,6 +61,9 @@ def test_paper_config_and_environment_contract(name, red, blue, mavs):
     assert cfg["published_parameters"]["episode_limit_steps"] == 1000
     assert cfg["published_parameters"]["maximum_attack_range_m"] == 14000
     assert cfg["published_parameters"]["launch_interval_s"] == 25
+    assert cfg["initial_perturbation"] == "none"
+    assert "minimum_launch_range_m" not in cfg["inferred_parameters"]
+    assert "structural_limit_grace_s" not in cfg["inferred_parameters"]
     assert len(cfg["red_agents"]) == red
     assert len(cfg["blue_agents"]) == blue
     assert sum(a["role"] == "mav" for a in cfg["red_agents"]) == mavs
@@ -62,6 +91,18 @@ def test_action_mapping_is_direct_and_exact():
     assert mid[0] == pytest.approx(0.4 + 20.0 / 39.0 * 0.5)
     assert mid[1:] == pytest.approx([-1.0 + 40.0 / 39.0] * 3)
     env.close()
+
+
+@pytest.mark.parametrize("name", PAPER_CONFIGS)
+def test_table_initial_states_are_unchanged(name):
+    cfg = yaml.safe_load((CONFIG_DIR / name).read_text(encoding="utf-8"))
+    actual = {}
+    for item in cfg["red_agents"] + cfg["blue_agents"]:
+        actual[item["id"]] = (
+            item["lon_deg"], item["lat_deg"], item["altitude_m"],
+            item["speed_mps"], item["heading_deg"],
+        )
+    assert actual == TABLE_INITIAL_STATES[name]
 
 
 def test_situation_weights_and_target_selection():

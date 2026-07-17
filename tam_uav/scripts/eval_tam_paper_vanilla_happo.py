@@ -28,7 +28,9 @@ def parse_args(argv=None):
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default="outputs/tam_paper_vanilla_happo/evaluation.json")
     parser.add_argument("--perturbation", choices=("none", "low", "medium", "large"),
-                        default="low")
+                        default="none",
+                        help=("none: nominal Table 5-7 experiment; "
+                              "low/medium/large: 5v4 generalization experiment"))
     return parser.parse_args(argv)
 
 

@@ -341,7 +341,6 @@ class TAMPaperTask:
     def _apply_constraints_once(self):
         out_step, crash_step, structural_step = set(), set(), set()
         radius = float(self.inferred["combat_zone_radius_m"])
-        grace = float(self.inferred["structural_limit_grace_s"])
         for agent in self.agents:
             if not agent.alive:
                 continue
@@ -366,15 +365,6 @@ class TAMPaperTask:
                 agent.overload_violation_count += 1
             else:
                 agent.overload_violation_time_s = 0.0
-            reason = None
-            if agent.speed_violation_time_s + 1e-12 >= grace:
-                reason = "structural_speed"
-            elif agent.overload_violation_time_s + 1e-12 >= grace:
-                reason = "structural_overload"
-            if reason:
-                agent.kill(reason)
-                structural_step.add(agent.agent_id)
-                self.structural_failures += 1
         return out_step, crash_step, structural_step
 
     def _combat_units(self, side, alive_only=True):
@@ -389,15 +379,7 @@ class TAMPaperTask:
         if not red_alive:
             return True, False, "blue", "red_combat_units_eliminated"
         if self.step_count >= self.episode_limit:
-            if len(red_alive) != len(blue_alive):
-                winner = "red" if len(red_alive) > len(blue_alive) else "blue"
-            else:
-                red_kills = sum(not a.alive and a.death_reason == "shotdown"
-                                for a in self._combat_units("blue", False))
-                blue_kills = sum(not a.alive and a.death_reason == "shotdown"
-                                 for a in self._combat_units("red", False))
-                winner = "red" if red_kills > blue_kills else "blue" if blue_kills > red_kills else "draw"
-            return False, True, winner, "episode_limit"
+            return False, True, "draw", "episode_limit"
         return False, False, None, None
 
     def _build_info(self, events, components, opponent_diag, winner, reason,

@@ -7,6 +7,9 @@ import numpy as np
 from .missile import PaperMissile
 
 
+COINCIDENT_POSITION_EPSILON_M = 1.0e-6
+
+
 class PaperWeaponManager:
     def __init__(self, published: dict, inferred: dict):
         self.published = published
@@ -33,7 +36,7 @@ class PaperWeaponManager:
                 or shooter.missile_left <= 0 or target is None or not target.alive or not visible):
             return None
         distance = float(np.linalg.norm(target.position - shooter.position))
-        if distance < float(self.inferred["minimum_launch_range_m"]):
+        if distance <= COINCIDENT_POSITION_EPSILON_M:
             return None
         if distance > float(self.published["maximum_attack_range_m"]):
             return None

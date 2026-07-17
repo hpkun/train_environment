@@ -35,6 +35,30 @@ def test_mav_is_unarmed_and_launch_interval_is_25_seconds():
     env.close()
 
 
+def test_close_range_launch_is_allowed_without_tactical_minimum_range():
+    env = _env()
+    env.reset(seed=11)
+    by_id = {a.agent_id: a for a in env.task.agents}
+    shooter, target = by_id["red_1"], by_id["blue_0"]
+    target.position = shooter.position + np.array([100.0, 0.0, 0.0])
+    assert env.task.weapon.try_launch(shooter, target, True, 0.0) is not None
+    env.close()
+
+
+def test_maximum_launch_range_and_interval_remain_enforced():
+    env = _env()
+    env.reset(seed=12)
+    by_id = {a.agent_id: a for a in env.task.agents}
+    shooter, target = by_id["red_1"], by_id["blue_0"]
+    target.position = shooter.position + np.array([14001.0, 0.0, 0.0])
+    assert env.task.weapon.try_launch(shooter, target, True, 0.0) is None
+    target.position = shooter.position + np.array([5000.0, 0.0, 0.0])
+    assert env.task.weapon.try_launch(shooter, target, True, 0.0) is not None
+    shooter.missile_left += 1
+    assert env.task.weapon.try_launch(shooter, target, True, 24.99) is None
+    env.close()
+
+
 def test_mav_track_sharing_stops_immediately_after_death():
     env = _env()
     env.reset(seed=2)

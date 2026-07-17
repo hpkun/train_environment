@@ -188,7 +188,7 @@ def test_dodge_speed_reward_uses_whole_decision_span():
     env.close()
 
 
-def test_structural_limits_do_not_rewrite_velocity_and_fail_after_grace():
+def test_speed_limit_is_diagnostic_only_and_does_not_kill():
     env = env_for()
     env.reset(seed=5)
     aircraft = env.task.agents[1]
@@ -197,33 +197,37 @@ def test_structural_limits_do_not_rewrite_velocity_and_fail_after_grace():
     for _ in range(12):
         env.task._apply_constraints_once()
     assert np.array_equal(aircraft.velocity, original)
-    assert not aircraft.alive
-    assert aircraft.death_reason == "structural_speed"
+    assert aircraft.alive
+    assert aircraft.death_reason is None
+    assert aircraft.speed_violation_count == 12
+    assert env.task.structural_failures == 0
     env.close()
 
 
-def test_overload_limit_uses_grace_and_records_structural_reason():
+def test_overload_limit_is_diagnostic_only_and_does_not_kill():
     env = env_for()
     env.reset(seed=51)
     aircraft = env.task.agents[1]
     env.task.published["maximum_aircraft_overload_g"] = 0.5
     for _ in range(12):
         env.task._apply_constraints_once()
-    assert not aircraft.alive
-    assert aircraft.death_reason == "structural_overload"
+    assert aircraft.alive
+    assert aircraft.death_reason is None
     assert aircraft.overload_violation_count == 12
+    assert env.task.structural_failures == 0
     env.close()
 
 
-def test_overload_limit_uses_absolute_nz(monkeypatch):
+def test_overload_diagnostic_uses_absolute_nz_without_killing(monkeypatch):
     env = env_for()
     env.reset(seed=511)
     aircraft = env.task.agents[1]
     monkeypatch.setattr(type(aircraft), "load_factor_g", property(lambda self: -10.0))
     for _ in range(12):
         env.task._apply_constraints_once()
-    assert not aircraft.alive
-    assert aircraft.death_reason == "structural_overload"
+    assert aircraft.alive
+    assert aircraft.death_reason is None
+    assert aircraft.overload_violation_count == 12
     env.close()
 
 
@@ -281,6 +285,39 @@ def test_combat_unit_termination_ignores_mav_count():
     for aircraft in red_uavs:
         aircraft.kill("shotdown")
     assert env.task._termination() == (True, False, "blue", "red_combat_units_eliminated")
+    env.close()
+
+
+def test_episode_limit_is_draw_despite_unequal_surviving_combat_units():
+    env = env_for()
+    env.reset(seed=61)
+    red_uavs = [a for a in env.task.agents
+                if a.side == "red" and a.aircraft_type.role != "mav"]
+    red_uavs[0].kill("shotdown")
+    env.task.step_count = env.task.episode_limit
+    assert len(env.task._combat_units("red")) != len(env.task._combat_units("blue"))
+    assert env.task._termination() == (False, True, "draw", "episode_limit")
+    env.close()
+
+
+def test_episode_limit_step_returns_truncated_draw_for_all_controlled_agents(monkeypatch):
+    env = env_for()
+    env.reset(seed=62)
+    red_uavs = [a for a in env.task.agents
+                if a.side == "red" and a.aircraft_type.role != "mav"]
+    red_uavs[0].kill("shotdown")
+    env.task.step_count = env.task.episode_limit - 1
+    monkeypatch.setattr(env.task.weapon, "try_launch",
+                        lambda shooter, target, visible, simulation_time_s: None)
+    actions = {aid: np.array([20, 20, 20, 20]) for aid in env.agent_ids}
+    _, _, terminated, truncated, info = env.step(actions)
+    assert terminated[red_uavs[0].agent_id]
+    assert not terminated["red_0"]
+    assert not terminated[red_uavs[1].agent_id]
+    assert all(truncated.values())
+    assert all(terminated[aid] or truncated[aid] for aid in env.agent_ids)
+    assert info["winner"] == "draw"
+    assert info["termination_reason"] == "episode_limit"
     env.close()
 
 

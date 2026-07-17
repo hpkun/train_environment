@@ -24,18 +24,20 @@ from scripts.vanilla_happo_runtime import (
 BASELINES = ("neutral", "random", "rule", "untrained_happo")
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenario", choices=("2v2", "3v2", "5v4"), default="2v2")
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--seed", type=int, default=120000)
     parser.add_argument("--perturbation", choices=("none", "low", "medium", "large"),
-                        default="low")
+                        default="none",
+                        help=("none: nominal Table 5-7 experiment; "
+                              "low/medium/large: 5v4 generalization experiment"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--output-directory",
         default="outputs/environment_diagnosis_2v2_seed120000_50ep_v2")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def summarize(result):
