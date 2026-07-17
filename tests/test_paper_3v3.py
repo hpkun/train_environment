@@ -372,10 +372,10 @@ def test_speed_envelope_is_monitor_only(monkeypatch):
         sim = env.red_planes["red_0"]
         monkeypatch.setattr(
             sim, "get_velocity", lambda: np.array([601.0, 0.0, 0.0]))
-        env._enforce_aircraft_constraints("red_0", sim)
-        env._enforce_aircraft_constraints("red_0", sim)
+        env._check_aircraft_post_physics_state("red_0", sim)
+        env._check_aircraft_post_physics_state("red_0", sim)
         assert sim.is_alive
-        env._enforce_aircraft_constraints("red_0", sim)
+        env._check_aircraft_post_physics_state("red_0", sim)
         assert sim.is_alive
         diag = env._aircraft_diagnostics["red_0"]
         assert diag["speed_envelope_violation"]
@@ -385,7 +385,7 @@ def test_speed_envelope_is_monitor_only(monkeypatch):
         assert not env._invalid_numerical_episode
         monkeypatch.setattr(
             sim, "get_velocity", lambda: np.array([300.0, 0.0, 0.0]))
-        env._enforce_aircraft_constraints("red_0", sim)
+        env._check_aircraft_post_physics_state("red_0", sim)
         assert diag["consecutive_above_600mps_frames"] == 0
     finally:
         env.close()
@@ -473,11 +473,153 @@ def test_nonfinite_aircraft_state_remains_numerical_invalid(monkeypatch):
         sim = env.red_planes["red_0"]
         monkeypatch.setattr(
             sim, "get_velocity", lambda: np.array([np.nan, 0.0, 0.0]))
-        env._enforce_aircraft_constraints("red_0", sim)
+        env._check_aircraft_post_physics_state("red_0", sim)
         assert not sim.is_alive
         assert env._invalid_numerical_episode
         assert any("NonFiniteState" in reason
                    for reason in env._invalid_numerical_reasons)
+    finally:
+        env.close()
+
+
+def test_mid_frame_ground_crossing_is_classified_before_next_load_read(
+        monkeypatch):
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        aid = "red_0"
+        sim = env.red_planes[aid]
+        state = {"altitude": 1.0, "runs": 0, "load_reads_after_ground": 0}
+        original_property = sim.get_property_value
+
+        monkeypatch.setattr(
+            sim, "get_position",
+            lambda: np.array([0.0, 0.0, state["altitude"]]))
+        monkeypatch.setattr(
+            sim, "get_geodetic",
+            lambda: np.array([120.0, 60.0, state["altitude"]]))
+
+        def run():
+            state["runs"] += 1
+            state["altitude"] = -0.1
+            return True
+
+        def property_value(name):
+            if (state["altitude"] < 0.0
+                    and name.startswith("accelerations/n-pilot-")):
+                state["load_reads_after_ground"] += 1
+                return 500.0
+            return original_property(name)
+
+        monkeypatch.setattr(sim, "run", run)
+        monkeypatch.setattr(sim, "get_property_value", property_value)
+        env._run_one_physics_frame()
+
+        assert state["runs"] == 1
+        assert not sim.is_alive
+        assert env._death_reasons[aid] == "Crash_LowAlt"
+        assert not env._invalid_numerical_episode
+        target = (0.0, 0.0, 300.0)
+        env._apply_pid_controls({aid: target})
+        env._update_overload_timers()
+        env._run_one_physics_frame()
+        assert state["runs"] == 1
+        assert state["load_reads_after_ground"] == 0
+
+        rewards, components = env._compute_rewards()
+        assert all(np.isfinite(value) for value in rewards.values())
+        assert components[aid]["r_death"] == 0.0
+        assert env._get_terminated()[aid]
+        assert not any(env._get_truncated().values())
+    finally:
+        env.close()
+
+
+def test_dead_aircraft_stops_mid_decision_while_survivor_finishes_frames(
+        monkeypatch):
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        dead_id = "red_0"
+        dead = env.red_planes[dead_id]
+        survivor = env.red_planes["red_1"]
+        state = {"altitude": 1.0, "dead_runs": 0, "survivor_runs": 0,
+                 "load_reads_after_ground": 0}
+        original_property = dead.get_property_value
+
+        monkeypatch.setattr(
+            dead, "get_position",
+            lambda: np.array([0.0, 0.0, state["altitude"]]))
+        monkeypatch.setattr(
+            dead, "get_geodetic",
+            lambda: np.array([120.0, 60.0, state["altitude"]]))
+
+        def dead_run():
+            state["dead_runs"] += 1
+            if state["dead_runs"] == 3:
+                state["altitude"] = -0.1
+            return True
+
+        def survivor_run():
+            state["survivor_runs"] += 1
+            return True
+
+        def property_value(name):
+            if (state["altitude"] < 0.0
+                    and name.startswith("accelerations/n-pilot-")):
+                state["load_reads_after_ground"] += 1
+                return 500.0
+            return original_property(name)
+
+        monkeypatch.setattr(dead, "run", dead_run)
+        monkeypatch.setattr(dead, "get_property_value", property_value)
+        monkeypatch.setattr(survivor, "run", survivor_run)
+        actions = {
+            aid: np.zeros(3, dtype=np.float32) for aid in env.agent_ids}
+        _, rewards, _, truncated, info = env.step(actions)
+
+        assert state["dead_runs"] == 3
+        assert state["survivor_runs"] == env.agent_interaction_steps
+        assert state["load_reads_after_ground"] == 0
+        assert env._death_reasons[dead_id] == "Crash_LowAlt"
+        assert not env._invalid_numerical_episode
+        assert all(np.isfinite(value) for value in rewards.values())
+        assert not any(truncated.values())
+        assert not info["__episode__"]["invalid_numerical_episode"]
+    finally:
+        env.close()
+
+
+def test_real_jsbsim_low_dive_crosses_ground_as_normal_crash():
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        aid = "red_0"
+        sim = env.red_planes[aid]
+        initial_state = dict(sim.init_state)
+        initial_state.update({
+            "ic/h-sl-ft": 20.0 / 0.3048,
+            "ic/theta-deg": -30.0,
+            "ic/u-fps": 300.0 / 0.3048,
+        })
+        sim.reload(new_state=initial_state)
+
+        for _ in range(30):
+            env._run_one_physics_frame()
+            if not sim.is_alive:
+                break
+
+        assert not sim.is_alive
+        assert sim.get_geodetic()[2] < 0.0
+        assert env._death_reasons[aid] == "Crash_LowAlt"
+        assert not env._invalid_numerical_episode
+        for other_id in env.agent_ids:
+            if other_id == aid:
+                continue
+            other = env._get_sim(other_id)
+            assert other.is_alive
+            assert np.all(np.isfinite(np.concatenate([
+                other.get_position(), other.get_velocity(), other.get_rpy()])))
     finally:
         env.close()
 

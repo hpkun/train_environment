@@ -170,7 +170,6 @@ class UavCombatEnv(gymnasium.Env):
     # logic follows eq.18 here.
     BATTLEFIELD_HALF_SIZE = paper_value("boundary_reward_half_width_m")
     BATTLEFIELD_ALTITUDE_MAX = 10000.0  # m — ceiling
-    BATTLEFIELD_ALTITUDE_MIN = 2500.0   # m — floor (crash)
     OVERLOAD_G_LIMIT = paper_value("maximum_aircraft_load_g")
     OVERLOAD_TIME_LIMIT = 10.0         # s after which >9G triggers termination
     MAX_SPEED = paper_value("maximum_aircraft_speed_mps")
@@ -698,7 +697,6 @@ class UavCombatEnv(gymnasium.Env):
         for _ in range(self.agent_interaction_steps):
             self._apply_pid_controls(targets)
             self._run_one_physics_frame()
-            self._physics_frame += 1
             self._check_missile_launch()
             self._update_missiles()
             self._update_overload_timers()
@@ -1361,24 +1359,53 @@ class UavCombatEnv(gymnasium.Env):
 
     def _run_one_physics_frame(self):
         """Advance every alive aircraft by one JSBSim frame."""
+        advanced = []
         for aid, sim in self._all_sims_with_ids():
             if sim.is_alive:
                 sim.run()
-                self._enforce_aircraft_constraints(aid, sim)
+                advanced.append((aid, sim))
+        self._physics_frame += 1
+        for aid, sim in advanced:
+            self._check_aircraft_post_physics_state(aid, sim)
 
-    def _enforce_aircraft_constraints(self, aid: str, sim: AircraftSimulator):
-        """Apply numerical guards and audit the paper 600 m/s envelope."""
-        velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
-        position = np.asarray(sim.get_position(), dtype=np.float64)
-        rpy = np.asarray(sim.get_rpy(), dtype=np.float64)
-        if not np.all(np.isfinite(np.concatenate([velocity, position, rpy]))):
+    def _check_aircraft_post_physics_state(
+            self, aid: str, sim: AircraftSimulator, *, audit_speed: bool = True
+    ) -> bool:
+        """Classify post-frame state before another control or combat update."""
+        if sim is None or not sim.is_alive:
+            return False
+        try:
+            velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
+            position = np.asarray(sim.get_position(), dtype=np.float64)
+            rpy = np.asarray(sim.get_rpy(), dtype=np.float64)
+            altitude = float(sim.get_geodetic()[2])
+            state = np.concatenate([velocity, position, rpy, [altitude]])
+        except Exception:
+            state = np.array([np.nan], dtype=np.float64)
+        if not np.all(np.isfinite(state)):
             sim.crash()
             if _is_adapted_profile(self):
                 self._mark_invalid_numerical(aid, "NonFiniteState")
             else:
                 self._death_reasons.setdefault(aid, "Crash_NonFinite")
             self._crashed_this_step.add(aid)
-            return
+            return False
+        if altitude < self.arena_altitude_min_m:
+            reason = "Crash_LowAlt"
+        elif altitude > self.arena_altitude_max_m:
+            reason = "Crash_HighAlt"
+        elif (abs(position[0]) > self.arena_half_width_m
+              or abs(position[1]) > self.arena_half_width_m):
+            reason = "Crash_BattleVolume"
+        else:
+            reason = None
+        if reason is not None:
+            sim.crash()
+            self._crashed_this_step.add(aid)
+            self._death_reasons.setdefault(aid, reason)
+            return False
+        if not audit_speed:
+            return True
         speed = float(np.linalg.norm(velocity))
         maximum = float(self.environment_config.aircraft.maximum_speed_mps.value)
         diag = self._aircraft_diagnostics[aid]
@@ -1396,6 +1423,7 @@ class UavCombatEnv(gymnasium.Env):
             diag["consecutive_above_600mps_frames"] = 0
         if diag["consecutive_above_600mps_frames"] >= AIRCRAFT_ENVELOPE_FRAMES:
             diag["speed_envelope_violation"] = True
+        return True
 
     def _mark_invalid_numerical(self, aid: str, reason: str) -> None:
         self._invalid_numerical_episode = True
@@ -1773,39 +1801,17 @@ class UavCombatEnv(gymnasium.Env):
             sim = self._get_sim(aid)
             if sim is None or not sim.is_alive:
                 continue
+            if not self._check_aircraft_post_physics_state(
+                    aid, sim, audit_speed=False):
+                continue
+            if _is_adapted_profile(self):
+                # Other tactical death categories are disabled in this profile.
+                continue
 
             crashed = False
             reason = None
-
-            alt = float(sim.get_geodetic()[2])
-            pos = np.asarray(sim.get_position(), dtype=np.float64)
-            if alt < self.arena_altitude_min_m:
-                sim.crash()
-                crashed = True
-                reason = "Crash_LowAlt"
-            elif _is_adapted_profile(self) and alt > self.arena_altitude_max_m:
-                sim.crash()
-                crashed = True
-                reason = "Crash_HighAlt"
-            elif _is_adapted_profile(self) and (
-                    abs(pos[0]) > self.arena_half_width_m
-                    or abs(pos[1]) > self.arena_half_width_m):
-                sim.crash()
-                crashed = True
-                reason = "Crash_BattleVolume"
-            elif _is_adapted_profile(self):
-                # Other tactical death categories are disabled in this profile.
-                continue
-            elif alt > self.arena_altitude_max_m:
-                sim.crash()
-                crashed = True
-                reason = "Crash_HighAlt"
-            elif abs(pos[0]) > self.arena_half_width_m or abs(pos[1]) > self.arena_half_width_m:
-                sim.crash()
-                crashed = True
-                reason = "Crash_BattleVolume"
-            elif (self.pid_profile != "paper"
-                  and self._overload_timers[aid] > self.OVERLOAD_TIME_LIMIT):
+            if (self.pid_profile != "paper"
+                    and self._overload_timers[aid] > self.OVERLOAD_TIME_LIMIT):
                 sim.crash()
                 crashed = True
                 reason = "Crash_OverG"
