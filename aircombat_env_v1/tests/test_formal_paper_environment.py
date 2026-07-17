@@ -5,7 +5,7 @@ import pytest
 from gymnasium import spaces
 
 from aircombat_env_v1.paper_action_semantics import map_action_indices
-from aircombat_env_v1.paper_env import TAMPaperCombatEnv,PUBLISHED,INFERRED,SCENARIOS
+from aircombat_env_v1.paper_env import PaperAircraft,TAMPaperCombatEnv,PUBLISHED,INFERRED,SCENARIOS
 from aircombat_env_v1.paper_missile import PaperMissile
 from aircombat_env_v1.paper_observation import PaperObservation
 from aircombat_env_v1.paper_reward import PaperReward
@@ -26,6 +26,30 @@ def test_control_command_is_reordered_for_aircraft_simulator(monkeypatch):
     env=TAMPaperCombatEnv("paper_nominal_1v1","all");env.reset(seed=1);a=env.agents[0];seen=[]
     monkeypatch.setattr(a.simulator,"set_controls",lambda *values:seen.append(values));a.apply_direct_fcs_command([.7,.1,.2,.3])
     assert seen[-1]==(.1,.2,.3,.7);env.close()
+
+def test_formal_initialization_retracts_gear_and_flaps():
+    aircraft=PaperAircraft("init","red",120.,60.,0.)
+    try:
+        status=aircraft.control_initialization_status()
+        assert status["gear_command_norm"]==0 and status["gear_position_norm"]==0
+        assert status["gear_unit_positions_norm"]==[0.,0.,0.]
+        assert status["flap_command_norm"]==0 and status["flap_position_norm"]==0
+        assert status["engine_running"] and status["physics_dt_s"]==pytest.approx(1/60)
+    finally:aircraft.close()
+
+def test_formal_load_factor_reads_accelerations_nz(monkeypatch):
+    aircraft=PaperAircraft("load","red",120.,60.,0.)
+    try:
+        original=aircraft.simulator.get_property
+        monkeypatch.setattr(aircraft.simulator,"get_property",lambda name:3.25 if name=="accelerations/Nz" else original(name))
+        aircraft._update();assert aircraft.load_factor_g==3.25
+    finally:aircraft.close()
+
+def test_formal_aircraft_saves_required_finite_state():
+    aircraft=PaperAircraft("state","red",120.,60.,0.)
+    try:assert np.isfinite([aircraft.position[2],aircraft.speed,aircraft.roll,aircraft.pitch,aircraft.heading,
+                            aircraft.vertical_speed,aircraft.load_factor_g,aircraft.alpha,aircraft.beta]).all()
+    finally:aircraft.close()
 
 def test_formal_env_does_not_reference_paper_autopilot():
     import aircombat_env_v1.paper_env as module

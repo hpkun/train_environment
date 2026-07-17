@@ -14,6 +14,8 @@
 
 `weapon_enabled_agent_ids` 是仅供验收诊断的可选开关；默认 `None` 时所有攻击 UAV 武器正常启用，不改变正式行为。
 
+正式 JSBSim 初始化显式收起起落架与襟翼、启动发动机并进入 propulsion steady state；正式过载口径为 `accelerations/Nz`。基础机动索引属于 `paper_unspecified_local_jsbsim_calibration`，不是论文公开参数。离线审计命令为 `python aircombat_env_v1/scripts/calibrate_paper_basic_manoeuvres.py`。只有双航向 1000 步 level 门槛通过后，才可将其作为 initial direct-FCS command；该初始命令是本地工程校准值，因为论文没有公开 initial FCS trim。
+
 名义初始条件直接来自 `tam_paper_env_v1_2v2.yaml`：6000 m、250 m/s，红方航向 0°、蓝方 180°；2v2 位置为 red `(120,60)/(120.02,60)`、blue `(120,60.2)/(120.02,60.2)`，每架两枚导弹。
 
 ```powershell

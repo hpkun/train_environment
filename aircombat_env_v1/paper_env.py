@@ -36,10 +36,25 @@ class PaperAircraft:
         self.reset()
     def reset(self):
         self.missile_left=2; self.alive=True; self.death_reason=None; self.out_of_boundary=False; self.current_target=None; self.incoming_missiles=[]
-        # Formal direct-FCS initialization: engine running, gear/flaps retracted by
-        # the bundled model, minimum published throttle command, no PID trim.
+        # Engine start and propulsion steady-state are performed by reset().
         self._state=self.simulator.reset(6000.,250.,self.initial_heading_deg,0.,0.,self.latitude,self.longitude,0.,.4)
+        self._initialize_paper_direct_fcs()
         self._update(); return self
+    def _initialize_paper_direct_fcs(self,indices=None):
+        """Apply the local direct-FCS initial condition once, without PID."""
+        for name in ("gear/gear-cmd-norm","gear/gear-pos-norm"):
+            self.simulator.set_property(name,0.)
+        for index in range(3):self.simulator.set_property(f"gear/unit[{index}]/pos-norm",0.)
+        self.simulator.set_property("fcs/flap-cmd-norm",0.);self.simulator.set_property("fcs/flap-pos-norm",0.)
+        if indices is not None:self.apply_direct_fcs_command(map_action_indices(indices))
+    def control_initialization_status(self):
+        return {"gear_command_norm":self.simulator.get_property("gear/gear-cmd-norm"),
+                "gear_position_norm":self.simulator.get_property("gear/gear-pos-norm"),
+                "gear_unit_positions_norm":[self.simulator.get_property(f"gear/unit[{i}]/pos-norm") for i in range(3)],
+                "flap_command_norm":self.simulator.get_property("fcs/flap-cmd-norm"),
+                "flap_position_norm":self.simulator.get_property("fcs/flap-pos-norm"),
+                "engine_running":bool(self.simulator.get_property("propulsion/engine/set-running")),
+                "physics_dt_s":self.simulator.dt}
     def apply_direct_fcs_command(self,command):
         throttle,aileron,elevator,rudder=np.asarray(command,float).reshape(4)
         self.simulator.set_controls(aileron,elevator,rudder,throttle)
@@ -48,13 +63,16 @@ class PaperAircraft:
         try:self._state=self.simulator.run()
         except (RuntimeError,ValueError,FloatingPointError):self.kill("numerical_invalid");return
         self._update()
-        if not np.isfinite(np.r_[self.position,self.velocity,self.roll,self.pitch,self.heading,self.speed,self.load_factor_g]).all():self.kill("numerical_invalid")
+        if not np.isfinite(np.r_[self.position,self.velocity,self.roll,self.pitch,self.heading,self.speed,self.vertical_speed,
+                                 self.load_factor_g,self.alpha,self.beta]).all():self.kill("numerical_invalid")
         elif self.position[2]<=0:self.kill("crash")
     def _update(self):
         s=self._state; self.position=LLA2NEU(s["longitude"],s["latitude"],s["altitude"],*ORIGIN)
         self.velocity=np.array([s["v_north"],s["v_east"],-s["v_down"]],float)
         self.roll=float(s["roll"]);self.pitch=float(s["pitch"]);self.heading=float(s["heading"])
-        self.speed=float(s["true_airspeed"]);self.load_factor_g=float(s["load_factor"])
+        self.speed=float(s["true_airspeed"]);self.vertical_speed=float(-s["v_down"])
+        self.load_factor_g=float(self.simulator.get_property("accelerations/Nz"))
+        self.alpha=float(s["alpha"]);self.beta=float(s["beta"])
     def kill(self,reason):self.alive=False;self.death_reason=reason;self.out_of_boundary=reason=="boundary"
     def close(self):self.simulator=None
 
@@ -93,8 +111,11 @@ class TAMPaperCombatEnv(gym.Env):
         self.by_id={a.agent_id:a for a in self.agents};self.weapon.reset();self.step_count=0;self.simulation_time_s=0.
         self.invalid_episode=False;self.red_missile_kills=self.blue_missile_kills=0;self.red_crashes=self.blue_crashes=0
         self.flight_envelope_violation=False;self.minimum_altitude_m=min(a.position[2] for a in self.agents)
+        self.maximum_altitude_m=max(a.position[2] for a in self.agents);self.minimum_speed_mps=min(a.speed for a in self.agents)
         self.maximum_speed_mps=max(a.speed for a in self.agents);self.maximum_load_factor_g=max(abs(a.load_factor_g) for a in self.agents)
+        self.maximum_alpha_deg=max(abs(np.rad2deg(a.alpha)) for a in self.agents);self.maximum_beta_deg=max(abs(np.rad2deg(a.beta)) for a in self.agents)
         self.current_targets={};self.target_change_events=[];self.target_changes=0;self.second_launches=0
+        self.first_launch_target={};self.second_launch_target={};self.second_launch_target_matches=0
         self._launch_counts={a.agent_id:0 for a in self.agents};self.simultaneous_kills=0
         self._update_targets(count_changes=False);obs=self.paper_observation.build(self.agents,self.weapon.missiles)
         return {aid:obs[aid] for aid in self.controlled_ids},self._info(None,None)
@@ -104,7 +125,7 @@ class TAMPaperCombatEnv(gym.Env):
             enemies=sorted([e for e in self.agents if e.side!=a.side and e.alive],key=lambda e:e.agent_id)
             target=min(enemies,key=lambda e:(float(np.linalg.norm(e.position-a.position)),e.agent_id)) if a.alive and enemies else None
             a.current_target=target.agent_id if target else None;self.current_targets[a.agent_id]=a.current_target
-            if count_changes and previous is not None and previous!=a.current_target:
+            if count_changes and previous is not None and a.current_target is not None and previous!=a.current_target:
                 self.target_changes+=1;self.target_change_events.append({"agent_id":a.agent_id,"previous_target":previous,
                     "current_target":a.current_target,"decision_step":self.step_count,"simulation_time_s":self.simulation_time_s})
             a.incoming_missiles=[m for m in self.weapon.missiles if m.alive and m.target_id==a.agent_id]
@@ -127,6 +148,11 @@ class TAMPaperCombatEnv(gym.Env):
                 if launch:
                     self._launch_counts[a.agent_id]+=1
                     if self._launch_counts[a.agent_id]==2:self.second_launches+=1
+                    if self._launch_counts[a.agent_id]==1:self.first_launch_target[a.agent_id]=launch["target_id"]
+                    elif self._launch_counts[a.agent_id]==2:
+                        self.second_launch_target[a.agent_id]=launch["target_id"]
+                        changes=[e for e in self.target_change_events if e["agent_id"]==a.agent_id]
+                        if changes and changes[-1]["current_target"]==launch["target_id"]:self.second_launch_target_matches+=1
                     launch.update({"simulation_time_s":self.simulation_time_s,"decision_step":self.step_count,
                                    "missiles_left":a.missile_left,"launch_number":self._launch_counts[a.agent_id]})
                     events.append(launch)
@@ -161,8 +187,11 @@ class TAMPaperCombatEnv(gym.Env):
         return {aid:obs[aid] for aid in self.controlled_ids},{aid:rewards[aid] for aid in self.controlled_ids},terminated,truncated,info
     def _check_frame(self,out_step):
         for a in self.agents:
-            self.minimum_altitude_m=min(self.minimum_altitude_m,float(a.position[2]));self.maximum_speed_mps=max(self.maximum_speed_mps,a.speed)
+            self.minimum_altitude_m=min(self.minimum_altitude_m,float(a.position[2]));self.maximum_altitude_m=max(self.maximum_altitude_m,float(a.position[2]))
+            self.minimum_speed_mps=min(self.minimum_speed_mps,a.speed);self.maximum_speed_mps=max(self.maximum_speed_mps,a.speed)
             self.maximum_load_factor_g=max(self.maximum_load_factor_g,abs(a.load_factor_g))
+            self.maximum_alpha_deg=max(self.maximum_alpha_deg,abs(float(np.rad2deg(a.alpha))))
+            self.maximum_beta_deg=max(self.maximum_beta_deg,abs(float(np.rad2deg(a.beta))))
             self.flight_envelope_violation|=a.position[2]<750 or a.speed>400 or abs(a.load_factor_g)>9
             if a.death_reason=="numerical_invalid":self.invalid_episode=True
             if a.alive and np.linalg.norm(a.position[:2])>28000:a.kill("boundary");out_step.add(a.agent_id)
@@ -176,12 +205,17 @@ class TAMPaperCombatEnv(gym.Env):
          "red_missile_kills":self.red_missile_kills,"blue_missile_kills":self.blue_missile_kills,"red_crashes":self.red_crashes,"blue_crashes":self.blue_crashes,
          "active_missiles":sum(m.alive for m in self.weapon.missiles),"current_targets":dict(self.current_targets),
          "flight_envelope_violation":self.flight_envelope_violation,"minimum_altitude_m":self.minimum_altitude_m,
-         "maximum_speed_mps":self.maximum_speed_mps,"maximum_load_factor_g":self.maximum_load_factor_g,"invalid_episode":self.invalid_episode,
+         "maximum_altitude_m":self.maximum_altitude_m,"minimum_speed_mps":self.minimum_speed_mps,
+         "maximum_speed_mps":self.maximum_speed_mps,"maximum_load_factor_g":self.maximum_load_factor_g,
+         "maximum_alpha_deg":self.maximum_alpha_deg,"maximum_beta_deg":self.maximum_beta_deg,
+         "final_vertical_speed_mps":{a.agent_id:a.vertical_speed for a in self.agents},"invalid_episode":self.invalid_episode,
          "red_numerical_invalid":sum(a.death_reason=="numerical_invalid" for a in red),
          "blue_numerical_invalid":sum(a.death_reason=="numerical_invalid" for a in blue),
          "boundary_deaths":sum(a.death_reason=="boundary" for a in self.agents),
          "simultaneous_kills":self.simultaneous_kills,"target_changes":self.target_changes,
          "target_change_events":list(self.target_change_events),"second_launches":self.second_launches,
+         "valid_target_reselections":self.target_changes,"second_launch_target_matches":self.second_launch_target_matches,
+         "first_launch_target":dict(self.first_launch_target),"second_launch_target":dict(self.second_launch_target),
          "weapon_enabled_agent_ids":(None if self.weapon_enabled_agent_ids is None else sorted(self.weapon_enabled_agent_ids)),
          "termination_reason":reason,"winner":winner,"death_reason":{a.agent_id:a.death_reason for a in self.agents}}
     def close(self):
