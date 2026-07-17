@@ -199,9 +199,10 @@ class PureHAPPOPolicy(nn.Module):
                  init_log_std: float = -1.204,
                  credit_mode: str = "shared_alive_team_mean"):
         super().__init__()
-        if credit_mode != "shared_alive_team_mean":
+        if credit_mode not in {
+                "shared_alive_team_mean", "fixed_three_agent_team_mean"}:
             raise ValueError(
-                "PureHAPPOPolicy formal contract requires shared_alive_team_mean")
+                f"unsupported PureHAPPOPolicy credit_mode: {credit_mode}")
         self.actor_obs_dim = int(actor_obs_dim)
         self.critic_state_dim = int(critic_state_dim)
         self.action_dim = int(action_dim)

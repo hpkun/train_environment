@@ -53,6 +53,7 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.formal_contract = formal_contract
         self.observation_contract = observation_contract
         self.reward_contract = reward_contract
+        self.credit_mode = str(config["credit_mode"])
         self._observation_builder = observation_builder
         self._reward_builder = reward_builder
         self.red_ids = list(RED_IDS)
@@ -106,6 +107,7 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.last_critic_state = np.zeros(self.critic_state_dim, np.float32)
         self.previous_missile_risk = {aid: 0.0 for aid in self.red_ids}
         self.previous_missile_speed: dict[str, float] = {}
+        self.v2_mav_team_credit_used = 0.0
         self.last_fire_gates: dict[str, dict] = {}
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -139,6 +141,7 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.last_control_targets = {aid: None for aid in self.aircraft}
         self.previous_missile_risk = {aid: 0.0 for aid in self.red_ids}
         self.previous_missile_speed = {}
+        self.v2_mav_team_credit_used = 0.0
         self.last_fire_gates = {}
         self.audit_initial_perturbation = perturbation
         obs, self.last_critic_state = self._observation_builder(self)
@@ -209,10 +212,37 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
                 reward_components["per_agent"][aid].get("missile_risk", 0.0))
         red_alive = sum(self.aircraft[aid].is_alive for aid in self.red_ids)
         blue_alive = sum(self.aircraft[aid].is_alive for aid in self.blue_ids)
-        terminated = bool(numeric_anomaly or red_alive == 0 or blue_alive == 0)
+        red_attack_alive = sum(
+            self.aircraft[aid].is_alive for aid in self.red_ids
+            if self.roles[aid] == "attack_uav")
+        blue_attack_alive = sum(
+            self.aircraft[aid].is_alive for aid in self.blue_ids
+            if self.roles[aid] == "attack_uav")
+        if self.formal_contract == "hetero_3v2_pure_happo_v2":
+            combat_capability_lost = (
+                red_attack_alive == 0 or blue_attack_alive == 0)
+            terminated = bool(numeric_anomaly or combat_capability_lost)
+        else:
+            terminated = bool(numeric_anomaly or red_alive == 0 or blue_alive == 0)
         truncated = bool(not terminated and self.step_count >= self.max_steps)
         if numeric_anomaly:
             outcome, reason = "invalid", "numeric_anomaly"
+        elif self.formal_contract == "hetero_3v2_pure_happo_v2":
+            if red_attack_alive == 0 and blue_attack_alive == 0:
+                outcome, reason = (
+                    "mutual_elimination",
+                    "mutual_combat_capability_eliminated",
+                )
+            elif red_attack_alive == 0:
+                outcome, reason = (
+                    "blue_win", "red_combat_capability_eliminated")
+            elif blue_attack_alive == 0:
+                outcome, reason = (
+                    "red_win", "blue_combat_capability_eliminated")
+            elif truncated:
+                outcome, reason = "draw", "timeout"
+            else:
+                outcome, reason = "ongoing", ""
         elif red_alive == 0 and blue_alive == 0:
             outcome, reason = "mutual_elimination", "mutual_elimination"
         elif red_alive == 0:
@@ -287,6 +317,12 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
             "reward_components": reward_components,
             "red_alive": sum(self.aircraft[aid].is_alive for aid in self.red_ids),
             "blue_alive": sum(self.aircraft[aid].is_alive for aid in self.blue_ids),
+            "red_attack_alive": sum(
+                self.aircraft[aid].is_alive for aid in self.red_ids
+                if self.roles[aid] == "attack_uav"),
+            "blue_attack_alive": sum(
+                self.aircraft[aid].is_alive for aid in self.blue_ids
+                if self.roles[aid] == "attack_uav"),
             "mav_alive": bool(self.aircraft.get("red_0") and self.aircraft["red_0"].is_alive),
             "death_reasons": dict(self.death_reasons),
             "audit_initial_perturbation": getattr(self, "audit_initial_perturbation", {}),

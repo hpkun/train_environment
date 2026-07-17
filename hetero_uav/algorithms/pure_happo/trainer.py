@@ -80,6 +80,13 @@ def _alive_before_team_mean(rewards: torch.Tensor, active: torch.Tensor) -> torc
     return (rewards * active).sum(dim=-1) / active.sum(dim=-1).clamp(min=1)
 
 
+def _fixed_three_agent_team_mean(rewards: torch.Tensor) -> torch.Tensor:
+    if rewards.shape[-1] != 3:
+        raise ValueError(
+            "fixed_three_agent_team_mean requires exactly three reward roles")
+    return rewards.sum(dim=-1) / 3.0
+
+
 def _compute_grouped_gae(rewards, values, next_values, bootstrap_or_dones,
                          continuation_or_env_ids, env_ids_or_gamma=None,
                          gamma_or_lambda=None, gae_lambda=None, **legacy_kwargs):
@@ -133,8 +140,9 @@ class PureHAPPOTrainer:
                  clip_param=0.2, entropy_coef=0.01, value_coef=0.5,
                  max_grad_norm=10.0, ppo_epochs=5, gamma=0.99,
                  gae_lambda=0.95, seed=None, critic_epochs: int = 1):
-        if getattr(policy, "credit_mode", None) != "shared_alive_team_mean":
-            raise ValueError("sequential-v2 requires shared_alive_team_mean")
+        if getattr(policy, "credit_mode", None) not in {
+                "shared_alive_team_mean", "fixed_three_agent_team_mean"}:
+            raise ValueError("sequential-v2 requires a supported scalar team credit mode")
         if int(critic_epochs) < 1:
             raise ValueError("critic_epochs must be >= 1")
         self.policy = policy
@@ -181,7 +189,10 @@ class PureHAPPOTrainer:
         if values.ndim != 1 or next_values.shape != values.shape:
             raise ValueError("sequential-v2 critic values must be scalar [T]")
 
-        team_reward = _alive_before_team_mean(rewards, active)
+        if self.policy.credit_mode == "fixed_three_agent_team_mean":
+            team_reward = _fixed_three_agent_team_mean(rewards)
+        else:
+            team_reward = _alive_before_team_mean(rewards, active)
         bootstrap_masks = 1.0 - terminated
         continuation_masks = 1.0 - episode_dones
         advantages_raw, returns = _compute_grouped_gae(

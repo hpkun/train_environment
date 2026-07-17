@@ -11,7 +11,7 @@ from uav_env.JSBSim.formal_v1.geometry import combat_geometry
 from uav_env.JSBSim.formal_v1.missile import FormalMissile
 from uav_env.JSBSim.formal_v1.targeting import fire_gate
 from uav_env.JSBSim.formal_v2.contract import (
-    ENV_TYPE, OBSERVATION_CONTRACT, REWARD_CONTRACT_VERSION,
+    CREDIT_MODE, ENV_TYPE, OBSERVATION_CONTRACT, REWARD_CONTRACT_VERSION,
 )
 from uav_env.JSBSim.formal_v2.observation import (
     FIRE_CONTROL_FIELDS, build_actor_observation,
@@ -78,6 +78,7 @@ def fake_env():
         launch_ta_rad=np.deg2rad(90.0),
         mav_detection_range_m=80_000.0,
         uav_detection_range_m=10_000.0,
+        v2_mav_team_credit_used=0.0,
     )
 
 
@@ -243,7 +244,8 @@ def test_mav_weights_shared_metric_and_death_contract():
     reward, detail = compute_role_rewards(
         env, {"red_1": "blue_0", "red_2": "blue_1"}, [])
     mav = detail["per_agent"]["red_0"]
-    assert reward["red_0"] == EVENT_REWARDS["mav_death"]
+    assert mav["raw_event_reward"] == EVENT_REWARDS["mav_death"]
+    assert reward["red_0"] == pytest.approx(-2.0)
     assert mav["dense"] == 0.0
     assert all(mav[key] == 0.0 for key in (
         "mav_safety", "mav_support", "mav_awareness"))
@@ -298,7 +300,7 @@ def test_v2_meta_and_cross_contract_rejection():
     env = make_env(V2_CONFIG)
     meta = {
         **_contract_meta(env),
-        "credit_mode": "shared_alive_team_mean",
+        "credit_mode": CREDIT_MODE,
         "algorithm_contract": "pure_happo_sequential_v2",
         "policy_distribution": "tanh_squashed_gaussian_raw_action",
         "critic_contract": "centralized_shared_scalar_v",

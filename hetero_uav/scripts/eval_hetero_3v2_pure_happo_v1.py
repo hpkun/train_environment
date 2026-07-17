@@ -15,6 +15,7 @@ from uav_env.make_env import make_env
 from uav_env.JSBSim.formal_v1.contract import ENV_TYPE
 from uav_env.JSBSim.formal_v1.reward import REWARD_CONTRACT_VERSION
 from uav_env.JSBSim.formal_v2.contract import (
+    CREDIT_MODE as V2_CREDIT_MODE,
     ENV_TYPE as V2_ENV_TYPE,
     OBSERVATION_CONTRACT as V2_OBSERVATION_CONTRACT,
     REWARD_CONTRACT_VERSION as V2_REWARD_CONTRACT_VERSION,
@@ -31,15 +32,17 @@ def _validate_checkpoint_meta(
             f"environment {expected_formal_contract!r}")
     if formal_contract not in {ENV_TYPE, V2_ENV_TYPE}:
         raise ValueError("checkpoint is not a supported formal V1/V2 checkpoint")
-    if meta.get("credit_mode") != "shared_alive_team_mean":
-        raise ValueError("checkpoint is not a formal shared-credit checkpoint")
     if formal_contract == V2_ENV_TYPE:
+        if meta.get("credit_mode") != V2_CREDIT_MODE:
+            raise ValueError("checkpoint credit_mode is not formal V2")
         if meta.get("reward_contract") != V2_REWARD_CONTRACT_VERSION:
             raise ValueError("checkpoint reward_contract is not formal V2")
         if meta.get("observation_contract") != V2_OBSERVATION_CONTRACT:
             raise ValueError("checkpoint observation_contract is not formal V2")
         dimensions = {"actor_obs_dim": 73, "critic_state_dim": 219}
     else:
+        if meta.get("credit_mode") != "shared_alive_team_mean":
+            raise ValueError("checkpoint credit_mode is not formal V1")
         if meta.get("reward_contract", {}).get("version") != REWARD_CONTRACT_VERSION:
             raise ValueError("checkpoint does not use the current formal V1 reward contract")
         dimensions = {"actor_obs_dim": 68, "critic_state_dim": 204}
@@ -76,7 +79,8 @@ def main():
             raise ValueError(
                 f"checkpoint {key}={meta[key]} does not match environment {actual}")
     policy = PureHAPPOPolicy(meta["actor_obs_dim"], meta["critic_state_dim"],
-                             meta["action_dim"], meta["num_agents"]).to(a.device)
+                             meta["action_dim"], meta["num_agents"],
+                             credit_mode=meta["credit_mode"]).to(a.device)
     policy.load_state_dict(torch.load(model, map_location=a.device, weights_only=True)); policy.eval()
     rows=[]
     for episode in range(a.episodes):
@@ -91,6 +95,19 @@ def main():
             obs,reward,term,trunc,info=env.step({x:action[i] for i,x in enumerate(env.red_ids)})
             for aid in env.red_ids: totals[aid] += float(reward[aid])
             components=info["reward_components"]["per_agent"]
+            if env.formal_contract == V2_ENV_TYPE:
+                stats["raw_mav_reward"] += float(
+                    components["red_0"].get("raw_role_reward", 0.0))
+                stats["normalized_mav_reward"] += float(
+                    components["red_0"].get("normalized_role_reward", 0.0))
+                stats["raw_uav_reward"] += float(np.mean([
+                    components[aid].get("raw_role_reward", 0.0)
+                    for aid in ("red_1", "red_2")]))
+                stats["normalized_uav_reward"] += float(np.mean([
+                    components[aid].get("normalized_role_reward", 0.0)
+                    for aid in ("red_1", "red_2")]))
+                stats["team_reward"] += float(
+                    info["reward_components"].get("team_reward", 0.0))
             for key in ("dense","safety","support_position","shared_information"):
                 stats[f"mav_{key}"] += float(components["red_0"].get(key,0.0))
             for key in ("dense","flight","speed","angle","distance","dodge"):
@@ -113,8 +130,10 @@ def main():
         actions=np.asarray(action_rows,np.float32)
         row={"episode":episode,"mav_return":totals["red_0"],
                      "uav_return_mean":float(np.mean([totals["red_1"],totals["red_2"]])),
-                     "outcome":info["outcome"],
+                     "outcome":info["outcome"], "end_reason":info["end_reason"],
                      "red_alive":info["red_alive"],"blue_alive":info["blue_alive"],
+                     "red_attack_alive":info["red_attack_alive"],
+                     "blue_attack_alive":info["blue_attack_alive"],
                      "red_launches":red_launches,"blue_launches":blue_launches,
                      "red_hits":red_hits,"blue_hits":blue_hits,
                      "red_kills":red_hits,"blue_kills":blue_hits,
@@ -123,6 +142,11 @@ def main():
                      "ata_rate":stats["ata_ok"]/denominator,
                      "ta_rate":stats["ta_ok"]/denominator,
                      "geometry_rate":stats["geometry_ok"]/denominator}
+        if env.formal_contract == V2_ENV_TYPE:
+            for key in (
+                    "raw_mav_reward", "normalized_mav_reward",
+                    "raw_uav_reward", "normalized_uav_reward", "team_reward"):
+                row[f"{key}_mean"] = stats[key] / step_denominator
         for key in ("dense","safety","support_position","shared_information"):
             row[f"mav_{key}_mean"]=stats[f"mav_{key}"]/step_denominator
         for key in ("dense","flight","speed","angle","distance","dodge"):
@@ -150,6 +174,16 @@ def main():
     for key in ("red_launches","blue_launches","red_hits","blue_hits","red_kills","blue_kills",
                 "range_rate","ata_rate","ta_rate","geometry_rate","mav_shared_information_mean"):
         summary[f"{key}_mean"]=float(np.mean([x[key] for x in rows]))
+    if env.formal_contract == V2_ENV_TYPE:
+        for output_key, row_key in (
+                ("raw_mav_reward_mean", "raw_mav_reward_mean"),
+                ("normalized_mav_reward_mean", "normalized_mav_reward_mean"),
+                ("raw_uav_reward_mean", "raw_uav_reward_mean"),
+                ("normalized_uav_reward_mean", "normalized_uav_reward_mean"),
+                ("team_reward_mean", "team_reward_mean"),
+                ("red_attack_alive_mean", "red_attack_alive"),
+                ("blue_attack_alive_mean", "blue_attack_alive")):
+            summary[output_key] = float(np.mean([x[row_key] for x in rows]))
     summary["finite"]=bool(all(
         np.isfinite(value) for row in rows for value in row.values() if not isinstance(value,str)))
     numeric_episode_keys = [

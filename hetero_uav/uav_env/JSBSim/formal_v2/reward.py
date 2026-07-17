@@ -9,11 +9,9 @@ import math
 import numpy as np
 
 from ..formal_v1.geometry import combat_geometry
-from ..formal_v1.reward import (
-    EVENT_REWARDS, shared_information_score, smooth_band,
-)
+from ..formal_v1.reward import shared_information_score
 
-REWARD_CONTRACT_VERSION = "paper_aligned_role_reward_v3"
+REWARD_CONTRACT_VERSION = "paper_aligned_role_reward_v4"
 UAV_WEIGHTS = {
     "height": 10.0,
     "speed": 10.0,
@@ -24,6 +22,20 @@ UAV_WEIGHTS = {
 MAV_SAFETY_WEIGHTS = {"distance": 0.5, "threat": 0.3, "aspect": 0.2}
 MAV_SUPPORT_WEIGHTS = {"position": 0.6, "awareness": 0.4}
 MISSILE_SPEED_NORM_MPS = 1_000.0
+UAV_DENSE_NORMALIZER = 75.0
+# R_safety is in [-1.2, 0.1] and R_support is in [-0.6, 0.84].
+MAV_DENSE_NORMALIZER = 1.8
+# The smallest published event magnitude is 100. This maps kill/death to
+# +/-2 and out-of-zone to -1, keeping an event larger than one dense step.
+EVENT_NORMALIZER = 100.0
+EVENT_REWARDS = {
+    "red_kill": 200.0,
+    "uav_death": -200.0,
+    "mav_death": -200.0,
+    "out_of_zone": -100.0,
+    "mav_team_kill": 100.0,
+    "mav_team_kill_cap": 200.0,
+}
 
 
 def _finite_clip(value: float, low: float = -1.0, high: float = 1.0) -> float:
@@ -129,14 +141,7 @@ def mav_safety_components(env) -> dict[str, float]:
         incoming = any(
             missile.is_launched and missile.target_id == "red_0"
             for missile in env.missiles)
-        launch_threat = any(
-            (geometry := combat_geometry(enemy, mav))["range_m"]
-            <= env.attack_range_m
-            and geometry["ata_rad"] <= env.launch_ata_rad
-            and geometry["ta_rad"] >= env.launch_ta_rad
-            for enemy in enemies
-        )
-        threat_term = -1.0 if incoming else (-0.5 if launch_threat else 0.0)
+        threat_term = -1.0 if incoming else 0.0
         aspect_terms = []
         for enemy in enemies:
             # Enemy TA in combat_geometry(mav, enemy) measures enemy heading
@@ -145,17 +150,17 @@ def mav_safety_components(env) -> dict[str, float]:
             aspect_terms.append(
                 -(1.0 - enemy_toward_mav / (math.pi / 4.0))
                 if enemy_toward_mav < math.pi / 4.0 else 0.0)
-        aspect_term = min(aspect_terms, default=0.0)
+        aspect_term = sum(aspect_terms)
     distance_term = _finite_clip(distance_term, -1.0, 0.2)
     threat_term = _finite_clip(threat_term, -1.0, 0.0)
-    aspect_term = _finite_clip(aspect_term, -1.0, 0.0)
+    aspect_term = _finite_clip(aspect_term, -2.0, 0.0)
     safety = (
         MAV_SAFETY_WEIGHTS["distance"] * distance_term
         + MAV_SAFETY_WEIGHTS["threat"] * threat_term
         + MAV_SAFETY_WEIGHTS["aspect"] * aspect_term
     )
     return {
-        "safety": _finite_clip(safety),
+        "safety": _finite_clip(safety, -1.2, 0.1),
         "safety_distance": distance_term,
         "safety_threat": threat_term,
         "safety_aspect": aspect_term,
@@ -164,27 +169,38 @@ def mav_safety_components(env) -> dict[str, float]:
 
 def mav_support_components(env) -> dict[str, float]:
     mav = env.aircraft["red_0"]
-    position_scores = []
-    for agent_id in ("red_1", "red_2"):
-        uav = env.aircraft[agent_id]
-        if uav.is_alive:
-            distance = float(np.linalg.norm(
-                mav.get_position() - uav.get_position()))
-            position_scores.append(
-                smooth_band(distance, 750.0, 4_000.0, 15_000.0, 30_000.0))
-    position = float(np.mean(position_scores)) if position_scores else 0.0
-    awareness_terms = []
+    combatants = [
+        env.aircraft[agent_id]
+        for agent_id in (*env.red_ids[1:], *env.blue_ids)
+        if env.aircraft[agent_id].is_alive
+    ]
+    if combatants:
+        battlefield_center = np.mean(
+            [aircraft.get_position()[:2] for aircraft in combatants], axis=0)
+        center_distance = float(np.linalg.norm(
+            mav.get_position()[:2] - battlefield_center))
+        d_opt, d_max = 8_000.0, 25_000.0
+        if center_distance < d_opt:
+            position = center_distance / d_opt - 1.0
+        elif center_distance < d_max:
+            position = 1.0 - (center_distance - d_opt) / (d_max - d_opt)
+        else:
+            position = -0.5
+    else:
+        center_distance = 0.0
+        position = 0.0
+    awareness = 0.0
+    observed_count = 0
     for target_id in env.blue_ids:
         target = env.aircraft[target_id]
         if not target.is_alive:
             continue
         geometry = combat_geometry(mav, target)
         if geometry["range_m"] <= env.mav_detection_range_m:
-            awareness_terms.append(max(
-                0.0, 1.0 - geometry["ata_rad"] / (math.pi / 2.0)))
-        else:
-            awareness_terms.append(0.0)
-    awareness = float(np.mean(awareness_terms)) if awareness_terms else 0.0
+            observed_count += 1
+            if geometry["ata_rad"] < math.pi / 2.0:
+                awareness += 0.3 * (
+                    1.0 - geometry["ata_rad"] / (math.pi / 2.0))
     support = (
         MAV_SUPPORT_WEIGHTS["position"] * position
         + MAV_SUPPORT_WEIGHTS["awareness"] * awareness
@@ -192,8 +208,35 @@ def mav_support_components(env) -> dict[str, float]:
     return {
         "support": _finite_clip(support),
         "support_position": _finite_clip(position),
-        "awareness": _finite_clip(awareness, 0.0, 1.0),
+        "support_center_distance_m": float(center_distance),
+        "awareness": _finite_clip(awareness, 0.0, 0.6),
+        "awareness_observed_count": float(observed_count),
         "shared_information_metric": shared_information_score(env),
+    }
+
+
+def _scaled_reward_fields(
+    raw_dense: float, raw_event: float, dense_normalizer: float,
+) -> dict[str, float]:
+    normalized_dense = _finite_clip(raw_dense / dense_normalizer)
+    normalized_event = float(raw_event / EVENT_NORMALIZER)
+    normalized_total = normalized_dense + normalized_event
+    values = np.asarray([
+        raw_dense, raw_event, normalized_dense, normalized_event,
+        normalized_total,
+    ], dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("non-finite formal v2 reward scaling")
+    return {
+        "raw_dense_reward": float(raw_dense),
+        "raw_event_reward": float(raw_event),
+        "raw_role_reward": float(raw_dense + raw_event),
+        "normalized_dense_reward": normalized_dense,
+        "normalized_event_reward": normalized_event,
+        "normalized_role_reward": float(normalized_total),
+        "dense": float(raw_dense),
+        "event": normalized_event,
+        "total": float(normalized_total),
     }
 
 
@@ -201,8 +244,11 @@ def _dead_mav_components(event: float) -> dict[str, float]:
     values = {
         "safety": 0.0, "safety_distance": 0.0, "safety_threat": 0.0,
         "safety_aspect": 0.0, "support": 0.0, "support_position": 0.0,
-        "awareness": 0.0, "shared_information_metric": 0.0,
-        "missile_risk": 0.0, "dense": 0.0, "event": event, "total": event,
+        "support_center_distance_m": 0.0, "awareness": 0.0,
+        "awareness_observed_count": 0.0, "shared_information_metric": 0.0,
+        "missile_risk": 0.0, "mav_team_kill_credit_delta": 0.0,
+        "mav_team_kill_credit_used": 0.0,
+        **_scaled_reward_fields(0.0, event, MAV_DENSE_NORMALIZER),
     }
     return _with_mav_log_names(values)
 
@@ -211,7 +257,8 @@ def _dead_uav_components(event: float) -> dict[str, float]:
     values = {
         "height": 0.0, "speed": 0.0, "angle": 0.0, "distance": 0.0,
         "dodge": 0.0, "dodge_angle": 0.0, "dodge_speed": 0.0,
-        "missile_risk": 0.0, "dense": 0.0, "event": event, "total": event,
+        "missile_risk": 0.0,
+        **_scaled_reward_fields(0.0, event, UAV_DENSE_NORMALIZER),
     }
     return _with_uav_log_names(values)
 
@@ -228,8 +275,10 @@ def _with_mav_log_names(values: dict[str, float]) -> dict[str, float]:
         "mav_support_position": values["support_position"],
         "mav_awareness": values["awareness"],
         "mav_shared_information_metric": values["shared_information_metric"],
-        "mav_event": values["event"],
-        "mav_total": values["total"],
+        "mav_event": values["raw_event_reward"],
+        "mav_total": values["raw_role_reward"],
+        "mav_raw_reward": values["raw_role_reward"],
+        "mav_normalized_reward": values["normalized_role_reward"],
     }
 
 
@@ -244,8 +293,10 @@ def _with_uav_log_names(values: dict[str, float]) -> dict[str, float]:
         "uav_dodge": values["dodge"],
         "uav_dodge_angle": values["dodge_angle"],
         "uav_dodge_speed": values["dodge_speed"],
-        "uav_event": values["event"],
-        "uav_total": values["total"],
+        "uav_event": values["raw_event_reward"],
+        "uav_total": values["raw_role_reward"],
+        "uav_raw_reward": values["raw_role_reward"],
+        "uav_normalized_reward": values["normalized_role_reward"],
     }
 
 
@@ -277,10 +328,27 @@ def compute_role_rewards(
             safety = mav_safety_components(env)
             support = mav_support_components(env)
             dense = safety["safety"] + support["support"]
+            step_attack_kills = sum(
+                red_hits_by.count(attacker_id)
+                for attacker_id in ("red_1", "red_2"))
+            available_credit = max(
+                0.0,
+                EVENT_REWARDS["mav_team_kill_cap"]
+                - float(env.v2_mav_team_credit_used),
+            )
+            team_credit = min(
+                EVENT_REWARDS["mav_team_kill"] * step_attack_kills,
+                available_credit,
+            )
+            env.v2_mav_team_credit_used += team_credit
+            event += team_credit
             detail = _with_mav_log_names({
                 **safety, **support, "missile_risk": 0.0,
-                "dense": float(dense), "event": float(event),
-                "total": float(dense + event),
+                "mav_team_kill_credit_delta": float(team_credit),
+                "mav_team_kill_credit_used": float(
+                    env.v2_mav_team_credit_used),
+                **_scaled_reward_fields(
+                    dense, event, MAV_DENSE_NORMALIZER),
             })
         else:
             target_id = selected_targets.get(agent_id)
@@ -309,16 +377,20 @@ def compute_role_rewards(
             )
             detail = _with_uav_log_names({
                 "height": height, "speed": speed, "angle": angle,
-                "distance": distance, **dodge, "dense": float(dense),
-                "event": float(event), "total": float(dense + event),
+                "distance": distance, **dodge,
+                **_scaled_reward_fields(
+                    dense, event, UAV_DENSE_NORMALIZER),
             })
         if not np.isfinite(np.asarray([
                 value for value in detail.values()
                 if isinstance(value, (int, float, np.number))])).all():
             raise ValueError(f"non-finite formal v2 reward for {agent_id}")
-        rewards[agent_id] = float(detail["total"])
+        rewards[agent_id] = float(detail["normalized_role_reward"])
         components[agent_id] = detail
+    team_reward = float(sum(rewards.values()) / 3.0)
     return rewards, {
         "per_agent": components,
         "reward_contract": REWARD_CONTRACT_VERSION,
+        "credit_mode": "fixed_three_agent_team_mean",
+        "team_reward": team_reward,
     }

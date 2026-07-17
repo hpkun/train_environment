@@ -26,7 +26,7 @@ two rule-controlled blue attack UAVs. The blue opponent remains
 | Action dimension | 3 | DERIVED |
 
 V2 does not change action decoding, PID gains, aircraft XML, aircraft model,
-initial geometry, termination implementation, or Pure HAPPO.
+initial geometry, physical dynamics, or Pure HAPPO actor/critic/update logic.
 
 ## 3. Observation contract
 
@@ -71,21 +71,22 @@ The two weight ratios are PUBLISHED.
 
 - `R_dist` is a bounded nearest-threat distance score. The 8 km danger and
   15 km safe normalization distances are DESIGN_CHOICE.
-- `R_threat` penalizes an incoming missile, or a blue aircraft already inside
-  the unchanged formal launch geometry. Its bounded normalization is
-  DESIGN_CHOICE.
-- `R_aspect` penalizes the most dangerous blue heading toward the MAV. The
-  45-degree normalization is DESIGN_CHOICE.
-- `R_pos` is the mean bounded MAV-to-live-attack-UAV support-distance score.
-  Its 0.75/4/15/30 km trapezoid is DESIGN_CHOICE.
-- `R_aware` is a continuous MAV-to-blue angular awareness score inside the
-  existing 80 km MAV sensing range. Its normalization is DESIGN_CHOICE.
+- `R_threat` is -1 only while a real launched missile targets the MAV;
+  pre-launch geometry does not enter this term.
+- `R_aspect` sums the bounded unsafe-aspect contribution from live blue UAVs.
+  The 45-degree normalization is DESIGN_CHOICE.
+- `R_pos` uses the horizontal distance from the MAV to the dynamic battlefield
+  center formed by live red attack UAVs and live blue attack UAVs. The
+  8/25 km piecewise normalization is DESIGN_CHOICE.
+- `R_aware` sums `0.3 * (1 - AO/(pi/2))` for each live, MAV-observed blue UAV
+  with AO below 90 degrees.
 
 `mav_shared_information_metric` remains diagnostic only. It is not included
 in `R_support` or `mav_total`.
 
-When the MAV is dead, every dense component is zero. Only the one-step V1
-death/event settlement remains.
+When the MAV is dead, every dense component is zero. Its death event is
+settled once. While alive, it receives +100 raw team credit per red attack-UAV
+kill, capped at +200 per episode. The MAV death event is -200 raw.
 
 ## 5. Attack UAV reward
 
@@ -153,12 +154,36 @@ limits. V2 does not add a new overload, altitude or speed termination/clamping
 path; their concrete aircraft behavior and enforcement remain inherited from
 V1 and JSBSim.
 
-## 7. Events and termination
+## 7. Reward scale, credit, events and termination
 
-V2 retains the V1 event and termination path. Kill, UAV death, MAV death and
-out-of-zone constants are DESIGN_CHOICE because the papers do not publish the
-exact constants used here. An event is settled once through `newly_dead` and
-the step missile event list.
+The paper event constants used by V2 are UAV kill `+200`, UAV death/crash
+`-200`, and UAV out-of-zone `-100`. MAV death is `-200`; bounded MAV team kill
+credit uses `+100` per kill and a `+200` cap.
+
+Both raw and training values are retained:
+
+```text
+normalized_uav_dense = clip(raw_uav_dense / 75, -1, 1)
+normalized_mav_dense = clip(raw_mav_dense / 1.8, -1, 1)
+normalized_event = raw_event / 100
+normalized_role_reward = normalized_dense + normalized_event
+team_reward = (normalized_red_0 + normalized_red_1 + normalized_red_2) / 3
+```
+
+The UAV normalizer is the published weight sum `10+10+15+10+30=75`.
+The MAV normalizer 1.8 is derived from the implemented bounded terms:
+`R_safety` is in `[-1.2, 0.1]`, `R_support` is in `[-0.6, 0.84]`, so the
+largest absolute dense value is 1.8. The event normalizer 100 is the smallest
+paper event magnitude; it maps kill/death to +/-2 and out-of-zone to -1, so a
+kill is larger than any one normalized dense step. These normalizers are fixed
+and do not use running statistics or training data.
+
+V2 terminates on combat capability, not total red-aircraft count. If both blue
+attack UAVs are gone while a red attack UAV remains, the result is `red_win`.
+If both red attack UAVs are gone while a blue attack UAV remains, the result is
+`blue_win`, even if the unarmed MAV survives. If both sides lose all attack
+UAVs, the result is `mutual_elimination`. Timeout is possible only while each
+side retains at least one attack UAV. V1 termination remains unchanged.
 
 ## 8. V1 to V2 changes
 
@@ -168,7 +193,9 @@ V2 changes only:
 2. critic input from 204 to 219;
 3. MAV reward from shared-information occupancy shaping to the published
    safety/support role structure;
-4. UAV category weights and speed/dodge formulas to the published TAM forms.
+4. UAV category weights and speed/dodge formulas to the published TAM forms;
+5. reward-v4 raw/normalized separation and fixed-three-agent credit;
+6. combat-capability termination for the unarmed-MAV scenario.
 
 V1 remains available through
 `uav_env/JSBSim/configs/hetero_3v2_pure_happo_v1.yaml`.
@@ -179,19 +206,20 @@ V2 checkpoint metadata is:
 
 ```text
 formal_contract = hetero_3v2_pure_happo_v2
-reward_contract = paper_aligned_role_reward_v3
+reward_contract = paper_aligned_role_reward_v4
 observation_contract = formal_entity_fire_state_v2
 algorithm_contract = pure_happo_sequential_v2
 policy_distribution = tanh_squashed_gaussian_raw_action
 critic_contract = centralized_shared_scalar_v
 gae_contract = separated_termination_truncation
-credit_mode = shared_alive_team_mean
+credit_mode = fixed_three_agent_team_mean
 actor_obs_dim = 73
 critic_state_dim = 219
 action_dim = 3
 num_agents = 3
 ```
 
-V1 and V2 checkpoints are intentionally incompatible. Evaluation rejects a
-formal-contract, reward-contract, observation-contract or dimension mismatch;
-there is no silent truncation or zero-padding.
+V1, V2 reward-v3 and V2 reward-v4 checkpoints are intentionally incompatible.
+Training, resume and evaluation reject a formal-contract, reward-contract,
+credit-mode, observation-contract or dimension mismatch; there is no silent
+truncation or zero-padding.

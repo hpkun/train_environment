@@ -33,8 +33,12 @@ from uav_env.JSBSim.formal_v2.contract import (
     REWARD_CONTRACT_VERSION as V2_REWARD_CONTRACT_VERSION,
 )
 from uav_env.JSBSim.formal_v2.reward import (
+    EVENT_NORMALIZER as V2_EVENT_NORMALIZER,
+    EVENT_REWARDS as V2_EVENT_REWARDS,
     MAV_SAFETY_WEIGHTS as V2_MAV_SAFETY_WEIGHTS,
+    MAV_DENSE_NORMALIZER as V2_MAV_DENSE_NORMALIZER,
     MAV_SUPPORT_WEIGHTS as V2_MAV_SUPPORT_WEIGHTS,
+    UAV_DENSE_NORMALIZER as V2_UAV_DENSE_NORMALIZER,
     UAV_WEIGHTS as V2_UAV_WEIGHTS,
 )
 
@@ -274,7 +278,10 @@ def _contract_meta(env) -> dict:
                 "uav_weights": V2_UAV_WEIGHTS,
                 "mav_safety_weights": V2_MAV_SAFETY_WEIGHTS,
                 "mav_support_weights": V2_MAV_SUPPORT_WEIGHTS,
-                "event_rewards": EVENT_REWARDS,
+                "event_rewards": V2_EVENT_REWARDS,
+                "uav_dense_normalizer": V2_UAV_DENSE_NORMALIZER,
+                "mav_dense_normalizer": V2_MAV_DENSE_NORMALIZER,
+                "event_normalizer": V2_EVENT_NORMALIZER,
             },
         }
     return {
@@ -310,8 +317,10 @@ def main():
     if requested_device.startswith("cuda") and not torch.cuda.is_available():
         raise ValueError(f"CUDA requested but unavailable: {requested_device}")
     device = torch.device(requested_device)
-    policy = PureHAPPOPolicy(env.actor_obs_dim, env.critic_state_dim, ACTION_DIM,
-                             len(env.red_ids), credit_mode="shared_alive_team_mean").to(device)
+    policy = PureHAPPOPolicy(
+        env.actor_obs_dim, env.critic_state_dim, ACTION_DIM, len(env.red_ids),
+        credit_mode=env.credit_mode,
+    ).to(device)
     trainer = PureHAPPOTrainer(
         policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
         clip_param=args.clip_param, entropy_coef=args.entropy_coef,
@@ -321,7 +330,7 @@ def main():
     requested_rollouts = _planned_rollout_count(args.total_env_steps, args.rollout_length)
     planned_actual_steps = requested_rollouts * args.rollout_length
     meta = {**_contract_meta(env), "policy_arch": "pure_happo",
-            "credit_mode": "shared_alive_team_mean", "config": str(config),
+            "credit_mode": env.credit_mode, "config": str(config),
             "seed": int(args.seed), "run_identity": str(output.resolve()),
             "requested_device": requested_device, "actual_device": str(device),
             "requested_total_env_steps": int(args.total_env_steps),
@@ -365,6 +374,9 @@ def main():
             "mav_support", "mav_awareness", "mav_shared_information_metric",
             "mav_event", "mav_total", "uav_height", "uav_dodge_angle",
             "uav_dodge_speed", "uav_event", "uav_total",
+            "raw_mav_reward", "raw_uav_reward", "normalized_mav_reward",
+            "normalized_uav_reward", "final_team_reward",
+            "red_attack_alive", "mav_alive", "blue_attack_alive",
         ])
     for role in ("mav", "uav"):
         for dimension in ("pitch", "heading", "speed"):
@@ -471,6 +483,18 @@ def main():
                     stats[f"uav_{key}"].append(float(np.mean([
                         components[aid].get(key, 0.0) for aid in ("red_1", "red_2")])))
                 if is_v2:
+                    stats["raw_mav_reward"].append(float(
+                        mav.get("raw_role_reward", 0.0)))
+                    stats["normalized_mav_reward"].append(float(
+                        mav.get("normalized_role_reward", 0.0)))
+                    stats["raw_uav_reward"].append(float(np.mean([
+                        components[aid].get("raw_role_reward", 0.0)
+                        for aid in ("red_1", "red_2")])))
+                    stats["normalized_uav_reward"].append(float(np.mean([
+                        components[aid].get("normalized_role_reward", 0.0)
+                        for aid in ("red_1", "red_2")])))
+                    stats["final_team_reward"].append(float(
+                        next_info["reward_components"].get("team_reward", 0.0)))
                     for key in (
                             "mav_safety_distance", "mav_safety_threat",
                             "mav_safety_aspect", "mav_support", "mav_awareness",
@@ -483,7 +507,9 @@ def main():
                             components[aid].get(key, 0.0)
                             for aid in ("red_1", "red_2")])))
                 event_values = np.asarray([components[aid].get("event", 0.0) for aid in env.red_ids])
-                stats["team_event"].append(float((event_values * active).sum() / max(active.sum(), 1.0)))
+                stats["team_event"].append(float(
+                    event_values.sum() / 3.0 if is_v2
+                    else (event_values * active).sum() / max(active.sum(), 1.0)))
                 stats["saturation"].append(float(np.mean(np.abs(actions[active > 0.5]) > 0.95))
                                             if np.any(active > 0.5) else 0.0)
                 for event in next_info["step_events"]:
@@ -509,9 +535,14 @@ def main():
                 total_steps += 1
                 if episode_done:
                     completed.append({"outcome": next_info["outcome"],
+                                      "end_reason": next_info["end_reason"],
                                       "mav": float(next_info["mav_alive"]),
                                       "red_alive": float(next_info["red_alive"]),
-                                      "blue_alive": float(next_info["blue_alive"])})
+                                      "blue_alive": float(next_info["blue_alive"]),
+                                      "red_attack_alive": float(
+                                          next_info["red_attack_alive"]),
+                                      "blue_attack_alive": float(
+                                          next_info["blue_attack_alive"])})
                     completed_episode_count += 1
                     episode_reset_seed = args.seed + total_steps
                     obs, info = env.reset(seed=episode_reset_seed)
@@ -611,6 +642,16 @@ def main():
                         "uav_height", "uav_dodge_angle", "uav_dodge_speed",
                         "uav_event", "uav_total",
                     )
+                })
+                row.update({
+                    "raw_mav_reward": mean("raw_mav_reward"),
+                    "raw_uav_reward": mean("raw_uav_reward"),
+                    "normalized_mav_reward": mean("normalized_mav_reward"),
+                    "normalized_uav_reward": mean("normalized_uav_reward"),
+                    "final_team_reward": mean("final_team_reward"),
+                    "red_attack_alive": episode_mean("red_attack_alive"),
+                    "mav_alive": episode_mean("mav"),
+                    "blue_attack_alive": episode_mean("blue_attack_alive"),
                 })
             for role in ("mav", "uav"):
                 for dimension in ("pitch", "heading", "speed"):

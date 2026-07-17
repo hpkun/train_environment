@@ -8,7 +8,8 @@ from ..formal_v1.contract import (
 
 ENV_TYPE = "hetero_3v2_pure_happo_v2"
 OBSERVATION_CONTRACT = "formal_entity_fire_state_v2"
-REWARD_CONTRACT_VERSION = "paper_aligned_role_reward_v3"
+REWARD_CONTRACT_VERSION = "paper_aligned_role_reward_v4"
+CREDIT_MODE = "fixed_three_agent_team_mean"
 ACTOR_OBS_DIM = 73
 CRITIC_STATE_DIM = len(RED_IDS) * ACTOR_OBS_DIM
 
@@ -21,7 +22,7 @@ def validate_formal_config(config: dict) -> None:
         "decision_freq": DECISION_FREQ,
         "agent_interaction_steps": PHYSICS_STEPS_PER_ACTION,
         "max_steps": MAX_STEPS,
-        "credit_mode": "shared_alive_team_mean",
+        "credit_mode": CREDIT_MODE,
         "action_mode": "continuous_high_level_pid",
     }
     for key, expected in required.items():
