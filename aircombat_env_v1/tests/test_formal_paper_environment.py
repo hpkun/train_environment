@@ -53,9 +53,27 @@ def test_automatic_launch_inside_14km_and_not_outside():
     w=PaperWeaponManager(PUBLISHED,INFERRED);s=fake("r","red",[0,0,6000]);t=fake("b","blue",[13999,0,6000]);assert w.try_launch(s,t,0) is not None
     w.reset();s.missile_left=2;t.position[0]=14001;assert w.try_launch(s,t,0) is None
 
+def test_default_weapon_enablement_is_all_agents():
+    assert TAMPaperCombatEnv("paper_nominal_1v1").weapon_enabled_agent_ids is None
+
+@pytest.mark.integration
+def test_weapon_enablement_only_controls_launch(monkeypatch):
+    env=TAMPaperCombatEnv("paper_nominal_1v1","all",max_steps=1,weapon_enabled_agent_ids={"red_0"});env.reset(seed=1)
+    red,blue=env.by_id["red_0"],env.by_id["blue_0"];blue.position=red.position+np.array([1000.,0,0]);before=blue.position.copy()
+    _,_,_,_,info=env.step(env.build_rule_actions());assert info["missiles_fired"]==1 and blue.missile_left==2 and np.isfinite(blue.position).all() and not np.array_equal(before,blue.position);env.close()
+
+@pytest.mark.integration
+def test_disabling_blue_weapon_prevents_blue_launch():
+    env=TAMPaperCombatEnv("paper_nominal_1v1","all",max_steps=1,weapon_enabled_agent_ids={"red_0"});env.reset(seed=1);red,blue=env.by_id["red_0"],env.by_id["blue_0"];blue.position=red.position+np.array([1000.,0,0])
+    _,_,_,_,info=env.step(env.build_rule_actions());assert all(e.get("shooter_id")!="blue_0" for e in info["events"]);env.close()
+
 def test_25_second_cooldown_without_lock_gate():
     w=PaperWeaponManager(PUBLISHED,INFERRED);s=fake("r","red",[0,0,6000]);t=fake("b","blue",[-1000,0,6000])
     assert w.try_launch(s,t,0);assert w.try_launch(s,t,24.99) is None;assert w.try_launch(s,t,25.)
+
+def test_second_launch_uses_new_live_target_after_cooldown():
+    w=PaperWeaponManager(PUBLISHED,INFERRED);s=fake("r","red",[0,0,6000]);a=fake("a","blue",[1000,0,6000]);b=fake("b","blue",[1200,0,6000])
+    assert w.try_launch(s,a,0)["target_id"]=="a";a.alive=False;assert w.try_launch(s,b,24.99) is None;assert w.try_launch(s,b,25.)["target_id"]=="b"
 
 def test_no_ten_degree_lock_or_minimum_range():
     w=PaperWeaponManager(PUBLISHED,INFERRED);s=fake("r","red",[0,0,6000]);t=fake("b","blue",[-1,0,6000]);assert w.try_launch(s,t,0)
@@ -96,6 +114,10 @@ def test_nearest_target_selection_is_stable_and_retargets():
 def test_blue_crash_does_not_increment_red_missile_kill():
     env=TAMPaperCombatEnv("paper_nominal_1v1","all");env.red_missile_kills=0;assert env.red_missile_kills==0
 
+def test_target_dead_missile_is_not_a_hit():
+    w=PaperWeaponManager(PUBLISHED,INFERRED);s=fake("r","red",[0,0,6000]);t=fake("b","blue",[1000,0,6000]);w.try_launch(s,t,0);t.alive=False;events=w.step_physics_once({"r":s,"b":t},1/60)
+    assert events[0]["reason"]=="target_dead" and not events[0]["hit"] and w.total_hits==0
+
 def test_hit_and_death_event_rewards_are_plus_and_minus_200():
     r=PaperReward();red=fake("r","red",[0,0,6000]);blue=fake("b","blue",[1000,0,6000]);blue.alive=False;blue.death_reason="shotdown"
     rewards,c=r.compute([red,blue],{"r":None,"b":None},{},[],[{"reason":"hit","shooter_id":"r"}],{"r":True,"b":True},set())
@@ -127,6 +149,19 @@ def test_flight_envelope_is_checked_each_frame(monkeypatch):
         original()
         if not called[0]:a.speed=401.;called[0]=True
     monkeypatch.setattr(a,"step_physics_once",step);env.step(env.build_rule_actions());assert env.flight_envelope_violation and env.maximum_speed_mps>=401;env.close()
+
+def test_boundary_is_enabled_from_formal_tam_derived_radius():
+    env=TAMPaperCombatEnv("paper_nominal_1v1","all");env.reset(seed=1);a=env.by_id["red_0"];a.position[:2]=[28001,0];out=set();env._check_frame(out)
+    assert a.death_reason=="boundary" and a.agent_id in out;env.close()
+
+def test_info_contains_independent_acceptance_counters():
+    env=TAMPaperCombatEnv("paper_nominal_1v1","all");env.reset(seed=1);info=env._info(None,None)
+    for key in ("red_numerical_invalid","blue_numerical_invalid","boundary_deaths","simultaneous_kills","target_changes","second_launches"):assert key in info
+    env.close()
+
+def test_long_health_diagnostics_remain_finite_even_when_they_fail_gate():
+    from aircombat_env_v1.scripts.check_paper_direct_fcs_health import run_commands
+    result=run_commands(("level" for _ in range(1000)));assert all(np.isfinite(v) for k,v in result.items() if isinstance(v,(float,int)))
 
 @pytest.mark.integration
 @pytest.mark.parametrize("mode",["paper_nominal_1v1","paper_nominal_2v2"])

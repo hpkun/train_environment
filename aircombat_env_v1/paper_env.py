@@ -60,10 +60,13 @@ class PaperAircraft:
 
 class TAMPaperCombatEnv(gym.Env):
     metadata={"render_modes":[]}
-    def __init__(self,scenario_mode="paper_nominal_2v2",controlled_side="red",max_steps=1000):
+    def __init__(self,scenario_mode="paper_nominal_2v2",controlled_side="red",max_steps=1000,
+                 weapon_enabled_agent_ids=None):
         if scenario_mode not in SCENARIOS:raise ValueError("scenario_mode must be paper_nominal_1v1 or paper_nominal_2v2")
         if controlled_side not in ("red","all"):raise ValueError("controlled_side must be red or all")
         self.scenario_mode=scenario_mode;self.controlled_side=controlled_side;self.max_steps=int(max_steps)
+        self.weapon_enabled_agent_ids=(None if weapon_enabled_agent_ids is None
+                                       else set(weapon_enabled_agent_ids))
         self.agent_specs=SCENARIOS[scenario_mode];self.max_red=sum(x[1]=="red" for x in self.agent_specs);self.max_blue=sum(x[1]=="blue" for x in self.agent_specs)
         self.controlled_ids=[x[0] for x in self.agent_specs if controlled_side=="all" or x[1]=="red"]
         self.action_space=spaces.Dict({aid:spaces.MultiDiscrete([40]*4) for aid in self.controlled_ids})
@@ -91,13 +94,19 @@ class TAMPaperCombatEnv(gym.Env):
         self.invalid_episode=False;self.red_missile_kills=self.blue_missile_kills=0;self.red_crashes=self.blue_crashes=0
         self.flight_envelope_violation=False;self.minimum_altitude_m=min(a.position[2] for a in self.agents)
         self.maximum_speed_mps=max(a.speed for a in self.agents);self.maximum_load_factor_g=max(abs(a.load_factor_g) for a in self.agents)
-        self.current_targets={};self._update_targets();obs=self.paper_observation.build(self.agents,self.weapon.missiles)
+        self.current_targets={};self.target_change_events=[];self.target_changes=0;self.second_launches=0
+        self._launch_counts={a.agent_id:0 for a in self.agents};self.simultaneous_kills=0
+        self._update_targets(count_changes=False);obs=self.paper_observation.build(self.agents,self.weapon.missiles)
         return {aid:obs[aid] for aid in self.controlled_ids},self._info(None,None)
-    def _update_targets(self):
+    def _update_targets(self,count_changes=True):
         for a in self.agents:
+            previous=self.current_targets.get(a.agent_id)
             enemies=sorted([e for e in self.agents if e.side!=a.side and e.alive],key=lambda e:e.agent_id)
             target=min(enemies,key=lambda e:(float(np.linalg.norm(e.position-a.position)),e.agent_id)) if a.alive and enemies else None
             a.current_target=target.agent_id if target else None;self.current_targets[a.agent_id]=a.current_target
+            if count_changes and previous is not None and previous!=a.current_target:
+                self.target_changes+=1;self.target_change_events.append({"agent_id":a.agent_id,"previous_target":previous,
+                    "current_target":a.current_target,"decision_step":self.step_count,"simulation_time_s":self.simulation_time_s})
             a.incoming_missiles=[m for m in self.weapon.missiles if m.alive and m.target_id==a.agent_id]
     def build_rule_actions(self,agent_ids=None):
         selected=set(agent_ids or self.controlled_ids);result={}
@@ -113,16 +122,26 @@ class TAMPaperCombatEnv(gym.Env):
             for a in self.agents:
                 if a.side=="blue" and a.alive:action_map[a.agent_id]=self.opponent.act(a,self.by_id.get(a.current_target),a.incoming_missiles)[0]
         for a in self.agents:
-            launch=self.weapon.try_launch(a,self.by_id.get(a.current_target),self.simulation_time_s)
-            if launch:events.append(launch)
+            if self.weapon_enabled_agent_ids is None or a.agent_id in self.weapon_enabled_agent_ids:
+                launch=self.weapon.try_launch(a,self.by_id.get(a.current_target),self.simulation_time_s)
+                if launch:
+                    self._launch_counts[a.agent_id]+=1
+                    if self._launch_counts[a.agent_id]==2:self.second_launches+=1
+                    launch.update({"simulation_time_s":self.simulation_time_s,"decision_step":self.step_count,
+                                   "missiles_left":a.missile_left,"launch_number":self._launch_counts[a.agent_id]})
+                    events.append(launch)
         commands={a.agent_id:map_action_indices(action_map.get(a.agent_id,INACTIVE_ACTION_PLACEHOLDER)) for a in self.agents}
         out_step=set()
-        for _ in range(12):
+        for frame_index in range(12):
             for a in self.agents:
                 if a.alive:a.apply_direct_fcs_command(commands[a.agent_id])
             for a in self.agents:
                 if a.alive:a.step_physics_once()
-            self._check_frame(out_step);frame_events=self.weapon.step_physics_once(self.by_id,1/60);events.extend(frame_events)
+            self._check_frame(out_step);frame_events=self.weapon.step_physics_once(self.by_id,1/60)
+            for event in frame_events:event.update({"physics_frame_index":frame_index,"simulation_time_s":self.simulation_time_s+1/60})
+            hit_sides={self.by_id[e["shooter_id"]].side for e in frame_events if e.get("hit")}
+            if hit_sides=={"red","blue"}:self.simultaneous_kills+=1
+            events.extend(frame_events)
             self.simulation_time_s+=1/60
         for e in events:
             if e.get("reason")=="hit":
@@ -158,6 +177,12 @@ class TAMPaperCombatEnv(gym.Env):
          "active_missiles":sum(m.alive for m in self.weapon.missiles),"current_targets":dict(self.current_targets),
          "flight_envelope_violation":self.flight_envelope_violation,"minimum_altitude_m":self.minimum_altitude_m,
          "maximum_speed_mps":self.maximum_speed_mps,"maximum_load_factor_g":self.maximum_load_factor_g,"invalid_episode":self.invalid_episode,
+         "red_numerical_invalid":sum(a.death_reason=="numerical_invalid" for a in red),
+         "blue_numerical_invalid":sum(a.death_reason=="numerical_invalid" for a in blue),
+         "boundary_deaths":sum(a.death_reason=="boundary" for a in self.agents),
+         "simultaneous_kills":self.simultaneous_kills,"target_changes":self.target_changes,
+         "target_change_events":list(self.target_change_events),"second_launches":self.second_launches,
+         "weapon_enabled_agent_ids":(None if self.weapon_enabled_agent_ids is None else sorted(self.weapon_enabled_agent_ids)),
          "termination_reason":reason,"winner":winner,"death_reason":{a.agent_id:a.death_reason for a in self.agents}}
     def close(self):
         for a in self.agents:a.close()

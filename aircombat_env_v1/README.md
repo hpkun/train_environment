@@ -10,10 +10,15 @@
 
 结构化观测包含 7 维自身状态、每个相对实体 5 维状态以及固定槽位 mask；1v1 flatten 为 61 维，2v2 为 73 维。2v2 目标选择采用“最近存活敌机，距离相同时按 agent_id”，这是论文未公开的工程实现。
 
+作战边界已启用：正式 TAM `protocol.py` 将 `combat_zone_radius_m` 明确定义为 `2 × maximum_attack_range_m`，`task.py` 在每个 60 Hz 帧执行该 28 km 半径判断并施加越界事件/奖励。本目录直接复制该正式项目定义；28 km 是 TAM 工程派生值，不是论文显式空间边界。
+
+`weapon_enabled_agent_ids` 是仅供验收诊断的可选开关；默认 `None` 时所有攻击 UAV 武器正常启用，不改变正式行为。
+
 名义初始条件直接来自 `tam_paper_env_v1_2v2.yaml`：6000 m、250 m/s，红方航向 0°、蓝方 180°；2v2 位置为 red `(120,60)/(120.02,60)`、blue `(120,60.2)/(120.02,60.2)`，每架两枚导弹。
 
 ```powershell
 python aircombat_env_v1/scripts/check_paper_environment.py
+python aircombat_env_v1/scripts/check_paper_direct_fcs_health.py
 python aircombat_env_v1/scripts/run_paper_rule_combat.py --scenario paper_nominal_2v2 --episodes 20
 python -m pytest aircombat_env_v1/tests -q
 python -m pytest aircombat_env_v1/tests -q -m integration
