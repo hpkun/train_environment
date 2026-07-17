@@ -10,19 +10,13 @@ from algorithms.happo.vanilla_happo import (
 from algorithms.happo.vanilla_happo_checkpoint import (
     load_vanilla_happo_checkpoint, save_vanilla_happo_checkpoint)
 from uav_env.JSBSim.paper.protocol import (
-    ENVIRONMENT_FIDELITY_REVISION, PAPER_NOMINAL_PROTOCOL)
+    ENVIRONMENT_FIDELITY_REVISION, PAPER_NOMINAL_PROTOCOL, protocol_metadata)
 from uav_env.make_env import make_env
 
 
 def formal_checkpoint_config(scenario):
-    return {
-        "scenario": scenario,
-        "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
-        "experiment_protocol": PAPER_NOMINAL_PROTOCOL,
-        "initial_perturbation": "none",
-        "dynamics_backend": "jsbsim",
-        "paper_silent_assumptions_present": True,
-    }
+    return {"scenario": scenario, **protocol_metadata(
+        scenario, "none", "jsbsim", PAPER_NOMINAL_PROTOCOL)}
 
 
 def policy_for(agent_ids=("red_0", "red_1", "red_2"), obs_dim=12, state_dim=30):

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-ENVIRONMENT_FIDELITY_REVISION = "published_rules_simplified_v3"
+ENVIRONMENT_FIDELITY_REVISION = "published_rules_simplified_v4"
 NOMINAL_PERTURBATION = "none"
 GENERALIZATION_PERTURBATION_LEVELS = ("low", "medium", "large")
 GENERALIZATION_EPISODES_PER_LEVEL = 50
@@ -14,6 +14,8 @@ TERMINATION_RESOLUTION = "decision_step_boundary"
 SCENARIOS = ("2v2", "3v2", "5v4")
 NOMINAL_ALTITUDE_M = 6000.0
 MAX_INCOMING_MISSILES = 8  # 4 opposing attack UAVs x 2 missiles.
+BLUE_POLICY_FIDELITY = "minimal_greedy_basic_manoeuvre_reconstruction"
+REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED = False
 
 
 def derived_environment_values(maximum_attack_range_m: float) -> dict:
@@ -70,6 +72,10 @@ def protocol_metadata(scenario: str, perturbation: str, dynamics_backend: str,
         "paper_generalization_experiment": generalization,
         "paper_silent_assumptions_present": PAPER_SILENT_ASSUMPTIONS_PRESENT,
         "termination_resolution": TERMINATION_RESOLUTION,
+        "neutral_action_semantics": "nearest_positive_center_not_exact_zero",
+        "blue_policy_fidelity": BLUE_POLICY_FIDELITY,
+        "reference_8_exact_blue_fsm_reproduced": (
+            REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED),
     }
 
 
@@ -84,4 +90,9 @@ def checkpoint_lineage(metadata: dict) -> dict:
         "checkpoint_environment_steps": metadata.get("environment_steps"),
         "checkpoint_episodes": metadata.get("episodes"),
         "checkpoint_algorithm_mode": metadata.get("algorithm_mode"),
+        "checkpoint_paper_silent_assumptions_present": metadata.get(
+            "paper_silent_assumptions_present"),
+        "checkpoint_blue_policy_fidelity": metadata.get("blue_policy_fidelity"),
+        "checkpoint_reference_8_exact_blue_fsm_reproduced": metadata.get(
+            "reference_8_exact_blue_fsm_reproduced"),
     }

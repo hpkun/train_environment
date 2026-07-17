@@ -10,6 +10,14 @@ from .situation import SituationScore
 from .protocol import NOMINAL_ALTITUDE_M, derived_environment_values
 
 
+TEAM_KILL_REWARD_PER_ENEMY = 200.0
+
+
+def scenario_derived_reward_cap(initial_enemy_attack_uav_count: int) -> float:
+    """SCENARIO_DERIVED_REWARD_CAP for the MAV team contribution."""
+    return TEAM_KILL_REWARD_PER_ENEMY * int(initial_enemy_attack_uav_count)
+
+
 def uav_distance_reward(distance_m: float) -> float:
     distance_km = float(distance_m) / 1000.0
     if distance_km <= 5.0:
@@ -51,26 +59,28 @@ class PaperReward:
         self.inferred = inferred
         self.derived = derived_environment_values(published["maximum_attack_range_m"])
         self.global_scale = float(inferred.get("reward_global_scale", 1.0))
+        self.credited_enemy_ids: dict[str, set[str]] = {}
+        self.cumulative_team_kill_bonus: dict[str, float] = {}
 
     def reset(self):
-        pass
+        self.credited_enemy_ids.clear()
+        self.cumulative_team_kill_bonus.clear()
 
     def compute(self, agents, targets: dict[str, str | None], scores: dict,
                 missiles, step_events: list[dict], out_of_zone_step: set[str],
                 alive_at_step_start: dict[str, bool]):
         by_id = {a.agent_id: a for a in agents}
-        hit_events_by_side = {"red": [], "blue": []}
         death_sequence = {
-            event["agent_id"]: event.get("event_sequence_id", float("inf"))
+            event["agent_id"]: event["event_sequence_id"]
             for event in step_events
             if event.get("event_type") == "aircraft_death"
+            and "agent_id" in event and "event_sequence_id" in event
         }
         killed_by: dict[str, int] = {}
         for event in step_events:
             if event.get("reason") == "hit":
                 shooter = by_id.get(event.get("shooter_id"))
                 if shooter is not None:
-                    hit_events_by_side[shooter.side].append(event)
                     killed_by[shooter.agent_id] = killed_by.get(shooter.agent_id, 0) + 1
         rewards, components = {}, {}
         for agent in agents:
@@ -80,14 +90,14 @@ class PaperReward:
                 continue
             just_died = not agent.alive
             if agent.aircraft_type.role == "mav":
-                mav_death_sequence = death_sequence.get(agent.agent_id, float("inf"))
-                eligible_team_kills = sum(
-                    event.get("event_sequence_id", -1) < mav_death_sequence
-                    for event in hit_events_by_side[agent.side]
-                )
+                mav_death_sequence = death_sequence.get(
+                    agent.agent_id,
+                    -float("inf") if just_died else float("inf"))
+                credited_targets = self._eligible_mav_hit_targets(
+                    agent, by_id, step_events, mav_death_sequence)
                 total, comp = self._mav(
                     agent, agents, missiles,
-                    eligible_team_kills,
+                    credited_targets,
                     just_died)
             else:
                 target = by_id.get(targets.get(agent.agent_id))
@@ -105,13 +115,49 @@ class PaperReward:
     def _zero_components(agent):
         if agent.aircraft_type.role == "mav":
             keys = ("r_dist", "r_threat", "r_aspect", "r_safety", "r_pos",
-                    "r_aware", "r_support", "r_event", "total")
+                    "r_aware", "r_support", "r_team_kill_bonus_increment",
+                    "r_team_kill_bonus_cumulative", "r_team_kill_bonus_cap",
+                    "r_death", "r_event", "total")
         else:
             keys = ("r_height", "r_speed", "r_angle", "r_distance",
                     "r_dodge_angle", "r_dodge_speed", "r_dodge", "r_event", "total")
         return {key: 0.0 for key in keys}
 
-    def _mav(self, mav, agents, missiles, team_kills: int, just_died: bool):
+    @staticmethod
+    def _eligible_mav_hit_targets(mav, by_id, step_events, mav_death_sequence):
+        eligible = []
+        seen_this_step = set()
+        ordered = sorted(
+            step_events,
+            key=lambda event: event.get("event_sequence_id", float("inf")))
+        for event in ordered:
+            if (event.get("event_type") != "missile_termination"
+                    or event.get("reason") != "hit"):
+                continue
+            sequence = event.get("event_sequence_id")
+            if not isinstance(sequence, (int, float)) or not np.isfinite(sequence):
+                continue
+            if sequence >= mav_death_sequence:
+                continue
+            shooter = by_id.get(event.get("shooter_id"))
+            target = by_id.get(event.get("target_id"))
+            if (shooter is None or target is None or shooter.side != mav.side
+                    or target.side == mav.side
+                    or target.aircraft_type.role != "attack_uav"
+                    or target.agent_id in seen_this_step):
+                continue
+            seen_this_step.add(target.agent_id)
+            eligible.append(target.agent_id)
+        return eligible
+
+    @staticmethod
+    def _mav_team_kill_bonus_cap(mav, agents) -> float:
+        enemy_attack_uavs = sum(
+            agent.side != mav.side and agent.aircraft_type.role == "attack_uav"
+            for agent in agents)
+        return scenario_derived_reward_cap(enemy_attack_uavs)
+
+    def _mav(self, mav, agents, missiles, credited_targets, just_died: bool):
         enemies = [a for a in agents if a.side != mav.side and a.alive]
         distances = [float(np.linalg.norm(a.position - mav.position)) for a in enemies]
         nearest = min(distances, default=float(self.derived["mav_d_max_m"]))
@@ -153,12 +199,26 @@ class PaperReward:
             if ao < np.pi / 2.0:
                 r_aware += 0.3 * (1.0 - ao / (np.pi / 2.0))
         r_support = 0.6 * r_pos + 0.4 * r_aware
+        cap = self._mav_team_kill_bonus_cap(mav, agents)
+        credited = self.credited_enemy_ids.setdefault(mav.agent_id, set())
+        cumulative = self.cumulative_team_kill_bonus.setdefault(mav.agent_id, 0.0)
+        new_targets = [target_id for target_id in credited_targets
+                       if target_id not in credited]
+        remaining = max(cap - cumulative, 0.0)
+        increment = min(TEAM_KILL_REWARD_PER_ENEMY * len(new_targets), remaining)
+        credited.update(new_targets)
+        cumulative += increment
+        self.cumulative_team_kill_bonus[mav.agent_id] = cumulative
         death = -200.0 if just_died else 0.0
-        event = death + 200.0 * team_kills
+        event = death + increment
         return r_safety + r_support + event, {
             "r_dist": r_dist, "r_threat": r_threat, "r_aspect": r_aspect,
             "r_safety": r_safety, "r_pos": r_pos, "r_aware": r_aware,
-            "r_support": r_support, "r_event": event,
+            "r_support": r_support,
+            "r_team_kill_bonus_increment": increment,
+            "r_team_kill_bonus_cumulative": cumulative,
+            "r_team_kill_bonus_cap": cap,
+            "r_death": death, "r_event": event,
         }
 
     def _uav(self, agent, target, pair: SituationScore | None, missiles,

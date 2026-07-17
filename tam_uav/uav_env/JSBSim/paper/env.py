@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .action_semantics import ACTION_LEVELS, INACTIVE_ACTION_PLACEHOLDER
 from .task import TAMPaperTask
 
 
@@ -24,7 +25,7 @@ class TAMPaperEnv:
                             for i, a in enumerate(config["red_agents"])}
         self.num_agents = self.n_agents = len(self.agent_ids)
         self.tam_action_distribution = "multidiscrete_categorical"
-        self.tam_action_levels = 40
+        self.tam_action_levels = ACTION_LEVELS
         self.action_interface = "tam_direct_fcs_4d"
         self.paper_environment_mode = "tam_paper_env_v1"
         self._obs = None
@@ -32,7 +33,8 @@ class TAMPaperEnv:
 
     def _make_spaces(self):
         from gymnasium import spaces
-        self.action_space = spaces.Dict({aid: spaces.MultiDiscrete([40, 40, 40, 40])
+        self.action_space = spaces.Dict({aid: spaces.MultiDiscrete(
+            [ACTION_LEVELS] * 4)
                                          for aid in self.agent_ids})
         per_agent = {}
         for aid in self.agent_ids:
@@ -92,10 +94,10 @@ class TAMPaperEnv:
         result = {}
         by_id = {a.agent_id: a for a in self.task.agents}
         for aid in self.agent_ids:
-            mask = np.ones((4, 40), dtype=np.float32)
+            mask = np.ones((4, ACTION_LEVELS), dtype=np.float32)
             if self.task.agents and not by_id[aid].alive:
                 mask.fill(0.0)
-                mask[:, 20] = 1.0
+                mask[:, INACTIVE_ACTION_PLACEHOLDER[0]] = 1.0
             result[aid] = mask
         return result
 

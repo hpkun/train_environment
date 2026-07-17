@@ -15,7 +15,8 @@ from algorithms.happo.vanilla_happo_checkpoint import (
     FORMAT, read_vanilla_happo_checkpoint_metadata)
 from scripts.tam_output_paths import resolve_tam_output
 from uav_env.JSBSim.paper.protocol import (
-    ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL)
+    ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL,
+    PAPER_SILENT_ASSUMPTIONS_PRESENT)
 
 
 def inspect_checkpoint(path):
@@ -26,6 +27,7 @@ def inspect_checkpoint(path):
         "experiment_protocol": PAPER_NOMINAL_PROTOCOL,
         "initial_perturbation": NOMINAL_PERTURBATION,
         "dynamics_backend": "jsbsim",
+        "paper_silent_assumptions_present": PAPER_SILENT_ASSUMPTIONS_PRESENT,
     }
     reasons = [f"{key}: {metadata.get(key)!r} != {value!r}"
                for key, value in expected.items() if metadata.get(key) != value]

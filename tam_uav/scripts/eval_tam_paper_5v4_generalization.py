@@ -20,9 +20,11 @@ from algorithms.happo.vanilla_happo_checkpoint import (
 from scripts.tam_output_paths import resolve_tam_output
 from scripts.vanilla_happo_runtime import deterministic_evaluate, infer_policy, make_paper_env
 from uav_env.JSBSim.paper.protocol import (
-    ENVIRONMENT_FIDELITY_REVISION, GENERALIZATION_EPISODES_PER_LEVEL,
+    BLUE_POLICY_FIDELITY, ENVIRONMENT_FIDELITY_REVISION,
+    GENERALIZATION_EPISODES_PER_LEVEL,
     GENERALIZATION_PERTURBATION_LEVELS, PAPER_5V4_GENERALIZATION_PROTOCOL,
-    PAPER_NOMINAL_PROTOCOL, PAPER_SILENT_ASSUMPTIONS_PRESENT, checkpoint_lineage,
+    PAPER_NOMINAL_PROTOCOL, PAPER_SILENT_ASSUMPTIONS_PRESENT,
+    REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED, checkpoint_lineage,
     validate_generalization_protocol)
 
 
@@ -92,7 +94,9 @@ def main():
                 expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION,
                 expected_experiment_protocol=PAPER_NOMINAL_PROTOCOL,
                 expected_initial_perturbation="none",
-                expected_dynamics_backend="jsbsim")
+                expected_dynamics_backend="jsbsim",
+                expected_paper_silent_assumptions_present=(
+                    PAPER_SILENT_ASSUMPTIONS_PRESENT))
             episode_seeds = [
                 args.seed + level_index * 10000 + episode
                 for episode in range(args.episodes_per_level)]
@@ -113,6 +117,10 @@ def main():
         "paper_nominal_experiment": False,
         "paper_generalization_experiment": True,
         "paper_silent_assumptions_present": PAPER_SILENT_ASSUMPTIONS_PRESENT,
+        "neutral_action_semantics": "nearest_positive_center_not_exact_zero",
+        "blue_policy_fidelity": BLUE_POLICY_FIDELITY,
+        "reference_8_exact_blue_fsm_reproduced": (
+            REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED),
         "checkpoint": str(checkpoint.relative_to(ROOT)),
         "actor_sharing": metadata["actor_sharing"],
         "algorithm_label": ("vanilla_happo" if metadata["actor_sharing"] == "independent"

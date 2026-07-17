@@ -10,6 +10,7 @@ import torch
 
 from algorithms.happo.vanilla_happo import VanillaHAPPOPolicy
 from uav_env.make_env import make_env
+from uav_env.JSBSim.paper.action_semantics import INACTIVE_ACTION_PLACEHOLDER
 from uav_env.JSBSim.paper.protocol import (
     NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL,
     PAPER_5V4_GENERALIZATION_PROTOCOL, validate_generalization_protocol,
@@ -117,7 +118,7 @@ def stack_controlled_rule_actions(env):
         elif agent.alive:
             raise RuntimeError(f"alive controlled agent {aid!r} has no rule action")
         else:
-            action = np.full(4, 20, dtype=np.int64)
+            action = np.asarray(INACTIVE_ACTION_PLACEHOLDER, dtype=np.int64)
         if action.shape != (4,):
             raise RuntimeError(
                 f"rule action for {aid!r} must have shape (4,), got {action.shape}")
@@ -203,6 +204,9 @@ def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo"
         "environment_fidelity_revision", "experiment_protocol", "scenario",
         "initial_perturbation", "dynamics_backend", "paper_nominal_experiment",
         "paper_generalization_experiment", "paper_silent_assumptions_present")
+    metadata_keys += (
+        "neutral_action_semantics", "blue_policy_fidelity",
+        "reference_8_exact_blue_fsm_reproduced")
     return {"baseline": baseline, "episode_seeds": seeds,
             "episodes_detail": records, "summary": summary} | {
                 key: env.task.last_info[key] for key in metadata_keys}

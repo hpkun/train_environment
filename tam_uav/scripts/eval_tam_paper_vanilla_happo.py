@@ -16,7 +16,7 @@ from scripts.vanilla_happo_runtime import (deterministic_evaluate, infer_policy,
                                            make_paper_env, seed_all)
 from uav_env.JSBSim.paper.protocol import (
     ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL,
-    checkpoint_lineage, protocol_metadata,
+    PAPER_SILENT_ASSUMPTIONS_PRESENT, checkpoint_lineage, protocol_metadata,
     validate_nominal_protocol)
 
 
@@ -64,7 +64,9 @@ def main():
             expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION,
             expected_experiment_protocol=PAPER_NOMINAL_PROTOCOL,
             expected_initial_perturbation=NOMINAL_PERTURBATION,
-            expected_dynamics_backend="jsbsim")
+            expected_dynamics_backend="jsbsim",
+            expected_paper_silent_assumptions_present=(
+                PAPER_SILENT_ASSUMPTIONS_PRESENT))
     else:
         seed_all(args.seed)
         policy, _, _ = infer_policy(env, "independent", 128, device)

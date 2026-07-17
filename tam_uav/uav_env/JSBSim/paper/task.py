@@ -10,10 +10,13 @@ from .opponent import GreedyPaperOpponent
 from .reward import PaperReward
 from .situation import assess_pair, select_best_target
 from .weapon import PaperWeaponManager
+from .action_semantics import INACTIVE_ACTION_PLACEHOLDER, map_action_indices
 from .protocol import (
+    BLUE_POLICY_FIDELITY,
     ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION,
     PAPER_5V4_GENERALIZATION_PROTOCOL, PAPER_NOMINAL_PROTOCOL,
-    PAPER_SILENT_ASSUMPTIONS_PRESENT, TERMINATION_RESOLUTION,
+    PAPER_SILENT_ASSUMPTIONS_PRESENT, REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED,
+    TERMINATION_RESOLUTION,
     derived_environment_values)
 
 
@@ -163,9 +166,11 @@ class TAMPaperTask:
         commands = {}
         action_indices = {}
         for agent in self.agents:
-            indices = np.asarray(action_map.get(agent.agent_id, np.full(4, 20)), dtype=np.int64)
+            indices = np.asarray(action_map.get(
+                agent.agent_id, INACTIVE_ACTION_PLACEHOLDER), dtype=np.int64)
             if not agent.alive:
-                indices = np.full(4, 20, dtype=np.int64)
+                # Inactive placeholder only; never applied to a dead aircraft.
+                indices = np.asarray(INACTIVE_ACTION_PLACEHOLDER, dtype=np.int64)
             action_indices[agent.agent_id] = indices.copy()
             commands[agent.agent_id] = self.map_action(indices)
 
@@ -282,11 +287,7 @@ class TAMPaperTask:
 
     @staticmethod
     def map_action(indices) -> np.ndarray:
-        values = np.clip(np.asarray(indices, dtype=np.int64).reshape(4), 0, 39)
-        return np.array([0.4 + values[0] / 39.0 * 0.5,
-                         -1.0 + values[1] / 39.0 * 2.0,
-                         -1.0 + values[2] / 39.0 * 2.0,
-                         -1.0 + values[3] / 39.0 * 2.0], dtype=np.float64)
+        return map_action_indices(indices)
 
     def _normalize_actions(self, actions):
         if isinstance(actions, dict):
@@ -401,6 +402,10 @@ class TAMPaperTask:
                 self.experiment_protocol == PAPER_5V4_GENERALIZATION_PROTOCOL),
             "paper_silent_assumptions_present": PAPER_SILENT_ASSUMPTIONS_PRESENT,
             "termination_resolution": TERMINATION_RESOLUTION,
+            "neutral_action_semantics": "nearest_positive_center_not_exact_zero",
+            "blue_policy_fidelity": BLUE_POLICY_FIDELITY,
+            "reference_8_exact_blue_fsm_reproduced": (
+                REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED),
             "winner": winner, "termination_reason": reason,
             "red_alive": sum(a.alive for a in red), "blue_alive": sum(a.alive for a in blue),
             "red_combat_alive": len(self._combat_units("red")),

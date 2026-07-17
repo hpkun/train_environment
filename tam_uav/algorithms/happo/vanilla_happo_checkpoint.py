@@ -7,14 +7,18 @@ import numpy as np
 import torch
 
 from uav_env.JSBSim.paper.protocol import (
-    ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL,
-    PAPER_SILENT_ASSUMPTIONS_PRESENT)
+    BLUE_POLICY_FIDELITY, ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION,
+    PAPER_NOMINAL_PROTOCOL, PAPER_SILENT_ASSUMPTIONS_PRESENT,
+    REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED)
+from uav_env.JSBSim.paper.action_semantics import NEUTRAL_ACTION_SEMANTICS
 
 
-FORMAT = "tam_paper_heterogeneous_reward_vanilla_happo_v3"
+FORMAT = "tam_paper_heterogeneous_reward_vanilla_happo_v4"
 REQUIRED_ENVIRONMENT_FIELDS = (
     "environment_fidelity_revision", "experiment_protocol", "initial_perturbation",
-    "dynamics_backend", "paper_silent_assumptions_present", "scenario")
+    "dynamics_backend", "paper_silent_assumptions_present", "scenario",
+    "neutral_action_semantics", "blue_policy_fidelity",
+    "reference_8_exact_blue_fsm_reproduced")
 
 
 def read_vanilla_happo_checkpoint_metadata(path):
@@ -36,6 +40,10 @@ def _validate_formal_config(config):
         "initial_perturbation": NOMINAL_PERTURBATION,
         "dynamics_backend": "jsbsim",
         "paper_silent_assumptions_present": PAPER_SILENT_ASSUMPTIONS_PRESENT,
+        "neutral_action_semantics": NEUTRAL_ACTION_SEMANTICS,
+        "blue_policy_fidelity": BLUE_POLICY_FIDELITY,
+        "reference_8_exact_blue_fsm_reproduced": (
+            REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED),
     }
     for key, value in expected.items():
         if config.get(key) != value:
@@ -102,7 +110,8 @@ def load_vanilla_happo_checkpoint(
         for_resume=False, allow_episode_restart=False, expected_scenario=None,
         expected_environment_fidelity_revision=None,
         expected_experiment_protocol=None, expected_initial_perturbation=None,
-        expected_dynamics_backend=None):
+        expected_dynamics_backend=None,
+        expected_paper_silent_assumptions_present=None):
     payload = torch.load(path, map_location=next(policy.parameters()).device,
                          weights_only=False)
     revision = payload.get("environment_fidelity_revision")
@@ -114,6 +123,9 @@ def load_vanilla_happo_checkpoint(
             f"{ENVIRONMENT_FIDELITY_REVISION!r}")
     if payload.get("format") != FORMAT:
         raise ValueError(f"unsupported checkpoint format: {payload.get('format')!r}")
+    if payload.get("paper_silent_assumptions_present") is not True:
+        raise ValueError(
+            "checkpoint paper_silent_assumptions_present must be explicitly True")
     if for_resume:
         strict = (payload.get("checkpoint_type") == "resumable"
                   and payload.get("at_episode_boundary") is True)
@@ -138,6 +150,8 @@ def load_vanilla_happo_checkpoint(
         "experiment_protocol": expected_experiment_protocol,
         "initial_perturbation": expected_initial_perturbation,
         "dynamics_backend": expected_dynamics_backend,
+        "paper_silent_assumptions_present": (
+            expected_paper_silent_assumptions_present),
     }
     expected.update({key: value for key, value in expected_lineage.items()
                      if value is not None})

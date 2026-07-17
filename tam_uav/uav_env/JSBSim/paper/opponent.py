@@ -8,9 +8,11 @@ from .reward import (paper_height_reward, uav_angle_reward, uav_distance_reward,
                      uav_speed_reward)
 from .situation import assess_pair
 from .protocol import derived_environment_values
+from .action_semantics import map_action_indices
 
 
 MANOEUVRES = {
+    # Level approximation using nearest-positive-center control surfaces.
     "level": (24, 20, 20, 20),
     "accelerate": (34, 20, 20, 20),
     "decelerate": (14, 20, 20, 20),
@@ -22,11 +24,7 @@ MANOEUVRES = {
 
 
 def map_indices(indices) -> np.ndarray:
-    values = np.asarray(indices, dtype=np.float64)
-    return np.array([0.4 + values[0] / 39.0 * 0.5,
-                     -1.0 + values[1] / 39.0 * 2.0,
-                     -1.0 + values[2] / 39.0 * 2.0,
-                     -1.0 + values[3] / 39.0 * 2.0])
+    return map_action_indices(indices)
 
 
 class GreedyPaperOpponent:

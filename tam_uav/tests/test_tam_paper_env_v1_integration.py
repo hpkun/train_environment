@@ -127,7 +127,8 @@ def test_info_contains_per_agent_reward_and_missile_accounting():
     assert set(info["missile_termination_reasons"]) == {
         "hit", "timeout", "target_dead", "nonfinite"
     }
-    assert info["environment_fidelity_revision"] == "published_rules_simplified_v3"
+    assert info["environment_fidelity_revision"] == "published_rules_simplified_v4"
+    assert info["reference_8_exact_blue_fsm_reproduced"] is False
     assert info["termination_resolution"] == "decision_step_boundary"
     assert info["experiment_protocol"] == "paper_nominal"
     assert info["initial_perturbation"] == "none"

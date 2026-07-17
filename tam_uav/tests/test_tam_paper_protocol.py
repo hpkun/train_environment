@@ -5,14 +5,18 @@ import pytest
 from scripts.eval_tam_paper_5v4_generalization import parse_args as parse_generalization_args
 from scripts.eval_tam_paper_env_v1 import parse_args as parse_nominal_env_args
 from uav_env.JSBSim.paper.protocol import (
-    ENVIRONMENT_FIDELITY_REVISION, GENERALIZATION_EPISODES_PER_LEVEL,
+    BLUE_POLICY_FIDELITY, ENVIRONMENT_FIDELITY_REVISION,
+    GENERALIZATION_EPISODES_PER_LEVEL,
     GENERALIZATION_PERTURBATION_LEVELS, PAPER_5V4_GENERALIZATION_PROTOCOL,
-    PAPER_NOMINAL_PROTOCOL, validate_generalization_protocol,
+    PAPER_NOMINAL_PROTOCOL, REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED,
+    validate_generalization_protocol,
     validate_nominal_protocol)
 
 
 def test_protocol_constants_and_nominal_validation():
-    assert ENVIRONMENT_FIDELITY_REVISION == "published_rules_simplified_v3"
+    assert ENVIRONMENT_FIDELITY_REVISION == "published_rules_simplified_v4"
+    assert BLUE_POLICY_FIDELITY == "minimal_greedy_basic_manoeuvre_reconstruction"
+    assert REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED is False
     assert PAPER_NOMINAL_PROTOCOL == "paper_nominal"
     for scenario in ("2v2", "3v2", "5v4"):
         validate_nominal_protocol(scenario, "none")

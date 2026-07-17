@@ -26,9 +26,11 @@ from uav_env.JSBSim.core.aircraft import JSBSimAircraftPlatform
 from uav_env.make_env import make_env
 from scripts.vanilla_happo_runtime import stack_controlled_rule_actions
 from uav_env.JSBSim.paper.protocol import (
-    ENVIRONMENT_FIDELITY_REVISION, GENERALIZATION_PERTURBATION_LEVELS,
+    BLUE_POLICY_FIDELITY, ENVIRONMENT_FIDELITY_REVISION,
+    GENERALIZATION_PERTURBATION_LEVELS,
     NOMINAL_PERTURBATION, derived_environment_values, validate_generalization_protocol,
-    validate_nominal_protocol)
+    validate_nominal_protocol, REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED)
+from uav_env.JSBSim.paper.missile import TIMEOUT_DERIVATION
 
 
 CONFIG_NAMES = (
@@ -337,6 +339,9 @@ def main() -> int:
     report = {
         "formal_environment_mode": "tam_paper_env_v1",
         "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+        "blue_policy_fidelity": BLUE_POLICY_FIDELITY,
+        "reference_8_exact_blue_fsm_reproduced": (
+            REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED),
         "experiment_protocol_validation": {
             "paper_nominal_none_only": True,
             "paper_5v4_generalization_levels": list(GENERALIZATION_PERTURBATION_LEVELS),
@@ -356,6 +361,13 @@ def main() -> int:
         "config_consumption_table": _config_consumption(config),
         "derived_environment_parameters": derived_environment_values(
             config["published_parameters"]["maximum_attack_range_m"]),
+        "missile_timeout": {
+            "classification": "PAPER_SILENT_DERIVED_SIMPLIFICATION",
+            "timeout_derivation": TIMEOUT_DERIVATION,
+            "derived_timeout_s": (
+                2.0 * config["published_parameters"]["maximum_attack_range_m"]
+                / config["inferred_parameters"]["missile_initial_speed_mps"]),
+        },
         "missile_published_metadata": {
             key: config["published_parameters"][key] for key in (
                 "missile_mass_kg", "missile_length_m", "missile_diameter_m")

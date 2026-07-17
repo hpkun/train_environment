@@ -28,18 +28,12 @@ from scripts.run_tam_paper_baseline_diagnosis import (
 from scripts.train_tam_paper_vanilla_happo import parse_args as parse_train_args
 from scripts.inspect_tam_paper_checkpoint import inspect_checkpoint
 from uav_env.JSBSim.paper.protocol import (
-    ENVIRONMENT_FIDELITY_REVISION, PAPER_NOMINAL_PROTOCOL)
+    ENVIRONMENT_FIDELITY_REVISION, PAPER_NOMINAL_PROTOCOL, protocol_metadata)
 
 
 def formal_checkpoint_config(scenario):
-    return {
-        "scenario": scenario,
-        "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
-        "experiment_protocol": PAPER_NOMINAL_PROTOCOL,
-        "initial_perturbation": "none",
-        "dynamics_backend": "jsbsim",
-        "paper_silent_assumptions_present": True,
-    }
+    return {"scenario": scenario, **protocol_metadata(
+        scenario, "none", "jsbsim", PAPER_NOMINAL_PROTOCOL)}
 
 
 def make_policy(n=3, hidden=16, sharing="independent"):
@@ -438,27 +432,32 @@ def test_wrong_scenario_is_rejected(tmp_path):
             path, policy, restore_rng=False, expected_scenario="3v2")
 
 
-def test_v3_checkpoint_top_level_lineage_and_formal_load(tmp_path):
+def test_v4_checkpoint_top_level_lineage_and_formal_load(tmp_path):
     policy = make_policy(2); trainer = VanillaHAPPOTrainer(policy)
-    path = tmp_path / "v3.pt"
+    path = tmp_path / "v4.pt"
     config = formal_checkpoint_config("2v2")
     save_vanilla_happo_checkpoint(
         path, policy, trainer, environment_steps=12, episodes=3,
         config=config, numpy_rng=np.random.default_rng())
     metadata = read_vanilla_happo_checkpoint_metadata(path)
-    for key, value in config.items():
-        assert metadata[key] == value
+    for key in (
+            "scenario", "environment_fidelity_revision", "experiment_protocol",
+            "initial_perturbation", "dynamics_backend",
+            "paper_silent_assumptions_present", "neutral_action_semantics",
+            "blue_policy_fidelity", "reference_8_exact_blue_fsm_reproduced"):
+        assert metadata[key] == config[key]
     loaded = load_vanilla_happo_checkpoint(
         path, policy, restore_rng=False, expected_scenario="2v2",
         expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION,
         expected_experiment_protocol=PAPER_NOMINAL_PROTOCOL,
-        expected_initial_perturbation="none", expected_dynamics_backend="jsbsim")
+        expected_initial_perturbation="none", expected_dynamics_backend="jsbsim",
+        expected_paper_silent_assumptions_present=True)
     assert loaded["environment_steps"] == 12
     assert loaded["episodes"] == 3
 
 
 @pytest.mark.parametrize(("field", "value", "message"), [
-    ("environment_fidelity_revision", "published_rules_simplified_v2",
+    ("environment_fidelity_revision", "published_rules_simplified_v3",
      "environment_fidelity_revision mismatch"),
     ("experiment_protocol", "paper_5v4_generalization", "experiment_protocol mismatch"),
     ("initial_perturbation", "low", "initial_perturbation mismatch"),
@@ -478,7 +477,31 @@ def test_formal_load_rejects_lineage_mismatch(tmp_path, field, value, message):
             path, policy, restore_rng=False,
             expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION,
             expected_experiment_protocol=PAPER_NOMINAL_PROTOCOL,
-            expected_initial_perturbation="none", expected_dynamics_backend="jsbsim")
+            expected_initial_perturbation="none", expected_dynamics_backend="jsbsim",
+            expected_paper_silent_assumptions_present=True)
+
+
+@pytest.mark.parametrize("missing", (True, False))
+def test_formal_load_rejects_missing_or_false_paper_silent_flag(tmp_path, missing):
+    policy = make_policy(2); trainer = VanillaHAPPOTrainer(policy)
+    path = tmp_path / "bad-paper-silent.pt"
+    save_vanilla_happo_checkpoint(
+        path, policy, trainer, environment_steps=0, episodes=0,
+        config=formal_checkpoint_config("2v2"), numpy_rng=np.random.default_rng())
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if missing:
+        payload.pop("paper_silent_assumptions_present")
+    else:
+        payload["paper_silent_assumptions_present"] = False
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match="paper_silent_assumptions_present"):
+        load_vanilla_happo_checkpoint(
+            path, policy, restore_rng=False,
+            expected_paper_silent_assumptions_present=True)
+    inspected = inspect_checkpoint(path)
+    assert inspected["formal_environment_compatible"] is False
+    assert any("paper_silent_assumptions_present" in reason
+               for reason in inspected["incompatibility_reasons"])
 
 
 def test_missing_revision_is_pre_fidelity_and_inspect_is_read_only(tmp_path):
@@ -499,7 +522,7 @@ def test_missing_revision_is_pre_fidelity_and_inspect_is_read_only(tmp_path):
                for reason in inspected["incompatibility_reasons"])
 
 
-def test_resume_and_formal_evaluators_require_v3_lineage_arguments():
+def test_resume_and_formal_evaluators_require_v4_lineage_arguments():
     train_source = (Path(__file__).parents[1] /
                     "scripts/train_tam_paper_vanilla_happo.py").read_text()
     nominal_source = (Path(__file__).parents[1] /
@@ -510,6 +533,7 @@ def test_resume_and_formal_evaluators_require_v3_lineage_arguments():
         assert "expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION" in source
         assert "expected_initial_perturbation" in source
         assert "expected_dynamics_backend" in source
+        assert "expected_paper_silent_assumptions_present" in source
 
 
 def test_red_and_blue_detection_and_attack_times_are_separate():

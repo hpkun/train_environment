@@ -13,13 +13,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 ENVIRONMENT_HASHES = {
-    "uav_env/JSBSim/paper/env.py": "9a9ae99738ba9a8ea8fefeef99f941c345fb96e5c41eb4e4492cc347c8f884ba",
-    "uav_env/JSBSim/paper/task.py": "9f3a56b76387ea9d4707e73df9d3d62e4c5f977f15d42e1452349931f06c8270",
-    "uav_env/JSBSim/paper/reward.py": "2db4aa290d652340faccbc8651acf148531d8eca6794785d63cc54442a739218",
+    "uav_env/JSBSim/paper/env.py": "b712133166eddf396d8b77862303f541c97c4f524fb877b7822da87171cacb3f",
+    "uav_env/JSBSim/paper/task.py": "92c40e8090a696b53ec50be9e7115f74e9c36ddc7030e6a346984b822a1e0132",
+    "uav_env/JSBSim/paper/reward.py": "815acc1dc0d756dea9ca47f2d9223af248bbc9b80a1fdfce434bc9fe74e2d710",
     "uav_env/JSBSim/paper/observation.py": "50910f7e715b3d4197b20f72fef61601f3061178f8093eb43b2790a7bb36054a",
-    "uav_env/JSBSim/paper/missile.py": "1ef8261909a5355a666b46d9b1afe9cb378bed953ae7c2b84da06d98f424f533",
+    "uav_env/JSBSim/paper/missile.py": "8d8e79b31b697ef3b75c3ba50ddbeb0271302707f468bed78f90ff17ffc92121",
     "uav_env/JSBSim/paper/weapon.py": "4155f26ddcfaf76ad9f4314275ef6c4af4a8966e127cce2f4e2ea31fc5b3fcf1",
-    "uav_env/JSBSim/paper/protocol.py": "58fcc78ec4de759d08ca75d6f85446648d9cf74d8f2565593dd000af27ea4175",
+    "uav_env/JSBSim/paper/protocol.py": "74b0698d5a1fa28c3b551efc041b9fa16542b575f1b64e44a1a0ca86ac26878a",
+    "uav_env/JSBSim/paper/action_semantics.py": "daf980b98448e23d47d07fa159ad71a1dad5d518f6eefe44360f02e43957569f",
     "uav_env/JSBSim/core/aircraft.py": "4da145ebd6fe478d1f25ae24ee507cb6427a413ec0549a7d939e1d95ead138bf",
     "uav_env/JSBSim/configs/tam_paper_env_v1_2v2.yaml": "4c35649960441cf0bbcd8e992c96023873bca7e8ad30b84a8e3fb66ab43eeb13",
     "uav_env/JSBSim/configs/tam_paper_env_v1_3v2.yaml": "a66b2cd332fc88dd8e357949521e204bed1d5476e3c73c473793401d97626ada",
