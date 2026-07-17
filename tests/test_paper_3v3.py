@@ -14,6 +14,7 @@ from configs.paper_3v3_spec import (
     PAPER_ENVIRONMENT_PROFILE,
     PAPER_MISSILE_GUIDANCE_MODE,
     PAPER_PID_PROFILE,
+    PAPER_UNSPECIFIED_ENGINEERING,
     paper_environment_snapshot,
 )
 from my_uav_env.alignment.reward_utils import (
@@ -100,6 +101,12 @@ def test_formal_profile_contract_and_dimensions():
         "intentional_3v3_deviation_derived")
     assert snapshot["observation_schema"]["source"] == (
         "paper_equation_operational")
+    low_altitude = snapshot["environment_config"]["scenario"][
+        "arena_altitude_min_m"]
+    assert low_altitude["value"] == pytest.approx(100.0)
+    assert low_altitude["source"] == PAPER_UNSPECIFIED_ENGINEERING
+    assert snapshot["environment_config_fingerprint"] != (
+        "3686728c40163c88388932de0beb132e15024687879e03f982fd4715aa6d4d9d")
     assert snapshot["environment_config"]["missile"]["navigation_constant"][
         "source"] == "paper_unspecified_engineering"
     assert snapshot["environment_config"]["missile"]["model"]["source"] == (
@@ -360,7 +367,8 @@ def test_checkpoint_fingerprint_rejects_old_environment():
     assert expected["missile_hit_radius_m"] == pytest.approx(100.0)
     payload = {"state_dict": {}, "model_kind": "actor",
                "metadata": dict(expected)}
-    payload["metadata"]["environment_config_fingerprint"] = "old"
+    payload["metadata"]["environment_config_fingerprint"] = (
+        "3686728c40163c88388932de0beb132e15024687879e03f982fd4715aa6d4d9d")
     with pytest.raises(ValueError):
         _unpack_and_validate_checkpoint(payload, expected, "actor")
 
@@ -482,6 +490,117 @@ def test_nonfinite_aircraft_state_remains_numerical_invalid(monkeypatch):
         env.close()
 
 
+@pytest.mark.parametrize("altitude_m, expected_alive", [
+    (100.1, True),
+    (100.0, False),
+    (99.9, False),
+])
+def test_low_altitude_hard_boundary(monkeypatch, altitude_m, expected_alive):
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        aid = "red_0"
+        sim = env.red_planes[aid]
+        monkeypatch.setattr(
+            sim, "get_geodetic",
+            lambda: np.array([120.0, 60.0, altitude_m]))
+
+        result = env._check_aircraft_post_physics_state(aid, sim)
+
+        assert result is expected_alive
+        assert sim.is_alive is expected_alive
+        if expected_alive:
+            assert aid not in env._death_reasons
+        else:
+            assert env._death_reasons[aid] == "Crash_LowAlt"
+        assert not env._invalid_numerical_episode
+        assert not env._invalid_numerical_reasons
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("altitude_m, expected_alive", [
+    (9999.9, True),
+    (10000.0, False),
+    (10000.1, False),
+])
+def test_high_altitude_hard_boundary(monkeypatch, altitude_m, expected_alive):
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        aid = "red_0"
+        sim = env.red_planes[aid]
+        monkeypatch.setattr(
+            sim, "get_geodetic",
+            lambda: np.array([120.0, 60.0, altitude_m]))
+
+        result = env._check_aircraft_post_physics_state(aid, sim)
+
+        assert result is expected_alive
+        assert sim.is_alive is expected_alive
+        if expected_alive:
+            assert aid not in env._death_reasons
+        else:
+            assert env._death_reasons[aid] == "Crash_HighAlt"
+        assert not env._invalid_numerical_episode
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("north_m, east_m, expected_alive", [
+    (49999.9, 0.0, True),
+    (50000.0, 0.0, False),
+    (-50000.0, 0.0, False),
+    (0.0, 50000.0, False),
+])
+def test_horizontal_hard_boundary(
+        monkeypatch, north_m, east_m, expected_alive):
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        aid = "red_0"
+        sim = env.red_planes[aid]
+        monkeypatch.setattr(
+            sim, "get_position",
+            lambda: np.array([north_m, east_m, 6000.0]))
+
+        result = env._check_aircraft_post_physics_state(aid, sim)
+
+        assert result is expected_alive
+        assert sim.is_alive is expected_alive
+        if expected_alive:
+            assert aid not in env._death_reasons
+        else:
+            assert env._death_reasons[aid] == "Crash_BattleVolume"
+        assert not env._invalid_numerical_episode
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("north_m, expected_penalty", [
+    (39999.9, 0.0),
+    (40000.0, 0.0),
+    (40000.1, -10.0),
+    (49999.9, -10.0),
+])
+def test_eq18_penalty_precedes_hard_boundary(
+        monkeypatch, north_m, expected_penalty):
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        aid = "red_0"
+        sim = env.red_planes[aid]
+        monkeypatch.setattr(
+            sim, "get_position",
+            lambda: np.array([north_m, 0.0, 6000.0]))
+
+        assert env._boundary_penalty(sim) == expected_penalty
+        assert env._check_aircraft_post_physics_state(aid, sim)
+        assert sim.is_alive
+    finally:
+        env.close()
+
+
 def test_mid_frame_ground_crossing_is_classified_before_next_load_read(
         monkeypatch):
     env = UavCombatEnv()
@@ -489,7 +608,8 @@ def test_mid_frame_ground_crossing_is_classified_before_next_load_read(
         env.reset(seed=3)
         aid = "red_0"
         sim = env.red_planes[aid]
-        state = {"altitude": 1.0, "runs": 0, "load_reads_after_ground": 0}
+        state = {"altitude": 100.1, "runs": 0,
+                 "load_reads_after_ground": 0}
         original_property = sim.get_property_value
 
         monkeypatch.setattr(
@@ -501,11 +621,11 @@ def test_mid_frame_ground_crossing_is_classified_before_next_load_read(
 
         def run():
             state["runs"] += 1
-            state["altitude"] = -0.1
+            state["altitude"] = 99.9
             return True
 
         def property_value(name):
-            if (state["altitude"] < 0.0
+            if (state["altitude"] <= 100.0
                     and name.startswith("accelerations/n-pilot-")):
                 state["load_reads_after_ground"] += 1
                 return 500.0
@@ -543,7 +663,7 @@ def test_dead_aircraft_stops_mid_decision_while_survivor_finishes_frames(
         dead_id = "red_0"
         dead = env.red_planes[dead_id]
         survivor = env.red_planes["red_1"]
-        state = {"altitude": 1.0, "dead_runs": 0, "survivor_runs": 0,
+        state = {"altitude": 100.1, "dead_runs": 0, "survivor_runs": 0,
                  "load_reads_after_ground": 0}
         original_property = dead.get_property_value
 
@@ -557,7 +677,7 @@ def test_dead_aircraft_stops_mid_decision_while_survivor_finishes_frames(
         def dead_run():
             state["dead_runs"] += 1
             if state["dead_runs"] == 3:
-                state["altitude"] = -0.1
+                state["altitude"] = 99.9
             return True
 
         def survivor_run():
@@ -565,7 +685,7 @@ def test_dead_aircraft_stops_mid_decision_while_survivor_finishes_frames(
             return True
 
         def property_value(name):
-            if (state["altitude"] < 0.0
+            if (state["altitude"] <= 100.0
                     and name.startswith("accelerations/n-pilot-")):
                 state["load_reads_after_ground"] += 1
                 return 500.0
@@ -598,21 +718,26 @@ def test_real_jsbsim_low_dive_crosses_ground_as_normal_crash():
         sim = env.red_planes[aid]
         initial_state = dict(sim.init_state)
         initial_state.update({
-            "ic/h-sl-ft": 20.0 / 0.3048,
+            "ic/h-sl-ft": 120.0 / 0.3048,
             "ic/theta-deg": -30.0,
             "ic/u-fps": 300.0 / 0.3048,
         })
         sim.reload(new_state=initial_state)
 
+        previous_altitude = float(sim.get_geodetic()[2])
         for _ in range(30):
             env._run_one_physics_frame()
             if not sim.is_alive:
                 break
+            previous_altitude = float(sim.get_geodetic()[2])
 
         assert not sim.is_alive
-        assert sim.get_geodetic()[2] < 0.0
+        crash_altitude = float(sim.get_geodetic()[2])
+        assert previous_altitude > 100.0
+        assert 0.0 < crash_altitude <= 100.0
         assert env._death_reasons[aid] == "Crash_LowAlt"
         assert not env._invalid_numerical_episode
+        assert not env._invalid_numerical_reasons
         for other_id in env.agent_ids:
             if other_id == aid:
                 continue

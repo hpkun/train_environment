@@ -55,7 +55,7 @@ COARSE_ALTITUDE_GRID_M = 250.0
 
 PAPER_SCENARIO = ScenarioConfig(
     arena_half_width_m=sv(50_000.0, PAPER_EXPLICIT),
-    arena_altitude_min_m=sv(0.0, PAPER_UNSPECIFIED_ENGINEERING),
+    arena_altitude_min_m=sv(100.0, PAPER_UNSPECIFIED_ENGINEERING),
     arena_altitude_max_m=sv(10_000.0, PAPER_EXPLICIT),
     reward_boundary_half_width_m=sv(40_000.0, PAPER_EQUATION),
     initial_head_on_range_m=sv(10_000.0, PAPER_EXPLICIT),

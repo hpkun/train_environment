@@ -1390,12 +1390,12 @@ class UavCombatEnv(gymnasium.Env):
                 self._death_reasons.setdefault(aid, "Crash_NonFinite")
             self._crashed_this_step.add(aid)
             return False
-        if altitude < self.arena_altitude_min_m:
+        if altitude <= self.arena_altitude_min_m:
             reason = "Crash_LowAlt"
-        elif altitude > self.arena_altitude_max_m:
+        elif altitude >= self.arena_altitude_max_m:
             reason = "Crash_HighAlt"
-        elif (abs(position[0]) > self.arena_half_width_m
-              or abs(position[1]) > self.arena_half_width_m):
+        elif (abs(position[0]) >= self.arena_half_width_m
+              or abs(position[1]) >= self.arena_half_width_m):
             reason = "Crash_BattleVolume"
         else:
             reason = None
