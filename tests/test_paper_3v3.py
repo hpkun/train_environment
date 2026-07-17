@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -21,6 +23,7 @@ from my_uav_env.alignment.reward_utils import (
 from my_uav_env.alignment.state_extractor import (
     extract_relative_state,
     extract_self_state,
+    extract_self_state_with_meta,
 )
 from my_uav_env.blue_policy_profiles import BluePolicyController
 from my_uav_env.env import UavCombatEnv
@@ -89,7 +92,18 @@ def test_formal_profile_contract_and_dimensions():
     assert snapshot["current_scale"]["source"] == "intentional_3v3_deviation"
     assert _compute_obs_dim(3, 3, True) == 60
     assert _compute_global_state_dim(3) == 30
-    assert CHECKPOINT_SCHEMA_VERSION == "vanilla_mappo_paper_3v3_v1"
+    assert CHECKPOINT_SCHEMA_VERSION == "vanilla_mappo_paper_3v3_v2"
+    assert snapshot["entity_feature_dimension"]["source"] == "paper_explicit"
+    assert snapshot["actor_input_dim"]["source"] == (
+        "intentional_3v3_deviation_derived")
+    assert snapshot["critic_input_dim"]["source"] == (
+        "intentional_3v3_deviation_derived")
+    assert snapshot["observation_schema"]["source"] == (
+        "paper_equation_operational")
+    assert snapshot["environment_config"]["missile"]["navigation_constant"][
+        "source"] == "paper_unspecified_engineering"
+    assert snapshot["environment_config"]["missile"]["model"]["source"] == (
+        "intentional_model_simplification")
 
 
 def test_environment_rejects_nonformal_contracts():
@@ -117,6 +131,40 @@ def test_reset_observation_fields_dimensions_and_ammo():
                    for aid in env.agent_ids)
     finally:
         env.close()
+
+
+def test_real_jsbsim_alpha_beta_sources_survive_reset_and_step():
+    env = UavCombatEnv()
+    try:
+        obs, _ = env.reset(seed=3)
+        for _phase in range(2):
+            state, meta = extract_self_state_with_meta(
+                env.red_planes["red_0"], require_real_alpha_beta=True)
+            assert meta["alpha_source"].startswith(("jsbsim:", "getter:"))
+            assert meta["beta_source"].startswith(("jsbsim:", "getter:"))
+            assert meta["alpha_source"] != "placeholder:0"
+            assert meta["beta_source"] != "placeholder:0"
+            assert np.all(np.isfinite(state[[7, 8]]))
+            actions = {aid: np.zeros(3, dtype=np.float32) for aid in env.red_ids}
+            actions.update(env.blue_policy_actions(
+                {aid: obs[aid] for aid in env.blue_ids}))
+            obs, *_ = env.step(actions)
+    finally:
+        env.close()
+
+
+def test_formal_environment_source_contains_no_legacy_branches():
+    source = Path("my_uav_env/env.py").read_text(encoding="utf-8")
+    for forbidden in (
+            "if False", "_make_entity_vec", "_normalize_obs_vec",
+            "_build_body_frame_entity", "GCAS", "11-dim"):
+        assert forbidden not in source
+    tree = ast.parse(source)
+    reward = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_compute_rewards")
+    assert len(reward.body) == 2
+    assert isinstance(reward.body[-1], ast.Return)
 
 
 def test_table1_field_order_and_jsbsim_alpha_beta():
@@ -309,6 +357,7 @@ def test_checkpoint_fingerprint_rejects_old_environment():
     config = Config()
     config.seed = 3
     expected = _checkpoint_metadata(config, 60, 30)
+    assert expected["missile_hit_radius_m"] == pytest.approx(100.0)
     payload = {"state_dict": {}, "model_kind": "actor",
                "metadata": dict(expected)}
     payload["metadata"]["environment_config_fingerprint"] = "old"
@@ -316,7 +365,7 @@ def test_checkpoint_fingerprint_rejects_old_environment():
         _unpack_and_validate_checkpoint(payload, expected, "actor")
 
 
-def test_speed_envelope_requires_three_consecutive_frames(monkeypatch):
+def test_speed_envelope_is_monitor_only(monkeypatch):
     env = UavCombatEnv()
     try:
         env.reset(seed=3)
@@ -327,15 +376,22 @@ def test_speed_envelope_requires_three_consecutive_frames(monkeypatch):
         env._enforce_aircraft_constraints("red_0", sim)
         assert sim.is_alive
         env._enforce_aircraft_constraints("red_0", sim)
-        assert not sim.is_alive
-        assert env._death_reasons["red_0"] == (
-            "PaperMaximumSpeedEnvelopeViolation")
+        assert sim.is_alive
+        diag = env._aircraft_diagnostics["red_0"]
+        assert diag["speed_envelope_violation"]
+        assert diag["overspeed_frames"] == 3
+        assert diag["maximum_consecutive_above_600mps_frames"] == 3
+        assert "red_0" not in env._death_reasons
         assert not env._invalid_numerical_episode
+        monkeypatch.setattr(
+            sim, "get_velocity", lambda: np.array([300.0, 0.0, 0.0]))
+        env._enforce_aircraft_constraints("red_0", sim)
+        assert diag["consecutive_above_600mps_frames"] == 0
     finally:
         env.close()
 
 
-def test_overload_envelope_transient_and_three_frames(monkeypatch):
+def test_overload_envelope_is_monitor_only(monkeypatch):
     env = UavCombatEnv()
     try:
         env.reset(seed=3)
@@ -363,10 +419,65 @@ def test_overload_envelope_transient_and_three_frames(monkeypatch):
         env._apply_pid_controls({aid: target})
         assert sim.is_alive
         env._apply_pid_controls({aid: target})
-        assert not sim.is_alive
-        assert env._death_reasons[aid] == (
-            "PaperMaximumOverloadEnvelopeViolation")
+        assert sim.is_alive
+        diag = env._aircraft_diagnostics[aid]
+        assert diag["overload_envelope_violation"]
+        assert diag["frames_above_9g"] == 4
+        assert diag["maximum_consecutive_above_9g_frames"] == 3
+        assert aid not in env._death_reasons
         assert not env._invalid_numerical_episode
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("mode", ["catastrophic", "persistent", "nonfinite"])
+def test_load_numerical_invalid_remains_terminal(monkeypatch, mode):
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        aid = "red_0"
+        sim = env.red_planes[aid]
+        original = sim.get_property_value
+        value = {"catastrophic": 101.0, "persistent": 31.0,
+                 "nonfinite": float("nan")}[mode]
+
+        def property_value(name):
+            if name == "accelerations/n-pilot-x-norm":
+                return value
+            if name in ("accelerations/n-pilot-y-norm",
+                        "accelerations/n-pilot-z-norm"):
+                return 0.0
+            return original(name)
+
+        monkeypatch.setattr(sim, "get_property_value", property_value)
+        target = (0.0, float(sim.get_rpy()[2]), 300.0)
+        repeats = 3 if mode == "persistent" else 1
+        for _ in range(repeats):
+            env._apply_pid_controls({aid: target})
+        assert not sim.is_alive
+        assert env._invalid_numerical_episode
+        expected = {
+            "catastrophic": "CatastrophicFiniteLoad",
+            "persistent": "PersistentExtremeFiniteLoad",
+            "nonfinite": "NonFiniteLoad",
+        }[mode]
+        assert any(expected in reason for reason in env._invalid_numerical_reasons)
+    finally:
+        env.close()
+
+
+def test_nonfinite_aircraft_state_remains_numerical_invalid(monkeypatch):
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        sim = env.red_planes["red_0"]
+        monkeypatch.setattr(
+            sim, "get_velocity", lambda: np.array([np.nan, 0.0, 0.0]))
+        env._enforce_aircraft_constraints("red_0", sim)
+        assert not sim.is_alive
+        assert env._invalid_numerical_episode
+        assert any("NonFiniteState" in reason
+                   for reason in env._invalid_numerical_reasons)
     finally:
         env.close()
 
@@ -466,6 +577,29 @@ def test_both_teams_mws_override_with_same_semantics():
                          % (2 * np.pi) - np.pi)
         assert np.rad2deg(red_delta) == pytest.approx(60.0)
         assert np.rad2deg(blue_delta) == pytest.approx(60.0)
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("aid, team, other", [
+    ("red_0", "red", "blue"),
+    ("blue_0", "blue", "red"),
+])
+def test_mws_generation_and_flip_statistics_are_team_scoped(aid, team, other):
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        incoming = SimpleNamespace(uid=f"{other}_missile_test")
+        env._mws_evasion_target(aid, incoming, 0.0, 1.0)
+        env._mws_evasion_target(aid, incoming, 0.0, -1.0)
+        diag = env._mws_decision_diagnostics
+        assert diag[f"{team}_warning_generations"] == 1
+        assert diag[f"{team}_suppressed_direction_flip_attempts"] == 1
+        assert diag[f"{team}_maximum_continuous_decisions"] == 2
+        assert diag[f"{team}_target_heading_delta_max_deg"] == pytest.approx(60.0)
+        assert diag[f"{other}_warning_generations"] == 0
+        assert diag[f"{other}_suppressed_direction_flip_attempts"] == 0
+        assert diag[f"{other}_maximum_continuous_decisions"] == 0
     finally:
         env.close()
 

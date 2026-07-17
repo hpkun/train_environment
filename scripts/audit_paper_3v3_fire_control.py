@@ -56,6 +56,8 @@ def straight_actions(env, ids, headings):
 def run_case(seed, case):
     env = UavCombatEnv()
     try:
+        trajectory_samples = []
+        env.set_missile_trajectory_sink(trajectory_samples.append)
         obs, _ = env.reset(seed=seed)
         headings = {
             aid: float(env._get_sim(aid).get_rpy()[2]) for aid in env.agent_ids}
@@ -76,13 +78,53 @@ def run_case(seed, case):
                 break
         shooter = "red" if case == "red_chase" else "blue"
         terms = info.get("__missile_term__", {}).get(shooter, {})
+        missile_positions = {}
+        missile_movement_samples = 0
+        for sample in trajectory_samples:
+            if sample.get("team") != shooter:
+                continue
+            uid = sample["missile_id"]
+            position = np.asarray(sample["missile_position"], dtype=np.float64)
+            previous = missile_positions.get(uid)
+            if previous is not None and np.linalg.norm(position - previous) > 0.0:
+                missile_movement_samples += 1
+            missile_positions[uid] = position
+        aircraft_rows = [info.get(aid, {}) for aid in env.agent_ids]
+        maximum_speed = max(
+            (float(row.get("maximum_speed_mps_seen", 0.0))
+             for row in aircraft_rows), default=0.0)
+        maximum_total_load = max(
+            (float(row.get("maximum_load_g_seen", 0.0))
+             for row in aircraft_rows), default=0.0)
+        maximum_abs_pilot_z = max(
+            (float(row.get("maximum_abs_pilot_z_load_seen", 0.0))
+             for row in aircraft_rows), default=0.0)
+        speed_envelope_frames = sum(
+            int(row.get("overspeed_frames", 0)) for row in aircraft_rows)
+        overload_envelope_frames = sum(
+            int(row.get("frames_above_9g", 0)) for row in aircraft_rows)
+        death_reasons = {
+            aid: info.get(aid, {}).get("death_reason")
+            for aid in env.agent_ids
+            if info.get(aid, {}).get("death_reason")
+        }
         return {
             "seed": seed, "case": case, "steps": step + 1,
             "geometry": totals[shooter].get("geometry_ok_pairs", 0),
             "lock_mature": totals[shooter].get("lock_mature_pairs", 0),
             "launches": totals[shooter].get("launches", 0),
             "hits": int(terms.get("hit", 0)),
+            "missile_movement_samples": int(missile_movement_samples),
             "missile_numerical_invalid": int(terms.get("numerical_invalid", 0)),
+            "maximum_aircraft_speed_mps": maximum_speed,
+            "maximum_total_pilot_load_norm": maximum_total_load,
+            "maximum_abs_pilot_z_load": maximum_abs_pilot_z,
+            "speed_envelope_violation_count": speed_envelope_frames,
+            "overload_envelope_violation_count": overload_envelope_frames,
+            "aircraft_numerical_invalid_count": len(
+                info.get("__episode__", {}).get(
+                    "invalid_numerical_reasons", ())),
+            "death_reasons": death_reasons,
             "invalid_episode": bool(
                 info.get("__episode__", {}).get("invalid_numerical_episode", False)),
         }
@@ -97,10 +139,15 @@ def run_audit(seeds):
     blue = [row for row in rows if row["case"] == "blue_chase"]
     direction_pass = lambda group: (
         all(row["geometry"] > 0 and row["lock_mature"] > 0
-            and row["launches"] > 0 for row in group)
+            and row["launches"] > 0
+            and row["missile_movement_samples"] > 0 for row in group)
         and sum(row["hits"] for row in group) > 0)
     healthy = all(not row["invalid_episode"]
-                  and row["missile_numerical_invalid"] == 0 for row in rows)
+                  and row["missile_numerical_invalid"] == 0
+                  and row["aircraft_numerical_invalid_count"] == 0
+                  and row["speed_envelope_violation_count"] == 0
+                  and row["overload_envelope_violation_count"] == 0
+                  for row in rows)
     return {
         "FireControlClosureRed": "PASS" if direction_pass(red) else "FAIL",
         "FireControlClosureBlue": "PASS" if direction_pass(blue) else "FAIL",

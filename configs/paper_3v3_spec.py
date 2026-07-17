@@ -29,13 +29,15 @@ from my_uav_env.pid_controller import (
 PAPER_UNSPECIFIED_ENGINEERING = "paper_unspecified_engineering"
 PAPER_EQUATION_OPERATIONAL = "paper_equation_operational"
 INTENTIONAL_3V3_DEVIATION = "intentional_3v3_deviation"
+INTENTIONAL_3V3_DEVIATION_DERIVED = "intentional_3v3_deviation_derived"
+INTENTIONAL_MODEL_SIMPLIFICATION = "intentional_model_simplification"
 
 PAPER_ENVIRONMENT_PROFILE = "paper_3v3_v1"
 PAPER_BLUE_POLICY_PROFILE = "simple_dynamic_pursuit_with_mws"
 PAPER_PID_PROFILE = "paper_3v3_pid_v1"
 PAPER_REWARD_MODE = "paper_joint"
 PAPER_MISSILE_GUIDANCE_MODE = "paper_3v3_eq9_11_v1"
-PAPER_CHECKPOINT_SCHEMA = "vanilla_mappo_paper_3v3_v1"
+PAPER_CHECKPOINT_SCHEMA = "vanilla_mappo_paper_3v3_v2"
 
 MISSILE_LAUNCH_SPEED_MPS = 800.0
 MISSILE_HIT_RADIUS_M = 100.0
@@ -96,7 +98,11 @@ PAPER_PID = PIDConfig(
 
 PAPER_MISSILE = replace(
     MissileConfig(),
-    model=sv("paper_3v3_constant_speed_point_mass", PAPER_UNSPECIFIED_ENGINEERING),
+    model=sv(
+        "paper_3v3_constant_speed_point_mass",
+        INTENTIONAL_MODEL_SIMPLIFICATION,
+        "Eq.7-Eq.8 dynamics are intentionally simplified; only Eq.9-Eq.11 "
+        "guidance structure is implemented operationally."),
     maximum_flight_time_s=sv(60.0, PAPER_UNSPECIFIED_ENGINEERING),
     thrust_time_s=sv(0.0, PAPER_UNSPECIFIED_ENGINEERING),
     specific_impulse_s=sv(0.0, PAPER_UNSPECIFIED_ENGINEERING),
@@ -105,7 +111,7 @@ PAPER_MISSILE = replace(
     drag_coefficient=sv(0.0, PAPER_UNSPECIFIED_ENGINEERING),
     initial_mass_kg=sv(1.0, PAPER_UNSPECIFIED_ENGINEERING),
     mass_flow_kg_s=sv(0.0, PAPER_UNSPECIFIED_ENGINEERING),
-    navigation_constant=sv(3.0, PAPER_EQUATION_OPERATIONAL),
+    navigation_constant=sv(3.0, PAPER_UNSPECIFIED_ENGINEERING),
     maximum_overload_g=sv(30.0, PAPER_UNSPECIFIED_ENGINEERING),
     hit_radius_m=sv(MISSILE_HIT_RADIUS_M, PAPER_UNSPECIFIED_ENGINEERING),
     minimum_speed_mps=sv(0.0, PAPER_UNSPECIFIED_ENGINEERING),
@@ -168,7 +174,11 @@ PAPER_PROFILE_METADATA = {
         PAPER_ENVIRONMENT_CONFIG.fire_control.rear_hemisphere_ta_rad),
     "initial_condition_profile": sv(
         "deterministic_head_on_3v3_v1", PAPER_UNSPECIFIED_ENGINEERING),
-    "observation_schema": sv("paper_table1_table2_entity_mask_v1", PAPER_EXPLICIT),
+    "entity_feature_dimension": sv(10, PAPER_EXPLICIT),
+    "observation_schema": sv(
+        "paper_table1_table2_entity_mask_v1", PAPER_EQUATION_OPERATIONAL,
+        "The Table 1/Table 2 fields are explicit; the Gym dictionary and mask "
+        "container are an operational interface."),
     "blue_policy_profile": sv(PAPER_BLUE_POLICY_PROFILE, PAPER_UNSPECIFIED_ENGINEERING),
     "red_mws_mode": sv("scripted_ttc_evasion_v1", PAPER_UNSPECIFIED_ENGINEERING),
     "blue_mws_mode": sv("scripted_ttc_evasion_v1", PAPER_UNSPECIFIED_ENGINEERING),
@@ -186,8 +196,14 @@ PAPER_PROFILE_METADATA = {
     "altitude_pair_aggregation": sv(
         "paper_unspecified_engineering_mean_over_alive_enemies",
         PAPER_UNSPECIFIED_ENGINEERING),
-    "actor_input_dim": sv(60, PAPER_EXPLICIT),
-    "critic_input_dim": sv(30, PAPER_EXPLICIT),
+    "actor_input_dim": sv(60, INTENTIONAL_3V3_DEVIATION_DERIVED),
+    "critic_input_dim": sv(30, INTENTIONAL_3V3_DEVIATION_DERIVED),
+    "aircraft_load_interpretation": sv(
+        "paper_unspecified_engineering_total_pilot_load_norm",
+        PAPER_UNSPECIFIED_ENGINEERING),
+    "missile_dynamics_scope": sv(
+        "constant_speed_point_mass_with_eq9_eq11_guidance_only",
+        INTENTIONAL_MODEL_SIMPLIFICATION),
     "coarse_horizontal_grid_m": sv(
         COARSE_HORIZONTAL_GRID_M, PAPER_UNSPECIFIED_ENGINEERING),
     "coarse_altitude_grid_m": sv(

@@ -67,7 +67,7 @@ from my_uav_env.alignment.state_extractor import (
 
 from .simulator import AircraftSimulator, MissileSimulator
 from .pid_controller import PIDController
-from .utils import get2d_AO_TA_R, get2d_heading_AO_TA_R
+from .utils import get2d_heading_AO_TA_R
 from .render_tacview import TacviewLogger
 
 logger = logging.getLogger(__name__)
@@ -117,68 +117,6 @@ def make_empty_launch_diag() -> dict:
             for team in LAUNCH_DIAG_TEAMS}
 
 
-def _make_entity_vec(ego_pos, ego_vel, tgt_pos, tgt_vel, tgt_rpy, alive: bool):
-    """Build an 11-dim entity feature vector for *tgt* as seen from *ego*.
-
-    Coordinates should be in ego's BODY frame (paper Table 2):
-      x=forward, y=right, z=down.
-
-    [Δx, Δy, Δz, AO_signed, TA, R, V_tgt,
-     sin(roll_tgt), cos(roll_tgt), sin(pitch_tgt), cos(pitch_tgt)]
-
-    AO_signed ∈ [−π, π]: body-frame signed Angle-Off — cross(ego_vel, LOS)
-    in body x-y plane tells whether the target is to the left (−) or right (+).
-    TA ∈ [0, π]: unsigned Target Aspect.
-    V_tgt = ||tgt_vel|| — target speed magnitude (m/s).
-    Returns zeros if the target is dead.
-    """
-    if not alive:
-        return np.zeros(11, dtype=np.float32)
-
-    dn = tgt_pos[0] - ego_pos[0]
-    de = tgt_pos[1] - ego_pos[1]
-    du = tgt_pos[2] - ego_pos[2]
-
-    # Build feature arrays for 2D AO/TA computation (north, east, down, vn, ve, vd)
-    ego_feat = np.array([ego_pos[0], ego_pos[1], -ego_pos[2],
-                         ego_vel[0], ego_vel[1], -ego_vel[2]], dtype=np.float64)
-    enm_feat = np.array([tgt_pos[0], tgt_pos[1], -tgt_pos[2],
-                         tgt_vel[0], tgt_vel[1], -tgt_vel[2]], dtype=np.float64)
-    AO_unsigned, TA, R, side_flag = get2d_AO_TA_R(ego_feat, enm_feat,
-                                                   return_side=True)
-    AO_signed = _signed_ao_from_unsigned_and_side(AO_unsigned, side_flag)
-
-    V_tgt = float(np.linalg.norm(tgt_vel))
-
-    return np.array([
-        dn, de, du, AO_signed, TA, R, V_tgt,
-        np.sin(tgt_rpy[0]), np.cos(tgt_rpy[0]),
-        np.sin(tgt_rpy[1]), np.cos(tgt_rpy[1]),
-    ], dtype=np.float32)
-
-
-def _signed_ao_from_unsigned_and_side(ao_unsigned: float, side_flag: float) -> float:
-    """Return signed AO while preserving front/back collinear cases.
-
-    ``get2d_AO_TA_R(return_side=True)`` returns ``side_flag = sign(cross(v_ego_xy, los_xy))``.
-    When the velocity and LOS are exactly collinear (target directly ahead or behind),
-    the cross product is zero and ``side_flag == 0``.  Multiplying by zero collapses
-    the unsigned AO to 0 for *both* cases, making behind indistinguishable from ahead
-    in the 11-dim entity observation vector.
-
-    This helper preserves the full unsigned AO when side_flag == 0:
-
-    - side_flag > 0: target on right → +AO_unsigned
-    - side_flag < 0: target on left  → −AO_unsigned
-    - side_flag == 0: collinear → +AO_unsigned (≈ 0 ahead, ≈ π behind)
-    """
-    if side_flag > 0:
-        return float(ao_unsigned)
-    if side_flag < 0:
-        return float(-ao_unsigned)
-    return float(ao_unsigned)
-
-
 class UavCombatEnv(gymnasium.Env):
     """
     Multi-agent UAV combat environment (paper BRMA-MAPPO baseline).
@@ -203,7 +141,6 @@ class UavCombatEnv(gymnasium.Env):
     #   V ∈ [0.3, 1.2] Mach   velocity act[2] ∈ [-1, 1] → [102, 408] m/s
     #
     # Both teams share identical action authority per paper specification.
-    # Blue-only GCAS is retained only as an explicit engineering debug option.
     #
     # Velocity:  F-16 F100-PW-229 MilThrust ≈ 17 800 lbf; jet can sustain M0.8–1.0
     #            in level flight at 10 kft.  Mach reference: a ≈ 340 m/s at sea level,
@@ -237,18 +174,6 @@ class UavCombatEnv(gymnasium.Env):
     OVERLOAD_G_LIMIT = paper_value("maximum_aircraft_load_g")
     OVERLOAD_TIME_LIMIT = 10.0         # s after which >9G triggers termination
     MAX_SPEED = paper_value("maximum_aircraft_speed_mps")
-
-    # ---- GCAS (Ground Collision Avoidance System) ----
-    GCAS_ALTITUDE_THRESH = 3000.0       # m — 静态触发阈值 (低下降率时)
-    GCAS_RECOVERY_THRESH = 3500.0       # m — 静态恢复解除阈值 (低下降率时)
-    GCAS_MAX_PITCH_DEG = 25.0           # deg — 紧急恢复俯仰角 (比常规 ±15° 更激进)
-    GCAS_DESCENT_TIME_BUDGET = 15.0     # s — 保留 15 秒下降时间作为恢复余量
-    # 动态触发公式: trigger_alt = 2500 + abs(v_up) * GCAS_DESCENT_TIME_BUDGET
-    #   v_up = −20 m/s → trigger =  2800 → clamped to 3000
-    #   v_up = −33 m/s → trigger =  2995 → clamped to 3000
-    #   v_up = −60 m/s → trigger =  3400
-    #   v_up = −90 m/s → trigger =  3850
-    #   v_up =−120 m/s → trigger =  4300
 
     metadata = {"render_modes": []}
 
@@ -432,8 +357,6 @@ class UavCombatEnv(gymnasium.Env):
         # Death reason tracking (set on the step the agent dies, cleared on reset)
         self._death_reasons: dict[str, str | None] = {}
 
-        # Kill cooldown: prevent "machine gun" multi-kill bursts (paper: 0.5 s between kills)
-
         # Engaged-targets set: hot-updated across agents within the same
         # physics frame to prevent same-frame double-launch (paper §2.1.3).
         # Populated at the start of each env step from in-flight missiles;
@@ -580,12 +503,16 @@ class UavCombatEnv(gymnasium.Env):
                   "maximum_speed_after_limit_mps": 0.0,
                   "speed_limiter_activations": 0,
                   "consecutive_above_600mps_frames": 0,
+                  "maximum_consecutive_above_600mps_frames": 0,
+                  "speed_envelope_violation": False,
                   "maximum_load_g_seen": 0.0, "over_g_frames": 0,
+                  "maximum_abs_pilot_z_load_seen": 0.0,
                   "load_limiter_activations": 0,
                   "frames_above_9g": 0,
                   "consecutive_above_9g_frames": 0,
                   "maximum_consecutive_above_9g_frames": 0,
                   "episode_ever_exceeded_9g": False,
+                  "overload_envelope_violation": False,
                   "consecutive_above_30g_frames": 0,
                   "maximum_consecutive_above_30g_frames": 0,
                   "transient_above_30g_events": 0,
@@ -623,25 +550,21 @@ class UavCombatEnv(gymnasium.Env):
         # Reset missile launch counters
         self._missile_launch_counts = {aid: 0 for aid in self.agent_ids}
         self._minimal_launch_sequence = {aid: 0 for aid in self.agent_ids}
-        self._fire_control_assignments = {aid: None for aid in self.agent_ids}
-        self._fire_control_pending_reallocation_after_death = set()
-        self._target_assignment_diagnostics = {
-            "target_reallocations": 0,
-            "target_reallocations_after_death": 0,
-            "target_switches_while_alive": 0,
-            "engaged_wait_frames": 0,
-            "no_alive_target_frames": 0,
-        }
         self._mws_decision_diagnostics = {
             "red_detected_agent_decisions": 0,
             "red_override_agent_decisions": 0,
             "blue_detected_agent_decisions": 0,
             "blue_override_agent_decisions": 0,
             "red_warning_generations": 0,
+            "blue_warning_generations": 0,
             "red_direction_changes_within_same_missile": 0,
+            "blue_direction_changes_within_same_missile": 0,
             "red_suppressed_direction_flip_attempts": 0,
+            "blue_suppressed_direction_flip_attempts": 0,
             "red_maximum_continuous_decisions": 0,
+            "blue_maximum_continuous_decisions": 0,
             "red_target_heading_delta_max_deg": 0.0,
+            "blue_target_heading_delta_max_deg": 0.0,
         }
         self._missile_first_warning_frame = {}
         self._warning_to_terminal_s = {"red": [], "blue": []}
@@ -653,7 +576,6 @@ class UavCombatEnv(gymnasium.Env):
         # Reset death reasons
         self._death_reasons = {}
 
-        # Reset kill cooldown tracking
         self._engaged_targets = set()
         self._crashed_this_step: set[str] = set()
 
@@ -944,6 +866,7 @@ class UavCombatEnv(gymnasium.Env):
             turn_direction: float) -> tuple[float, float, float]:
         state = self._learnable_mws_state.setdefault(
             aid, self._empty_mws_state())
+        team = "blue" if aid.startswith("blue_") else "red"
         missile_uid = str(incoming.uid)
         if state["active_missile_uid"] != missile_uid:
             generation = int(state.get("warning_generation", 0)) + 1
@@ -960,21 +883,23 @@ class UavCombatEnv(gymnasium.Env):
                 "warning_generation": generation,
                 "continuous_decisions": 0,
             })
-            self._mws_decision_diagnostics["red_warning_generations"] += 1
+            self._mws_decision_diagnostics[f"{team}_warning_generations"] += 1
         elif float(state["break_direction"]) != float(turn_direction):
             # The stored direction is authoritative for an existing missile.
             self._mws_decision_diagnostics[
-                "red_suppressed_direction_flip_attempts"] += 1
+                f"{team}_suppressed_direction_flip_attempts"] += 1
         state["previous_warning_active"] = True
         state["continuous_decisions"] += 1
-        self._mws_decision_diagnostics["red_maximum_continuous_decisions"] = max(
-            self._mws_decision_diagnostics["red_maximum_continuous_decisions"],
+        continuous_key = f"{team}_maximum_continuous_decisions"
+        self._mws_decision_diagnostics[continuous_key] = max(
+            self._mws_decision_diagnostics[continuous_key],
             int(state["continuous_decisions"]))
         delta_deg = abs(np.rad2deg(self._wrap_angle_rad(
             state["break_target_heading"]
             - state["break_reference_heading"])))
-        self._mws_decision_diagnostics["red_target_heading_delta_max_deg"] = max(
-            self._mws_decision_diagnostics["red_target_heading_delta_max_deg"],
+        delta_key = f"{team}_target_heading_delta_max_deg"
+        self._mws_decision_diagnostics[delta_key] = max(
+            self._mws_decision_diagnostics[delta_key],
             float(delta_deg))
         return 0.0, float(state["break_target_heading"]), 300.0
 
@@ -1027,8 +952,7 @@ class UavCombatEnv(gymnasium.Env):
 
         Control-flow priority (team-aware):
           Layer 1 — Missile evasion:     BOTH teams  (paper §2.1.3, scripted)
-          Layer 2 — GCAS safety net:     BLUE only   (hard-coded baseline)
-          Layer 3 — Agent action:        BOTH teams  (identical §2.4 mapping)
+          Layer 2 — Agent action:        BOTH teams  (identical §2.4 mapping)
 
         Paper §2.4 mapping — IDENTICAL for both teams (ABSOLUTE targets):
           act[0] ∈ [-1, 1]  →  target_pitch   ∈ [-π/2, +π/2]     [rad]  (±90°)
@@ -1150,41 +1074,7 @@ class UavCombatEnv(gymnasium.Env):
                 self._deactivate_mws_state(aid)
 
             # =================================================================
-            #  Layer 2 — GCAS Safety Net (BLUE ONLY)
-            #
-            #  Blue is the hard-coded rule-based baseline.  It receives full
-            #  altitude protection to establish a credible reference opponent.
-            #
-            #  Red team does NOT go through here — see §2.5.1 rationale above.
-            # =================================================================
-            if False:  # removed formal GCAS branch retained only until cleanup
-                alt_m = sim.get_geodetic()[2]
-                vel = sim.get_velocity()
-                v_up = float(vel[2])  # positive = climbing
-
-                # Dynamic trigger: faster descent → earlier intervention
-                if v_up >= 0:
-                    trigger_alt = self.GCAS_ALTITUDE_THRESH
-                else:
-                    trigger_alt = max(self.GCAS_ALTITUDE_THRESH,
-                                      2500.0 + abs(v_up) * self.GCAS_DESCENT_TIME_BUDGET)
-                recovery_alt = trigger_alt + 500.0
-
-                if alt_m < trigger_alt or alt_m < recovery_alt:
-                    ego_roll = float(rpy[0])
-                    # Roll wings level, pull hard up
-                    if abs(ego_roll) > np.deg2rad(5):
-                        target_heading = current_heading - np.sign(ego_roll) * np.deg2rad(15.0)
-                    else:
-                        target_heading = current_heading
-                    targets[aid] = self._finalize_target(
-                        aid, (np.deg2rad(self.GCAS_MAX_PITCH_DEG),
-                              target_heading, self.VELOCITY_MAX),
-                        "gcas_override")
-                    continue
-
-            # =================================================================
-            #  Layer 3 — Agent Action (paper §2.4 — both teams identical)
+            #  Layer 2 — Agent Action (paper §2.4 — both teams identical)
             #
             #    target_pitch   = act[0] * 90°             ∈ [−90°, +90°]
             #    target_heading = act[1] * 180°            ∈ [−180°, +180°]  (absolute)
@@ -1411,6 +1301,12 @@ class UavCombatEnv(gymnasium.Env):
             except Exception:
                 g_components = (float("nan"),) * 3
                 g_load = float("nan")
+            pilot_z_abs = abs(float(g_components[2]))
+            if np.isfinite(pilot_z_abs):
+                diag["maximum_abs_pilot_z_load_seen"] = max(
+                    diag["maximum_abs_pilot_z_load_seen"], pilot_z_abs)
+            else:
+                diag["maximum_abs_pilot_z_load_seen"] = float("inf")
             if not np.isfinite(g_load):
                 diag["maximum_load_g_seen"] = float("inf")
                 diag["nonfinite_load_frames"] = int(
@@ -1451,11 +1347,8 @@ class UavCombatEnv(gymnasium.Env):
                 if (self._aircraft_diagnostics[aid][
                         "consecutive_above_9g_frames"]
                         >= AIRCRAFT_ENVELOPE_FRAMES):
-                    sim.crash()
-                    self._death_reasons.setdefault(
-                        aid, "PaperMaximumOverloadEnvelopeViolation")
-                    self._crashed_this_step.add(aid)
-                    continue
+                    self._aircraft_diagnostics[aid][
+                        "overload_envelope_violation"] = True
 
             sim.set_property_value("fcs/aileron-cmd-norm", aileron)
             sim.set_property_value("fcs/elevator-cmd-norm", elevator)
@@ -1474,7 +1367,7 @@ class UavCombatEnv(gymnasium.Env):
                 self._enforce_aircraft_constraints(aid, sim)
 
     def _enforce_aircraft_constraints(self, aid: str, sim: AircraftSimulator):
-        """Apply finite-state guards and the three-frame 600 m/s envelope."""
+        """Apply numerical guards and audit the paper 600 m/s envelope."""
         velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
         position = np.asarray(sim.get_position(), dtype=np.float64)
         rpy = np.asarray(sim.get_rpy(), dtype=np.float64)
@@ -1496,13 +1389,13 @@ class UavCombatEnv(gymnasium.Env):
         if speed > maximum:
             diag["overspeed_frames"] += 1
             diag["consecutive_above_600mps_frames"] += 1
+            diag["maximum_consecutive_above_600mps_frames"] = max(
+                diag["maximum_consecutive_above_600mps_frames"],
+                diag["consecutive_above_600mps_frames"])
         else:
             diag["consecutive_above_600mps_frames"] = 0
         if diag["consecutive_above_600mps_frames"] >= AIRCRAFT_ENVELOPE_FRAMES:
-            sim.crash()
-            self._death_reasons.setdefault(
-                aid, "PaperMaximumSpeedEnvelopeViolation")
-            self._crashed_this_step.add(aid)
+            diag["speed_envelope_violation"] = True
 
     def _mark_invalid_numerical(self, aid: str, reason: str) -> None:
         self._invalid_numerical_episode = True
@@ -1525,63 +1418,6 @@ class UavCombatEnv(gymnasium.Env):
                     "frames": copy.deepcopy(history),
                 })
         self._death_reasons.setdefault(aid, "Invalid_Numerical")
-
-    def _initial_opponent_id(self, aid: str) -> str | None:
-        try:
-            index = int(aid.split("_", 1)[1])
-        except (ValueError, IndexError):
-            return None
-        prefix = "red" if aid.startswith("blue_") else "blue"
-        limit = self.max_num_red if prefix == "red" else self.max_num_blue
-        return f"{prefix}_{index}" if index < limit else None
-
-    def _learnable_fire_control_target(
-        self, aid: str, enemies: dict[str, AircraftSimulator],
-        *, count_wait: bool = True,
-    ) -> AircraftSimulator | None:
-        """Keep a live assignment; after death choose lowest live unengaged."""
-        target_id = self._fire_control_assignments.get(aid)
-        current = enemies.get(target_id) if target_id is not None else None
-        if current is not None and current.is_alive:
-            return current
-        if target_id is not None:
-            self._fire_control_pending_reallocation_after_death.add(aid)
-
-        alive = sorted(
-            (enemy for enemy in enemies.values() if enemy.is_alive),
-            key=lambda enemy: int(enemy.uid.split("_", 1)[1]))
-        if not alive:
-            self._fire_control_assignments[aid] = None
-            if count_wait:
-                self._target_assignment_diagnostics[
-                    "no_alive_target_frames"] += 1
-            return None
-        replacement = next(
-            (enemy for enemy in alive if enemy.uid not in self._engaged_targets),
-            None)
-        if replacement is None:
-            if count_wait:
-                self._target_assignment_diagnostics[
-                    "engaged_wait_frames"] += 1
-            return None
-        self._fire_control_assignments[aid] = replacement.uid
-        self._target_assignment_diagnostics["target_reallocations"] += 1
-        if aid in self._fire_control_pending_reallocation_after_death:
-            self._target_assignment_diagnostics[
-                "target_reallocations_after_death"] += 1
-            self._fire_control_pending_reallocation_after_death.discard(aid)
-        return replacement
-
-    def _refresh_learnable_assignments(
-        self, agent_ids: list[str], *, count_wait: bool,
-    ) -> None:
-        for aid in agent_ids:
-            sim = self._get_sim(aid)
-            if sim is None or not sim.is_alive:
-                continue
-            enemies = self.red_planes if aid.startswith("blue_") else self.blue_planes
-            self._learnable_fire_control_target(
-                aid, enemies, count_wait=count_wait)
 
     def _check_missile_launch(self):
         """Advance the single automatic EO-track and launch state machine."""
@@ -1689,9 +1525,6 @@ class UavCombatEnv(gymnasium.Env):
                     diag["cooldown_blocked"] += 1
                 if engaged_blocked:
                     diag["engaged_blocked"] += 1
-                    if self.is_paper_3v3:
-                        self._target_assignment_diagnostics[
-                            "engaged_wait_frames"] += 1
             if (best_enemy is not None
                     and lock_mature
                     and ta_ok_at_launch
@@ -2015,97 +1848,8 @@ class UavCombatEnv(gymnasium.Env):
     # ------------------------------------------------------------------
 
     def _compute_rewards(self) -> tuple[dict, dict]:
-        """Per-agent reward (paper §2.5, eq 15–23).
-
-        r_i = ω_θ·r_θ + ω_φ·r_φ + ω_V·r_V + ω_h·r_h + ω_b·r_b + ω_adv·r_adv + r_end
-
-        Weights (paper Table 4):
-          ω_θ=0.01  ω_φ=0.002  ω_h=0.04  ω_b=0.04  ω_V=0.02  ω_adv=0.15
-
-        Terminal (eq 23):  r_end = 30×(N_team − N_enemy) if round over, else 0.
-        r_end is a GLOBAL team reward (paper eq 23 + joint reward r_R = Σ r_i + r_end).
-        It MUST be divided equally among all teammates so that sum(r_end across team)
-        equals the raw team-level value — NOT N_team × the raw value.
-        Crash penalty:     r_death = −10 injected on the frame of LowAlt / OverG
-                           death, so PPO can causally link the fatal action to death.
-        """
+        """Return the formal Eq.15-Eq.23 team-joint reward."""
         return self._compute_paper_joint_rewards()
-
-        n_blue_alive = sum(1 for s in self.blue_planes.values() if s.is_alive)
-        n_red_alive = sum(1 for s in self.red_planes.values() if s.is_alive)
-        round_over = (n_blue_alive == 0 or n_red_alive == 0
-                      or self.current_step >= self.max_steps)
-
-        # Paper eq.23 defines a team-level terminal reward. This environment
-        # returns per-agent rewards, so the team-level value is shared across
-        # teammates and sums back to the paper's rend. This avoids multiplying
-        # terminal reward by the number of agents when team size changes.
-        raw_r_end_red  = 30.0 * (n_red_alive - n_blue_alive)
-        raw_r_end_blue = 30.0 * (n_blue_alive - n_red_alive)
-
-        rewards = {}
-        components = {}
-        for aid in self.agent_ids:
-            sim = self._get_sim(aid)
-            if sim is None or not sim.is_alive:
-                components[aid] = {}
-                r_death = -10.0 if aid in self._crashed_this_step else 0.0
-                if round_over:
-                    if aid.startswith("blue"):
-                        r_end = raw_r_end_blue / self.max_num_blue
-                    else:
-                        r_end = raw_r_end_red / self.max_num_red
-                    rewards[aid] = r_end + r_death
-                    components[aid]["r_end"] = float(r_end)
-                    if r_death != 0.0:
-                        components[aid]["r_death"] = float(r_death)
-                else:
-                    rewards[aid] = r_death
-                    if r_death != 0.0:
-                        components[aid]["r_death"] = float(r_death)
-                continue
-
-            # A. Flight status penalties (raw, before weight)
-            r_theta  = self._pitch_penalty(sim)
-            r_phi    = self._roll_penalty(sim)
-            r_V      = self._speed_penalty(sim)
-            r_alt    = self._altitude_reward(sim)
-            r_bound  = self._boundary_penalty(sim)
-            # B. Situation coupling reward (raw)
-            r_adv = self._situation_reward(sim)
-
-            # C. Win-lose reward (terminal only) — team-level, per-agent share
-            if round_over:
-                if aid.startswith("blue"):
-                    r_end = raw_r_end_blue / self.max_num_blue
-                else:
-                    r_end = raw_r_end_red / self.max_num_red
-            else:
-                r_end = 0.0
-
-            # D. Weighted components (paper Table 4)
-            w_pitch = 0.01 * r_theta
-            w_roll  = 0.002 * r_phi
-            w_vel   = 0.02 * r_V
-            w_alt   = 0.04 * r_alt
-            w_bound = 0.04 * r_bound
-            w_adv   = 0.15 * r_adv
-
-            rewards[aid] = (w_pitch + w_roll + w_vel + w_alt + w_bound
-                          + w_adv + r_end)
-
-            components[aid] = {
-                "r_pitch": float(w_pitch),
-                "r_roll":  float(w_roll),
-                "r_alt":   float(w_alt),
-                "r_bound": float(w_bound),
-                "r_vel":   float(w_vel),
-                "r_adv":   float(w_adv),
-
-                "r_end":   float(r_end),
-                "r_death": 0.0,
-            }
-        return rewards, components
 
     def _compute_paper_joint_rewards(self) -> tuple[dict, dict]:
         """Return the paper team-joint reward identically to every teammate."""
@@ -2310,41 +2054,6 @@ class UavCombatEnv(gymnasium.Env):
         return 0.0
 
     # ------------------------------------------------------------------
-    #  Observation normalisation
-    # ------------------------------------------------------------------
-
-    def _normalize_obs_vec(self, raw: np.ndarray) -> np.ndarray:
-        """Scale an 11-dim entity vector to roughly [-1, 1] for NN training.
-
-        Raw layout (body-frame, paper Table 2):
-          [Δx_body, Δy_body, Δz_body, AO_body, TA_body, R, V_tgt,
-           sin(φ), cos(φ), sin(θ), cos(θ)]
-        idx:    0        1        2        3        4     5    6      7      8      9     10
-
-        AO_body ∈ [−π, π]  (+ right, − left)    — body-frame signed angle-off
-        TA_body ∈ [0, π]    (unsigned)            — body-frame target aspect
-
-        Returns zeros unchanged (dead / non-existent entity).
-        """
-        if not np.any(raw):
-            return raw
-
-        out = raw.copy()
-        # Position deltas — horizontal / vertical
-        out[0] = raw[0] / self.BATTLEFIELD_HALF_SIZE       # Δn  ∈ [−1, 1]
-        out[1] = raw[1] / self.BATTLEFIELD_HALF_SIZE       # Δe  ∈ [−1, 1]
-        out[2] = raw[2] / self.BATTLEFIELD_ALTITUDE_MAX    # Δu  ∈ [−1, 1]
-        # AO_signed — radians → [−1, 1]  (sign tells turn direction)
-        out[3] = raw[3] / np.pi                            # AO  ∈ [−1, 1]
-        out[4] = raw[4] / np.pi                            # TA  ∈ [0, 1]
-        # Range — metres → [0, ~1]
-        out[5] = raw[5] / (self.BATTLEFIELD_HALF_SIZE * 2.0)  # R  ∈ [0, ~1]
-        # Target speed — m/s → [0, 1]
-        out[6] = raw[6] / self.MAX_SPEED                   # V_tgt ∈ [0, 1]
-        # idx 7-10: sin/cos already in [-1, 1] — no scaling needed
-        return out
-
-    # ------------------------------------------------------------------
     #  Observation construction
     # ------------------------------------------------------------------
 
@@ -2356,118 +2065,6 @@ class UavCombatEnv(gymnasium.Env):
 
     def _get_agent_obs(self, agent_id: str) -> dict:
         return self._get_agent_obs_paper_strict(agent_id)
-
-        sim = self._get_sim(agent_id)
-        alive = sim is not None and sim.is_alive
-        color = "Blue" if agent_id.startswith("blue") else "Red"
-
-        _ego_slots, ally_slots, enemy_slots = ordered_entity_slots(self, agent_id)
-        ally_sims = [slot[1] for slot in ally_slots]
-        enemy_sims = [slot[1] for slot in enemy_slots]
-
-        # ---- ego_state (self-observation: delta=0, frame-independent) ----
-        if alive:
-            ego_pos = sim.get_position()          # (north, east, up) — m
-            ego_vel = sim.get_velocity()          # (vn, ve, vu)     — m/s
-            ego_rpy = sim.get_rpy()               # (φ, θ, ψ)        — rad
-            raw_ego = _make_entity_vec(ego_pos, ego_vel, ego_pos, ego_vel, ego_rpy, True)
-            ego_state = self._normalize_obs_vec(raw_ego)
-
-            # Pre-compute body-frame rotation matrix and ego body-frame velocity
-            R_BI = PIDController.ned_to_body_matrix(
-                float(ego_rpy[0]), float(ego_rpy[1]), float(ego_rpy[2]))
-            ego_vel_ned = np.array([ego_vel[0], ego_vel[1], -ego_vel[2]], dtype=np.float64)
-            ego_vel_body = R_BI @ ego_vel_ned
-            # Pseudo-NED for _make_entity_vec: body x→north, body y→east, −body z→up
-            ego_pos_bf = np.zeros(3, dtype=np.float64)
-            ego_vel_bf = np.array([ego_vel_body[0], ego_vel_body[1], -ego_vel_body[2]],
-                                  dtype=np.float64)
-        else:
-            ego_state = np.zeros(11, dtype=np.float32)
-
-        # ---- ally_states ----
-        max_allies = len(ally_sims)
-
-        ally_vecs = np.zeros((max_allies, 11), dtype=np.float32)
-        if alive:
-            for j, ally in enumerate(ally_sims):
-                if not ally.is_alive:
-                    continue
-                raw_ally = self._build_body_frame_entity(
-                    ego_pos, ego_pos_bf, ego_vel_bf, R_BI,
-                    ally.get_position(), ally.get_velocity(), ally.get_rpy(),
-                    ally.is_alive,
-                )
-                ally_vecs[j] = self._normalize_obs_vec(raw_ally)
-
-        # ---- enemy_states (partial observability per paper) ----
-        max_enemies = len(enemy_sims)
-
-        enemy_vecs = np.zeros((max_enemies, 11), dtype=np.float32)
-        if alive:
-            for j, enemy in enumerate(enemy_sims):
-                if not enemy.is_alive:
-                    continue
-
-                if self._is_detected_by_radar(sim, enemy):
-                    # ---- Full track (within FOV + detection range) ----
-                    raw_enemy = self._build_body_frame_entity(
-                        ego_pos, ego_pos_bf, ego_vel_bf, R_BI,
-                        enemy.get_position(), enemy.get_velocity(), enemy.get_rpy(),
-                        True,
-                    )
-                    enemy_vecs[j] = self._normalize_obs_vec(raw_enemy)
-                else:
-                    # ---- Blind zone: AWACS gives coarse body-frame position ----
-                    enm_pos = enemy.get_position()
-                    dn_ned = enm_pos[0] - ego_pos[0]
-                    de_ned = enm_pos[1] - ego_pos[1]
-                    dd_ned = -enm_pos[2] - (-ego_pos[2])
-                    delta_ned = np.array([dn_ned, de_ned, dd_ned], dtype=np.float64)
-                    delta_body = R_BI @ delta_ned
-                    dx, dy, dz = float(delta_body[0]), float(delta_body[1]), float(delta_body[2])
-                    R_b = float(np.linalg.norm([dx, dy, dz]))
-
-                    # Body-frame signed AO: arctan2(dy, dx)
-                    ao_body = float(np.arctan2(dy, dx + 1e-12))
-                    ao_norm = float(ao_body / np.pi)
-
-                    enemy_vecs[j] = np.array([
-                        dx / self.BATTLEFIELD_HALF_SIZE,              # Δx_body
-                        dy / self.BATTLEFIELD_HALF_SIZE,              # Δy_body
-                        (-dz) / self.BATTLEFIELD_ALTITUDE_MAX,         # Δup_body
-                        ao_norm, 0.0,                                  # AO_body, TA=0
-                        R_b / (self.BATTLEFIELD_HALF_SIZE * 2.0),     # R norm
-                        0.0,                                           # V_tgt=0
-                        0.0, 0.0, 0.0, 0.0,                            # attitude masked
-                    ], dtype=np.float32)
-
-        # Canonical mask: 1=alive/valid, 0=dead/invalid.
-        alive_mask = slot_aligned_alive_mask(self, agent_id)
-
-        # ---- missile_warning ----
-        mw = 0.0
-        if alive and sim.check_missile_warning() is not None:
-            mw = 1.0
-        missile_warning = np.array([mw], dtype=np.float32)
-
-        # ---- altitude / velocity (raw NED, for rule-based safety checks) ----
-        alt_m = sim.get_geodetic()[2] if alive else 0.0
-        altitude = np.array([alt_m], dtype=np.float32)
-        vel = sim.get_velocity() if alive else np.zeros(3)
-        velocity = np.array([vel[0], vel[1], vel[2]], dtype=np.float32)
-
-        return {
-            "ego_state": ego_state,
-            "ally_states": ally_vecs,
-            "enemy_states": enemy_vecs,
-            "alive_mask": alive_mask,
-            "death_mask": alive_mask.copy(),
-            "missile_warning": missile_warning,
-            "altitude": altitude,
-            "velocity": velocity,
-        }
-
     def _get_agent_obs_paper_strict(self, agent_id: str) -> dict:
         """Build Table 1 / Table 2 10-dim observations for reset/step."""
         sim = self._get_sim(agent_id)
@@ -2477,7 +2074,8 @@ class UavCombatEnv(gymnasium.Env):
         enemy_sims = [slot[1] for slot in enemy_slots]
 
         if alive:
-            ego_state, _meta = extract_self_state_with_meta(sim)
+            ego_state, _meta = extract_self_state_with_meta(
+                sim, require_real_alpha_beta=True)
         else:
             ego_state = np.zeros(10, dtype=np.float32)
 
@@ -2507,42 +2105,6 @@ class UavCombatEnv(gymnasium.Env):
             "enemy_states": enemy_vecs,
             "entity_mask": entity_mask.astype(np.int64),
         }
-
-    @staticmethod
-    def _build_body_frame_entity(ego_pos_ned, ego_pos_bf, ego_vel_bf, R_BI,
-                                  tgt_pos_ned, tgt_vel_ned, tgt_rpy, alive):
-        """Build 11-dim entity vector with relative coordinates in ego's body frame.
-
-        Rotates the NED-frame delta into body frame, then expresses the result
-        in a pseudo-NED system where body x→north, body y→east, −body z→up.
-        This allows ``_make_entity_vec`` (which calls ``get2d_AO_TA_R``) to
-        compute AO/TA in the body x-y plane — exactly what paper Table 2 requires.
-        """
-        if not alive:
-            return np.zeros(11, dtype=np.float32)
-
-        # NED delta (north, east, down)
-        dn = tgt_pos_ned[0] - ego_pos_ned[0]
-        de = tgt_pos_ned[1] - ego_pos_ned[1]
-        dd = -tgt_pos_ned[2] - (-ego_pos_ned[2])
-        delta_ned = np.array([dn, de, dd], dtype=np.float64)
-
-        # Rotate to body frame: body x=forward, y=right, z=down
-        delta_body = R_BI @ delta_ned
-
-        # Target velocity in body frame
-        tgt_vn, tgt_ve, tgt_vu = tgt_vel_ned
-        tgt_vel_ned_vec = np.array([tgt_vn, tgt_ve, -tgt_vu], dtype=np.float64)
-        tgt_vel_body = R_BI @ tgt_vel_ned_vec
-
-        # Express in pseudo-NED: body x→north, body y→east, −body z→up
-        tgt_pos_bf = np.array([delta_body[0], delta_body[1], -delta_body[2]],
-                              dtype=np.float64)
-        tgt_vel_bf = np.array([tgt_vel_body[0], tgt_vel_body[1], -tgt_vel_body[2]],
-                              dtype=np.float64)
-
-        return _make_entity_vec(ego_pos_bf, ego_vel_bf,
-                                tgt_pos_bf, tgt_vel_bf, tgt_rpy, True)
 
     def _get_info(self, reward_components: dict | None = None) -> dict:
         info = {}
@@ -2655,14 +2217,7 @@ class UavCombatEnv(gymnasium.Env):
             for row in blue_policy_rows if isinstance(row, dict)
         }
         info["__target_assignment_diag__"] = {
-            **dict(self._target_assignment_diagnostics),
-            "fire_control_assignments": dict(self._fire_control_assignments),
             "movement_target_ids": movement_targets,
-            "movement_matches_fire_control": {
-                aid: movement_targets.get(aid) == target_id
-                for aid, target_id in self._fire_control_assignments.items()
-                if aid.startswith("blue_")
-            },
         }
         n_red_alive = sum(int(s.is_alive) for s in self.red_planes.values())
         n_blue_alive = sum(int(s.is_alive) for s in self.blue_planes.values())
@@ -2709,6 +2264,16 @@ class UavCombatEnv(gymnasium.Env):
                     "red_maximum_continuous_decisions", 0)),
                 "RedMWSTargetHeadingDeltaMaxDeg": float(mws_diag.get(
                     "red_target_heading_delta_max_deg", 0.0)),
+                "BlueMWSWarningGenerations": int(mws_diag.get(
+                    "blue_warning_generations", 0)),
+                "BlueMWSDirectionChangesWithinSameMissile": int(mws_diag.get(
+                    "blue_direction_changes_within_same_missile", 0)),
+                "BlueMWSSuppressedDirectionFlipAttempts": int(mws_diag.get(
+                    "blue_suppressed_direction_flip_attempts", 0)),
+                "BlueMWSMaximumContinuousDecisions": int(mws_diag.get(
+                    "blue_maximum_continuous_decisions", 0)),
+                "BlueMWSTargetHeadingDeltaMaxDeg": float(mws_diag.get(
+                    "blue_target_heading_delta_max_deg", 0.0)),
             })
         return info
 

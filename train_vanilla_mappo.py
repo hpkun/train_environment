@@ -678,6 +678,8 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             "derivative_semantics", {}).get(
                 "value", PAPER_PID_DERIVATIVE_SEMANTICS),
         "missile_guidance_mode": config.missile_guidance_mode,
+        "missile_hit_radius_m": float(
+            environment_snapshot["missile_hit_radius_m"]["value"]),
         "altitude_reward_config": asdict(config.altitude_reward_config),
         "action_distribution": ACTION_DISTRIBUTION_VERSION,
         "entropy_estimator": ENTROPY_ESTIMATOR_VERSION,

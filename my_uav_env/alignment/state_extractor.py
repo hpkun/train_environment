@@ -1,8 +1,7 @@
 """Extractor for strict paper-style 10-dim observations.
 
-``UavCombatEnv`` uses this module on its ``obs_mode="paper_strict"`` reset/step
-observation path. It builds paper Table 1 / Table 2 style observations from
-simulator state while keeping the legacy engineering observation path separate.
+``UavCombatEnv`` uses this module for its formal reset/step observations. It
+builds paper Table 1 / Table 2 style observations from simulator state.
 """
 from __future__ import annotations
 
@@ -151,12 +150,19 @@ def extract_self_state(sim) -> np.ndarray:
     return extract_self_state_with_meta(sim)[0]
 
 
-def extract_self_state_with_meta(sim) -> tuple[np.ndarray, dict]:
+def extract_self_state_with_meta(
+        sim, *, require_real_alpha_beta: bool = False) -> tuple[np.ndarray, dict]:
     """Extract self state and alpha/beta source diagnostics."""
     position = np.asarray(sim.get_position(), dtype=np.float64)
     velocity = np.asarray(sim.get_velocity(), dtype=np.float64)
     roll, pitch, heading = np.asarray(sim.get_rpy(), dtype=np.float64)
     alpha, beta, alpha_source, beta_source = _get_alpha_beta_with_source(sim)
+    if require_real_alpha_beta and (
+            alpha_source == "placeholder:0" or beta_source == "placeholder:0"):
+        raise RuntimeError(
+            "paper_3v3_v1 requires real JSBSim alpha/beta properties")
+    if require_real_alpha_beta and not np.all(np.isfinite([alpha, beta])):
+        raise RuntimeError("paper_3v3_v1 received non-finite JSBSim alpha/beta")
 
     speed = float(np.linalg.norm(velocity))
     down_velocity = float(-velocity[2])
@@ -301,7 +307,9 @@ def build_strict_paper_entity_observation(env, agent_id: str):
     mask = []
 
     if _is_valid_sim(ego_sim):
-        self_state, self_meta = extract_self_state_with_meta(ego_sim)
+        self_state, self_meta = extract_self_state_with_meta(
+            ego_sim,
+            require_real_alpha_beta=bool(getattr(env, "is_paper_3v3", False)))
         rows.append(self_state)
         mask.append(0)
     else:

@@ -363,7 +363,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
         while not done:
             actions = {}
 
-            # 蓝方协同目标分配 + 引导律 (GCAS / 导弹规避在 env 层自动保护)
+            # 蓝方协同目标分配；导弹规避由环境层脚本处理。
             blue_obs_dict = {bid: obs[bid] for bid in blue_ids}
             actions.update(env.blue_policy_actions(blue_obs_dict))
 
