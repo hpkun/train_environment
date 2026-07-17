@@ -28,9 +28,10 @@ def test_simultaneous_hit_is_draw():
 
 
 @pytest.mark.parametrize("event, expected", [
-    ("red_hit", 10.0), ("blue_crash", 10.0),
-    ("blue_hit", -10.0), ("red_crash", -10.0),
+    ("red_hit", 200.0), ("blue_crash", 0.0),
+    ("blue_hit", -200.0), ("red_crash", -200.0),
     ("draw_simultaneous_hit", 0.0), ("timeout", 0.0),
+    ("physics_exception", 0.0),
 ])
 def test_terminal_reward_sign(event, expected):
     assert terminal_reward(event) == expected

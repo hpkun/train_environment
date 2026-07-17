@@ -37,6 +37,12 @@ def relative_geometry(own_state, enemy_state):
     enemy_velocity = np.array([
         enemy_state["v_north"], enemy_state["v_east"], enemy_state["v_down"]])
     closure = float(-np.dot(relative_ned, enemy_velocity - own_velocity) / distance)
+    ata = float(np.arccos(np.clip(
+        np.dot(own_velocity, relative_ned)
+        / max(np.linalg.norm(own_velocity) * distance, 1e-8), -1.0, 1.0)))
+    aa = float(np.arccos(np.clip(
+        np.dot(enemy_velocity, relative_ned)
+        / max(np.linalg.norm(enemy_velocity) * distance, 1e-8), -1.0, 1.0)))
     return {
         "relative_neu": relative_neu,
         "relative_ned": relative_ned,
@@ -45,6 +51,8 @@ def relative_geometry(own_state, enemy_state):
         "los_heading": los_heading,
         "los_pitch": los_pitch,
         "boresight_angle": boresight,
+        "ata_rad": ata,
+        "aa_rad": aa,
         "closure_mps": closure,
         "relative_heading": float(in_range_rad(
             enemy_state["heading"] - own_state["heading"])),

@@ -14,7 +14,7 @@ import torch
 
 @dataclass
 class TrainingConfig:
-    total_steps: int = 100000
+    total_steps: int = 150000
     num_envs: int = 8
     rollout_steps: int = 256
     seed: int = 1
@@ -33,13 +33,69 @@ class TrainingConfig:
     target_kl: float = 0.03
 
 
-def curriculum_stage(global_step, total_steps):
-    fraction = global_step / max(total_steps, 1)
-    if fraction < 0.2:
-        return 1
-    if fraction < 0.7:
-        return 2
-    return 3
+class PerformanceCurriculum:
+    """Two-stage curriculum driven only by consecutive evaluation results."""
+
+    def __init__(self, stage=1, consecutive_passes=0, learnability_passed=False):
+        self.stage = int(stage)
+        self.consecutive_passes = int(consecutive_passes)
+        self.learnability_passed = bool(learnability_passed)
+
+    def update(self, fixed_hit_rate, randomized_hit_rate=None):
+        previous_stage = self.stage
+        if self.stage == 1:
+            passed = float(fixed_hit_rate) >= 0.80
+            self.consecutive_passes = (
+                self.consecutive_passes + 1 if passed else 0)
+            if self.consecutive_passes >= 2:
+                self.stage = 2
+                self.consecutive_passes = 0
+        else:
+            passed = (
+                float(fixed_hit_rate) >= 0.80
+                and randomized_hit_rate is not None
+                and float(randomized_hit_rate) >= 0.60)
+            self.consecutive_passes = (
+                self.consecutive_passes + 1 if passed else 0)
+            if self.consecutive_passes >= 2:
+                self.learnability_passed = True
+        return self.stage != previous_stage
+
+    def state_dict(self):
+        return {
+            "stage": self.stage,
+            "consecutive_passes": self.consecutive_passes,
+            "learnability_passed": self.learnability_passed,
+        }
+
+
+def curriculum_stage(global_step=None, total_steps=None):
+    """Compatibility helper; performance curriculum always starts at stage 1."""
+    del global_step, total_steps
+    return 1
+
+
+def best_fixed_key(result):
+    if not result.get("best_eligible", False):
+        return None
+    return (result["red_hit_rate"], result["mean_return"],
+            -result["numerical_invalid"])
+
+
+def best_randomized_key(result):
+    return best_fixed_key(result)
+
+
+def best_joint_key(fixed, randomized):
+    if not fixed.get("best_eligible", False) or not randomized.get(
+            "best_eligible", False):
+        return None
+    return (
+        min(fixed["red_hit_rate"], randomized["red_hit_rate"]),
+        fixed["red_hit_rate"] + randomized["red_hit_rate"],
+        0.5 * (fixed["mean_return"] + randomized["mean_return"]),
+        -(fixed["numerical_invalid"] + randomized["numerical_invalid"]),
+    )
 
 
 def set_random_seeds(seed):
@@ -59,7 +115,8 @@ def resolve_device(name):
 def save_training_state(path, actor, critic, optimizer, global_step,
                         update_index, best_eval_hit_rate, config,
                         best_eval_return=float("-inf"),
-                        best_eval_numerical_invalid=10**9):
+                        best_eval_numerical_invalid=10**9,
+                        curriculum=None, best_records=None):
     payload = {
         "actor": actor.state_dict(),
         "critic": critic.state_dict(),
@@ -76,6 +133,8 @@ def save_training_state(path, actor, critic, optimizer, global_step,
             torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None),
         "config": asdict(config) if hasattr(config, "__dataclass_fields__")
         else dict(config),
+        "curriculum": curriculum,
+        "best_records": best_records,
     }
     torch.save(payload, path)
     return payload

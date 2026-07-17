@@ -1,5 +1,30 @@
 # aircombat_env_v1
 
+## 论文事实边界
+
+| 分类 | 本目录中的内容 |
+|---|---|
+| `paper_explicit` | JSBSim 60 Hz；决策5 Hz；每次动作保持12个物理步；每回合1000个决策步；蓝方使用有限候选机动并在每个决策步按即时奖励贪心选择；UAV奖励结构为height、speed、angle、distance、dodge、event，训练权重为10、10、15、10、30；最低高度250 m、最大速度400 m/s、最大过载9 g；随机初始化采用各状态分量独立的有界均匀扰动。 |
+| `paper_unspecified_engineering` | 8个候选机动的具体3维动作值、0.2秒高层动作前视、当前PID目标接口、尾追初始条件、几何驻留命中、随机扰动幅度、观测归一化尺度、高度奖励近似、安全候选惩罚以及1000步dense奖励归一化。TAM仓库的speed/angle/distance函数和贪心候选结构被复制适配；其height函数本身明确是论文未定义近似。 |
+| `temporary_learnability_abstraction` | 3维目标俯仰/相对航向/目标速度动作；用几何攻击区代替真实导弹；单智能体PPO；1v1尾追课程。 |
+
+`paper_greedy`来源结构为
+`tam_uav/uav_env/JSBSim/paper/opponent.py`，候选动作通过本目录现有
+`action_to_targets`接口执行。本目录不把单智能体MLP PPO称为TAM-HAPPO复现。
+
+红方奖励保持论文权重比例：
+
+`10*r_height + 10*r_speed + 15*r_angle + 10*r_distance + r_event`，
+
+当前没有导弹，因此`r_dodge=0`。事件奖励为命中`+200`、被命中或红方坠毁
+`-200`、draw/timeout/blue_crash/数值异常为0。`blue_crash`是
+`opponent_failure`，不是红方胜利，也不能参与best模型排序。几何命中只是
+`temporary_learnability_abstraction`。
+
+20维观测的0至14维直接对应或等价表示论文Eq.13中的自身位置、速度、姿态、
+相对速度、相对高度、距离、ATA和AA；15至19维是当前1v1所需的相对NEU和双方
+攻击驻留。位置、相对量等具体归一化尺度属于工程值。
+
 A standalone, repeatable JSBSim F-16 trim and PID experiment. The controller
 structure follows BRMA-MAPPO Section 2.4, but its numerical gains, trim biases,
 actuator signs, and acceptance thresholds are local engineering values—not

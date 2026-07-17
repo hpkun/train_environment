@@ -20,8 +20,25 @@ EVALUATION_MODES = (
 )
 
 
+def record_event(counts, event):
+    if event == "red_hit":
+        counts["red_hits"] += 1
+    elif event == "blue_hit":
+        counts["blue_hits"] += 1
+    elif event == "red_crash":
+        counts["red_crashes"] += 1
+    elif event == "blue_crash":
+        counts["blue_crashes"] += 1
+    elif event == "timeout":
+        counts["timeouts"] += 1
+    elif "numerical_invalid" in str(event) or event == "physics_exception":
+        counts["numerical_invalid"] += 1
+    else:
+        counts["draws"] += 1
+
+
 def evaluate_policy(policy, episodes=20, scenario="fixed_tail_chase",
-                    opponent="straight", seed=1, stochastic=False,
+                    opponent="paper_greedy", seed=1, stochastic=False,
                     actor=None, device="cpu"):
     env = AirCombat1v1Env(
         scenario_mode=scenario, opponent_policy=opponent, max_steps=1000)
@@ -59,20 +76,7 @@ def evaluate_policy(policy, episodes=20, scenario="fixed_tail_chase",
                 if terminated or truncated:
                     break
             event = final_info.get("event", "timeout")
-            if event == "red_hit":
-                counts["red_hits"] += 1
-            elif event == "blue_hit":
-                counts["blue_hits"] += 1
-            elif event == "red_crash":
-                counts["red_crashes"] += 1
-            elif event == "blue_crash":
-                counts["blue_crashes"] += 1
-            elif event == "timeout":
-                counts["timeouts"] += 1
-            elif "numerical_invalid" in str(event):
-                counts["numerical_invalid"] += 1
-            else:
-                counts["draws"] += 1
+            record_event(counts, event)
             returns.append(episode_return)
             steps.append(step_index + 1)
             distances.append(float(final_info.get("distance_m", np.nan)))
@@ -92,10 +96,18 @@ def evaluate_policy(policy, episodes=20, scenario="fixed_tail_chase",
         "numerical_invalid": counts["numerical_invalid"],
         "draws": counts["draws"],
         "timeouts": counts["timeouts"],
+        "opponent_failures": counts["blue_crashes"],
         "red_hit_rate": counts["red_hits"] / max(int(episodes), 1),
+        "blue_hit_rate": counts["blue_hits"] / max(int(episodes), 1),
+        "red_crash_rate": counts["red_crashes"] / max(int(episodes), 1),
+        "blue_crash_rate": counts["blue_crashes"] / max(int(episodes), 1),
+        "invalid_rate": counts["numerical_invalid"] / max(int(episodes), 1),
+        "timeout_rate": counts["timeouts"] / max(int(episodes), 1),
         "mean_return": float(np.mean(returns)),
         "mean_steps": float(np.mean(steps)),
         "mean_final_distance": float(np.nanmean(distances)),
         "mean_red_boresight_deg": float(np.nanmean(boresights)),
     }
+    result["best_eligible"] = bool(
+        result["numerical_invalid"] == 0 and result["opponent_failures"] == 0)
     return result

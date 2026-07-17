@@ -30,6 +30,12 @@ SCENARIO_MODES = (
 )
 
 
+def curriculum_scenario(rng):
+    """Stage-2 engineering mixture: 20% fixed and 80% randomized."""
+    return ("fixed_tail_chase" if rng.random() < 0.2
+            else "randomized_tail_chase")
+
+
 def _placed_blue(distance_m, lateral_m, altitude_m, red_heading_deg):
     heading = np.deg2rad(red_heading_deg)
     north = distance_m * np.cos(heading) - lateral_m * np.sin(heading)

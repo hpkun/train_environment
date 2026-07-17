@@ -1,33 +1,60 @@
-"""Small potential-based reward for the minimal 1v1 environment."""
+"""Paper-structured UAV reward adapted to the current 1v1 abstraction."""
 
 from __future__ import annotations
 
-import numpy as np
+from .opponent import angle_reward, distance_reward, height_reward, speed_reward
 
 
-def potential(geometry):
-    alignment = np.cos(geometry["boresight_angle"])
-    range_score = np.exp(-((geometry["distance_m"] - 1500.0) / 2500.0) ** 2)
-    closure_score = np.clip(geometry["closure_mps"] / 300.0, -1.0, 1.0)
-    return float(0.6 * alignment + 0.25 * range_score + 0.15 * closure_score)
+EVENT_REWARDS = {
+    "red_hit": 200.0,
+    "blue_hit": -200.0,
+    "red_crash": -200.0,
+    "draw_simultaneous_hit": 0.0,
+    "draw_both_crash": 0.0,
+    "timeout": 0.0,
+    "blue_crash": 0.0,
+    "red_numerical_invalid": 0.0,
+    "blue_numerical_invalid": 0.0,
+    "draw_both_numerical_invalid": 0.0,
+    "physics_exception": 0.0,
+}
+
+# Engineering normalization keeps the largest 1000-step dense accumulation
+# below the +200 hit event while preserving the published 10:10:15:10 ratios.
+DENSE_HORIZON_NORMALIZATION = 1000.0
+
+
+def reward_components(red_state, blue_state, geometry):
+    return {
+        "r_height": height_reward(red_state["altitude"]),
+        "r_speed": speed_reward(
+            red_state["true_airspeed"], blue_state["true_airspeed"]),
+        "r_angle": angle_reward(
+            geometry["ata_rad"], geometry["aa_rad"]),
+        "r_distance": distance_reward(geometry["distance_m"]),
+        "r_dodge": 0.0,
+    }
+
+
+def dense_reward(red_state, blue_state, geometry):
+    components = reward_components(red_state, blue_state, geometry)
+    value = (
+        10.0 * components["r_height"]
+        + 10.0 * components["r_speed"]
+        + 15.0 * components["r_angle"]
+        + 10.0 * components["r_distance"]
+    ) / DENSE_HORIZON_NORMALIZATION
+    return float(value), components
 
 
 def terminal_reward(event):
-    if event in ("red_hit", "blue_crash", "blue_numerical_invalid"):
-        return 10.0
-    if event in ("blue_hit", "red_crash", "red_numerical_invalid"):
-        return -10.0
-    return 0.0
+    return float(EVENT_REWARDS.get(event, 0.0))
 
 
-def step_reward(previous_potential, next_potential, red_dwell_delta,
-                blue_dwell_delta, event=None, action=None,
-                previous_action=None):
-    smooth_penalty = 0.0
-    if action is not None and previous_action is not None:
-        smooth_penalty = 0.002 * float(np.mean(
-            (np.asarray(action) - np.asarray(previous_action)) ** 2))
-    shaped = (0.99 * next_potential - previous_potential - 0.001
-              + 0.02 * (red_dwell_delta - blue_dwell_delta)
-              - smooth_penalty)
-    return float(shaped + terminal_reward(event))
+def step_reward(red_state, blue_state, geometry, event=None):
+    dense, components = dense_reward(red_state, blue_state, geometry)
+    if event in {
+            "blue_crash", "red_numerical_invalid", "blue_numerical_invalid",
+            "draw_both_numerical_invalid", "physics_exception"}:
+        return 0.0, components
+    return float(dense + terminal_reward(event)), components

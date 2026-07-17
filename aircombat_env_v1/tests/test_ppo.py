@@ -3,7 +3,7 @@ import torch
 
 from aircombat_env_v1.ppo import (
     Actor, Critic, RolloutBuffer, SquashedNormal, compute_gae)
-from aircombat_env_v1.training import curriculum_stage
+from aircombat_env_v1.training import PerformanceCurriculum
 
 
 def test_squashed_normal_samples_in_bounds_and_has_finite_log_prob():
@@ -66,9 +66,20 @@ def test_rollout_buffer_shapes():
     assert flat["returns"].shape == (6,)
 
 
-def test_curriculum_boundaries():
-    assert curriculum_stage(0, 100) == 1
-    assert curriculum_stage(19, 100) == 1
-    assert curriculum_stage(20, 100) == 2
-    assert curriculum_stage(69, 100) == 2
-    assert curriculum_stage(70, 100) == 3
+def test_stage_one_requires_two_consecutive_threshold_passes():
+    curriculum = PerformanceCurriculum()
+    curriculum.update(0.8)
+    assert curriculum.stage == 1
+    curriculum.update(0.79)
+    assert curriculum.stage == 1
+    curriculum.update(0.9)
+    curriculum.update(0.8)
+    assert curriculum.stage == 2
+
+
+def test_stage_two_requires_two_joint_passes():
+    curriculum = PerformanceCurriculum(stage=2)
+    curriculum.update(0.8, 0.6)
+    assert not curriculum.learnability_passed
+    curriculum.update(0.8, 0.6)
+    assert curriculum.learnability_passed

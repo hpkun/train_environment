@@ -29,7 +29,7 @@ def parse_args():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--scenario", default="fixed_tail_chase")
-    parser.add_argument("--opponent", default="straight")
+    parser.add_argument("--opponent", default="paper_greedy")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument("--output", default=None)

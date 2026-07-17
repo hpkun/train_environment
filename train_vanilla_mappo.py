@@ -42,21 +42,15 @@ from my_uav_env.alignment.reward_utils import (
     DEFAULT_ALTITUDE_REWARD_CONFIG,
     REWARD_VERSION,
 )
-from configs.brma_mappo_paper_spec import (
-    DEFAULT_PAPER_ENVIRONMENT_CONFIG,
-    environment_config_snapshot,
-)
-from configs.paper_minimal_3v3_spec import (
-    PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-    REFERENCE_ENVIRONMENT_PROFILE,
-    minimal_environment_snapshot,
-)
-from configs.paper_learnable_3v3_spec import (
-    LEARNABLE_INITIALIZATION_MODES,
-    LEARNABLE_MISSILE_GUIDANCE_MODE,
-    LEARNABLE_PID_THROTTLE_BASE,
-    PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
-    learnable_environment_snapshot,
+from configs.paper_3v3_spec import (
+    PAPER_BLUE_POLICY_PROFILE,
+    PAPER_CHECKPOINT_SCHEMA,
+    PAPER_ENVIRONMENT_PROFILE,
+    PAPER_MISSILE_GUIDANCE_MODE,
+    PAPER_PID_PROFILE,
+    PAPER_REWARD_MODE,
+    PID_THROTTLE_BASE,
+    paper_environment_snapshot,
 )
 from my_uav_env.pid_controller import PAPER_PID_ERROR_DEFINITION
 from my_uav_env.pid_controller import PAPER_PID_DERIVATIVE_SEMANTICS
@@ -114,17 +108,17 @@ class Config:
     enable_blue_gcas: bool = False
     obs_mode: str = "paper_strict"
     obs_normalization: str = "paper_fixed_v1"
-    pid_profile: str = "paper"
-    pid_throttle_base: float = 0.0
-    reward_mode: str = "paper_joint"
-    missile_guidance_mode: str = "paper_eq9"
+    pid_profile: str = PAPER_PID_PROFILE
+    pid_throttle_base: float = PID_THROTTLE_BASE
+    reward_mode: str = PAPER_REWARD_MODE
+    missile_guidance_mode: str = PAPER_MISSILE_GUIDANCE_MODE
     altitude_reward_config = DEFAULT_ALTITUDE_REWARD_CONFIG
     resume_from_best: bool = False
     action_dim: int = 3
     algorithm_type: str = "mappo_mlp"
-    environment_version: str = "brma_paper_profile_v1"
-    environment_profile: str = REFERENCE_ENVIRONMENT_PROFILE
-    blue_policy_profile: str = "paper_pursuit"
+    environment_version: str = PAPER_ENVIRONMENT_PROFILE
+    environment_profile: str = PAPER_ENVIRONMENT_PROFILE
+    blue_policy_profile: str = PAPER_BLUE_POLICY_PROFILE
     initial_condition_randomization_mode: str = "deterministic_v1"
 
     # ---- PPO (论文 Table 3) ----
@@ -180,7 +174,9 @@ def _include_aux_obs_default(obs_mode: str, include_aux_obs: bool | None = None)
 def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool,
                      obs_mode: str = "paper_strict",
                      include_aux_obs: bool | None = None) -> int:
-    """计算展平后的观测向量维度。"""
+    """Return the fixed Table 1/Table 2 actor input dimension."""
+    if obs_mode != "paper_strict" or include_aux_obs:
+        raise ValueError("paper_3v3_v1 only supports strict entity observations")
     if is_red:
         n_ally = num_red - 1
         n_enemy = num_blue
@@ -188,19 +184,14 @@ def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool,
         n_ally = num_blue - 1
         n_enemy = num_red
     total_entities = 1 + max(n_ally, 0) + n_enemy
-    entity_dim = 10 if obs_mode == "paper_strict" else 11
-    dim = entity_dim * total_entities
-    if obs_mode != "paper_strict":
-        dim += num_red + num_blue
-    if _include_aux_obs_default(obs_mode, include_aux_obs):
-        dim += 1 + 1 + 3
-    return dim
+    return 10 * total_entities
 
 
 def _compute_global_state_dim(num_red: int, obs_mode: str = "paper_strict") -> int:
     """Paper CTDE state: native ego state of every red UAV."""
-    entity_dim = 10 if obs_mode == "paper_strict" else 11
-    return num_red * entity_dim
+    if obs_mode != "paper_strict":
+        raise ValueError("paper_3v3_v1 only supports paper_strict")
+    return num_red * 10
 
 
 def _global_state_from_local_obs_flats(
@@ -208,7 +199,9 @@ def _global_state_from_local_obs_flats(
     obs_mode: str = "paper_strict",
 ) -> np.ndarray:
     """Extract and concatenate each red agent's leading ego-state entity."""
-    entity_dim = 10 if obs_mode == "paper_strict" else 11
+    if obs_mode != "paper_strict":
+        raise ValueError("paper_3v3_v1 only supports paper_strict")
+    entity_dim = 10
     return np.concatenate([
         np.asarray(obs, dtype=np.float32).reshape(-1)[:entity_dim]
         for obs in local_obs_flats
@@ -346,10 +339,12 @@ def _normalize_paper_fixed_v1(obs_np: dict) -> tuple[np.ndarray, np.ndarray, np.
 def _flatten_obs(obs_np: dict, obs_mode: str = "paper_strict",
                  include_aux_obs: bool | None = None,
                  obs_normalization: str = "paper_fixed_v1") -> np.ndarray:
-    """将 Dict 观测展平为一维向量。"""
+    """Flatten only the six Table 1/Table 2 entities (6 x 10)."""
+    if obs_mode != "paper_strict" or include_aux_obs:
+        raise ValueError("paper_3v3_v1 excludes auxiliary and legacy observations")
     if obs_normalization not in ("paper_fixed_v1", "none"):
         raise ValueError("obs_normalization must be 'paper_fixed_v1' or 'none'")
-    if obs_mode == "paper_strict" and obs_normalization == "paper_fixed_v1":
+    if obs_normalization == "paper_fixed_v1":
         ego, allies, enemies = _normalize_paper_fixed_v1(obs_np)
     else:
         ego = obs_np["ego_state"]
@@ -360,15 +355,6 @@ def _flatten_obs(obs_np: dict, obs_mode: str = "paper_strict",
         np.asarray(allies, dtype=np.float32).ravel(),
         np.asarray(enemies, dtype=np.float32).ravel(),
     ]
-    if obs_mode != "paper_strict":
-        parts.append(obs_np.get(
-            "alive_mask", obs_np["death_mask"]).astype(np.float32).ravel())
-    if _include_aux_obs_default(obs_mode, include_aux_obs):
-        parts.extend([
-            obs_np["missile_warning"].ravel(),
-            (obs_np["altitude"].ravel() / 10000.0).astype(np.float32),
-            (obs_np["velocity"].ravel() / 600.0).astype(np.float32),
-        ])
     return np.concatenate(parts)
 
 
@@ -379,7 +365,6 @@ LAUNCH_DIAG_BASE_KEYS = (
     "geometry_ok_pairs",
     "lock_mature_pairs",
     "cooldown_blocked",
-    "kill_cooldown_blocked",
     "engaged_blocked",
     "range_low_blocked",
     "range_high_blocked",
@@ -401,8 +386,6 @@ LAUNCH_DIAG_CSV_FIELDS = (
     "LaunchDiagBlueEngagedBlocked",
     "LaunchDiagRedCooldownBlocked",
     "LaunchDiagBlueCooldownBlocked",
-    "LaunchDiagRedKillCooldownBlocked",
-    "LaunchDiagBlueKillCooldownBlocked",
     "LaunchDiagRedLockMature",
     "LaunchDiagBlueLockMature",
     "RedGeometryToLaunchRate",
@@ -613,7 +596,7 @@ LEARNABILITY_DIAG_CSV_FIELDS = (
     "PersistentExtremeFiniteLoadInvalidEpisodes",
 )
 
-CHECKPOINT_SCHEMA_VERSION = "vanilla_mappo_paper_env_v8"
+CHECKPOINT_SCHEMA_VERSION = PAPER_CHECKPOINT_SCHEMA
 TRAINING_STATE_SCHEMA_VERSION = "vanilla_mappo_training_state_v1"
 ACTION_DISTRIBUTION_VERSION = "tanh_squashed_diag_gaussian_v1"
 ENTROPY_ESTIMATOR_VERSION = "pre_tanh_base_normal_entropy_v1"
@@ -674,37 +657,17 @@ def _rollout_layout(replay_buffer_size: int, num_envs: int) -> dict:
 
 
 def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
-    if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
-        environment_snapshot = minimal_environment_snapshot(
-            num_red=config.num_red, num_blue=config.num_blue,
-            sim_freq=60, agent_interaction_steps=12,
-            max_episode_length=config.max_episode_length, seed=config.seed,
-            blue_policy_profile=config.blue_policy_profile)
-    elif config.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
-        environment_snapshot = learnable_environment_snapshot(
-            num_red=config.num_red, num_blue=config.num_blue,
-            sim_freq=60, agent_interaction_steps=12,
-            max_episode_length=config.max_episode_length, seed=config.seed,
-            blue_policy_profile=config.blue_policy_profile,
-            initial_condition_randomization_mode=(
-                config.initial_condition_randomization_mode))
-    else:
-        environment_snapshot = environment_config_snapshot(
-            DEFAULT_PAPER_ENVIRONMENT_CONFIG,
-            num_red=config.num_red, num_blue=config.num_blue,
-            sim_freq=60, agent_interaction_steps=12, seed=config.seed,
-            blue_policy_profile=config.blue_policy_profile)
+    if (config.environment_profile != PAPER_ENVIRONMENT_PROFILE
+            or config.num_red != 3 or config.num_blue != 3
+            or config.max_episode_length != 1400):
+        raise ValueError("formal MAPPO checkpoints require paper_3v3_v1")
+    environment_snapshot = paper_environment_snapshot(seed=config.seed)
     rollout_layout = _rollout_layout(config.replay_buffer_size, config.num_envs)
     metadata = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": config.obs_mode,
         "obs_normalization": config.obs_normalization,
-        "reward_version": (
-            "paper_literal_minimal_unspecified_v1"
-            if config.environment_profile in (
-                PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-                PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
-            else REWARD_VERSION),
+        "reward_version": "paper_3v3_joint_eq15_23_v1",
         "reward_mode": config.reward_mode,
         "pid_profile": config.pid_profile,
         "pid_throttle_base": float(config.pid_throttle_base),
@@ -726,11 +689,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             config.initial_condition_randomization_mode),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
         "altitude_reward_interpretation": (
-            "pairwise_mean_all_alive_enemies_v1"
-            if config.environment_profile in (
-                PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-                PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
-            else "pairwise_sum_all_alive_enemies_v1"),
+            "paper_unspecified_engineering_mean_over_alive_enemies"),
         "num_red": int(config.num_red),
         "num_blue": int(config.num_blue),
         "max_episode_length": int(config.max_episode_length),
@@ -757,63 +716,11 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "environment_config_fingerprint": environment_snapshot[
             "environment_config_fingerprint"],
     }
-    if config.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
-        sourced_keys = (
-            "initial_condition_profile", "sensor_profile", "mws_evasion_profile",
-            "red_mws_mode", "blue_mws_mode",
-            "blue_missile_evasion_enabled", "mws_asymmetry_reason",
-            "missile_profile", "reward_version", "altitude_pair_aggregation",
-            "altitude_high_tail", "aircraft_model", "constant_rcs",
-            "radar_range_constant", "initial_altitude_m", "initial_speed_mps",
-            "formation_spacing_m", "initial_missile_speed_mps",
-            "missile_hit_radius_m", "missile_overshoot_window_s",
-            "missile_overshoot_distance_hysteresis_m",
-            "missile_positive_closing_threshold_mps",
-            "initial_missile_direction_mode",
-            "missile_rng_version", "target_deconfliction",
-            "load_limiter_mode", "maximum_load_g",
-            "extreme_load_invalid_threshold_g", "speed_limiter_mode", "vertical_bounds_m",
-            "maximum_live_missiles_observed")
-        provenance = {}
-        for key in sourced_keys:
-            sourced = environment_snapshot[key]
-            metadata[key] = sourced["value"]
-            provenance[key] = sourced["source"]
-        provenance.update({
-            "environment_profile": environment_snapshot[
-                "environment_profile"]["source"],
-            "blue_policy_profile": environment_snapshot[
-                "blue_policy_profile"]["source"],
-            "pid_profile": environment_snapshot["pid_profile"]["source"],
-        })
-        metadata["profile_provenance"] = provenance
-    elif config.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
-        sourced_keys = (
-            "profile_provenance", "initial_condition_profile",
-            "initial_condition_randomization_mode", "blue_policy_profile",
-            "red_mws_mode", "blue_mws_mode", "missile_profile",
-            "initial_missile_direction_mode", "initial_missile_speed_mps",
-            "missile_hit_radius_m", "missile_arming_time_s",
-            "missile_overshoot_window_s",
-            "missile_overshoot_distance_hysteresis_m",
-            "missile_positive_closing_threshold_mps", "eo_maximum_range_m",
-            "launch_positive_finite_range_guard",
-            "launch_deconfliction", "missile_los_definition",
-            "fire_control_profile", "reward_version", "target_assignment_mode",
-            "observation_mode", "actor_input_dim",
-            "critic_input_dim", "setpoint_rate_limiter",
-            "load_command_scaling", "pid_error_definition",
-            "derivative_semantics",
-            "extreme_finite_load_guard")
-        provenance = {}
-        for key in sourced_keys:
-            sourced = environment_snapshot[key]
-            metadata[key] = sourced["value"]
-            provenance[key] = sourced["source"]
-        metadata["profile_provenance_fields"] = provenance
-        metadata["pid_throttle_base"] = float(
-            environment_snapshot["environment_config"]["pid"][
-                "throttle_base"]["value"])
+    metadata["profile_provenance_fields"] = {
+        key: value["source"]
+        for key, value in environment_snapshot.items()
+        if isinstance(value, dict) and "source" in value
+    }
     return metadata
 
 
@@ -1012,25 +919,6 @@ def _unpack_and_validate_checkpoint(payload, expected_metadata: dict,
             f"checkpoint model_kind mismatch: expected {model_kind!r}, "
             f"got {payload.get('model_kind')!r}")
     metadata = dict(payload["metadata"])
-    expected_profile = expected_metadata.get("blue_policy_profile")
-    if "blue_policy_profile" not in metadata and expected_profile == "paper_pursuit":
-        metadata["blue_policy_profile"] = "paper_pursuit"
-        print("[COMPAT] checkpoint has no blue_policy_profile; interpreting it "
-              "as paper_pursuit.", flush=True)
-    actual_env = metadata.get("environment_config")
-    expected_env = expected_metadata.get("environment_config")
-    if (expected_profile == "paper_pursuit" and isinstance(actual_env, dict)
-            and isinstance(expected_env, dict)
-            and "blue_policy_profile" not in actual_env):
-        actual_core = dict(actual_env)
-        expected_core = dict(expected_env)
-        actual_core.pop("environment_config_fingerprint", None)
-        expected_core.pop("environment_config_fingerprint", None)
-        expected_core.pop("blue_policy_profile", None)
-        if actual_core == expected_core:
-            metadata["environment_config"] = expected_env
-            metadata["environment_config_fingerprint"] = expected_metadata.get(
-                "environment_config_fingerprint")
     mismatches = {
         key: (metadata.get(key), expected)
         for key, expected in expected_metadata.items()
@@ -1082,8 +970,6 @@ def _launch_diag_metrics(totals: dict) -> dict:
         "LaunchDiagBlueEngagedBlocked": blue["engaged_blocked"],
         "LaunchDiagRedCooldownBlocked": red["cooldown_blocked"],
         "LaunchDiagBlueCooldownBlocked": blue["cooldown_blocked"],
-        "LaunchDiagRedKillCooldownBlocked": red["kill_cooldown_blocked"],
-        "LaunchDiagBlueKillCooldownBlocked": blue["kill_cooldown_blocked"],
         "LaunchDiagRedLockMature": red["lock_mature_pairs"],
         "LaunchDiagBlueLockMature": blue["lock_mature_pairs"],
         "RedGeometryToLaunchRate": _safe_div(red_launches, red_geometry),
@@ -2688,39 +2574,31 @@ def parse_args():
     parser.add_argument("--mlp-hidden", type=int, default=defaults.mlp_hidden)
     parser.add_argument("--rnn-hidden-size", type=int,
                         default=defaults.rnn_hidden_size)
-    parser.add_argument("--enable-blue-gcas", action="store_true",
-                        default=defaults.enable_blue_gcas)
-    parser.add_argument("--blue-policy-profile", choices=(
-        "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
-        "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1",
-        "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1",
-        "paper_learnable_fixed_pair_v1"),
+    parser.add_argument("--blue-policy-profile",
+        choices=(PAPER_BLUE_POLICY_PROFILE,),
         default=defaults.blue_policy_profile)
-    parser.add_argument("--environment-profile", choices=(
-        REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-        PAPER_LEARNABLE_ENVIRONMENT_PROFILE),
+    parser.add_argument("--environment-profile",
+        choices=(PAPER_ENVIRONMENT_PROFILE,),
         default=defaults.environment_profile)
     parser.add_argument("--obs-mode", type=str,
-                        choices=("paper_strict", "engineering"),
+                        choices=("paper_strict",),
                         default=defaults.obs_mode)
     parser.add_argument("--obs-normalization", type=str,
                         choices=("paper_fixed_v1", "none"),
                         default=defaults.obs_normalization)
     parser.add_argument("--pid-profile", type=str,
-                        choices=("paper", "engineering_safe", "paper_minimal_shared_v1"),
+                        choices=(PAPER_PID_PROFILE,),
                         default=defaults.pid_profile)
     parser.add_argument("--pid-throttle-base", type=float,
                         default=defaults.pid_throttle_base)
     parser.add_argument("--reward-mode", type=str,
-                        choices=("paper_joint", "engineering_local", "paper_minimal_joint_v1"),
+                        choices=(PAPER_REWARD_MODE,),
                         default=defaults.reward_mode)
     parser.add_argument("--missile-guidance-mode", type=str,
-                        choices=("paper_eq9", "legacy_simplified",
-                                 "paper_minimal_point_mass_v1",
-                                 LEARNABLE_MISSILE_GUIDANCE_MODE),
+                        choices=(PAPER_MISSILE_GUIDANCE_MODE,),
                         default=defaults.missile_guidance_mode)
     parser.add_argument("--initial-condition-randomization-mode",
-                        choices=LEARNABLE_INITIALIZATION_MODES,
+                        choices=("deterministic_v1",),
                         default=defaults.initial_condition_randomization_mode)
     parser.add_argument("--resume-from-best", action="store_true",
                         default=defaults.resume_from_best)
@@ -2758,7 +2636,7 @@ _VANILLA_PRESET_CLI_FLAGS = {
     "num_red", "num_blue", "num_envs", "total_env_steps",
     "max_episode_length", "replay_buffer_size", "n_minibatches",
     "actor_lr", "critic_lr", "entropy_coef", "mlp_hidden", "rnn_hidden_size",
-    "enable_blue_gcas", "blue_policy_profile", "environment_profile",
+    "blue_policy_profile", "environment_profile",
     "obs_mode", "obs_normalization", "pid_profile",
     "pid_throttle_base",
     "reward_mode", "missile_guidance_mode", "resume_from_best",
@@ -2769,6 +2647,12 @@ _VANILLA_PRESET_CLI_FLAGS = {
     "extreme_load_trace_file",
     "checkpoint_dir", "seed", "device",
 }
+
+_FORMAL_PAPER_3V3_PRESETS = (
+    "vanilla_3v3_paper_smoke",
+    "vanilla_3v3_paper_main",
+    "vanilla_3v3_paper_100k_diag",
+)
 
 
 def _apply_preset_vanilla(args, preset: dict):
@@ -2790,12 +2674,7 @@ def _apply_preset_vanilla(args, preset: dict):
 
 
 def _validate_preset_resume_semantics(args) -> None:
-    if args.preset != "vanilla_3v3_paper_learnable_1m":
-        return
-    if args.resume_latest or args.resume_from_best:
-        raise ValueError(
-            "the 1m preset starts fresh unless an explicit --resume-state "
-            "path is supplied; --resume-latest/--resume-from-best are disabled")
+    return
 
 
 def make_config_from_args(args) -> Config:
@@ -2812,14 +2691,10 @@ def make_config_from_args(args) -> Config:
     config.entropy_coef = args.entropy_coef
     config.mlp_hidden = args.mlp_hidden
     config.rnn_hidden_size = args.rnn_hidden_size
-    config.enable_blue_gcas = args.enable_blue_gcas
     config.blue_policy_profile = args.blue_policy_profile
     config.environment_profile = args.environment_profile
     config.environment_version = args.environment_profile
-    if config.environment_profile in (
-            PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-            PAPER_LEARNABLE_ENVIRONMENT_PROFILE):
-        config.altitude_reward_config = _minimal_altitude_reward_config()
+    config.altitude_reward_config = _minimal_altitude_reward_config()
     config.obs_mode = args.obs_mode
     config.obs_normalization = args.obs_normalization
     config.pid_profile = args.pid_profile
@@ -2926,7 +2801,6 @@ def _run_periodic_evaluation(
                 max_steps=config.max_episode_length,
                 device=device,
                 episode_idx=episode + 1,
-                enable_blue_gcas=config.enable_blue_gcas,
                 obs_mode=config.obs_mode,
                 obs_normalization=config.obs_normalization,
                 pid_profile=config.pid_profile,
@@ -3003,21 +2877,23 @@ def main():
     args = parse_args()
 
     if args.list_presets:
-        from configs.experiment_presets import list_presets
         print("Available presets:")
-        for name in list_presets():
+        for name in _FORMAL_PAPER_3V3_PRESETS:
             print(f"  {name}")
         return
 
     if args.preset is not None:
+        if args.preset not in _FORMAL_PAPER_3V3_PRESETS:
+            choices = ", ".join(_FORMAL_PAPER_3V3_PRESETS)
+            raise ValueError(
+                f"formal vanilla MAPPO only accepts paper_3v3_v1 presets: {choices}"
+            )
         from configs.experiment_presets import get_preset
         preset = get_preset(args.preset)
         _apply_preset_vanilla(args, preset)
     _validate_preset_resume_semantics(args)
 
     config = make_config_from_args(args)
-    if config.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
-        config.pid_throttle_base = LEARNABLE_PID_THROTTLE_BASE
     if config.launch_quality_file is None:
         config.launch_quality_file = _default_launch_quality_file(config.results_file)
     if config.eval_log_file is None:
@@ -3158,12 +3034,7 @@ def main():
     print(f"  checkpoint_dir: {config.checkpoint_dir}")
     print(f"  seed: {config.seed}")
     print(f"  device: {device}")
-    print("  reward_version: " + (
-        "paper_literal_minimal_unspecified_v1"
-        if config.environment_profile in (
-            PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-            PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
-        else REWARD_VERSION))
+    print("  reward_version: paper_3v3_joint_eq15_23_v1")
     print(f"  environment_profile: {config.environment_profile}")
     print(f"  obs_mode: {config.obs_mode}")
     print(f"  obs_normalization: {config.obs_normalization}")
@@ -3200,8 +3071,7 @@ def main():
                       reward_mode=config.reward_mode,
                       missile_guidance_mode=config.missile_guidance_mode,
                       altitude_reward_config=config.altitude_reward_config,
-                      blue_policy_profile=config.blue_policy_profile,
-                      enable_gcas_for_blue=config.enable_blue_gcas)
+                      blue_policy_profile=config.blue_policy_profile)
     print(f"正在启动 {config.num_envs} 个 worker 进程...", flush=True)
     vec_env = SubprocVecEnv(config.num_envs, env_kwargs, base_seed=config.seed)
 
@@ -3974,11 +3844,7 @@ def main():
                              f"{kd_red_missile:.6f}",
                              f"{rwr:.6f}",
                              int(rwr_denominator_zero),
-                             ("paper_literal_minimal_unspecified_v1"
-        if config.environment_profile in (
-            PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-            PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
-                              else REWARD_VERSION),
+                             "paper_3v3_joint_eq15_23_v1",
                              config.reward_mode,
                              config.environment_profile,
                              config.obs_normalization,
@@ -4076,12 +3942,7 @@ def main():
             "KD_Red_MissileOnly": kd_red_missile,
             "RWR":            rwr,
             "RWRDenominatorZero": rwr_denominator_zero,
-            "RewardVersion":  (
-                "paper_literal_minimal_unspecified_v1"
-                if config.environment_profile in (
-                    PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-                    PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
-                else REWARD_VERSION),
+            "RewardVersion": "paper_3v3_joint_eq15_23_v1",
             "RewardMode": config.reward_mode,
             "EnvironmentProfile": config.environment_profile,
             "ObsNormalization": config.obs_normalization,

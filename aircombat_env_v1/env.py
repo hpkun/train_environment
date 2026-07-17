@@ -13,9 +13,31 @@ from .combat import (action_to_targets, hit_event, in_attack_zone,
                      pursuit_action, relative_geometry, update_attack_dwell)
 from .config import load_config
 from .observation import build_observation
+from .opponent import paper_greedy_action
 from .pid import PaperAutopilot
-from .reward import potential, step_reward, terminal_reward
-from .scenario import SCENARIO_MODES, make_scenario
+from .reward import step_reward, terminal_reward
+from .scenario import SCENARIO_MODES, curriculum_scenario, make_scenario
+
+
+def event_semantics(event):
+    winners = {
+        "red_hit": "red", "blue_crash": None,
+        "blue_hit": "blue", "red_crash": "blue",
+        "draw_simultaneous_hit": "draw", "draw_both_crash": "draw",
+        "red_numerical_invalid": None, "blue_numerical_invalid": None,
+        "draw_both_numerical_invalid": None, "physics_exception": None,
+        "timeout": None,
+    }
+    return {
+        "winner": winners[event],
+        "termination_reason": event,
+        "opponent_failure": event == "blue_crash",
+        "invalid_episode": (
+            "numerical_invalid" in event or event == "physics_exception"),
+        "valid_combat_outcome": event in {
+            "red_hit", "blue_hit", "red_crash",
+            "draw_simultaneous_hit", "draw_both_crash", "timeout"},
+    }
 
 
 class AirCombat1v1Env(gym.Env):
@@ -23,12 +45,14 @@ class AirCombat1v1Env(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, opponent_policy="straight",
+    def __init__(self, opponent_policy="paper_greedy",
                  scenario_mode="fixed_tail_chase",
                  opponent_mix_probability=0.2, randomize=None,
                  max_steps=1000, config_path=None):
-        if opponent_policy not in ("straight", "pursuit", "mixed"):
-            raise ValueError("opponent_policy must be straight, pursuit, or mixed")
+        if opponent_policy not in (
+                "paper_greedy", "straight", "pursuit", "mixed"):
+            raise ValueError(
+                "opponent_policy must be paper_greedy, straight, pursuit, or mixed")
         if randomize is not None:
             scenario_mode = (
                 "randomized_tail_chase" if randomize
@@ -56,25 +80,22 @@ class AirCombat1v1Env(gym.Env):
         self._step_count = 0
         self._red_dwell = 0.0
         self._blue_dwell = 0.0
-        self._potential = 0.0
         self._event = None
         self._actual_opponent_policy = opponent_policy
-        self._previous_action = np.zeros(3, dtype=np.float32)
         self._numerical_invalid = False
         self._physics_exception = False
+        self._reward_components = {}
+        self._actual_scenario_mode = scenario_mode
 
     def set_curriculum_stage(self, stage):
         if stage == 1:
             self.scenario_mode = "fixed_tail_chase"
-            self.opponent_policy = "straight"
+            self.opponent_policy = "paper_greedy"
         elif stage == 2:
-            self.scenario_mode = "randomized_tail_chase"
-            self.opponent_policy = "straight"
-        elif stage == 3:
-            self.scenario_mode = "randomized_tail_chase"
-            self.opponent_policy = "mixed"
+            self.scenario_mode = "curriculum_mixed_tail_chase"
+            self.opponent_policy = "paper_greedy"
         else:
-            raise ValueError("curriculum stage must be 1, 2, or 3")
+            raise ValueError("curriculum stage must be 1 or 2")
 
     @staticmethod
     def action_to_targets(action, current_heading):
@@ -94,6 +115,9 @@ class AirCombat1v1Env(gym.Env):
         super().reset(seed=seed)
         options = options or {}
         mode = options.get("scenario_mode", self.scenario_mode)
+        if mode == "curriculum_mixed_tail_chase":
+            mode = curriculum_scenario(self.np_random)
+        self._actual_scenario_mode = mode
         red_initial, blue_initial = make_scenario(mode, self.np_random)
         if self.opponent_policy == "mixed":
             self._actual_opponent_policy = (
@@ -109,16 +133,16 @@ class AirCombat1v1Env(gym.Env):
         self._step_count = 0
         self._red_dwell = self._blue_dwell = 0.0
         self._event = None
-        self._previous_action = np.zeros(3, dtype=np.float32)
         self._numerical_invalid = False
         self._physics_exception = False
-        self._potential = potential(
-            relative_geometry(self._red_state, self._blue_state))
+        self._reward_components = {}
         observation = build_observation(
             self._red_state, self._blue_state, 0.0, 0.0)
         return observation, self._info()
 
     def _blue_action(self):
+        if self._actual_opponent_policy == "paper_greedy":
+            return paper_greedy_action(self._blue_state, self._red_state)
         if self._actual_opponent_policy == "pursuit":
             return pursuit_action(self._blue_state, self._red_state)
         pitch = 0.0
@@ -152,11 +176,11 @@ class AirCombat1v1Env(gym.Env):
                 self.blue_sim.set_controls(*blue_controls)
                 self._red_state = self.red_sim.run()
             except (RuntimeError, ValueError, FloatingPointError):
-                return "red_numerical_invalid", True
+                return "physics_exception", True
             try:
                 self._blue_state = self.blue_sim.run()
             except (RuntimeError, ValueError, FloatingPointError):
-                return "blue_numerical_invalid", True
+                return "physics_exception", True
             red_finite = self._finite_state(self._red_state)
             blue_finite = self._finite_state(self._blue_state)
             if not red_finite and not blue_finite:
@@ -184,14 +208,14 @@ class AirCombat1v1Env(gym.Env):
         previous_observation = build_observation(
             previous_red_state, previous_blue_state,
             self._red_dwell, self._blue_dwell)
-        previous_potential = self._potential
         red_targets = action_to_targets(action, self._red_state["heading"])
         blue_targets = action_to_targets(
             self._blue_action(), self._blue_state["heading"])
         previous_red_dwell, previous_blue_dwell = self._red_dwell, self._blue_dwell
         event, physics_exception = self._advance_pair(red_targets, blue_targets)
         self._step_count += 1
-        numerical_invalid = event is not None and "numerical_invalid" in event
+        numerical_invalid = (event is not None and (
+            "numerical_invalid" in event or event == "physics_exception"))
         self._numerical_invalid = numerical_invalid
         self._physics_exception = physics_exception
         if numerical_invalid:
@@ -211,15 +235,9 @@ class AirCombat1v1Env(gym.Env):
             self._blue_dwell = update_attack_dwell(
                 self._blue_dwell, in_attack_zone(blue_geometry))
             event = hit_event(self._red_dwell, self._blue_dwell)
-        next_potential = potential(
-            relative_geometry(self._red_state, self._blue_state))
-        reward = step_reward(
-            previous_potential, next_potential,
-            self._red_dwell - previous_red_dwell,
-            self._blue_dwell - previous_blue_dwell, event,
-            action, self._previous_action)
-        self._previous_action = action.copy()
-        self._potential = next_potential
+        geometry = relative_geometry(self._red_state, self._blue_state)
+        reward, self._reward_components = step_reward(
+            self._red_state, self._blue_state, geometry, event)
         terminated = event is not None
         truncated = not terminated and self._step_count >= self.max_steps
         if truncated:
@@ -246,22 +264,13 @@ class AirCombat1v1Env(gym.Env):
             "red_speed_mps": self._red_state["true_airspeed"],
             "blue_speed_mps": self._blue_state["true_airspeed"],
             "opponent_policy": self._actual_opponent_policy,
+            "scenario_mode": self._actual_scenario_mode,
             "numerical_invalid": self._numerical_invalid,
             "physics_exception": self._physics_exception,
+            "reward_components": dict(self._reward_components),
         }
         if self._event is not None:
-            winners = {
-                "red_hit": "red", "blue_crash": "red",
-                "blue_hit": "blue", "red_crash": "blue",
-                "draw_simultaneous_hit": "draw", "draw_both_crash": "draw",
-                "red_numerical_invalid": "blue",
-                "blue_numerical_invalid": "red",
-                "draw_both_numerical_invalid": "draw",
-                "timeout": None,
-            }
-            info.update(
-                winner=winners[self._event],
-                termination_reason=self._event)
+            info.update(event_semantics(self._event))
         return info
 
     @property
