@@ -3,5 +3,7 @@
 from .aircraft import AircraftSimulator
 from .env import AirCombat1v1Env
 from .pid import PIDLoop, PaperAutopilot
+from .paper_env import TAMPaperCombatEnv
 
-__all__ = ["AircraftSimulator", "AirCombat1v1Env", "PIDLoop", "PaperAutopilot"]
+__all__ = ["AircraftSimulator", "AirCombat1v1Env", "PIDLoop", "PaperAutopilot",
+           "TAMPaperCombatEnv"]
