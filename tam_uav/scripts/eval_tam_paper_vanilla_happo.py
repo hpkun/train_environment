@@ -14,6 +14,9 @@ from algorithms.happo.vanilla_happo_checkpoint import (
 from scripts.tam_output_paths import resolve_tam_output
 from scripts.vanilla_happo_runtime import (deterministic_evaluate, infer_policy,
                                            make_paper_env, seed_all)
+from uav_env.JSBSim.paper.protocol import (
+    NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL, protocol_metadata,
+    validate_nominal_protocol)
 
 
 def parse_args(argv=None):
@@ -27,15 +30,15 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=3026)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default="outputs/tam_paper_vanilla_happo/evaluation.json")
-    parser.add_argument("--perturbation", choices=("none", "low", "medium", "large"),
-                        default="none",
-                        help=("none: nominal Table 5-7 experiment; "
-                              "low/medium/large: 5v4 generalization experiment"))
+    parser.add_argument("--perturbation", choices=(NOMINAL_PERTURBATION,),
+                        default=NOMINAL_PERTURBATION,
+                        help="paper_nominal is fixed to the unperturbed Table 5-7 state")
     return parser.parse_args(argv)
 
 
 def main():
     args = parse_args()
+    validate_nominal_protocol(args.scenario, args.perturbation)
     import torch
     device = args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu"
     env = make_paper_env(
@@ -61,6 +64,8 @@ def main():
     result["algorithm_label"] = (metadata["algorithm_mode"] if metadata
                                  else "untrained_or_nonlearning_baseline")
     result["formal_happo"] = bool(metadata and metadata["actor_sharing"] == "independent")
+    result.update(protocol_metadata(
+        args.scenario, args.perturbation, "jsbsim", PAPER_NOMINAL_PROTOCOL))
     env.close()
     output = resolve_tam_output(ROOT, args.output, create_parent=True)
     output.write_text(json.dumps(result, indent=2), encoding="utf-8")

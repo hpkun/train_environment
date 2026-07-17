@@ -509,12 +509,17 @@ def test_output_path_guard_rejects_symlink_escape_when_supported(tmp_path):
 
 def test_independent_eval_perturbation_argument_and_zero_episode_skip_contract():
     assert parse_eval_args([]).perturbation == "none"
-    assert parse_eval_args(["--perturbation", "medium"]).perturbation == "medium"
+    with pytest.raises(SystemExit):
+        parse_eval_args(["--perturbation", "medium"])
     assert parse_train_args([]).evaluation_perturbation == "none"
+    with pytest.raises(SystemExit):
+        parse_train_args(["--evaluation-perturbation", "low"])
     assert parse_baseline_diagnosis_args([]).perturbation == "none"
+    with pytest.raises(SystemExit):
+        parse_baseline_diagnosis_args(["--perturbation", "large"])
     source = (Path(__file__).parents[1] /
               "scripts/eval_tam_paper_vanilla_happo.py").read_text()
-    assert "initial_perturbation=args.perturbation" in source
+    assert "validate_nominal_protocol" in source
     assert should_run_evaluation(1024, 4, 1024, 2048)
     assert not should_run_evaluation(1024, 0, 1024, 2048)
     assert not should_run_evaluation(0, 4, 2048, 2048)

@@ -10,6 +10,10 @@ import torch
 
 from algorithms.happo.vanilla_happo import VanillaHAPPOPolicy
 from uav_env.make_env import make_env
+from uav_env.JSBSim.paper.protocol import (
+    NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL,
+    PAPER_5V4_GENERALIZATION_PROTOCOL, validate_generalization_protocol,
+    validate_nominal_protocol)
 
 
 SCENARIOS = {"2v2": "tam_paper_env_v1_2v2.yaml",
@@ -26,10 +30,18 @@ def seed_all(seed):
 
 
 def make_paper_env(root: Path, scenario: str, *, initial_perturbation=None,
-                   dynamics_backend="jsbsim"):
+                   dynamics_backend="jsbsim",
+                   experiment_protocol=PAPER_NOMINAL_PROTOCOL):
+    perturbation = initial_perturbation or NOMINAL_PERTURBATION
+    if experiment_protocol == PAPER_NOMINAL_PROTOCOL:
+        validate_nominal_protocol(scenario, perturbation)
+    elif experiment_protocol == PAPER_5V4_GENERALIZATION_PROTOCOL:
+        validate_generalization_protocol(scenario, perturbation)
+    else:
+        raise ValueError(f"unknown paper experiment protocol {experiment_protocol!r}")
     kwargs = {"dynamics_backend": dynamics_backend}
-    if initial_perturbation is not None:
-        kwargs["initial_perturbation"] = initial_perturbation
+    kwargs.update({"initial_perturbation": perturbation, "scenario": scenario,
+                   "experiment_protocol": experiment_protocol})
     return make_env(str(root / "uav_env" / "JSBSim" / "configs" / SCENARIOS[scenario]),
                     **kwargs)
 
@@ -113,11 +125,16 @@ def stack_controlled_rule_actions(env):
     return np.stack(actions).astype(np.int64, copy=False)
 
 
-def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo"):
+def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo",
+                           episode_seeds=None):
     records = []
     rng = np.random.default_rng(seed)
+    seeds = list(episode_seeds) if episode_seeds is not None else [
+        seed + episode for episode in range(episodes)]
+    if len(seeds) != episodes:
+        raise ValueError("episode_seeds length must equal episodes")
     for episode in range(episodes):
-        obs, _ = env.reset(seed=seed + episode)
+        obs, _ = env.reset(seed=seeds[episode])
         returns = {aid: 0.0 for aid in env.agent_ids}
         tracker = _new_side_tracker()
         violations = 0
@@ -148,7 +165,8 @@ def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo"
         metrics = info["aircraft_metrics"]
         by_side = {side: [a for a in env.task.agents if a.side == side]
                    for side in ("red", "blue")}
-        record = {"winner": info["winner"], "termination_reason": info["termination_reason"],
+        record = {"episode_seed": seeds[episode],
+                  "winner": info["winner"], "termination_reason": info["termination_reason"],
                   "episode_steps": info["episode_step"],
                   "target_consistency_violations": violations, "finite": bool(finite),
                   "all_maximum_speed_mps": max(x["max_speed_mps"] for x in metrics.values()),
@@ -159,8 +177,7 @@ def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo"
             record.update({f"{side}_{key}": value for key, value in tracker[side].items()})
             record[f"{side}_maximum_speed_mps"] = max(x["max_speed_mps"] for x in side_metrics)
             record[f"{side}_maximum_load_g"] = max(x["max_abs_load_factor_g"] for x in side_metrics)
-            record[f"{side}_structural_failures"] = sum(
-                str(x["death_reason"]).startswith("structural_") for x in side_metrics)
+            record[f"{side}_structural_failures"] = 0
             record[f"{side}_crashes"] = sum(x["death_reason"] == "crash" for x in side_metrics)
             record[f"{side}_boundary"] = sum(x["death_reason"] == "boundary" for x in side_metrics)
             record[f"{side}_survival_rate"] = sum(a.alive for a in agents) / len(agents)
@@ -182,4 +199,10 @@ def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo"
     summary.update({"episodes": episodes,
                     "win_rate": float(np.mean([r["winner"] == "red" for r in records])),
                     "all_finite": all(r["finite"] for r in records)})
-    return {"baseline": baseline, "episodes_detail": records, "summary": summary}
+    metadata_keys = (
+        "environment_fidelity_revision", "experiment_protocol", "scenario",
+        "initial_perturbation", "dynamics_backend", "paper_nominal_experiment",
+        "paper_generalization_experiment", "paper_silent_assumptions_present")
+    return {"baseline": baseline, "episode_seeds": seeds,
+            "episodes_detail": records, "summary": summary} | {
+                key: env.task.last_info[key] for key in metadata_keys}

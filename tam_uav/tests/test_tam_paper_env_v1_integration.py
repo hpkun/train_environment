@@ -45,11 +45,25 @@ def test_close_range_launch_is_allowed_without_tactical_minimum_range():
     env.close()
 
 
+def test_coincident_position_does_not_launch():
+    env = _env()
+    env.reset(seed=111)
+    by_id = {a.agent_id: a for a in env.task.agents}
+    shooter, target = by_id["red_1"], by_id["blue_0"]
+    target.position = shooter.position.copy()
+    assert env.task.weapon.try_launch(shooter, target, True, 0.0) is None
+    env.close()
+
+
 def test_maximum_launch_range_and_interval_remain_enforced():
     env = _env()
     env.reset(seed=12)
     by_id = {a.agent_id: a for a in env.task.agents}
     shooter, target = by_id["red_1"], by_id["blue_0"]
+    target.position = shooter.position + np.array([14000.0, 0.0, 0.0])
+    assert env.task.weapon.try_launch(shooter, target, True, 0.0) is not None
+    shooter.missile_left += 1
+    env.task.weapon.last_launch_time_s.clear()
     target.position = shooter.position + np.array([14001.0, 0.0, 0.0])
     assert env.task.weapon.try_launch(shooter, target, True, 0.0) is None
     target.position = shooter.position + np.array([5000.0, 0.0, 0.0])
@@ -113,6 +127,18 @@ def test_info_contains_per_agent_reward_and_missile_accounting():
     assert set(info["missile_termination_reasons"]) == {
         "hit", "timeout", "target_dead", "nonfinite"
     }
+    assert info["environment_fidelity_revision"] == "published_rules_simplified_v2"
+    assert info["experiment_protocol"] == "paper_nominal"
+    assert info["initial_perturbation"] == "none"
+    assert info["paper_nominal_experiment"] is True
+    assert info["paper_generalization_experiment"] is False
+    for metrics in info["aircraft_metrics"].values():
+        assert "speed_limit_exceedance_count" in metrics
+        assert "overload_limit_exceedance_count" in metrics
+        assert metrics["speed_violation_count"] == metrics["speed_limit_exceedance_count"]
+        assert metrics["overload_violation_count"] == metrics["overload_limit_exceedance_count"]
+    assert info["structural_failures"] == 0
+    assert info["structural_failure_step"] == []
     env.close()
 
 

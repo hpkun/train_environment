@@ -24,6 +24,11 @@ from uav_env.JSBSim.paper.reward import PaperReward
 from uav_env.JSBSim.paper.weapon import PaperWeaponManager
 from uav_env.JSBSim.core.aircraft import JSBSimAircraftPlatform
 from uav_env.make_env import make_env
+from scripts.vanilla_happo_runtime import stack_controlled_rule_actions
+from uav_env.JSBSim.paper.protocol import (
+    ENVIRONMENT_FIDELITY_REVISION, GENERALIZATION_PERTURBATION_LEVELS,
+    NOMINAL_PERTURBATION, validate_generalization_protocol,
+    validate_nominal_protocol)
 
 
 CONFIG_NAMES = (
@@ -59,7 +64,8 @@ PARAMETER_CONSUMERS = {
 
 def _rule_actions(env) -> dict[str, np.ndarray]:
     env.prepare_decision_context()
-    return env.build_rule_actions(env.agent_ids)
+    stacked = stack_controlled_rule_actions(env)
+    return {aid: stacked[index] for index, aid in enumerate(env.agent_ids)}
 
 
 def rollout(config: Path, backend: str, steps: int, seed: int,
@@ -148,10 +154,10 @@ def rollout(config: Path, backend: str, steps: int, seed: int,
                 (item["max_speed_mps"] for item in metrics.values()), default=0.0),
             "maximum_abs_load_factor_g": max(
                 (item["max_abs_load_factor_g"] for item in metrics.values()), default=0.0),
-            "speed_violation_count": sum(
-                item["speed_violation_count"] for item in metrics.values()),
-            "overload_violation_count": sum(
-                item["overload_violation_count"] for item in metrics.values()),
+            "speed_limit_exceedance_count": sum(
+                item["speed_limit_exceedance_count"] for item in metrics.values()),
+            "overload_limit_exceedance_count": sum(
+                item["overload_limit_exceedance_count"] for item in metrics.values()),
             "finite": finite,
             "reward_components_finite": reward_components_finite,
             "target_consistency_violations": target_consistency_violations,
@@ -252,6 +258,10 @@ def main() -> int:
     config_dir = ROOT / "uav_env" / "JSBSim" / "configs"
     configs = [config_dir / name for name in CONFIG_NAMES]
     config = yaml.safe_load(configs[1].read_text(encoding="utf-8"))
+    for scenario in ("2v2", "3v2", "5v4"):
+        validate_nominal_protocol(scenario, NOMINAL_PERTURBATION)
+    for level in GENERALIZATION_PERTURBATION_LEVELS:
+        validate_generalization_protocol("5v4", level)
     environment_tests = ({"passed": False, "skipped": True}
                          if args.skip_tests else _run_pytest([
                              "tests/test_tam_paper_env_v1_contract.py",
@@ -328,6 +338,11 @@ def main() -> int:
         jsbsim_version = None
     report = {
         "formal_environment_mode": "tam_paper_env_v1",
+        "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+        "experiment_protocol_validation": {
+            "paper_nominal_none_only": True,
+            "paper_5v4_generalization_levels": list(GENERALIZATION_PERTURBATION_LEVELS),
+        },
         "runtime": {
             "requested_backend": args.backend,
             "actual_backend": "jsbsim" if real_jsbsim else "not_all_jsbsim",

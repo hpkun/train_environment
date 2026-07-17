@@ -19,6 +19,9 @@ from algorithms.happo.vanilla_happo_checkpoint import (load_vanilla_happo_checkp
 from scripts.vanilla_happo_runtime import (deterministic_evaluate, flattened_obs,
                                            infer_policy, make_paper_env, seed_all)
 from scripts.tam_output_paths import resolve_tam_output
+from uav_env.JSBSim.paper.protocol import (
+    NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL, protocol_metadata,
+    validate_nominal_protocol)
 
 
 def is_episode_boundary(terminated, truncated):
@@ -87,15 +90,15 @@ def parse_args(argv=None):
                    default="independent")
     p.add_argument("--hidden-dim", type=int, default=128)
     p.add_argument("--evaluation-seed-base", type=int, default=None)
-    p.add_argument("--evaluation-perturbation", choices=("none","low","medium","large"),
-                   default="none",
-                   help=("none: nominal Table 5-7 evaluation; "
-                         "low/medium/large: 5v4 generalization evaluation"))
+    p.add_argument("--evaluation-perturbation", choices=(NOMINAL_PERTURBATION,),
+                   default=NOMINAL_PERTURBATION,
+                   help="paper_nominal periodic evaluation is fixed to perturbation none")
     return p.parse_args(argv)
 
 
 def main():
     args = parse_args()
+    validate_nominal_protocol(args.scenario, args.evaluation_perturbation)
     device = torch.device(args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu")
     seed_all(args.seed)
     rng = np.random.default_rng(args.seed)
@@ -164,12 +167,11 @@ def main():
         "next_episode_reset_seed": next_episode_seed,
         "evaluation_seed_base": int(evaluation_seed_base),
         "evaluation_perturbation": args.evaluation_perturbation,
-        "evaluation_protocol": (
-            "fixed_seed_nominal" if args.evaluation_perturbation == "none"
-            else f"fixed_seed_{args.evaluation_perturbation}_generalization"),
+        "evaluation_protocol": "fixed_seed_nominal",
         "actor_sharing_label": ("formal_independent" if args.actor_sharing == "independent"
                                 else "parameter_sharing_ablation"),
-    }
+    } | protocol_metadata(
+        args.scenario, NOMINAL_PERTURBATION, "jsbsim", PAPER_NOMINAL_PROTOCOL)
     try:
         from torch.utils.tensorboard import SummaryWriter
         writer = SummaryWriter(output / "tensorboard")

@@ -37,12 +37,10 @@ class SimpleKinematicAircraftPlatform:
         self._geodetic = np.zeros(3, dtype=np.float32)
         self._direct_fcs_command = np.array([0.4, 0.0, 0.0, 0.0], dtype=np.float64)
         self.death_reason = None
-        self.speed_violation_time_s = 0.0
-        self.overload_violation_time_s = 0.0
         self.max_speed_observed_mps = self.speed
         self.max_abs_load_factor_g = 1.0
-        self.speed_violation_count = 0
-        self.overload_violation_count = 0
+        self.speed_limit_exceedance_count = 0
+        self.overload_limit_exceedance_count = 0
 
     def reset_runtime(self) -> None:
         self.alive = True
@@ -51,12 +49,10 @@ class SimpleKinematicAircraftPlatform:
         self.missile_left = self.aircraft_type.missile_num
         self.missile_cooldown = 0
         self.death_reason = None
-        self.speed_violation_time_s = 0.0
-        self.overload_violation_time_s = 0.0
         self.max_speed_observed_mps = self.speed
         self.max_abs_load_factor_g = 1.0
-        self.speed_violation_count = 0
-        self.overload_violation_count = 0
+        self.speed_limit_exceedance_count = 0
+        self.overload_limit_exceedance_count = 0
         self.launch_missiles.clear()
         self.under_missiles.clear()
 
@@ -149,7 +145,7 @@ class SimpleKinematicAircraftPlatform:
     def kill(self, reason: str = "killed") -> None:
         self.alive = False
         self.death_reason = reason
-        if reason in {"crash", "nonfinite", "structural_speed", "structural_overload"}:
+        if reason in {"crash", "nonfinite"}:
             self.crashed = True
         if reason == "boundary":
             self.out_of_boundary = True
@@ -157,6 +153,16 @@ class SimpleKinematicAircraftPlatform:
     @property
     def is_alive(self) -> bool:
         return self.alive
+
+    @property
+    def speed_violation_count(self) -> int:
+        """Deprecated alias for speed_limit_exceedance_count."""
+        return self.speed_limit_exceedance_count
+
+    @property
+    def overload_violation_count(self) -> int:
+        """Deprecated alias for overload_limit_exceedance_count."""
+        return self.overload_limit_exceedance_count
 
     @property
     def is_crash(self) -> bool:

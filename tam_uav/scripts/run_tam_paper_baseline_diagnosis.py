@@ -19,6 +19,9 @@ if str(ROOT) not in sys.path:
 from scripts.tam_output_paths import resolve_tam_output
 from scripts.vanilla_happo_runtime import (
     deterministic_evaluate, infer_policy, make_paper_env, seed_all)
+from uav_env.JSBSim.paper.protocol import (
+    NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL, protocol_metadata,
+    validate_nominal_protocol)
 
 
 BASELINES = ("neutral", "random", "rule", "untrained_happo")
@@ -29,10 +32,9 @@ def parse_args(argv=None):
     parser.add_argument("--scenario", choices=("2v2", "3v2", "5v4"), default="2v2")
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--seed", type=int, default=120000)
-    parser.add_argument("--perturbation", choices=("none", "low", "medium", "large"),
-                        default="none",
-                        help=("none: nominal Table 5-7 experiment; "
-                              "low/medium/large: 5v4 generalization experiment"))
+    parser.add_argument("--perturbation", choices=(NOMINAL_PERTURBATION,),
+                        default=NOMINAL_PERTURBATION,
+                        help="paper_nominal is fixed to perturbation none")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--output-directory",
@@ -105,6 +107,7 @@ def summary_text(summary):
 
 def main():
     args = parse_args()
+    validate_nominal_protocol(args.scenario, args.perturbation)
     if args.episodes <= 0:
         raise ValueError("--episodes must be positive")
     device = args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu"
@@ -124,7 +127,8 @@ def main():
                 env, policy, args.episodes, args.seed, baseline)
             result["scenario"] = args.scenario
             result["seed"] = args.seed
-            result["perturbation"] = args.perturbation
+            result.update(protocol_metadata(
+                args.scenario, args.perturbation, "jsbsim", PAPER_NOMINAL_PROTOCOL))
             (output / f"{baseline}.json").write_text(
                 json.dumps(result, indent=2), encoding="utf-8")
             results[baseline] = result
@@ -135,6 +139,8 @@ def main():
             if env is not None:
                 env.close()
     summary = {baseline: summarize(results[baseline]) for baseline in BASELINES}
+    summary["protocol_metadata"] = protocol_metadata(
+        args.scenario, args.perturbation, "jsbsim", PAPER_NOMINAL_PROTOCOL)
     (output / "baseline_summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8")
     (output / "baseline_summary.txt").write_text(

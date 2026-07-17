@@ -1,4 +1,4 @@
-"""Evaluate fixed or perturbed TAM paper environments (50 episodes per level by default)."""
+"""Evaluate one nominal TAM paper scenario with the rule baseline."""
 
 from __future__ import annotations
 
@@ -7,56 +7,45 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from uav_env.make_env import make_env
+from scripts.tam_output_paths import resolve_tam_output
+from scripts.vanilla_happo_runtime import deterministic_evaluate, make_paper_env
+from uav_env.JSBSim.paper.protocol import (
+    NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL, protocol_metadata,
+    validate_nominal_protocol)
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="uav_env/JSBSim/configs/tam_paper_env_v1_3v2.yaml")
-    parser.add_argument("--perturbation-levels", nargs="+",
-                        choices=("none", "low", "medium", "large"),
-                        default=["none", "low", "medium", "large"])
+    parser.add_argument("--scenario", choices=("2v2", "3v2", "5v4"), default="3v2")
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--backend", choices=("simple", "jsbsim"), default="jsbsim")
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--output", default="outputs/tam_paper_env_v1_evaluation.json")
-    args = parser.parse_args()
-    summaries = {}
-    for level_index, level in enumerate(args.perturbation_levels):
-        records = []
-        env = make_env(str(ROOT / args.config), dynamics_backend=args.backend,
-                       initial_perturbation=level)
-        for episode in range(args.episodes):
-            obs, info = env.reset(seed=args.seed + level_index * 10000 + episode)
-            while True:
-                env.prepare_decision_context()
-                actions = env.build_rule_actions(env.agent_ids)
-                obs, rewards, terminated, truncated, info = env.step(actions)
-                if all(terminated.values()) or all(truncated.values()):
-                    break
-            records.append({"winner": info["winner"], "steps": info["episode_step"],
-                            "missiles_fired": info["missiles_fired"],
-                            "missile_hits": info["missile_hits"],
-                            "finite": bool(np.isfinite(list(rewards.values())).all())})
+    return parser.parse_args(argv)
+
+
+def main():
+    args = parse_args()
+    if args.episodes <= 0:
+        raise ValueError("--episodes must be positive")
+    validate_nominal_protocol(args.scenario, NOMINAL_PERTURBATION)
+    env = make_paper_env(
+        ROOT, args.scenario, initial_perturbation=NOMINAL_PERTURBATION,
+        dynamics_backend=args.backend, experiment_protocol=PAPER_NOMINAL_PROTOCOL)
+    try:
+        result = deterministic_evaluate(
+            env, None, args.episodes, args.seed, baseline="rule")
+    finally:
         env.close()
-        summaries[level] = {
-            "episodes": len(records),
-            "red_win_rate": sum(r["winner"] == "red" for r in records) / len(records),
-            "mean_steps": float(np.mean([r["steps"] for r in records])),
-            "mean_missiles_fired": float(np.mean([r["missiles_fired"] for r in records])),
-            "mean_missile_hits": float(np.mean([r["missile_hits"] for r in records])),
-            "all_finite": all(r["finite"] for r in records),
-        }
-    output = ROOT / args.output
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(summaries, indent=2), encoding="utf-8")
-    print(json.dumps(summaries, indent=2))
+    result.update(protocol_metadata(
+        args.scenario, NOMINAL_PERTURBATION, args.backend, PAPER_NOMINAL_PROTOCOL))
+    output = resolve_tam_output(ROOT, args.output, create_parent=True)
+    output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

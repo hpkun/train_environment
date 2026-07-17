@@ -10,6 +10,10 @@ from .opponent import GreedyPaperOpponent
 from .reward import PaperReward
 from .situation import assess_pair, select_best_target
 from .weapon import PaperWeaponManager
+from .protocol import (
+    ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION,
+    PAPER_5V4_GENERALIZATION_PROTOCOL, PAPER_NOMINAL_PROTOCOL,
+    PAPER_SILENT_ASSUMPTIONS_PRESENT)
 
 
 class TAMPaperTask:
@@ -27,6 +31,14 @@ class TAMPaperTask:
         self.decision_dt = self.physics_frames * self.physics_dt
         self.episode_limit = int(self.published["episode_limit_steps"])
         self.controlled_side = "red"
+        self.scenario_name = str(config.get(
+            "scenario", f"{len(config['red_agents'])}v{len(config['blue_agents'])}"))
+        self.initial_perturbation = str(
+            config.get("initial_perturbation", NOMINAL_PERTURBATION))
+        self.experiment_protocol = str(config.get(
+            "experiment_protocol",
+            PAPER_NOMINAL_PROTOCOL if self.initial_perturbation == NOMINAL_PERTURBATION
+            else "pre_fidelity_diagnostic"))
         self.scenario = ScenarioBuilder(config)
         self.observation = PaperObservation(
             self.published, self.inferred,
@@ -157,7 +169,7 @@ class TAMPaperTask:
             commands[agent.agent_id] = self.map_action(indices)
 
         recorded_deaths = {aid for aid, alive in alive_at_start.items() if not alive}
-        out_step, crash_step, structural_step = set(), set(), set()
+        out_step, crash_step = set(), set()
         for physics_frame_index in range(self.physics_frames):
             for agent in self.agents:
                 if agent.alive:
@@ -165,10 +177,9 @@ class TAMPaperTask:
             for agent in self.agents:
                 if agent.alive:
                     agent.step_physics_once(self.physics_dt)
-            frame_out, frame_crash, frame_structural = self._apply_constraints_once()
+            frame_out, frame_crash = self._apply_constraints_once()
             out_step |= frame_out
             crash_step |= frame_crash
-            structural_step |= frame_structural
             frame_time = self.simulation_time_s + self.physics_dt
             self._record_new_deaths(
                 events, recorded_deaths, physics_frame_index, frame_time)
@@ -210,7 +221,8 @@ class TAMPaperTask:
             "event_ordering_consistent": self._event_ordering_consistent(events),
             "death_reason": {a.agent_id: a.death_reason for a in self.agents},
             "crash_step": sorted(crash_step), "out_of_zone_step": sorted(out_step),
-            "structural_failure_step": sorted(structural_step),
+            # Deprecated compatibility field; structural exceedances are diagnostic only.
+            "structural_failure_step": [],
             "low_altitude_violations": sorted(
                 a.agent_id for a in self.agents if a.alive and
                 a.position[2] < self.published["minimum_safe_altitude_m"]),
@@ -339,7 +351,7 @@ class TAMPaperTask:
         return idx is not None and obs[shooter.agent_id]["enemy_mask"][idx] > 0.5
 
     def _apply_constraints_once(self):
-        out_step, crash_step, structural_step = set(), set(), set()
+        out_step, crash_step = set(), set()
         radius = float(self.inferred["combat_zone_radius_m"])
         for agent in self.agents:
             if not agent.alive:
@@ -356,16 +368,10 @@ class TAMPaperTask:
                 self.out_of_zone += 1
                 continue
             if agent.speed > float(self.published["maximum_speed_mps"]):
-                agent.speed_violation_time_s += self.physics_dt
-                agent.speed_violation_count += 1
-            else:
-                agent.speed_violation_time_s = 0.0
+                agent.speed_limit_exceedance_count += 1
             if abs(agent.load_factor_g) > float(self.published["maximum_aircraft_overload_g"]):
-                agent.overload_violation_time_s += self.physics_dt
-                agent.overload_violation_count += 1
-            else:
-                agent.overload_violation_time_s = 0.0
-        return out_step, crash_step, structural_step
+                agent.overload_limit_exceedance_count += 1
+        return out_step, crash_step
 
     def _combat_units(self, side, alive_only=True):
         return [a for a in self.agents if a.side == side
@@ -374,6 +380,8 @@ class TAMPaperTask:
     def _termination(self):
         red_alive = self._combat_units("red")
         blue_alive = self._combat_units("blue")
+        if not red_alive and not blue_alive:
+            return True, False, "draw", "mutual_combat_units_eliminated"
         if not blue_alive:
             return True, False, "red", "blue_combat_units_eliminated"
         if not red_alive:
@@ -389,6 +397,15 @@ class TAMPaperTask:
         info = {
             "paper_environment_mode": "tam_paper_env_v1",
             "backend": self.scenario.dynamics_backend,
+            "dynamics_backend": self.scenario.dynamics_backend,
+            "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+            "experiment_protocol": self.experiment_protocol,
+            "scenario": self.scenario_name,
+            "initial_perturbation": self.initial_perturbation,
+            "paper_nominal_experiment": self.experiment_protocol == PAPER_NOMINAL_PROTOCOL,
+            "paper_generalization_experiment": (
+                self.experiment_protocol == PAPER_5V4_GENERALIZATION_PROTOCOL),
+            "paper_silent_assumptions_present": PAPER_SILENT_ASSUMPTIONS_PRESENT,
             "winner": winner, "termination_reason": reason,
             "red_alive": sum(a.alive for a in red), "blue_alive": sum(a.alive for a in blue),
             "red_combat_alive": len(self._combat_units("red")),
@@ -413,6 +430,8 @@ class TAMPaperTask:
             "aircraft_metrics": {a.agent_id: {
                 "max_speed_mps": a.max_speed_observed_mps,
                 "max_abs_load_factor_g": a.max_abs_load_factor_g,
+                "speed_limit_exceedance_count": a.speed_limit_exceedance_count,
+                "overload_limit_exceedance_count": a.overload_limit_exceedance_count,
                 "speed_violation_count": a.speed_violation_count,
                 "overload_violation_count": a.overload_violation_count,
                 "death_reason": a.death_reason,

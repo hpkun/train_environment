@@ -200,6 +200,7 @@ def test_speed_limit_is_diagnostic_only_and_does_not_kill():
     assert aircraft.alive
     assert aircraft.death_reason is None
     assert aircraft.speed_violation_count == 12
+    assert aircraft.speed_limit_exceedance_count == 12
     assert env.task.structural_failures == 0
     env.close()
 
@@ -214,6 +215,7 @@ def test_overload_limit_is_diagnostic_only_and_does_not_kill():
     assert aircraft.alive
     assert aircraft.death_reason is None
     assert aircraft.overload_violation_count == 12
+    assert aircraft.overload_limit_exceedance_count == 12
     assert env.task.structural_failures == 0
     env.close()
 
@@ -285,6 +287,17 @@ def test_combat_unit_termination_ignores_mav_count():
     for aircraft in red_uavs:
         aircraft.kill("shotdown")
     assert env.task._termination() == (True, False, "blue", "red_combat_units_eliminated")
+    env.close()
+
+
+def test_mutual_combat_unit_elimination_is_terminated_draw():
+    env = env_for()
+    env.reset(seed=60)
+    for aircraft in env.task.agents:
+        if aircraft.aircraft_type.role != "mav":
+            aircraft.kill("shotdown")
+    assert env.task._termination() == (
+        True, False, "draw", "mutual_combat_units_eliminated")
     env.close()
 
 
