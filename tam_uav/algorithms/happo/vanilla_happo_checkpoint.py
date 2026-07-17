@@ -54,19 +54,36 @@ def _validate_formal_config(config):
 def save_vanilla_happo_checkpoint(
         path, policy, trainer, *, environment_steps, episodes, config, numpy_rng,
         checkpoint_type="evaluation_weights", at_episode_boundary=False,
-        policy_version=None, seed_schedule=None, extra_metadata=None):
+        policy_version=None, seed_schedule=None, extra_metadata=None,
+        saved_at_update_boundary=False, discarded_partial_rollout_steps=0):
     _validate_formal_config(config)
-    if checkpoint_type not in {"evaluation_weights", "resumable"}:
-        raise ValueError("checkpoint_type must be evaluation_weights or resumable")
-    if checkpoint_type == "resumable" and not at_episode_boundary:
-        raise ValueError("resumable checkpoints require at_episode_boundary=true")
+    allowed = {"evaluation_weights", "resumable",
+               "exact_update_and_episode_boundary", "episode_boundary_restart"}
+    if checkpoint_type not in allowed:
+        raise ValueError(f"unsupported checkpoint_type {checkpoint_type!r}")
+    if checkpoint_type != "evaluation_weights" and not at_episode_boundary:
+        raise ValueError("training checkpoints require episode_boundary=true")
+    if (checkpoint_type == "exact_update_and_episode_boundary"
+            and not saved_at_update_boundary):
+        raise ValueError("exact checkpoint requires an update boundary")
+    if checkpoint_type == "exact_update_and_episode_boundary":
+        resume_semantics, exact_continuation = checkpoint_type, True
+    elif checkpoint_type == "episode_boundary_restart":
+        resume_semantics, exact_continuation = checkpoint_type, False
+    elif checkpoint_type == "resumable":  # Legacy v4 compatibility.
+        resume_semantics, exact_continuation = "episode_boundary", True
+    else:
+        resume_semantics, exact_continuation = "evaluation_only", False
     scenario = config.get("scenario")
     payload = {
         "format": FORMAT,
         "checkpoint_type": checkpoint_type,
         "at_episode_boundary": bool(at_episode_boundary),
-        "resume_semantics": ("episode_boundary" if checkpoint_type == "resumable"
-                             else "evaluation_only"),
+        "resume_semantics": resume_semantics,
+        "saved_at_episode_boundary": bool(at_episode_boundary),
+        "saved_at_update_boundary": bool(saved_at_update_boundary),
+        "discarded_partial_rollout_steps": int(discarded_partial_rollout_steps),
+        "exact_training_continuation": bool(exact_continuation),
         "algorithm_mode": trainer.algorithm_mode,
         **{key: config[key] for key in REQUIRED_ENVIRONMENT_FIELDS},
         "policy": policy.state_dict(),
@@ -133,12 +150,26 @@ def load_vanilla_happo_checkpoint(
         raise ValueError(
             "checkpoint paper_silent_assumptions_present must be explicitly True")
     if for_resume:
-        strict = (payload.get("checkpoint_type") == "resumable"
-                  and payload.get("at_episode_boundary") is True)
-        if not strict and not allow_episode_restart:
+        legacy_strict = (payload.get("checkpoint_type") == "resumable"
+                         and payload.get("at_episode_boundary") is True)
+        strict = (payload.get("checkpoint_type") ==
+                  "exact_update_and_episode_boundary"
+                  and payload.get("saved_at_episode_boundary") is True
+                  and payload.get("saved_at_update_boundary") is True
+                  and payload.get("exact_training_continuation") is True)
+        restart = (payload.get("checkpoint_type") == "episode_boundary_restart"
+                   and payload.get("saved_at_episode_boundary") is True)
+        legacy_restart = (payload.get("checkpoint_type") == "evaluation_weights"
+                          and allow_episode_restart)
+        if not (strict or legacy_strict) and not (
+                (restart and allow_episode_restart) or legacy_restart):
             raise ValueError(
-                "strict resume requires a resumable checkpoint saved at an episode boundary")
-        payload["resume_semantics"] = "episode_boundary" if strict else "episode_restart"
+                "strict resume requires an exact dual-boundary checkpoint or explicit "
+                "--allow-episode-restart-resume for episode_boundary_restart")
+        payload["resume_semantics"] = (
+            "exact_update_and_episode_boundary" if strict else
+            "episode_boundary" if legacy_strict else
+            "episode_boundary_restart" if restart else "episode_restart")
     expected = {
         "agent_ids": list(policy.agent_ids),
         "agent_roles": dict(policy.role_by_agent),

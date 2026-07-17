@@ -75,6 +75,7 @@ def trend_statistics(records, key, transform=None):
 
 def determine_verdict(runtime_valid, positive_training_trend,
                       positive_combat_trend, positive_deterministic_eval):
+    """Legacy telemetry-v1 helper retained for report compatibility tests."""
     if not runtime_valid:
         return "RUNTIME_INVALID"
     count = sum((positive_training_trend, positive_combat_trend,
@@ -84,6 +85,24 @@ def determine_verdict(runtime_valid, positive_training_trend,
     if count == 1:
         return "MIXED_OR_WEAK_EARLY_SIGNAL"
     return "NO_EARLY_SIGNAL_AT_102400_STEPS"
+
+
+def determine_robust_verdict(runtime_valid, panel_available, paired_mean,
+                             paired_ci_low, combat_improvement_count,
+                             exceeds_random, deterministic_not_degraded,
+                             auxiliary_positive=False):
+    if not runtime_valid:
+        return "RUNTIME_INVALID"
+    if not panel_available:
+        return "INSUFFICIENT_DATA"
+    robust = (paired_mean > 0 and paired_ci_low > 0
+              and combat_improvement_count >= 2 and exceeds_random
+              and deterministic_not_degraded)
+    if robust:
+        return "ROBUST_EARLY_LEARNING_SIGNAL"
+    if paired_mean > 0 or combat_improvement_count > 0 or auxiliary_positive:
+        return "MIXED_OR_WEAK_EARLY_SIGNAL"
+    return "NO_ROBUST_EARLY_SIGNAL_AT_102400_STEPS"
 
 
 def _evaluation_delta(reference, candidate):
@@ -138,6 +157,8 @@ def analyze_run(run_directory: Path) -> dict:
         "runtime_valid": runtime_valid,
     }
 
+    scenario_counts = {"2v2": (2, 2), "3v2": (3, 2), "5v4": (5, 4)}
+    red_initial, _blue_initial = scenario_counts[config.get("scenario", "2v2")]
     metrics = {
         "red_team_episode_return": ("red_team_episode_return", None),
         "red_win_rate": (None, lambda row: float(row.get("winner") == "red")),
@@ -147,9 +168,11 @@ def analyze_run(run_directory: Path) -> dict:
         "red_hit_rate": ("red_hit_rate", None),
         "red_missiles_fired": ("red_missiles_fired", None),
         "red_boundary_rate": (None, lambda row: (_number(
-            row.get("red_boundary_deaths")) or 0.0) / 2.0),
+            row.get("red_boundary_deaths")) or 0.0) / (
+                _number(row.get("red_initial_count")) or red_initial)),
         "red_crash_rate": (None, lambda row: (_number(
-            row.get("red_crashes")) or 0.0) / 2.0),
+            row.get("red_crashes")) or 0.0) / (
+                _number(row.get("red_initial_count")) or red_initial)),
     }
     trends = {name: trend_statistics(episodes, key, transform)
               for name, (key, transform) in metrics.items()}
@@ -180,11 +203,11 @@ def analyze_run(run_directory: Path) -> dict:
     explained = column_values("explained_variance/")
     actor_gradients = column_values("gradient_norm/")
     critic_gradients = column_values("critic_gradient_norm")
-    head_entropies = column_values("action_head_")
+    head_entropies = column_values("active_action_head_")
     distribution_peaks = []
     for row in training:
         for head in range(4):
-            raw = row.get(f"action_head_{head}_distribution")
+            raw = row.get(f"active_action_head_{head}_distribution")
             if raw:
                 distribution_peaks.append(max(json.loads(raw)))
     optimization = {
@@ -241,18 +264,83 @@ def analyze_run(run_directory: Path) -> dict:
             <= _number(step_zero["red_crashes"])
             for candidate in candidates)
 
-    insufficient = len(episodes) < 5 or len(evaluations) < 2
-    verdict = None if insufficient else determine_verdict(
-        runtime_valid, positive_training, positive_combat, positive_eval)
+    panel_path = run_directory / "robust_evaluation_v2" / "checkpoint_panel_summary.json"
+    panel = (json.loads(panel_path.read_text(encoding="utf-8"))
+             if panel_path.exists() else None)
+    if panel:
+        panel_peaks = [
+            max(distribution)
+            for item in panel["checkpoints"]
+            for head in range(4)
+            if (distribution := item.get(
+                f"active_action_head_{head}_distribution"))]
+        optimization["maximum_active_action_bin_probability"] = max(
+            panel_peaks, default=None)
+        optimization["active_action_distribution_completely_collapsed"] = bool(
+            panel_peaks and max(panel_peaks) >= 0.999)
+        optimization["action_collapse_source"] = "active_only_checkpoint_panel"
+    robust_evidence = None
+    if panel:
+        trained = [item for item in panel["checkpoints"]
+                   if int(item["environment_steps"]) > 0]
+        candidate = max(trained, key=lambda item: item["stochastic_mean_return"])
+        step_zero_panel = next(item for item in panel["checkpoints"]
+                               if int(item["environment_steps"]) == 0)
+        random_panel = panel["uniform_random"]
+        paired = candidate["paired_vs_step_0"]["return"]
+        combat_checks = {
+            "win_rate": candidate["win_rate"] > step_zero_panel["win_rate"],
+            "survival": candidate["red_survival_rate"] >
+                        step_zero_panel["red_survival_rate"],
+            "hit_rate": candidate["red_hit_rate"] > step_zero_panel["red_hit_rate"],
+            "crash_rate": candidate["red_crash_rate"] <
+                         step_zero_panel["red_crash_rate"],
+            "boundary_rate": candidate["red_boundary_rate"] <
+                            step_zero_panel["red_boundary_rate"],
+        }
+        deterministic_not_degraded = (
+            candidate["deterministic_red_crash_rate"] <=
+            step_zero_panel["deterministic_red_crash_rate"]
+            and candidate["deterministic_red_boundary_rate"] <=
+            step_zero_panel["deterministic_red_boundary_rate"])
+        robust_evidence = {
+            "candidate_environment_steps": candidate["environment_steps"],
+            "candidate_stochastic_mean_return": candidate["stochastic_mean_return"],
+            "step_0_stochastic_mean_return": step_zero_panel["stochastic_mean_return"],
+            "uniform_random_mean_return": random_panel["stochastic_mean_return"],
+            "paired_return": paired,
+            "combat_improvements": combat_checks,
+            "combat_improvement_count": sum(combat_checks.values()),
+            "exceeds_uniform_random": candidate["stochastic_mean_return"] >
+                                      random_panel["stochastic_mean_return"],
+            "deterministic_not_degraded": deterministic_not_degraded,
+            "deterministic_panel_disagreement": not deterministic_not_degraded,
+        }
+        verdict = determine_robust_verdict(
+            runtime_valid, True, paired["mean"], paired["bootstrap_ci95"][0],
+            robust_evidence["combat_improvement_count"],
+            robust_evidence["exceeds_uniform_random"],
+            deterministic_not_degraded,
+            auxiliary_positive=(positive_training or positive_combat))
+    else:
+        verdict = determine_robust_verdict(
+            runtime_valid, False, 0, 0, 0, False, False,
+            auxiliary_positive=(positive_training or positive_combat))
+    insufficient = len(episodes) < 5 or len(evaluations) < 2 or panel is None
+    if insufficient:
+        verdict = "INSUFFICIENT_DATA"
     status = "INSUFFICIENT_DATA" if insufficient else "COMPLETE"
     report = {
         "analysis_status": status,
         "run_directory": str(run_directory),
+        "training_code_generation": config.get(
+            "training_code_generation", "telemetry_v1"),
         "runtime_validity": runtime,
         "training_outcome_trends": trends,
         "deterministic_evaluation_progression": evaluation_progression,
         "optimization_health": optimization,
         "learnability_verdict": verdict,
+        "robust_panel_evidence": robust_evidence,
         "verdict_rule": {
             "positive_training_trend": positive_training,
             "positive_combat_trend": positive_combat,
@@ -260,9 +348,8 @@ def analyze_run(run_directory: Path) -> dict:
             "positive_deterministic_eval": positive_eval,
             "positive_category_count": sum(
                 (positive_training, positive_combat, positive_eval)),
-            "clear_requires": "runtime valid and at least two positive categories",
-            "mixed_requires": "runtime valid and exactly one positive category",
-            "no_signal_requires": "runtime valid and zero positive categories",
+            "robust_requires": "positive paired CI, two combat gains, beats random, deterministic not degraded",
+            "training_episode_trend_is_auxiliary_only": True,
             "runtime_invalid_overrides_learning_verdict": True,
         },
         "baseline_reference": baseline,
@@ -275,8 +362,9 @@ def analyze_run(run_directory: Path) -> dict:
     }
     if insufficient:
         report["insufficient_data_reason"] = (
-            f"requires at least 5 completed episodes and 2 evaluations; got "
-            f"{len(episodes)} episodes and {len(evaluations)} evaluations")
+            f"requires at least 5 completed episodes, 2 evaluations, and a "
+            f"checkpoint panel; got {len(episodes)} episodes, {len(evaluations)} "
+            f"evaluations, panel={panel is not None}")
     return report
 
 
@@ -306,6 +394,7 @@ def _markdown(report):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-directory", required=True)
+    parser.add_argument("--output-directory")
     return parser.parse_args(argv)
 
 
@@ -313,9 +402,15 @@ def main(argv=None):
     args = parse_args(argv)
     run_directory = resolve_tam_output(ROOT, args.run_directory)
     report = analyze_run(run_directory)
-    (run_directory / "learnability_report.json").write_text(
+    output = (resolve_tam_output(ROOT, args.output_directory)
+              if args.output_directory else
+              run_directory / "robust_evaluation_v2"
+              if (run_directory / "robust_evaluation_v2").exists()
+              else run_directory)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "learnability_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
-    (run_directory / "learnability_report.md").write_text(
+    (output / "learnability_report.md").write_text(
         _markdown(report), encoding="utf-8")
     print(json.dumps(report, indent=2))
     return 0

@@ -17,8 +17,9 @@ from algorithms.happo.vanilla_happo import (ParameterSharingPPOTrainer,
                                             VanillaHAPPOTrainer)
 from algorithms.happo.vanilla_happo_checkpoint import (load_vanilla_happo_checkpoint,
                                                        save_vanilla_happo_checkpoint)
-from scripts.vanilla_happo_runtime import (deterministic_evaluate, flattened_obs,
-                                           infer_policy, make_paper_env, seed_all)
+from scripts.vanilla_happo_runtime import (
+    active_action_statistics, deterministic_evaluate, flattened_obs,
+    infer_policy, make_paper_env, seed_all)
 from scripts.tam_output_paths import resolve_tam_output
 from scripts.tam_learnability_metrics import (
     RecordWriter, finish_episode, flatten_evaluation, start_episode,
@@ -38,7 +39,8 @@ def is_episode_boundary(terminated, truncated):
 
 
 def resume_seed_state(requested_seed, episodes, loaded):
-    if loaded.get("resume_semantics") == "episode_boundary":
+    if loaded.get("resume_semantics") in {
+            "episode_boundary", "exact_update_and_episode_boundary"}:
         schedule = loaded.get("seed_schedule") or {}
         if "episode_seed_base" not in schedule:
             raise ValueError("strict resume checkpoint is missing episode seed schedule")
@@ -262,6 +264,7 @@ def main():
         "evaluation_protocol": "fixed_seed_nominal",
         "requested_output_directory": args.output_directory,
         "actual_output_directory": str(output.relative_to(ROOT)),
+        "training_code_generation": "telemetry_v2_active_action_metrics",
         "actor_sharing_label": ("formal_independent" if args.actor_sharing == "independent"
                                 else "parameter_sharing_ablation"),
     } | protocol_metadata(
@@ -290,12 +293,24 @@ def main():
     best_checkpoint = None
     at_episode_boundary = False
 
-    def append_checkpoint_record(path, checkpoint_type, boundary, extra=None):
+    def append_checkpoint_record(path, checkpoint_type, boundary, extra=None,
+                                 update_boundary=False, discarded_steps=0):
+        if checkpoint_type == "exact_update_and_episode_boundary":
+            resume_semantics = checkpoint_type
+        elif checkpoint_type == "episode_boundary_restart":
+            resume_semantics = checkpoint_type
+        else:
+            resume_semantics = "evaluation_only"
         record = {
             "path": str(Path(path).relative_to(ROOT)),
             "checkpoint_type": checkpoint_type,
-            "resume_semantics": "episode_boundary" if boundary else "evaluation_only",
+            "resume_semantics": resume_semantics,
             "at_episode_boundary": bool(boundary),
+            "saved_at_episode_boundary": bool(boundary),
+            "saved_at_update_boundary": bool(update_boundary),
+            "discarded_partial_rollout_steps": int(discarded_steps),
+            "exact_training_continuation": bool(
+                checkpoint_type == "exact_update_and_episode_boundary"),
             "environment_steps": int(steps), "episodes": int(episodes),
             "policy_version": int(policy_version),
             "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
@@ -305,7 +320,8 @@ def main():
             handle.write(json.dumps(record) + "\n")
             handle.flush()
 
-    def save_checkpoint(path, checkpoint_type, boundary, extra_metadata=None):
+    def save_checkpoint(path, checkpoint_type, boundary, extra_metadata=None,
+                        update_boundary=False, discarded_steps=0):
         nonlocal current_checkpoint
         save_vanilla_happo_checkpoint(
             path, policy, trainer, environment_steps=steps, episodes=episodes,
@@ -314,9 +330,13 @@ def main():
             seed_schedule={"episode_seed_base": episode_seed_base,
                            "next_episode": episodes,
                            "next_episode_seed": episode_seed_base + episodes},
-            extra_metadata=extra_metadata)
+            extra_metadata=extra_metadata,
+            saved_at_update_boundary=update_boundary,
+            discarded_partial_rollout_steps=discarded_steps)
         current_checkpoint = str(Path(path).relative_to(ROOT))
-        append_checkpoint_record(path, checkpoint_type, boundary, extra_metadata)
+        append_checkpoint_record(
+            path, checkpoint_type, boundary, extra_metadata,
+            update_boundary, discarded_steps)
 
     try:
         # Step-0 evaluation and baseline references all use this exact policy object.
@@ -446,6 +466,11 @@ def main():
                     completed_records.append(episode_record)
                     episodes += 1; episode_id += 1
                     next_episode_seed = episode_seed_base + episodes
+                    save_checkpoint(
+                        output / "latest_episode_boundary_restart.pt",
+                        "episode_boundary_restart", True,
+                        update_boundary=False,
+                        discarded_steps=_local_step + 1)
                     obs, _ = env.reset(seed=next_episode_seed)
                     episode_accumulator = start_episode(
                         env, episodes, next_episode_seed, steps, policy_version)
@@ -554,13 +579,19 @@ def main():
                         denominator = sum(component_counts[aid] for aid in role_ids)
                         row[f"reward_component/role/{role}/{key}"] = (
                             numerator / max(denominator, 1))
+            active_stats = active_action_statistics(
+                actions_all, buffer.active_masks[:buffer.pos], action_levels=40)
+            row["active_action_sample_count"] = active_stats[
+                "active_action_sample_count"]
             for head in range(4):
-                counts = np.bincount(
-                    actions_all[..., head].reshape(-1), minlength=40)
-                probs = counts / max(counts.sum(), 1)
-                row[f"action_head_{head}_entropy"] = float(
-                    -(probs[probs > 0] * np.log(probs[probs > 0])).sum())
-                row[f"action_head_{head}_distribution"] = json.dumps(probs.tolist())
+                entropy = active_stats[f"active_action_head_{head}_entropy"]
+                distribution = active_stats[
+                    f"active_action_head_{head}_distribution"]
+                encoded = json.dumps(distribution) if distribution is not None else None
+                row[f"active_action_head_{head}_entropy"] = entropy
+                row[f"active_action_head_{head}_distribution"] = encoded
+                row[f"action_head_{head}_entropy"] = entropy
+                row[f"action_head_{head}_distribution"] = encoded
 
             invalid_reason = None
             numeric_result = [value for value in result.metrics.values()
@@ -631,17 +662,21 @@ def main():
                 raise RuntimeError(invalid_reason)
 
             at_episode_boundary = rollout_ended_at_episode_boundary
+            if at_episode_boundary:
+                save_checkpoint(
+                    output / "latest_exact_resumable.pt",
+                    "exact_update_and_episode_boundary", True,
+                    update_boundary=True, discarded_steps=0)
             if args.checkpoint_interval and (
                     steps % args.checkpoint_interval == 0
                     or steps == args.total_environment_steps):
-                checkpoint_type = (
-                    "resumable" if at_episode_boundary else "evaluation_weights")
-                save_checkpoint(output / f"checkpoint_{steps}.pt", checkpoint_type,
-                                at_episode_boundary)
+                save_checkpoint(
+                    output / f"checkpoint_{steps}.pt", "evaluation_weights", False,
+                    update_boundary=True)
 
         final_checkpoint = output / "checkpoint_final.pt"
-        final_type = "resumable" if at_episode_boundary else "evaluation_weights"
-        save_checkpoint(final_checkpoint, final_type, at_episode_boundary)
+        final_type = "evaluation_weights"
+        save_checkpoint(final_checkpoint, final_type, False, update_boundary=True)
         numeric_metrics = [value for row in rows for value in row.values()
                            if isinstance(value, (int, float, bool))]
         optimization_active = bool(

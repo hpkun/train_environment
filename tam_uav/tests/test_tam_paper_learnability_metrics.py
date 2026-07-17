@@ -124,7 +124,7 @@ def test_analyzer_reports_insufficient_data_without_episodes(tmp_path):
         (tmp_path / name).write_text("", encoding="utf-8")
     report = analyze_run(tmp_path)
     assert report["analysis_status"] == "INSUFFICIENT_DATA"
-    assert report["learnability_verdict"] is None
+    assert report["learnability_verdict"] == "INSUFFICIENT_DATA"
     assert "0 episodes" in report["insufficient_data_reason"]
 
 

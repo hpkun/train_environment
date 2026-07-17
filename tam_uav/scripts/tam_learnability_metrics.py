@@ -123,11 +123,16 @@ def finish_episode(accumulator: dict, env, info: dict,
         metrics = [info["aircraft_metrics"][agent.agent_id]
                    for agent in by_side[side]]
         record.update({
+            f"{side}_initial_count": int(
+                accumulator["initial_side_count"][side]),
+            f"{side}_initial_combat_count": int(
+                accumulator["initial_combat_count"][side]),
             f"{side}_survival_rate": _safe_rate(
                 survivors, accumulator["initial_side_count"][side]),
             f"{side}_combat_survival_rate": _safe_rate(
                 combat_survivors, accumulator["initial_combat_count"][side]),
             f"{side}_survivor_count": int(survivors),
+            f"{side}_combat_survivor_count": int(combat_survivors),
             f"{side}_missiles_fired": int(fired),
             f"{side}_hits": int(hits),
             f"{side}_hit_rate": _safe_rate(hits, fired),
@@ -185,14 +190,16 @@ def flatten_evaluation(result: dict, *, environment_steps: int,
         "episode_length": int(episode["episode_steps"]),
         "red_survival_rate": float(episode["red_survival_rate"]),
         "blue_survival_rate": float(episode["blue_survival_rate"]),
+        "red_combat_survival_rate": float(episode["red_combat_survival_rate"]),
+        "blue_combat_survival_rate": float(episode["blue_combat_survival_rate"]),
         "red_missiles_fired": int(episode["red_missiles_fired"]),
         "blue_missiles_fired": int(episode["blue_missiles_fired"]),
         "red_hits": int(episode["red_hits"]),
         "blue_hits": int(episode["blue_hits"]),
         "red_hit_rate": _safe_rate(episode["red_hits"], episode["red_missiles_fired"]),
         "blue_hit_rate": _safe_rate(episode["blue_hits"], episode["blue_missiles_fired"]),
-        "red_kills": int(round((1.0 - episode["blue_survival_rate"]) * 2)),
-        "blue_kills": int(round((1.0 - episode["red_survival_rate"]) * 2)),
+        "red_kills": int(episode["red_kills"]),
+        "blue_kills": int(episode["blue_kills"]),
         "red_boundary_deaths": int(episode["red_boundary"]),
         "blue_boundary_deaths": int(episode["blue_boundary"]),
         "red_crashes": int(episode["red_crashes"]),
@@ -212,6 +219,10 @@ def flatten_evaluation(result: dict, *, environment_steps: int,
         "evaluation_stage": evaluation_stage,
         "checkpoint": checkpoint,
     }
+    for side in ("red", "blue"):
+        for name in ("initial_count", "initial_combat_count", "survivor_count",
+                     "combat_survivor_count"):
+            row[f"{side}_{name}"] = int(episode[f"{side}_{name}"])
     for aid, value in episode["red_agent_returns"].items():
         row[f"agent_return/{aid}"] = float(value)
     for side in ("red", "blue"):
@@ -223,7 +234,7 @@ def flatten_evaluation(result: dict, *, environment_steps: int,
 
 def summarize_baseline(result: dict) -> dict:
     episodes = result["episodes_detail"]
-    return {
+    summary = {
         "baseline": result["baseline"],
         "episode_seeds": list(result["episode_seeds"]),
         "episodes": len(episodes),
@@ -246,16 +257,25 @@ def summarize_baseline(result: dict) -> dict:
         "blue_boundary_deaths": int(sum(item["blue_boundary"] for item in episodes)),
         "red_crashes": int(sum(item["red_crashes"] for item in episodes)),
         "blue_crashes": int(sum(item["blue_crashes"] for item in episodes)),
-        "first_detection_time_s/red": episodes[0]["red_first_detection_time_s"],
-        "first_detection_time_s/blue": episodes[0]["blue_first_detection_time_s"],
-        "first_launch_time_s/red": episodes[0]["red_first_launch_time_s"],
-        "first_launch_time_s/blue": episodes[0]["blue_first_launch_time_s"],
-        "first_hit_time_s/red": episodes[0]["red_first_hit_time_s"],
-        "first_hit_time_s/blue": episodes[0]["blue_first_hit_time_s"],
         "finite": bool(all(item["finite"] for item in episodes)),
         "target_consistency_violation": int(sum(
             item["target_consistency_violations"] for item in episodes)),
     }
+    timing_names = (
+        "first_detection_time_s", "first_attack_range_entry_s",
+        "first_launch_time_s", "first_hit_time_s", "target_switches")
+    for side in ("red", "blue"):
+        for name in timing_names:
+            values = [item[f"{side}_{name}"] for item in episodes
+                      if item.get(f"{side}_{name}") is not None]
+            numeric = np.asarray(values, dtype=float)
+            summary[f"{name}/{side}"] = {
+                "mean": float(numeric.mean()) if len(numeric) else None,
+                "std": float(numeric.std()) if len(numeric) else None,
+                "sample_count": int(len(numeric)),
+                "missing_count": int(len(episodes) - len(numeric)),
+            }
+    return summary
 
 
 def strictly_better_evaluation(best_return, candidate_return) -> bool:

@@ -30,6 +30,28 @@ def seed_all(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def active_action_statistics(actions, active_masks, action_levels=40):
+    """Return empirical action-head statistics for active samples only."""
+    actions = np.asarray(actions)
+    masks = np.asarray(active_masks, dtype=bool)
+    if actions.shape[:-1] != masks.shape or actions.shape[-1] != 4:
+        raise ValueError("actions must end in four heads and match active_masks")
+    active = actions[masks]
+    result = {"active_action_sample_count": int(active.shape[0])}
+    for head in range(4):
+        if active.shape[0] == 0:
+            entropy, distribution = None, None
+        else:
+            counts = np.bincount(active[:, head], minlength=action_levels)
+            distribution = counts.astype(float) / counts.sum()
+            positive = distribution[distribution > 0]
+            entropy = float(-(positive * np.log(positive)).sum())
+            distribution = distribution.tolist()
+        result[f"active_action_head_{head}_entropy"] = entropy
+        result[f"active_action_head_{head}_distribution"] = distribution
+    return result
+
+
 def make_paper_env(root: Path, scenario: str, *, initial_perturbation=None,
                    dynamics_backend="jsbsim",
                    experiment_protocol=PAPER_NOMINAL_PROTOCOL):
@@ -129,67 +151,134 @@ def stack_controlled_rule_actions(env):
     return np.stack(actions).astype(np.int64, copy=False)
 
 
-def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo",
-                           episode_seeds=None):
+def evaluate_policy_panel(
+        env, policy, episodes, environment_seed, baseline="trained_happo",
+        environment_seeds=None, policy_action_seeds=None, deterministic=True):
+    """Evaluate a policy panel while restoring all caller RNG states."""
     records = []
-    rng = np.random.default_rng(seed)
-    seeds = list(episode_seeds) if episode_seeds is not None else [
-        seed + episode for episode in range(episodes)]
-    if len(seeds) != episodes:
-        raise ValueError("episode_seeds length must equal episodes")
-    for episode in range(episodes):
-        obs, _ = env.reset(seed=seeds[episode])
-        returns = {aid: 0.0 for aid in env.agent_ids}
-        tracker = new_side_tracker()
-        violations = 0
-        finite = True
-        while True:
-            available = np.stack([env.get_avail_actions()[aid] for aid in env.agent_ids])
-            if baseline == "neutral":
-                actions = np.tile(np.array([24, 20, 20, 20]), (env.num_agents, 1))
-            elif baseline == "random":
-                actions = rng.integers(0, 40, size=(env.num_agents, 4))
-            elif baseline == "rule":
-                env.prepare_decision_context()
-                actions = stack_controlled_rule_actions(env)
-            else:
-                with torch.no_grad():
-                    actions = policy.act(flattened_obs(env, obs), env.get_state(),
-                                         available, deterministic=True)["actions"].cpu().numpy()
-            obs, rewards, terminated, truncated, info = env.step(
-                {aid: actions[i] for i, aid in enumerate(env.agent_ids)})
-            for aid in env.agent_ids:
-                returns[aid] += float(rewards[aid])
-            finite &= bool(np.isfinite(list(rewards.values())).all()
-                           and np.isfinite(env.get_state()).all())
-            update_side_timing(tracker, info, env.task.agents)
-            violations += len(info["target_consistency_violation"])
-            if all(terminated.values()) or all(truncated.values()):
-                break
-        metrics = info["aircraft_metrics"]
-        by_side = {side: [a for a in env.task.agents if a.side == side]
-                   for side in ("red", "blue")}
-        record = {"episode_seed": seeds[episode],
-                  "winner": info["winner"], "termination_reason": info["termination_reason"],
-                  "episode_steps": info["episode_step"],
-                  "target_consistency_violations": violations, "finite": bool(finite),
-                  "all_maximum_speed_mps": max(x["max_speed_mps"] for x in metrics.values()),
-                  "all_maximum_load_g": max(x["max_abs_load_factor_g"] for x in metrics.values())}
-        for side in ("red", "blue"):
-            agents = by_side[side]
-            side_metrics = [metrics[a.agent_id] for a in agents]
-            record.update({f"{side}_{key}": value for key, value in tracker[side].items()})
-            record[f"{side}_maximum_speed_mps"] = max(x["max_speed_mps"] for x in side_metrics)
-            record[f"{side}_maximum_load_g"] = max(x["max_abs_load_factor_g"] for x in side_metrics)
-            record[f"{side}_structural_failures"] = 0
-            record[f"{side}_crashes"] = sum(x["death_reason"] == "crash" for x in side_metrics)
-            record[f"{side}_boundary"] = sum(x["death_reason"] == "boundary" for x in side_metrics)
-            record[f"{side}_survival_rate"] = sum(a.alive for a in agents) / len(agents)
-        red_values = list(returns.values())
-        record["red_episode_return"] = float(sum(red_values))
-        record["red_agent_returns"] = returns
-        record["blue_episode_return"] = None  # Blue is rule-controlled and emits no policy reward.
-        records.append(record)
+    env_seeds = (list(environment_seeds) if environment_seeds is not None
+                 else [int(environment_seed)] * episodes)
+    action_seeds = (list(policy_action_seeds) if policy_action_seeds is not None
+                    else [int(environment_seed) + 100000 + i for i in range(episodes)])
+    if len(env_seeds) != episodes or len(action_seeds) != episodes:
+        raise ValueError("environment and policy seed lists must match episodes")
+    python_state, numpy_state = random.getstate(), np.random.get_state()
+    torch_cpu_state = torch.get_rng_state()
+    torch_cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        for episode in range(episodes):
+            obs, _ = env.reset(seed=env_seeds[episode])
+            seed_all(action_seeds[episode])
+            random_policy_rng = np.random.default_rng(action_seeds[episode])
+            returns = {aid: 0.0 for aid in env.agent_ids}
+            tracker, violations, finite = new_side_tracker(), 0, True
+            by_side = {side: [a for a in env.task.agents if a.side == side]
+                       for side in ("red", "blue")}
+            initial_count = {side: len(by_side[side]) for side in by_side}
+            initial_combat_count = {side: sum(
+                a.aircraft_type.role == "attack_uav" for a in by_side[side])
+                for side in by_side}
+            active_actions = []
+            while True:
+                available = np.stack(
+                    [env.get_avail_actions()[aid] for aid in env.agent_ids])
+                alive = np.asarray([next(
+                    a for a in env.task.agents if a.agent_id == aid).alive
+                    for aid in env.agent_ids], dtype=bool)
+                if baseline == "neutral":
+                    actions = np.tile(np.array([24, 20, 20, 20]),
+                                      (env.num_agents, 1))
+                elif baseline == "random":
+                    actions = random_policy_rng.integers(
+                        0, 40, size=(env.num_agents, 4))
+                elif baseline == "rule":
+                    env.prepare_decision_context()
+                    actions = stack_controlled_rule_actions(env)
+                else:
+                    with torch.no_grad():
+                        actions = policy.act(
+                            flattened_obs(env, obs), env.get_state(), available,
+                            deterministic=deterministic)["actions"].cpu().numpy()
+                active_actions.extend(np.asarray(actions)[alive].tolist())
+                obs, rewards, terminated, truncated, info = env.step(
+                    {aid: actions[i] for i, aid in enumerate(env.agent_ids)})
+                for aid in env.agent_ids:
+                    returns[aid] += float(rewards[aid])
+                finite &= bool(np.isfinite(list(rewards.values())).all()
+                               and np.isfinite(env.get_state()).all())
+                update_side_timing(tracker, info, env.task.agents)
+                violations += len(info["target_consistency_violation"])
+                if all(bool(terminated[aid] or truncated[aid])
+                       for aid in env.agent_ids):
+                    break
+            metrics = info["aircraft_metrics"]
+            record = {
+                "episode_seed": int(env_seeds[episode]),
+                "environment_seed": int(env_seeds[episode]),
+                "policy_action_seed": int(action_seeds[episode]),
+                "deterministic": bool(deterministic),
+                "winner": info["winner"],
+                "termination_reason": info["termination_reason"],
+                "episode_steps": int(info["episode_step"]),
+                "target_consistency_violations": int(violations),
+                "finite": bool(finite),
+                "all_maximum_speed_mps": max(
+                    x["max_speed_mps"] for x in metrics.values()),
+                "all_maximum_load_g": max(
+                    x["max_abs_load_factor_g"] for x in metrics.values()),
+            }
+            action_array = np.asarray(active_actions, dtype=np.int64).reshape(-1, 4)
+            action_stats = active_action_statistics(
+                action_array, np.ones(len(action_array), dtype=bool))
+            record.update(action_stats)
+            for side in ("red", "blue"):
+                agents = by_side[side]
+                combat = [a for a in agents
+                          if a.aircraft_type.role == "attack_uav"]
+                side_metrics = [metrics[a.agent_id] for a in agents]
+                survivors = sum(a.alive for a in agents)
+                combat_survivors = sum(a.alive for a in combat)
+                record.update({f"{side}_{key}": value
+                               for key, value in tracker[side].items()})
+                record[f"{side}_initial_count"] = initial_count[side]
+                record[f"{side}_initial_combat_count"] = initial_combat_count[side]
+                record[f"{side}_survivor_count"] = int(survivors)
+                record[f"{side}_combat_survivor_count"] = int(combat_survivors)
+                record[f"{side}_maximum_speed_mps"] = max(
+                    x["max_speed_mps"] for x in side_metrics)
+                record[f"{side}_maximum_load_g"] = max(
+                    x["max_abs_load_factor_g"] for x in side_metrics)
+                record[f"{side}_structural_failures"] = 0
+                record[f"{side}_crashes"] = sum(
+                    x["death_reason"] in {"crash", "nonfinite"}
+                    for x in side_metrics)
+                record[f"{side}_boundary"] = sum(
+                    x["death_reason"] == "boundary" for x in side_metrics)
+                record[f"{side}_survival_rate"] = (
+                    survivors / initial_count[side] if initial_count[side] else 0.0)
+                record[f"{side}_combat_survival_rate"] = (
+                    combat_survivors / initial_combat_count[side]
+                    if initial_combat_count[side] else 0.0)
+                record[f"{side}_kills"] = int(info["kills"][side])
+                record[f"{side}_hit_rate"] = (
+                    record[f"{side}_hits"] / record[f"{side}_missiles_fired"]
+                    if record[f"{side}_missiles_fired"] else 0.0)
+                record[f"{side}_crash_rate"] = (
+                    record[f"{side}_crashes"] / initial_count[side]
+                    if initial_count[side] else 0.0)
+                record[f"{side}_boundary_rate"] = (
+                    record[f"{side}_boundary"] / initial_count[side]
+                    if initial_count[side] else 0.0)
+            record["red_episode_return"] = float(sum(returns.values()))
+            record["red_agent_returns"] = returns
+            record["blue_episode_return"] = None
+            records.append(record)
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_cpu_state)
+        if torch.cuda.is_available() and torch_cuda_state is not None:
+            torch.cuda.set_rng_state_all(torch_cuda_state)
     numeric = sorted({key for record in records for key, value in record.items()
                       if isinstance(value, (int, float)) and not isinstance(value, bool)})
     summary = {}
@@ -210,6 +299,43 @@ def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo"
     metadata_keys += (
         "neutral_action_semantics", "blue_policy_fidelity",
         "reference_8_exact_blue_fsm_reproduced")
-    return {"baseline": baseline, "episode_seeds": seeds,
+    combined_actions = []
+    for record in records:
+        count = record["active_action_sample_count"]
+        if count:
+            # Reconstruct aggregate counts exactly from per-episode distributions.
+            combined_actions.append((count, [
+                record[f"active_action_head_{head}_distribution"]
+                for head in range(4)]))
+    active_summary = {"active_action_sample_count": int(sum(x[0] for x in combined_actions))}
+    for head in range(4):
+        if not combined_actions:
+            distribution, entropy = None, None
+        else:
+            total = active_summary["active_action_sample_count"]
+            distribution = (sum(count * np.asarray(distributions[head])
+                                for count, distributions in combined_actions) / total)
+            positive = distribution[distribution > 0]
+            entropy = float(-(positive * np.log(positive)).sum())
+            distribution = distribution.tolist()
+        active_summary[f"active_action_head_{head}_distribution"] = distribution
+        active_summary[f"active_action_head_{head}_entropy"] = entropy
+    summary.update(active_summary)
+    return {"baseline": baseline, "episode_seeds": env_seeds,
+            "environment_seeds": env_seeds,
+            "policy_action_seeds": action_seeds,
+            "deterministic": bool(deterministic),
             "episodes_detail": records, "summary": summary} | {
                 key: env.task.last_info[key] for key in metadata_keys}
+
+
+def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo",
+                           episode_seeds=None):
+    """Backward-compatible deterministic evaluator."""
+    seeds = list(episode_seeds) if episode_seeds is not None else [
+        seed + episode for episode in range(episodes)]
+    return evaluate_policy_panel(
+        env, policy, episodes, seed, baseline=baseline,
+        environment_seeds=seeds,
+        policy_action_seeds=[seed + 100000 + i for i in range(episodes)],
+        deterministic=True)
