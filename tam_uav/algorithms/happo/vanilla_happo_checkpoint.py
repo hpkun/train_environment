@@ -54,7 +54,7 @@ def _validate_formal_config(config):
 def save_vanilla_happo_checkpoint(
         path, policy, trainer, *, environment_steps, episodes, config, numpy_rng,
         checkpoint_type="evaluation_weights", at_episode_boundary=False,
-        policy_version=None, seed_schedule=None):
+        policy_version=None, seed_schedule=None, extra_metadata=None):
     _validate_formal_config(config)
     if checkpoint_type not in {"evaluation_weights", "resumable"}:
         raise ValueError("checkpoint_type must be evaluation_weights or resumable")
@@ -101,6 +101,12 @@ def save_vanilla_happo_checkpoint(
         "critic_architecture": "shared_centralized_backbone_independent_agent_heads",
         "critic_head_ids": list(policy.critic.heads.keys()),
     }
+    if extra_metadata:
+        collisions = set(extra_metadata) & set(payload)
+        if collisions:
+            raise ValueError(
+                f"extra checkpoint metadata collides with formal fields: {sorted(collisions)}")
+        payload.update(dict(extra_metadata))
     torch.save(payload, path)
     return payload
 

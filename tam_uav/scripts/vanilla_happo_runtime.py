@@ -96,12 +96,15 @@ def update_side_timing(tracker, info, agents):
                 tracker[side]["first_hit_time_s"] = event_time
 
 
-def _new_side_tracker():
+def new_side_tracker():
     return {side: {"first_detection_time_s": None,
                    "first_attack_range_entry_s": None,
                    "first_launch_time_s": None, "first_hit_time_s": None,
                    "target_switches": 0, "missiles_fired": 0, "hits": 0}
             for side in ("red", "blue")}
+
+
+_new_side_tracker = new_side_tracker  # Backward-compatible private alias.
 
 
 def stack_controlled_rule_actions(env):
@@ -137,7 +140,7 @@ def deterministic_evaluate(env, policy, episodes, seed, baseline="trained_happo"
     for episode in range(episodes):
         obs, _ = env.reset(seed=seeds[episode])
         returns = {aid: 0.0 for aid in env.agent_ids}
-        tracker = _new_side_tracker()
+        tracker = new_side_tracker()
         violations = 0
         finite = True
         while True:
