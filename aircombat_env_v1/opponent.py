@@ -19,10 +19,10 @@ MANOEUVRE_NAMES = (
 def height_reward(altitude_m):
     """Engineering approximation because the paper gives no height curve."""
     altitude = float(altitude_m)
-    if altitude <= 250.0:
+    if altitude < 750.0:
         return -1.0
     if altitude <= 6000.0:
-        return float(1.0 - ((6000.0 - altitude) / 5750.0) ** 2)
+        return float(1.0 - ((6000.0 - altitude) / 5250.0) ** 2)
     return float(np.clip(1.0 - ((altitude - 6000.0) / 4000.0) ** 2,
                          -1.0, 1.0))
 
@@ -95,17 +95,13 @@ def paper_structured_engineering_score(own_state, target_state, action):
         target_state["v_north"], target_state["v_east"],
         target_state["v_down"],
     ], dtype=float)
-    relative = np.array([
-        (target_state["v_north"] - own_state["v_north"]) * DECISION_DT,
-        (target_state["v_east"] - own_state["v_east"]) * DECISION_DT,
-        (target_state["v_down"] - own_state["v_down"]) * DECISION_DT,
-    ])
     # The current LOS is reconstructed from range/angles by the caller's
     # states only through geodetic conversion in combat; defer that import to
     # avoid a module cycle.
     from .combat import relative_geometry
     geometry = relative_geometry(own_state, target_state)
-    los = geometry["relative_ned"] + relative
+    # Candidate own velocity must be used here: r_next = r + (v_t-v_c)dt.
+    los = geometry["relative_ned"] + (target_velocity - velocity) * DECISION_DT
     predicted_altitude = own_state["altitude"] - velocity[2] * DECISION_DT
     ata, aa = _angle(velocity, los), _angle(target_velocity, los)
     score = (

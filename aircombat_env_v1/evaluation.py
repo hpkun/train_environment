@@ -1,113 +1,59 @@
-"""Evaluation policies and episode aggregation for the 1v1 environment."""
-
+"""Deterministic baseline and recurrent-policy evaluation."""
 from __future__ import annotations
-
 from collections import Counter
-
 import numpy as np
 import torch
-
 from .combat import pursuit_action
 from .env import AirCombat1v1Env
-from .ppo import deterministic_action, stochastic_action
 
 
-EVALUATION_MODES = (
-    ("fixed_tail_chase", "straight"),
-    ("randomized_tail_chase", "straight"),
-    ("offset_tail_chase", "straight"),
-    ("randomized_tail_chase", "pursuit"),
-)
+def record_event(counts,event):
+    mapping={"red_hit":"red_hits","blue_hit":"blue_hits","red_crash":"red_crashes",
+             "blue_crash":"blue_crashes","timeout":"timeouts"}
+    if event in mapping: counts[mapping[event]]+=1
+    elif "numerical_invalid" in str(event) or event=="physics_exception": counts["numerical_invalid"]+=1
+    else: counts["draws"]+=1
 
 
-def record_event(counts, event):
-    if event == "red_hit":
-        counts["red_hits"] += 1
-    elif event == "blue_hit":
-        counts["blue_hits"] += 1
-    elif event == "red_crash":
-        counts["red_crashes"] += 1
-    elif event == "blue_crash":
-        counts["blue_crashes"] += 1
-    elif event == "timeout":
-        counts["timeouts"] += 1
-    elif "numerical_invalid" in str(event) or event == "physics_exception":
-        counts["numerical_invalid"] += 1
-    else:
-        counts["draws"] += 1
-
-
-def evaluate_policy(policy, episodes=20, scenario="fixed_tail_chase",
-                    opponent="paper_greedy", seed=1, stochastic=False,
-                    actor=None, device="cpu"):
-    env = AirCombat1v1Env(
-        scenario_mode=scenario, opponent_policy=opponent, max_steps=1000)
-    rng = np.random.default_rng(seed)
-    counts = Counter()
-    returns, steps, distances, boresights = [], [], [], []
+def evaluate_policy(policy,episodes=20,scenario="paper_nominal_1v1",opponent="paper_greedy",
+                    seed=1,seeds=None,stochastic=False,actor=None,device="cpu"):
+    del stochastic
+    seeds=list(seeds) if seeds is not None else [seed+i for i in range(int(episodes))]
+    env=AirCombat1v1Env(scenario_mode=scenario,opponent_policy=opponent,max_steps=1000)
+    rng=np.random.default_rng(seed); counts=Counter(); returns=[]; lengths=[]; launches=[]; hit_times=[]; envelope=0
     try:
-        for episode in range(int(episodes)):
-            observation, _ = env.reset(seed=seed + episode)
-            episode_return = 0.0
-            final_info = {}
-            for step_index in range(env.max_steps):
-                if policy == "zero":
-                    action = np.zeros(3, dtype=np.float32)
-                elif policy == "random":
-                    action = rng.uniform(-1.0, 1.0, 3).astype(np.float32)
-                elif policy == "pursuit_rule":
-                    action = pursuit_action(env.red_state, env.blue_state)
-                elif policy == "ppo":
-                    if actor is None:
-                        raise ValueError("actor is required for PPO evaluation")
-                    tensor = torch.as_tensor(
-                        observation, dtype=torch.float32,
-                        device=device).unsqueeze(0)
-                    if stochastic:
-                        action_tensor, _ = stochastic_action(actor, tensor)
-                    else:
-                        action_tensor = deterministic_action(actor, tensor)
-                    action = action_tensor.squeeze(0).cpu().numpy()
-                else:
-                    raise ValueError(f"unknown policy: {policy}")
-                observation, reward, terminated, truncated, final_info = env.step(
-                    action)
-                episode_return += reward
-                if terminated or truncated:
-                    break
-            event = final_info.get("event", "timeout")
-            record_event(counts, event)
-            returns.append(episode_return)
-            steps.append(step_index + 1)
-            distances.append(float(final_info.get("distance_m", np.nan)))
-            boresights.append(float(
-                final_info.get("red_boresight_deg", np.nan)))
-    finally:
-        env.close()
-    result = {
-        "policy": policy,
-        "scenario": scenario,
-        "opponent": opponent,
-        "episodes": int(episodes),
-        "red_hits": counts["red_hits"],
-        "blue_hits": counts["blue_hits"],
-        "red_crashes": counts["red_crashes"],
-        "blue_crashes": counts["blue_crashes"],
-        "numerical_invalid": counts["numerical_invalid"],
-        "draws": counts["draws"],
-        "timeouts": counts["timeouts"],
-        "opponent_failures": counts["blue_crashes"],
-        "red_hit_rate": counts["red_hits"] / max(int(episodes), 1),
-        "blue_hit_rate": counts["blue_hits"] / max(int(episodes), 1),
-        "red_crash_rate": counts["red_crashes"] / max(int(episodes), 1),
-        "blue_crash_rate": counts["blue_crashes"] / max(int(episodes), 1),
-        "invalid_rate": counts["numerical_invalid"] / max(int(episodes), 1),
-        "timeout_rate": counts["timeouts"] / max(int(episodes), 1),
-        "mean_return": float(np.mean(returns)),
-        "mean_steps": float(np.mean(steps)),
-        "mean_final_distance": float(np.nanmean(distances)),
-        "mean_red_boresight_deg": float(np.nanmean(boresights)),
-    }
-    result["best_eligible"] = bool(
-        result["numerical_invalid"] == 0 and result["opponent_failures"] == 0)
+        for episode_seed in seeds:
+            obs,_=env.reset(seed=int(episode_seed)); total=0.; final={}
+            hidden=actor.initial_hidden(1,device) if actor is not None and hasattr(actor,"initial_hidden") else None
+            start=torch.ones(1,1,device=device)
+            for step in range(env.max_steps):
+                if policy in ("zero","zero_no_fire"):
+                    action={"maneuver":np.zeros(3,np.float32),"fire":0}
+                elif policy=="random":
+                    action={"maneuver":rng.uniform(-1,1,3).astype(np.float32),"fire":int(rng.integers(2))}
+                elif policy in ("pursuit_rule","pursuit_fire_rule"):
+                    action={"maneuver":pursuit_action(env.red_state,env.blue_state),"fire":1}
+                elif policy in ("ppo","recurrent_ppo"):
+                    if actor is None: raise ValueError("actor is required")
+                    with torch.no_grad():
+                        m,f,_,_,hidden=actor.act(torch.as_tensor(obs,dtype=torch.float32,device=device)[None],hidden,start,True)
+                    start.zero_(); action={"maneuver":m[0].cpu().numpy(),"fire":int(f[0].item())}
+                else: raise ValueError(f"unknown policy: {policy}")
+                obs,reward,terminated,truncated,final=env.step(action); total+=reward
+                if terminated or truncated: break
+            record_event(counts,final.get("event","timeout")); returns.append(total); lengths.append(step+1)
+            launches.append(final.get("red_launch_count",0)); envelope+=int(final.get("flight_envelope_violation",False))
+            if final.get("hit_time_s") is not None: hit_times.append(final["hit_time_s"])
+    finally: env.close()
+    n=max(len(seeds),1)
+    result={"policy":policy,"scenario":scenario,"opponent":opponent,"episodes":len(seeds),
+        **{k:counts[k] for k in ("red_hits","blue_hits","red_crashes","blue_crashes","numerical_invalid","draws","timeouts")},
+        "opponent_failures":counts["blue_crashes"],"red_missile_kill_rate":counts["red_hits"]/n,
+        "blue_missile_kill_rate":counts["blue_hits"]/n,"red_hit_rate":counts["red_hits"]/n,
+        "blue_hit_rate":counts["blue_hits"]/n,"red_crash_rate":counts["red_crashes"]/n,
+        "timeout_rate":counts["timeouts"]/n,"invalid_rate":counts["numerical_invalid"]/n,
+        "mean_return":float(np.mean(returns)),"mean_steps":float(np.mean(lengths)),
+        "mean_launch_count":float(np.mean(launches)),"mean_hit_time_s":float(np.mean(hit_times)) if hit_times else None,
+        "flight_envelope_violation_rate":envelope/n}
+    result["best_eligible"]=counts["numerical_invalid"]==0 and counts["blue_crashes"]==0
     return result

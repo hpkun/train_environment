@@ -1,93 +1,34 @@
 # aircombat_env_v1
 
-## 论文事实边界
+这是自包含的 JSBSim F-16 飞控与单智能体 1v1 导弹空战实验目录。飞控参数已冻结；正式环境保持 60 Hz JSBSim/PID 与 5 Hz 高层目标接口。
 
-| 分类 | 本目录中的内容 |
-|---|---|
-| `paper_explicit` | JSBSim 60 Hz；决策5 Hz；每次动作保持12个物理步；每回合1000个决策步；蓝方使用有限候选机动并在每个决策步按即时奖励贪心选择；UAV奖励结构为height、speed、angle、distance、dodge、event，训练权重为10、10、15、10、30；最低高度250 m、最大速度400 m/s、最大过载9 g；随机初始化采用各状态分量独立的有界均匀扰动。 |
-| `paper_unspecified_engineering` | 8个候选机动的具体3维动作值、0.2秒高层动作前视、当前PID目标接口、尾追初始条件、几何驻留命中、随机扰动幅度、观测归一化尺度、高度奖励近似、安全候选惩罚以及1000步dense奖励归一化。TAM仓库的speed/angle/distance函数和贪心候选结构被复制适配；其height函数本身明确是论文未定义近似。 |
-| `temporary_learnability_abstraction` | 3维目标俯仰/相对航向/目标速度动作；用几何攻击区代替真实导弹；单智能体PPO；1v1尾追课程。 |
+## 论文事实与项目假设
 
-`paper_greedy`来源结构为
-`tam_uav/uav_env/JSBSim/paper/opponent.py`，候选动作通过本目录现有
-`action_to_targets`接口执行。本目录不把单智能体MLP PPO称为TAM-HAPPO复现。
+- `paper_explicit`：最低飞行高度 750 m、最大速度 400 m/s、最大飞机过载 9 g；导弹最大攻击距离 14 km、发射间隔 25 s、最大过载 30 g、比例导引增益 `Ky=Kz=3`；奖励为 `10*r_height + 10*r_speed + 15*r_angle + 10*r_distance + 30*r_dodge + r_event`，击杀 `+200`、被击杀/坠毁 `-200`。
+- `engineering safety termination`：当前飞机在高度低于 1000 m 或速度低于 120 m/s 时结束回合。这不是论文的 750 m 飞行包线下限。
+- `paper_unspecified_project_assumption`：导弹初速 500 m/s、动力段 3 s、加速度 110 m/s²、命中半径 60 m、有效阻力 `0.00012/m`、寿命 56 s。工程锁定角为 10°，用于避免随机发射稳定获胜；这些都不是论文参数。
+- `paper_unspecified_project_assumption`：low/medium/high 初始扰动分别复用 `tam_paper_env_v1_2v2.yaml` 的三档有界均匀扰动；论文未给出这些具体幅度。
 
-红方奖励保持论文权重比例：
+名义场景 `paper_nominal_1v1` 取官方 TAM 2v2 配置的 `red_0` 与 `blue_0`：双方均为 F-16 攻击无人机、6000 m、250 m/s，位置 `(120.0, 60.0)` 与 `(120.0, 60.2)`，航向 0° 与 180°，各带两枚相同导弹。
 
-`10*r_height + 10*r_speed + 15*r_angle + 10*r_distance + r_event`，
+## 正式 1v1 接口
 
-当前没有导弹，因此`r_dodge=0`。事件奖励为命中`+200`、被命中或红方坠毁
-`-200`、draw/timeout/blue_crash/数值异常为0。`blue_crash`是
-`opponent_failure`，不是红方胜利，也不能参与best模型排序。几何命中只是
-`temporary_learnability_abstraction`。
+动作是 Gymnasium Dict：`maneuver: float32[3]`（目标俯仰、相对航向、目标速度）与 `fire: 0/1`。策略使用 SquashedNormal 连续头和 Bernoulli 发射头，联合 log-probability/entropy 为两头之和。
 
-20维观测的0至14维直接对应或等价表示论文Eq.13中的自身位置、速度、姿态、
-相对速度、相对高度、距离、ATA和AA；15至19维是当前1v1所需的相对NEU和双方
-攻击驻留。位置、相对量等具体归一化尺度属于工程值。
+观测为 26 维有限 `float32`：18 维 Eq.13 风格飞机/相对态势，加 8 维弹药量、冷却、来袭告警、距离、接近速度、LOS 角和剩余飞行时间。距离与相对位置按 14 km 归一化。正式胜负只由导弹命中、飞机坠毁、同时死亡、超时或数值异常决定，不使用旧几何驻留判杀。
 
-A standalone, repeatable JSBSim F-16 trim and PID experiment. The controller
-structure follows BRMA-MAPPO Section 2.4, but its numerical gains, trim biases,
-actuator signs, and acceptance thresholds are local engineering values—not
-paper parameters.
+蓝方采用 `paper_greedy` 有限候选机动与工程规则发射。规则要求目标存活、尚有弹药、冷却完成、距离不超过 14 km、锁定角内且同一目标没有在途友方导弹。
 
-Dependencies are `numpy`, `PyYAML`, `pymap3d`, `jsbsim`, `scipy`, and `pytest`.
-All commands below run from the repository root.
-
-## Required workflow
-
-```powershell
-python aircombat_env_v1/scripts/check_actuator_signs.py
-python aircombat_env_v1/scripts/find_trim.py
-python aircombat_env_v1/scripts/find_trim.py --accept
-python aircombat_env_v1/scripts/tune_pid.py
-python aircombat_env_v1/scripts/tune_pid.py --accept-candidate
-python aircombat_env_v1/scripts/tune_pid.py --pitch-integral-only --config path/to/candidate_config.yaml --joint-duration 90
-python aircombat_env_v1/scripts/validate_pid.py --mode quick
-python aircombat_env_v1/scripts/validate_pid.py --mode full
-python aircombat_env_v1/scripts/validate_pid.py --mode full --mark-validated
-```
-
-Inspect each generated output before using the corresponding accept flag.
-Parameter status progresses from `initial_guess` to `candidate`, then to
-`validated`. Quick mode runs eight representative 200-second health cases.
-Full mode runs the 72-case matrix plus those eight long cases.
-`--mark-validated` is rejected in quick mode and refuses to update the formal
-configuration unless full validation passes.
-
-Every closed-loop script uses the same 60 Hz physics/PID loop and 5 Hz command
-interface: one high-level command is held for 12 physics frames. In the
-combined task the interface is still called at 5 Hz, while deterministic target
-values change only every 3, 4, or 5 seconds.
-
-## Tests and smoke runs
+## 验证与实验
 
 ```powershell
 python -m pytest aircombat_env_v1/tests -q
 python -m pytest aircombat_env_v1/tests -q -m integration
-python aircombat_env_v1/scripts/check_actuator_signs.py --stabilization-duration 3
-python aircombat_env_v1/scripts/find_trim.py --duration 5 --grid-size 5
-python aircombat_env_v1/scripts/tune_pid.py --roll-duration 1 --pitch-duration 1 --speed-duration 1 --joint-duration 1 --maxiter 1 --popsize 2
-python aircombat_env_v1/scripts/validate_pid.py --mode quick --quick-duration 1
+python aircombat_env_v1/scripts/train_recurrent_ppo_1v1.py --total-steps 10000 --num-envs 4 --rollout-steps 128 --sequence-length 32 --eval-interval 5000 --seed 1
+python aircombat_env_v1/scripts/train_recurrent_ppo_1v1.py --total-steps 200000 --num-envs 8 --rollout-steps 256 --sequence-length 32 --eval-interval 10000 --seed 1
+python aircombat_env_v1/scripts/evaluate_recurrent_ppo_1v1.py --checkpoint path/to/best_nominal.pt --level low --output low.json
+python aircombat_env_v1/scripts/evaluate_recurrent_ppo_1v1.py --checkpoint path/to/best_nominal.pt --level medium --output medium.json
+python aircombat_env_v1/scripts/evaluate_recurrent_ppo_1v1.py --checkpoint path/to/best_nominal.pt --level high --output high.json
 ```
 
-Smoke outputs prove workflow execution only; they are not validated flight
-parameters. Timestamped artifacts are written under `aircombat_env_v1/outputs`
-and never overwrite prior runs. See `PID_DESIGN.md` for formulas, status rules,
-and metric definitions.
-
-## Minimal JSBSim 1v1 environment
-
-`AirCombat1v1Env` is a single-agent Gymnasium environment: external actions
-control red and an internal `straight` or pure-`pursuit` rule controls blue.
-The action is a three-vector for target pitch, relative heading, and speed;
-the observation is a clipped 16-vector. One environment step holds both
-commands for 12 interleaved 60 Hz JSBSim/PID frames.
-
-The fixed `tail_chase` scenario uses a geometric attack zone instead of
-missiles. This is intentionally only a learnability check, with no radar,
-weapons, rewards beyond the small geometric potential, or multi-agent API.
-
-```powershell
-python aircombat_env_v1/scripts/check_1v1_env.py
-python aircombat_env_v1/scripts/run_rule_1v1.py --episodes 5 --opponent straight
-```
+循环 PPO 的 Actor/Critic 都是 `Linear(128)-Tanh-GRU(128, 1 layer)`。rollout 保存两套隐藏状态与 episode-start mask，按长度 32 的连续序列更新，不把时间步随机展平。最佳名义模型只按固定名义种子集的导弹击杀率、被击杀率、命中时间和无效回合排序；扰动结果只作零样本评估。

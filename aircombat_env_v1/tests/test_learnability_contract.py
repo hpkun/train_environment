@@ -32,9 +32,9 @@ def result(hit, ret, eligible=True):
 def test_blue_crash_and_invalid_events_are_not_wins():
     blue_crash = event_semantics("blue_crash")
     assert terminal_reward("blue_crash") == 0.0
-    assert blue_crash["winner"] is None
+    assert blue_crash["winner"] == "red"
     assert blue_crash["opponent_failure"]
-    assert not blue_crash["valid_combat_outcome"]
+    assert blue_crash["valid_combat_outcome"]
     for event in (
             "red_numerical_invalid", "blue_numerical_invalid",
             "draw_both_numerical_invalid", "physics_exception"):

@@ -10,11 +10,11 @@ def test_vec_worker_short_run():
             num_envs=2, base_seed=3,
             env_kwargs={"max_steps": 2}, timeout=30.0) as env:
         observations, infos = env.reset()
-        assert observations.shape == (2, 20)
+        assert observations.shape == (2, 26)
         assert len(infos) == 2
         observations, rewards, terminated, truncated, infos = env.step(
             np.zeros((2, 3), dtype=np.float32))
-        assert observations.shape == (2, 20)
+        assert observations.shape == (2, 26)
         assert np.isfinite(rewards).all()
         observations, rewards, terminated, truncated, infos = env.step(
             np.zeros((2, 3), dtype=np.float32))
