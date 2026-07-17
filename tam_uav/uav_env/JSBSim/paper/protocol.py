@@ -3,14 +3,34 @@
 from __future__ import annotations
 
 
-ENVIRONMENT_FIDELITY_REVISION = "published_rules_simplified_v2"
+ENVIRONMENT_FIDELITY_REVISION = "published_rules_simplified_v3"
 NOMINAL_PERTURBATION = "none"
 GENERALIZATION_PERTURBATION_LEVELS = ("low", "medium", "large")
 GENERALIZATION_EPISODES_PER_LEVEL = 50
 PAPER_NOMINAL_PROTOCOL = "paper_nominal"
 PAPER_5V4_GENERALIZATION_PROTOCOL = "paper_5v4_generalization"
 PAPER_SILENT_ASSUMPTIONS_PRESENT = True
+TERMINATION_RESOLUTION = "decision_step_boundary"
 SCENARIOS = ("2v2", "3v2", "5v4")
+NOMINAL_ALTITUDE_M = 6000.0
+MAX_INCOMING_MISSILES = 8  # 4 opposing attack UAVs x 2 missiles.
+
+
+def derived_environment_values(maximum_attack_range_m: float) -> dict:
+    attack_range = float(maximum_attack_range_m)
+    return {
+        "uav_direct_detection_range_m": attack_range,
+        "mav_detection_range_m": 2.0 * attack_range,
+        "combat_zone_radius_m": 2.0 * attack_range,
+        "position_norm_m": 2.0 * attack_range,
+        "altitude_norm_m": NOMINAL_ALTITUDE_M,
+        "situation_height_norm_m": NOMINAL_ALTITUDE_M,
+        "max_incoming_missiles": MAX_INCOMING_MISSILES,
+        "mav_d_danger_m": 0.5 * attack_range,
+        "mav_d_safe_m": attack_range,
+        "mav_d_opt_m": attack_range,
+        "mav_d_max_m": 2.0 * attack_range,
+    }
 
 
 def validate_nominal_protocol(scenario: str, perturbation: str) -> None:
@@ -49,4 +69,19 @@ def protocol_metadata(scenario: str, perturbation: str, dynamics_backend: str,
         "paper_nominal_experiment": nominal,
         "paper_generalization_experiment": generalization,
         "paper_silent_assumptions_present": PAPER_SILENT_ASSUMPTIONS_PRESENT,
+        "termination_resolution": TERMINATION_RESOLUTION,
+    }
+
+
+def checkpoint_lineage(metadata: dict) -> dict:
+    """Return the stable checkpoint lineage fields used by result JSON files."""
+    return {
+        "checkpoint_environment_fidelity_revision": metadata.get(
+            "environment_fidelity_revision"),
+        "checkpoint_experiment_protocol": metadata.get("experiment_protocol"),
+        "checkpoint_initial_perturbation": metadata.get("initial_perturbation"),
+        "checkpoint_dynamics_backend": metadata.get("dynamics_backend"),
+        "checkpoint_environment_steps": metadata.get("environment_steps"),
+        "checkpoint_episodes": metadata.get("episodes"),
+        "checkpoint_algorithm_mode": metadata.get("algorithm_mode"),
     }

@@ -31,7 +31,12 @@ def wrapped_heading_error_deg(actual, expected):
 def check_scenario(scenario, seed=2026):
     config_path = ROOT / "uav_env" / "JSBSim" / "configs" / SCENARIOS[scenario]
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    configured = {item["id"]: item for item in config["red_agents"] + config["blue_agents"]}
+    configured = {
+        item["id"]: (item, side)
+        for side, entries in (("red", config["red_agents"]),
+                              ("blue", config["blue_agents"]))
+        for item in entries
+    }
     env = make_paper_env(
         ROOT, scenario, initial_perturbation=NOMINAL_PERTURBATION,
         dynamics_backend="jsbsim", experiment_protocol=PAPER_NOMINAL_PROTOCOL)
@@ -39,7 +44,9 @@ def check_scenario(scenario, seed=2026):
         env.reset(seed=seed)
         rows = []
         for agent in env.task.agents:
-            expected = configured[agent.agent_id]
+            expected, expected_side = configured[agent.agent_id]
+            expected_type = str(expected["type"])
+            expected_model = str(config["aircraft_type_params"][expected_type]["aircraft_model"])
             runtime = {
                 "longitude_deg": agent._get_property("position/long-gc-deg"),
                 "latitude_deg": agent._get_property("position/lat-geod-deg"),
@@ -59,13 +66,28 @@ def check_scenario(scenario, seed=2026):
             error["heading_deg"] = wrapped_heading_error_deg(
                 runtime["heading_deg"], expected_state["heading_deg"])
             rows.append({
-                "agent_id": agent.agent_id, "side": agent.side,
-                "role": agent.aircraft_type.role, "alive": agent.alive,
+                "agent_id": agent.agent_id,
+                "configured_side": expected_side, "runtime_side": agent.side,
+                "configured_role": expected["role"],
+                "runtime_role": agent.aircraft_type.role,
+                "configured_aircraft_type": expected_type,
+                "runtime_aircraft_type": agent.aircraft_type.name,
+                "configured_aircraft_model": expected_model,
+                "runtime_aircraft_model": agent.aircraft_type.aircraft_model,
+                "alive": agent.alive,
                 "missile_count": agent.missile_left,
                 "configured_initial_state": expected_state,
                 "runtime_initial_state": runtime,
                 "absolute_error": error,
-                "within_tolerance": all(error[key] <= TOLERANCE[key] for key in error),
+                "within_tolerance": (
+                    all(error[key] <= TOLERANCE[key] for key in error)
+                    and agent.side == expected_side
+                    and agent.aircraft_type.role == expected["role"]
+                    and agent.aircraft_type.name == expected_type
+                    and agent.aircraft_type.aircraft_model == expected_model
+                    and agent.alive
+                    and agent.missile_left == int(
+                        config["aircraft_type_params"][expected_type]["missile_num"])),
             })
         max_error = {key: max(row["absolute_error"][key] for row in rows)
                      for key in TOLERANCE}

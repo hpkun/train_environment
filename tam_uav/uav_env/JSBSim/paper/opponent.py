@@ -7,19 +7,17 @@ import numpy as np
 from .reward import (paper_height_reward, uav_angle_reward, uav_distance_reward,
                      uav_speed_reward)
 from .situation import assess_pair
+from .protocol import derived_environment_values
 
 
 MANOEUVRES = {
     "level": (24, 20, 20, 20),
-    "accelerate_level": (34, 20, 20, 20),
+    "accelerate": (34, 20, 20, 20),
+    "decelerate": (14, 20, 20, 20),
     "left_turn": (27, 10, 20, 14),
     "right_turn": (27, 29, 20, 25),
     "climb": (27, 20, 14, 20),
     "dive": (24, 20, 25, 20),
-    "left_climb": (27, 10, 14, 14),
-    "right_climb": (27, 29, 14, 25),
-    "left_dive": (25, 10, 25, 14),
-    "right_dive": (25, 29, 25, 25),
 }
 
 
@@ -32,11 +30,12 @@ def map_indices(indices) -> np.ndarray:
 
 
 class GreedyPaperOpponent:
-    """Argmax over ten 0.2 s predictions scored by the formal dense reward."""
+    """Minimal greedy basic-manoeuvre reconstruction with paper-silent prediction."""
 
     def __init__(self, published: dict, inferred: dict):
         self.published = published
         self.inferred = inferred
+        self.derived = derived_environment_values(published["maximum_attack_range_m"])
 
     def act(self, agent, current_target, incoming_missiles) -> tuple[np.ndarray, dict]:
         if not agent.alive or current_target is None or not current_target.alive:
@@ -55,11 +54,10 @@ class GreedyPaperOpponent:
             pair = assess_pair(position, velocity, predicted_target_position,
                                predicted_target_velocity,
                                self.published["maximum_attack_range_m"],
-                               self.inferred["situation_height_norm_m"],
+                               self.derived["situation_height_norm_m"],
                                self.published["maximum_speed_mps"])
             r_height = paper_height_reward(
-                position[2], self.published["minimum_safe_altitude_m"],
-                self.inferred["optimal_altitude_m"], self.inferred["maximum_altitude_m"])
+                position[2], self.published["minimum_safe_altitude_m"])
             r_speed = uav_speed_reward(speed, current_target.speed)
             r_angle = uav_angle_reward(pair.ata_rad, pair.aa_rad)
             r_distance = uav_distance_reward(pair.distance_m)

@@ -131,8 +131,10 @@ def test_uav_speed_angle_and_height_reward_boundaries():
     assert uav_speed_reward(200.0, 301.0) == pytest.approx(-1.0)
     assert uav_angle_reward(0.0, 0.0) == pytest.approx(1.0)
     assert uav_angle_reward(np.pi, 0.0) == pytest.approx(0.0)
-    assert paper_height_reward(750.0, 750.0, 6000.0, 12000.0) == pytest.approx(-1.0)
-    assert paper_height_reward(6000.0, 750.0, 6000.0, 12000.0) == pytest.approx(1.0)
+    assert paper_height_reward(0.0, 750.0) == pytest.approx(-1.0)
+    assert paper_height_reward(750.0, 750.0) == pytest.approx(0.0)
+    assert paper_height_reward(6000.0, 750.0) == pytest.approx(1.0)
+    assert paper_height_reward(12000.0, 750.0) == pytest.approx(1.0)
 
 
 def test_point_mass_missile_has_pn_limits_and_variable_speed():
@@ -141,12 +143,11 @@ def test_point_mass_missile_has_pn_limits_and_variable_speed():
         "navigation_gain_y": 3.0,
         "navigation_gain_z": 3.0,
         "maximum_overload_g": 30.0,
+        "maximum_attack_range_m": 14000.0,
         "missile_initial_speed_mps": 500.0,
-        "maximum_missile_speed_mps": 900.0,
         "powered_duration_s": 2.0,
         "powered_acceleration_mps2": 100.0,
         "effective_quadratic_drag_per_m": 1.0e-5,
-        "missile_max_flight_time_s": 60.0,
         "hit_radius_m": 30.0,
     }
     missile = PaperMissile("m1", "red_0", "blue_0", np.zeros(3),
@@ -159,6 +160,7 @@ def test_point_mass_missile_has_pn_limits_and_variable_speed():
         assert missile.commanded_overload_g <= 30.0 + 1e-6
     assert missile.navigation_gain_y == 3.0
     assert missile.navigation_gain_z == 3.0
+    assert missile.timeout_s == pytest.approx(56.0)
     assert max(speeds) - min(speeds) > 1e-3
 
 

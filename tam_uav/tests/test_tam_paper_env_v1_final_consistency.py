@@ -102,7 +102,7 @@ def test_aircraft_death_event_has_physics_order_metadata():
     env = env_for()
     env.reset(seed=103)
     agent = next(item for item in env.task.agents if item.agent_id == "red_1")
-    agent.position[0] = env.task.inferred["combat_zone_radius_m"] + 1000.0
+    agent.position[0] = env.task.derived["combat_zone_radius_m"] + 1000.0
     _, _, _, _, info = env.step(
         {aid: np.array([20, 20, 20, 20]) for aid in env.agent_ids})
     event = next(item for item in info["missile_events"]

@@ -12,7 +12,7 @@ from uav_env.JSBSim.paper.protocol import (
 
 
 def test_protocol_constants_and_nominal_validation():
-    assert ENVIRONMENT_FIDELITY_REVISION == "published_rules_simplified_v2"
+    assert ENVIRONMENT_FIDELITY_REVISION == "published_rules_simplified_v3"
     assert PAPER_NOMINAL_PROTOCOL == "paper_nominal"
     for scenario in ("2v2", "3v2", "5v4"):
         validate_nominal_protocol(scenario, "none")
@@ -34,6 +34,7 @@ def test_generalization_protocol_is_only_5v4_and_three_perturbations():
 def test_nominal_environment_cli_has_no_perturbation_argument():
     args = parse_nominal_env_args([])
     assert args.scenario == "3v2"
+    assert args.episodes == 1
     assert not hasattr(args, "perturbation")
     with pytest.raises(SystemExit):
         parse_nominal_env_args(["--perturbation-levels", "low"])

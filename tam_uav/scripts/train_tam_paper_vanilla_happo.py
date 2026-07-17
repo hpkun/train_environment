@@ -20,7 +20,8 @@ from scripts.vanilla_happo_runtime import (deterministic_evaluate, flattened_obs
                                            infer_policy, make_paper_env, seed_all)
 from scripts.tam_output_paths import resolve_tam_output
 from uav_env.JSBSim.paper.protocol import (
-    NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL, protocol_metadata,
+    ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL,
+    checkpoint_lineage, protocol_metadata,
     validate_nominal_protocol)
 
 
@@ -134,7 +135,11 @@ def main():
             resolve_tam_output(ROOT, args.resume_checkpoint), policy, trainer,
             numpy_rng=rng, for_resume=True,
             allow_episode_restart=args.allow_episode_restart_resume,
-            expected_scenario=args.scenario)
+            expected_scenario=args.scenario,
+            expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION,
+            expected_experiment_protocol=PAPER_NOMINAL_PROTOCOL,
+            expected_initial_perturbation=NOMINAL_PERTURBATION,
+            expected_dynamics_backend="jsbsim")
         steps, episodes = loaded["environment_steps"], loaded["episodes"]
         policy_version = trainer.update_count
         resumed_from_semantics = loaded["resume_semantics"]
@@ -159,6 +164,8 @@ def main():
         "critic_parameters": sum(p.numel() for p in policy.critic.parameters()),
         "uses_tam": False, "uses_recurrence": False, "uses_attention": False,
         "algorithm_mode": trainer.algorithm_mode,
+        "algorithm_label": ("vanilla_happo" if args.actor_sharing == "independent"
+                            else "parameter_sharing_ppo_ablation"),
         "reward_semantics": "heterogeneous_per_agent",
         "theoretical_team_reward_monotonic_guarantee_claimed": False,
         "resumed_from_semantics": resumed_from_semantics,
@@ -351,6 +358,11 @@ def main():
             latest_eval = deterministic_evaluate(eval_env, policy, args.evaluation_episodes,
                                                  evaluation_seed_base)
             eval_env.close()
+            latest_eval.update({
+                "evaluated_environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+                "evaluated_experiment_protocol": PAPER_NOMINAL_PROTOCOL,
+                "algorithm_label": snapshot["algorithm_label"],
+            })
             (output / f"evaluation_{steps}.json").write_text(
                 json.dumps(latest_eval, indent=2), encoding="utf-8")
     final_checkpoint = output / "checkpoint_final.pt"
@@ -387,7 +399,11 @@ def main():
                "HAPPO_RUNTIME_INVARIANTS_VALID": runtime_valid,
                "EARLY_PERFORMANCE_SIGNAL_OBSERVED": False,
                "early_performance_signal_reason": "insufficient_evaluation_samples",
-               "LEARNING_CONVERGENCE_NOT_VALIDATED": True}
+               "LEARNING_CONVERGENCE_NOT_VALIDATED": True,
+               "evaluated_environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+               "evaluated_experiment_protocol": PAPER_NOMINAL_PROTOCOL,
+               "algorithm_label": snapshot["algorithm_label"]} | checkpoint_lineage(
+                   snapshot | {"environment_steps": steps, "episodes": episodes})
     (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     writer.close(); env.close()
     return 0

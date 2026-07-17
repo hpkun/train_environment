@@ -1,4 +1,4 @@
-"""Evaluate a 5v4 vanilla-HAPPO checkpoint on the paper perturbation levels."""
+"""Evaluate a vanilla-HAPPO baseline checkpoint; this is not TAM-HAPPO."""
 
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ from scripts.vanilla_happo_runtime import deterministic_evaluate, infer_policy, 
 from uav_env.JSBSim.paper.protocol import (
     ENVIRONMENT_FIDELITY_REVISION, GENERALIZATION_EPISODES_PER_LEVEL,
     GENERALIZATION_PERTURBATION_LEVELS, PAPER_5V4_GENERALIZATION_PROTOCOL,
-    PAPER_SILENT_ASSUMPTIONS_PRESENT, validate_generalization_protocol)
+    PAPER_NOMINAL_PROTOCOL, PAPER_SILENT_ASSUMPTIONS_PRESENT, checkpoint_lineage,
+    validate_generalization_protocol)
 
 
 def parse_args(argv=None):
@@ -87,7 +88,11 @@ def main():
             if obs_dim != metadata["actor_obs_dim"] or state_dim != metadata["critic_state_dim"]:
                 raise ValueError("checkpoint dimensions do not match 5v4 environment")
             load_vanilla_happo_checkpoint(
-                checkpoint, policy, restore_rng=False, expected_scenario="5v4")
+                checkpoint, policy, restore_rng=False, expected_scenario="5v4",
+                expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION,
+                expected_experiment_protocol=PAPER_NOMINAL_PROTOCOL,
+                expected_initial_perturbation="none",
+                expected_dynamics_backend="jsbsim")
             episode_seeds = [
                 args.seed + level_index * 10000 + episode
                 for episode in range(args.episodes_per_level)]
@@ -110,8 +115,12 @@ def main():
         "paper_silent_assumptions_present": PAPER_SILENT_ASSUMPTIONS_PRESENT,
         "checkpoint": str(checkpoint.relative_to(ROOT)),
         "actor_sharing": metadata["actor_sharing"],
+        "algorithm_label": ("vanilla_happo" if metadata["actor_sharing"] == "independent"
+                            else "parameter_sharing_ppo_ablation"),
+        "evaluated_environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+        "evaluated_experiment_protocol": PAPER_5V4_GENERALIZATION_PROTOCOL,
         "levels": level_results,
-    }
+    } | checkpoint_lineage(metadata)
     output = resolve_tam_output(ROOT, args.output, create_parent=True)
     output.write_text(json.dumps(output_data, indent=2), encoding="utf-8")
     print(json.dumps(output_data, indent=2))

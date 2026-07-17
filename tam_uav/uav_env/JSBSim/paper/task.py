@@ -13,7 +13,8 @@ from .weapon import PaperWeaponManager
 from .protocol import (
     ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION,
     PAPER_5V4_GENERALIZATION_PROTOCOL, PAPER_NOMINAL_PROTOCOL,
-    PAPER_SILENT_ASSUMPTIONS_PRESENT)
+    PAPER_SILENT_ASSUMPTIONS_PRESENT, TERMINATION_RESOLUTION,
+    derived_environment_values)
 
 
 class TAMPaperTask:
@@ -21,6 +22,8 @@ class TAMPaperTask:
         self.config = config
         self.published = dict(config["published_parameters"])
         self.inferred = dict(config["inferred_parameters"])
+        self.derived = derived_environment_values(
+            self.published["maximum_attack_range_m"])
         self.simulation_frequency = int(self.published["simulation_frequency_hz"])
         self.physics_frames = int(self.published["physics_frames_per_action"])
         decision_frequency = float(self.published["decision_frequency_hz"])
@@ -127,7 +130,6 @@ class TAMPaperTask:
 
     def step(self, actions):
         context = self.prepare_decision_context()
-        pre_obs = context["pre_observation"]
         self.current_targets = dict(context["targets"])
         alive_at_start = {a.agent_id: a.alive for a in self.agents}
         self.weapon.begin_decision_step()
@@ -152,8 +154,7 @@ class TAMPaperTask:
             target_used_by_weapon[shooter.agent_id] = (
                 target.agent_id if target is not None else None)
             launch = self.weapon.try_launch(
-                shooter, target, self._target_visible(shooter, target, pre_obs),
-                self.simulation_time_s)
+                shooter, target, self.simulation_time_s)
             if launch:
                 events.append(self._stamp_event(
                     launch, physics_frame_index=-1,
@@ -316,7 +317,7 @@ class TAMPaperTask:
                         scores[target.agent_id] = assess_pair(
                             ego.position, ego.velocity, target.position, target.velocity,
                             self.published["maximum_attack_range_m"],
-                            self.inferred["situation_height_norm_m"],
+                            self.derived["situation_height_norm_m"],
                             self.published["maximum_speed_mps"])
             current = select_best_target(scores)
             self.current_targets[ego.agent_id] = current
@@ -339,20 +340,13 @@ class TAMPaperTask:
                 result[ego.agent_id][target.agent_id] = assess_pair(
                     ego.position, ego.velocity, target.position, target.velocity,
                     self.published["maximum_attack_range_m"],
-                    self.inferred["situation_height_norm_m"],
+                    self.derived["situation_height_norm_m"],
                     self.published["maximum_speed_mps"])
         return result
 
-    def _target_visible(self, shooter, target, obs):
-        if target is None:
-            return False
-        enemies = sorted([a for a in self.agents if a.side != shooter.side], key=lambda a: a.agent_id)
-        idx = next((i for i, a in enumerate(enemies) if a.agent_id == target.agent_id), None)
-        return idx is not None and obs[shooter.agent_id]["enemy_mask"][idx] > 0.5
-
     def _apply_constraints_once(self):
         out_step, crash_step = set(), set()
-        radius = float(self.inferred["combat_zone_radius_m"])
+        radius = float(self.derived["combat_zone_radius_m"])
         for agent in self.agents:
             if not agent.alive:
                 continue
@@ -406,6 +400,7 @@ class TAMPaperTask:
             "paper_generalization_experiment": (
                 self.experiment_protocol == PAPER_5V4_GENERALIZATION_PROTOCOL),
             "paper_silent_assumptions_present": PAPER_SILENT_ASSUMPTIONS_PRESENT,
+            "termination_resolution": TERMINATION_RESOLUTION,
             "winner": winner, "termination_reason": reason,
             "red_alive": sum(a.alive for a in red), "blue_alive": sum(a.alive for a in blue),
             "red_combat_alive": len(self._combat_units("red")),

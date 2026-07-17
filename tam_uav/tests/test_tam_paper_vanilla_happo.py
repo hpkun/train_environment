@@ -9,7 +9,20 @@ from algorithms.happo.vanilla_happo import (
     VanillaHAPPOPolicy, VanillaHAPPORolloutBuffer, VanillaHAPPOTrainer)
 from algorithms.happo.vanilla_happo_checkpoint import (
     load_vanilla_happo_checkpoint, save_vanilla_happo_checkpoint)
+from uav_env.JSBSim.paper.protocol import (
+    ENVIRONMENT_FIDELITY_REVISION, PAPER_NOMINAL_PROTOCOL)
 from uav_env.make_env import make_env
+
+
+def formal_checkpoint_config(scenario):
+    return {
+        "scenario": scenario,
+        "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+        "experiment_protocol": PAPER_NOMINAL_PROTOCOL,
+        "initial_perturbation": "none",
+        "dynamics_backend": "jsbsim",
+        "paper_silent_assumptions_present": True,
+    }
 
 
 def policy_for(agent_ids=("red_0", "red_1", "red_2"), obs_dim=12, state_dim=30):
@@ -154,7 +167,7 @@ def test_checkpoint_roundtrip_optimizer_rng_and_resume_step(tmp_path):
     path = tmp_path / "checkpoint.pt"
     saved = save_vanilla_happo_checkpoint(
         path, policy, trainer, environment_steps=123, episodes=4,
-        config={"scenario": "2v2"}, numpy_rng=rng,
+        config=formal_checkpoint_config("2v2"), numpy_rng=rng,
         checkpoint_type="resumable", at_episode_boundary=True)
     for parameter in policy.parameters():
         parameter.data.add_(1.0)
@@ -173,7 +186,8 @@ def test_checkpoint_rejects_wrong_scenario_dimensions(tmp_path):
     trainer = VanillaHAPPOTrainer(policy)
     path = tmp_path / "checkpoint.pt"
     save_vanilla_happo_checkpoint(path, policy, trainer, environment_steps=0,
-                                  episodes=0, config={}, numpy_rng=np.random.default_rng())
+                                  episodes=0, config=formal_checkpoint_config("2v2"),
+                                  numpy_rng=np.random.default_rng())
     wrong = policy_for(agent_ids=("red_0",), obs_dim=8, state_dim=9)
     with pytest.raises(ValueError, match="actor_obs_dim mismatch"):
         load_vanilla_happo_checkpoint(path, wrong, restore_rng=False)

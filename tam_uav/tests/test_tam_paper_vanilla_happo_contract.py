@@ -26,6 +26,20 @@ from scripts.eval_tam_paper_vanilla_happo import parse_args as parse_eval_args
 from scripts.run_tam_paper_baseline_diagnosis import (
     parse_args as parse_baseline_diagnosis_args)
 from scripts.train_tam_paper_vanilla_happo import parse_args as parse_train_args
+from scripts.inspect_tam_paper_checkpoint import inspect_checkpoint
+from uav_env.JSBSim.paper.protocol import (
+    ENVIRONMENT_FIDELITY_REVISION, PAPER_NOMINAL_PROTOCOL)
+
+
+def formal_checkpoint_config(scenario):
+    return {
+        "scenario": scenario,
+        "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+        "experiment_protocol": PAPER_NOMINAL_PROTOCOL,
+        "initial_perturbation": "none",
+        "dynamics_backend": "jsbsim",
+        "paper_silent_assumptions_present": True,
+    }
 
 
 def make_policy(n=3, hidden=16, sharing="independent"):
@@ -320,7 +334,7 @@ def test_checkpoint_requires_episode_boundary_for_resumable(tmp_path):
     with pytest.raises(ValueError, match="episode_boundary"):
         save_vanilla_happo_checkpoint(
             tmp_path / "x.pt", policy, trainer, environment_steps=2, episodes=0,
-            config={"scenario": "2v2"}, numpy_rng=np.random.default_rng(),
+            config=formal_checkpoint_config("2v2"), numpy_rng=np.random.default_rng(),
             checkpoint_type="resumable", at_episode_boundary=False)
 
 
@@ -328,7 +342,7 @@ def test_mid_episode_weights_rejected_for_strict_resume_and_explicit_restart_mar
     policy = make_policy(2); trainer = VanillaHAPPOTrainer(policy)
     path = tmp_path / "x.pt"
     save_vanilla_happo_checkpoint(path, policy, trainer, environment_steps=2, episodes=0,
-                                  config={"scenario": "2v2"},
+                                  config=formal_checkpoint_config("2v2"),
                                   numpy_rng=np.random.default_rng())
     with pytest.raises(ValueError, match="strict resume"):
         load_vanilla_happo_checkpoint(path, policy, trainer, for_resume=True)
@@ -346,7 +360,7 @@ def test_checkpoint_restores_next_order_permutations_optimizer_and_update(tmp_pa
     path = tmp_path / "resume.pt"
     save_vanilla_happo_checkpoint(
         path, policy, trainer, environment_steps=8, episodes=1,
-        config={"scenario": "3v2"}, numpy_rng=np.random.default_rng(19),
+        config=formal_checkpoint_config("3v2"), numpy_rng=np.random.default_rng(19),
         checkpoint_type="resumable", at_episode_boundary=True, policy_version=1,
         seed_schedule={"next_episode": 1})
     restored_policy = make_policy(3); restored = VanillaHAPPOTrainer(
@@ -370,7 +384,7 @@ def test_strict_resume_uses_checkpoint_seed_schedule_despite_different_requested
     path = tmp_path / "seed_resume.pt"
     save_vanilla_happo_checkpoint(
         path, policy, trainer, environment_steps=10, episodes=4,
-        config={"scenario": "2v2"}, numpy_rng=np.random.default_rng(11),
+        config=formal_checkpoint_config("2v2"), numpy_rng=np.random.default_rng(11),
         checkpoint_type="resumable", at_episode_boundary=True,
         seed_schedule={"episode_seed_base": 11, "next_episode": 4,
                        "next_episode_seed": 15})
@@ -388,7 +402,7 @@ def test_checkpoint_metadata_reconstructs_hidden_mode_heads_and_mappings(tmp_pat
     policy = make_policy(3, hidden=23); trainer = VanillaHAPPOTrainer(policy)
     path = tmp_path / "weights.pt"
     save_vanilla_happo_checkpoint(path, policy, trainer, environment_steps=0, episodes=0,
-                                  config={"scenario": "3v2"}, numpy_rng=np.random.default_rng())
+                                  config=formal_checkpoint_config("3v2"), numpy_rng=np.random.default_rng())
     metadata = read_vanilla_happo_checkpoint_metadata(path)
     assert metadata["hidden_dim"] == 23
     assert metadata["actor_sharing"] == "independent"
@@ -400,7 +414,7 @@ def test_five_agent_checkpoint_construction_has_five_actor_and_critic_mappings(t
     policy = make_policy(5); trainer = VanillaHAPPOTrainer(policy)
     path = tmp_path / "5v4.pt"
     save_vanilla_happo_checkpoint(path, policy, trainer, environment_steps=0, episodes=0,
-                                  config={"scenario": "5v4"}, numpy_rng=np.random.default_rng())
+                                  config=formal_checkpoint_config("5v4"), numpy_rng=np.random.default_rng())
     metadata = read_vanilla_happo_checkpoint_metadata(path)
     assert len(metadata["agent_actor_mapping"]) == 5
     assert len(metadata["agent_critic_mapping"]) == 5
@@ -418,10 +432,84 @@ def test_wrong_scenario_is_rejected(tmp_path):
     policy = make_policy(2); trainer = VanillaHAPPOTrainer(policy)
     path = tmp_path / "weights.pt"
     save_vanilla_happo_checkpoint(path, policy, trainer, environment_steps=0, episodes=0,
-                                  config={"scenario": "2v2"}, numpy_rng=np.random.default_rng())
+                                  config=formal_checkpoint_config("2v2"), numpy_rng=np.random.default_rng())
     with pytest.raises(ValueError, match="scenario mismatch"):
         load_vanilla_happo_checkpoint(
             path, policy, restore_rng=False, expected_scenario="3v2")
+
+
+def test_v3_checkpoint_top_level_lineage_and_formal_load(tmp_path):
+    policy = make_policy(2); trainer = VanillaHAPPOTrainer(policy)
+    path = tmp_path / "v3.pt"
+    config = formal_checkpoint_config("2v2")
+    save_vanilla_happo_checkpoint(
+        path, policy, trainer, environment_steps=12, episodes=3,
+        config=config, numpy_rng=np.random.default_rng())
+    metadata = read_vanilla_happo_checkpoint_metadata(path)
+    for key, value in config.items():
+        assert metadata[key] == value
+    loaded = load_vanilla_happo_checkpoint(
+        path, policy, restore_rng=False, expected_scenario="2v2",
+        expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION,
+        expected_experiment_protocol=PAPER_NOMINAL_PROTOCOL,
+        expected_initial_perturbation="none", expected_dynamics_backend="jsbsim")
+    assert loaded["environment_steps"] == 12
+    assert loaded["episodes"] == 3
+
+
+@pytest.mark.parametrize(("field", "value", "message"), [
+    ("environment_fidelity_revision", "published_rules_simplified_v2",
+     "environment_fidelity_revision mismatch"),
+    ("experiment_protocol", "paper_5v4_generalization", "experiment_protocol mismatch"),
+    ("initial_perturbation", "low", "initial_perturbation mismatch"),
+    ("dynamics_backend", "simple", "dynamics_backend mismatch"),
+])
+def test_formal_load_rejects_lineage_mismatch(tmp_path, field, value, message):
+    policy = make_policy(2); trainer = VanillaHAPPOTrainer(policy)
+    path = tmp_path / "bad.pt"
+    save_vanilla_happo_checkpoint(
+        path, policy, trainer, environment_steps=0, episodes=0,
+        config=formal_checkpoint_config("2v2"), numpy_rng=np.random.default_rng())
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload[field] = value
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match=message):
+        load_vanilla_happo_checkpoint(
+            path, policy, restore_rng=False,
+            expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION,
+            expected_experiment_protocol=PAPER_NOMINAL_PROTOCOL,
+            expected_initial_perturbation="none", expected_dynamics_backend="jsbsim")
+
+
+def test_missing_revision_is_pre_fidelity_and_inspect_is_read_only(tmp_path):
+    policy = make_policy(2); trainer = VanillaHAPPOTrainer(policy)
+    path = tmp_path / "legacy.pt"
+    save_vanilla_happo_checkpoint(
+        path, policy, trainer, environment_steps=0, episodes=0,
+        config=formal_checkpoint_config("2v2"), numpy_rng=np.random.default_rng())
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload.pop("environment_fidelity_revision")
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match="pre-fidelity"):
+        load_vanilla_happo_checkpoint(path, policy, restore_rng=False)
+    inspected = inspect_checkpoint(path)
+    assert inspected["pre_fidelity_checkpoint"] is True
+    assert inspected["formal_environment_compatible"] is False
+    assert any("environment_fidelity_revision" in reason
+               for reason in inspected["incompatibility_reasons"])
+
+
+def test_resume_and_formal_evaluators_require_v3_lineage_arguments():
+    train_source = (Path(__file__).parents[1] /
+                    "scripts/train_tam_paper_vanilla_happo.py").read_text()
+    nominal_source = (Path(__file__).parents[1] /
+                      "scripts/eval_tam_paper_vanilla_happo.py").read_text()
+    generalization_source = (Path(__file__).parents[1] /
+                             "scripts/eval_tam_paper_5v4_generalization.py").read_text()
+    for source in (train_source, nominal_source, generalization_source):
+        assert "expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION" in source
+        assert "expected_initial_perturbation" in source
+        assert "expected_dynamics_backend" in source
 
 
 def test_red_and_blue_detection_and_attack_times_are_separate():
@@ -509,6 +597,7 @@ def test_output_path_guard_rejects_symlink_escape_when_supported(tmp_path):
 
 def test_independent_eval_perturbation_argument_and_zero_episode_skip_contract():
     assert parse_eval_args([]).perturbation == "none"
+    assert parse_eval_args([]).episodes == 1
     with pytest.raises(SystemExit):
         parse_eval_args(["--perturbation", "medium"])
     assert parse_train_args([]).evaluation_perturbation == "none"

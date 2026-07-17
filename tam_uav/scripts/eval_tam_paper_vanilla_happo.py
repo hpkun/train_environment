@@ -15,7 +15,8 @@ from scripts.tam_output_paths import resolve_tam_output
 from scripts.vanilla_happo_runtime import (deterministic_evaluate, infer_policy,
                                            make_paper_env, seed_all)
 from uav_env.JSBSim.paper.protocol import (
-    NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL, protocol_metadata,
+    ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL,
+    checkpoint_lineage, protocol_metadata,
     validate_nominal_protocol)
 
 
@@ -26,7 +27,10 @@ def parse_args(argv=None):
                                                "untrained_happo", "trained_happo"),
                         default="trained_happo")
     parser.add_argument("--checkpoint")
-    parser.add_argument("--episodes", type=int, default=10)
+    parser.add_argument(
+        "--episodes", type=int, default=1,
+        help=("default 1 because nominal initial state and deterministic policies repeat "
+              "without other noise; set explicitly for additional episodes"))
     parser.add_argument("--seed", type=int, default=3026)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default="outputs/tam_paper_vanilla_happo/evaluation.json")
@@ -56,16 +60,28 @@ def main():
         if obs_dim != metadata["actor_obs_dim"] or state_dim != metadata["critic_state_dim"]:
             raise ValueError("checkpoint dimensions do not match evaluation environment")
         load_vanilla_happo_checkpoint(
-            checkpoint, policy, restore_rng=False, expected_scenario=args.scenario)
+            checkpoint, policy, restore_rng=False, expected_scenario=args.scenario,
+            expected_environment_fidelity_revision=ENVIRONMENT_FIDELITY_REVISION,
+            expected_experiment_protocol=PAPER_NOMINAL_PROTOCOL,
+            expected_initial_perturbation=NOMINAL_PERTURBATION,
+            expected_dynamics_backend="jsbsim")
     else:
         seed_all(args.seed)
         policy, _, _ = infer_policy(env, "independent", 128, device)
     result = deterministic_evaluate(env, policy, args.episodes, args.seed, args.baseline)
-    result["algorithm_label"] = (metadata["algorithm_mode"] if metadata
-                                 else "untrained_or_nonlearning_baseline")
+    result["algorithm_label"] = (
+        "vanilla_happo" if metadata and metadata["actor_sharing"] == "independent"
+        else "parameter_sharing_ppo_ablation" if metadata
+        else "untrained_or_nonlearning_baseline")
     result["formal_happo"] = bool(metadata and metadata["actor_sharing"] == "independent")
     result.update(protocol_metadata(
         args.scenario, args.perturbation, "jsbsim", PAPER_NOMINAL_PROTOCOL))
+    result.update(checkpoint_lineage(metadata or {}))
+    result["evaluated_environment_fidelity_revision"] = ENVIRONMENT_FIDELITY_REVISION
+    result["evaluated_experiment_protocol"] = PAPER_NOMINAL_PROTOCOL
+    result["checkpoint"] = (str(checkpoint.relative_to(ROOT)) if metadata else None)
+    if metadata:
+        result["actor_sharing"] = metadata["actor_sharing"]
     env.close()
     output = resolve_tam_output(ROOT, args.output, create_parent=True)
     output.write_text(json.dumps(result, indent=2), encoding="utf-8")

@@ -27,7 +27,7 @@ from uav_env.make_env import make_env
 from scripts.vanilla_happo_runtime import stack_controlled_rule_actions
 from uav_env.JSBSim.paper.protocol import (
     ENVIRONMENT_FIDELITY_REVISION, GENERALIZATION_PERTURBATION_LEVELS,
-    NOMINAL_PERTURBATION, validate_generalization_protocol,
+    NOMINAL_PERTURBATION, derived_environment_values, validate_generalization_protocol,
     validate_nominal_protocol)
 
 
@@ -57,8 +57,6 @@ PARAMETER_CONSUMERS = {
     "missile_length_m": "paper.missile published metadata only; not used in point-mass dynamics",
     "missile_diameter_m": "paper.missile published metadata only; not used in point-mass dynamics",
     "minimum_safe_altitude_m": "paper.reward",
-    "mav_detection_range_m": "core.aircraft_types",
-    "uav_direct_detection_range_m": "core.aircraft_types",
 }
 
 
@@ -356,6 +354,8 @@ def main() -> int:
             },
         },
         "config_consumption_table": _config_consumption(config),
+        "derived_environment_parameters": derived_environment_values(
+            config["published_parameters"]["maximum_attack_range_m"]),
         "missile_published_metadata": {
             key: config["published_parameters"][key] for key in (
                 "missile_mass_kg", "missile_length_m", "missile_diameter_m")

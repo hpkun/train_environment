@@ -26,12 +26,12 @@ def test_mav_is_unarmed_and_launch_interval_is_25_seconds():
     by_id = {a.agent_id: a for a in env.task.agents}
     shooter, target, mav = by_id["red_1"], by_id["blue_0"], by_id["red_0"]
     target.position = shooter.position + np.array([5000.0, 0.0, 0.0])
-    assert env.task.weapon.try_launch(mav, target, True, 0.0) is None
-    first = env.task.weapon.try_launch(shooter, target, True, 0.0)
+    assert env.task.weapon.try_launch(mav, target, 0.0) is None
+    first = env.task.weapon.try_launch(shooter, target, 0.0)
     assert first and first["reason"] == "launched"
     shooter.missile_left += 1
-    assert env.task.weapon.try_launch(shooter, target, True, 24.99) is None
-    assert env.task.weapon.try_launch(shooter, target, True, 25.0) is not None
+    assert env.task.weapon.try_launch(shooter, target, 24.99) is None
+    assert env.task.weapon.try_launch(shooter, target, 25.0) is not None
     env.close()
 
 
@@ -41,7 +41,7 @@ def test_close_range_launch_is_allowed_without_tactical_minimum_range():
     by_id = {a.agent_id: a for a in env.task.agents}
     shooter, target = by_id["red_1"], by_id["blue_0"]
     target.position = shooter.position + np.array([100.0, 0.0, 0.0])
-    assert env.task.weapon.try_launch(shooter, target, True, 0.0) is not None
+    assert env.task.weapon.try_launch(shooter, target, 0.0) is not None
     env.close()
 
 
@@ -51,7 +51,7 @@ def test_coincident_position_does_not_launch():
     by_id = {a.agent_id: a for a in env.task.agents}
     shooter, target = by_id["red_1"], by_id["blue_0"]
     target.position = shooter.position.copy()
-    assert env.task.weapon.try_launch(shooter, target, True, 0.0) is None
+    assert env.task.weapon.try_launch(shooter, target, 0.0) is None
     env.close()
 
 
@@ -61,15 +61,15 @@ def test_maximum_launch_range_and_interval_remain_enforced():
     by_id = {a.agent_id: a for a in env.task.agents}
     shooter, target = by_id["red_1"], by_id["blue_0"]
     target.position = shooter.position + np.array([14000.0, 0.0, 0.0])
-    assert env.task.weapon.try_launch(shooter, target, True, 0.0) is not None
+    assert env.task.weapon.try_launch(shooter, target, 0.0) is not None
     shooter.missile_left += 1
     env.task.weapon.last_launch_time_s.clear()
     target.position = shooter.position + np.array([14001.0, 0.0, 0.0])
-    assert env.task.weapon.try_launch(shooter, target, True, 0.0) is None
+    assert env.task.weapon.try_launch(shooter, target, 0.0) is None
     target.position = shooter.position + np.array([5000.0, 0.0, 0.0])
-    assert env.task.weapon.try_launch(shooter, target, True, 0.0) is not None
+    assert env.task.weapon.try_launch(shooter, target, 0.0) is not None
     shooter.missile_left += 1
-    assert env.task.weapon.try_launch(shooter, target, True, 24.99) is None
+    assert env.task.weapon.try_launch(shooter, target, 24.99) is None
     env.close()
 
 
@@ -127,7 +127,8 @@ def test_info_contains_per_agent_reward_and_missile_accounting():
     assert set(info["missile_termination_reasons"]) == {
         "hit", "timeout", "target_dead", "nonfinite"
     }
-    assert info["environment_fidelity_revision"] == "published_rules_simplified_v2"
+    assert info["environment_fidelity_revision"] == "published_rules_simplified_v3"
+    assert info["termination_resolution"] == "decision_step_boundary"
     assert info["experiment_protocol"] == "paper_nominal"
     assert info["initial_perturbation"] == "none"
     assert info["paper_nominal_experiment"] is True

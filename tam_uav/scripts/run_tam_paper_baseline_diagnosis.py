@@ -20,7 +20,7 @@ from scripts.tam_output_paths import resolve_tam_output
 from scripts.vanilla_happo_runtime import (
     deterministic_evaluate, infer_policy, make_paper_env, seed_all)
 from uav_env.JSBSim.paper.protocol import (
-    NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL, protocol_metadata,
+    ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL, protocol_metadata,
     validate_nominal_protocol)
 
 
@@ -129,6 +129,11 @@ def main():
             result["seed"] = args.seed
             result.update(protocol_metadata(
                 args.scenario, args.perturbation, "jsbsim", PAPER_NOMINAL_PROTOCOL))
+            result["evaluated_environment_fidelity_revision"] = ENVIRONMENT_FIDELITY_REVISION
+            result["evaluated_experiment_protocol"] = PAPER_NOMINAL_PROTOCOL
+            result["algorithm_label"] = (
+                "vanilla_happo" if baseline == "untrained_happo"
+                else f"{baseline}_baseline")
             (output / f"{baseline}.json").write_text(
                 json.dumps(result, indent=2), encoding="utf-8")
             results[baseline] = result

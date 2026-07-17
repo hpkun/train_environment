@@ -243,10 +243,10 @@ def test_reselected_target_is_shared_by_launch_and_reward(monkeypatch):
     launched = {}
     original_launch = env.task.weapon.try_launch
 
-    def capture_launch(shooter, target, visible, simulation_time_s):
+    def capture_launch(shooter, target, simulation_time_s):
         if shooter.agent_id == ego.agent_id:
             launched[shooter.agent_id] = target.agent_id
-        return original_launch(shooter, target, visible, simulation_time_s)
+        return original_launch(shooter, target, simulation_time_s)
 
     monkeypatch.setattr(env.task.weapon, "try_launch", capture_launch)
     _, _, _, _, info = env.step(
@@ -321,7 +321,7 @@ def test_episode_limit_step_returns_truncated_draw_for_all_controlled_agents(mon
     red_uavs[0].kill("shotdown")
     env.task.step_count = env.task.episode_limit - 1
     monkeypatch.setattr(env.task.weapon, "try_launch",
-                        lambda shooter, target, visible, simulation_time_s: None)
+                        lambda shooter, target, simulation_time_s: None)
     actions = {aid: np.array([20, 20, 20, 20]) for aid in env.agent_ids}
     _, _, terminated, truncated, info = env.step(actions)
     assert terminated[red_uavs[0].agent_id]

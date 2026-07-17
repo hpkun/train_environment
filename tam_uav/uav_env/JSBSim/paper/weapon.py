@@ -31,9 +31,9 @@ class PaperWeaponManager:
         for missile in self.missiles:
             missile.mark_decision_start()
 
-    def try_launch(self, shooter, target, visible: bool, simulation_time_s: float) -> dict | None:
+    def try_launch(self, shooter, target, simulation_time_s: float) -> dict | None:
         if (not shooter.alive or shooter.aircraft_type.role == "mav"
-                or shooter.missile_left <= 0 or target is None or not target.alive or not visible):
+                or shooter.missile_left <= 0 or target is None or not target.alive):
             return None
         distance = float(np.linalg.norm(target.position - shooter.position))
         if distance <= COINCIDENT_POSITION_EPSILON_M:

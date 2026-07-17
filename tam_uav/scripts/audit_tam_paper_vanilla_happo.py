@@ -14,16 +14,16 @@ if str(ROOT) not in sys.path:
 
 ENVIRONMENT_HASHES = {
     "uav_env/JSBSim/paper/env.py": "9a9ae99738ba9a8ea8fefeef99f941c345fb96e5c41eb4e4492cc347c8f884ba",
-    "uav_env/JSBSim/paper/task.py": "60c06a9ce6035210d84cdfbf40eb4c039ac5077571194734a6a0e6b3b345749a",
-    "uav_env/JSBSim/paper/reward.py": "8f06d7f3279c016cb82d1e790e866ca1f07aabcd2934e5f5180f25d4f2a86a80",
-    "uav_env/JSBSim/paper/observation.py": "92b76c39b443e7849fcb34f005c5494a33ee9158338276f86c603431a35fd7af",
-    "uav_env/JSBSim/paper/missile.py": "84524ddb491a89ba482db9d84ad5f1240c8d272f65ceaee690b5784803451638",
-    "uav_env/JSBSim/paper/weapon.py": "45cb936eebc53bdfeb147fb5fe73de9e6bfa71587ab15b6af8b3a6710a0a737c",
-    "uav_env/JSBSim/paper/protocol.py": "bb5462d7da563a6c75a87dea908282a6fc0f20903c3efb85b9f36f4f3fcc1699",
+    "uav_env/JSBSim/paper/task.py": "9f3a56b76387ea9d4707e73df9d3d62e4c5f977f15d42e1452349931f06c8270",
+    "uav_env/JSBSim/paper/reward.py": "2db4aa290d652340faccbc8651acf148531d8eca6794785d63cc54442a739218",
+    "uav_env/JSBSim/paper/observation.py": "50910f7e715b3d4197b20f72fef61601f3061178f8093eb43b2790a7bb36054a",
+    "uav_env/JSBSim/paper/missile.py": "1ef8261909a5355a666b46d9b1afe9cb378bed953ae7c2b84da06d98f424f533",
+    "uav_env/JSBSim/paper/weapon.py": "4155f26ddcfaf76ad9f4314275ef6c4af4a8966e127cce2f4e2ea31fc5b3fcf1",
+    "uav_env/JSBSim/paper/protocol.py": "58fcc78ec4de759d08ca75d6f85446648d9cf74d8f2565593dd000af27ea4175",
     "uav_env/JSBSim/core/aircraft.py": "4da145ebd6fe478d1f25ae24ee507cb6427a413ec0549a7d939e1d95ead138bf",
-    "uav_env/JSBSim/configs/tam_paper_env_v1_2v2.yaml": "595653b8197cff513c044055966febca1d2c2997ae1c4cb6d8579ef68294df94",
-    "uav_env/JSBSim/configs/tam_paper_env_v1_3v2.yaml": "eebc364c006017624efc60b2e0480964ccd848b820c9cbd20103a69f4434734b",
-    "uav_env/JSBSim/configs/tam_paper_env_v1_5v4.yaml": "d83e52bd547a5825bea89e3784c1392b1f26a7d0b886b6c008ca91fdf920b30c",
+    "uav_env/JSBSim/configs/tam_paper_env_v1_2v2.yaml": "4c35649960441cf0bbcd8e992c96023873bca7e8ad30b84a8e3fb66ab43eeb13",
+    "uav_env/JSBSim/configs/tam_paper_env_v1_3v2.yaml": "a66b2cd332fc88dd8e357949521e204bed1d5476e3c73c473793401d97626ada",
+    "uav_env/JSBSim/configs/tam_paper_env_v1_5v4.yaml": "07656d7664cd7c86ca6ed7a3a45b4ee8d6a6b6ee5cca9424d1a0b1ac657732ad",
 }
 
 

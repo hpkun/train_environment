@@ -6,14 +6,19 @@ import random
 import numpy as np
 import torch
 
+from uav_env.JSBSim.paper.protocol import (
+    ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL,
+    PAPER_SILENT_ASSUMPTIONS_PRESENT)
 
-FORMAT = "tam_paper_heterogeneous_reward_vanilla_happo_v2"
+
+FORMAT = "tam_paper_heterogeneous_reward_vanilla_happo_v3"
+REQUIRED_ENVIRONMENT_FIELDS = (
+    "environment_fidelity_revision", "experiment_protocol", "initial_perturbation",
+    "dynamics_backend", "paper_silent_assumptions_present", "scenario")
 
 
 def read_vanilla_happo_checkpoint_metadata(path):
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    if payload.get("format") != FORMAT:
-        raise ValueError(f"unsupported checkpoint format: {payload.get('format')!r}")
     return {key: value for key, value in payload.items()
             if key not in {"policy", "actor_optimizers", "critic_optimizer",
                            "python_random_state", "numpy_generator_state",
@@ -21,10 +26,28 @@ def read_vanilla_happo_checkpoint_metadata(path):
                            "torch_cpu_rng_state", "torch_cuda_rng_state"}}
 
 
+def _validate_formal_config(config):
+    missing = [key for key in REQUIRED_ENVIRONMENT_FIELDS if key not in config]
+    if missing:
+        raise ValueError(f"formal checkpoint config missing required fields: {missing}")
+    expected = {
+        "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+        "experiment_protocol": PAPER_NOMINAL_PROTOCOL,
+        "initial_perturbation": NOMINAL_PERTURBATION,
+        "dynamics_backend": "jsbsim",
+        "paper_silent_assumptions_present": PAPER_SILENT_ASSUMPTIONS_PRESENT,
+    }
+    for key, value in expected.items():
+        if config.get(key) != value:
+            raise ValueError(
+                f"formal checkpoint config {key} mismatch: {config.get(key)!r} != {value!r}")
+
+
 def save_vanilla_happo_checkpoint(
         path, policy, trainer, *, environment_steps, episodes, config, numpy_rng,
         checkpoint_type="evaluation_weights", at_episode_boundary=False,
         policy_version=None, seed_schedule=None):
+    _validate_formal_config(config)
     if checkpoint_type not in {"evaluation_weights", "resumable"}:
         raise ValueError("checkpoint_type must be evaluation_weights or resumable")
     if checkpoint_type == "resumable" and not at_episode_boundary:
@@ -37,6 +60,7 @@ def save_vanilla_happo_checkpoint(
         "resume_semantics": ("episode_boundary" if checkpoint_type == "resumable"
                              else "evaluation_only"),
         "algorithm_mode": trainer.algorithm_mode,
+        **{key: config[key] for key in REQUIRED_ENVIRONMENT_FIELDS},
         "policy": policy.state_dict(),
         "actor_optimizers": {key: value.state_dict()
                              for key, value in trainer.actor_optimizers.items()},
@@ -75,9 +99,19 @@ def save_vanilla_happo_checkpoint(
 
 def load_vanilla_happo_checkpoint(
         path, policy, trainer=None, *, numpy_rng=None, restore_rng=True,
-        for_resume=False, allow_episode_restart=False, expected_scenario=None):
+        for_resume=False, allow_episode_restart=False, expected_scenario=None,
+        expected_environment_fidelity_revision=None,
+        expected_experiment_protocol=None, expected_initial_perturbation=None,
+        expected_dynamics_backend=None):
     payload = torch.load(path, map_location=next(policy.parameters()).device,
                          weights_only=False)
+    revision = payload.get("environment_fidelity_revision")
+    if revision is None:
+        raise ValueError("pre-fidelity checkpoint missing environment_fidelity_revision")
+    if revision != ENVIRONMENT_FIDELITY_REVISION:
+        raise ValueError(
+            f"environment_fidelity_revision mismatch: {revision!r} != "
+            f"{ENVIRONMENT_FIDELITY_REVISION!r}")
     if payload.get("format") != FORMAT:
         raise ValueError(f"unsupported checkpoint format: {payload.get('format')!r}")
     if for_resume:
@@ -99,6 +133,14 @@ def load_vanilla_happo_checkpoint(
     }
     if expected_scenario is not None:
         expected["scenario"] = expected_scenario
+    expected_lineage = {
+        "environment_fidelity_revision": expected_environment_fidelity_revision,
+        "experiment_protocol": expected_experiment_protocol,
+        "initial_perturbation": expected_initial_perturbation,
+        "dynamics_backend": expected_dynamics_backend,
+    }
+    expected.update({key: value for key, value in expected_lineage.items()
+                     if value is not None})
     for key, value in expected.items():
         if payload.get(key) != value:
             raise ValueError(f"checkpoint {key} mismatch: {payload.get(key)!r} != {value!r}")

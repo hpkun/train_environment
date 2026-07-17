@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from .situation import assess_pair
+from .protocol import derived_environment_values
 
 
 OBS_KEYS = ("ego_state", "ally_states", "enemy_states", "incoming_missile_states",
@@ -17,9 +18,10 @@ class PaperObservation:
         self.inferred = inferred
         self.max_red = max_red
         self.max_blue = max_blue
-        self.max_incoming = int(inferred["max_incoming_missiles"])
-        self.position_norm_m = float(inferred["position_norm_m"])
-        self.altitude_norm_m = float(inferred["altitude_norm_m"])
+        self.derived = derived_environment_values(published["maximum_attack_range_m"])
+        self.max_incoming = int(self.derived["max_incoming_missiles"])
+        self.position_norm_m = float(self.derived["position_norm_m"])
+        self.altitude_norm_m = float(self.derived["altitude_norm_m"])
 
     def shapes_for(self, side: str):
         allies = (self.max_red if side == "red" else self.max_blue) - 1
@@ -91,7 +93,7 @@ class PaperObservation:
     def _relative(self, ego, position, velocity) -> np.ndarray:
         pair = assess_pair(ego.position, ego.velocity, position, velocity,
                            self.published["maximum_attack_range_m"],
-                           self.inferred["situation_height_norm_m"],
+                           self.derived["situation_height_norm_m"],
                            self.published["maximum_speed_mps"])
         return np.array([
             pair.relative_speed_mps / self.published["maximum_speed_mps"],
@@ -103,11 +105,11 @@ class PaperObservation:
 
     def _visible(self, ego, target, mavs) -> bool:
         distance = float(np.linalg.norm(target.position - ego.position))
-        if distance <= float(self.inferred["uav_direct_detection_range_m"]):
+        if distance <= float(self.derived["uav_direct_detection_range_m"]):
             return True
         if ego.side == "red" and ego.aircraft_type.role != "mav":
             return any(np.linalg.norm(target.position - mav.position)
-                       <= float(self.inferred["mav_detection_range_m"]) for mav in mavs)
+                       <= float(self.derived["mav_detection_range_m"]) for mav in mavs)
         if ego.aircraft_type.role == "mav":
-            return distance <= float(self.inferred["mav_detection_range_m"])
+            return distance <= float(self.derived["mav_detection_range_m"])
         return False

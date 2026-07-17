@@ -67,6 +67,8 @@ class PaperMissile:
         self.termination_reason = None
         self.navigation_gain_y = float(self.config["navigation_gain_y"])
         self.navigation_gain_z = float(self.config["navigation_gain_z"])
+        self.timeout_s = (2.0 * float(self.config["maximum_attack_range_m"])
+                          / float(self.config["missile_initial_speed_mps"]))
 
     @property
     def alive(self) -> bool:
@@ -129,16 +131,14 @@ class PaperMissile:
         self.longitudinal_overload_g = (thrust_accel - drag_accel) / G
         speed_dot = G * (self.longitudinal_overload_g - np.sin(self.pitch_rad))
         self.previous_speed_mps = self.speed_mps
-        self.speed_mps = float(np.clip(
-            self.speed_mps + speed_dot * dt, 1.0,
-            float(self.config["maximum_missile_speed_mps"])))
+        self.speed_mps = float(max(self.speed_mps + speed_dot * dt, 1.0))
         self.velocity = self._direction() * self.speed_mps
         self.position += self.velocity * dt
         self.flight_time_s += dt
         if not np.isfinite(np.concatenate([self.position, self.velocity,
                                            [self.speed_mps]])).all():
             self.status, self.termination_reason = "miss", "nonfinite"
-        elif self.flight_time_s >= float(self.config["missile_max_flight_time_s"]):
+        elif self.flight_time_s >= self.timeout_s:
             self.status, self.termination_reason = "miss", "timeout"
         return self.termination_reason
 
@@ -155,5 +155,6 @@ class PaperMissile:
             "speed_mps": self.speed_mps,
             "decision_start_speed_mps": self.decision_start_speed_mps,
             "distance_m": self.distance_m,
+            "derived_timeout_s": self.timeout_s,
             "termination_reason": self.termination_reason,
         }

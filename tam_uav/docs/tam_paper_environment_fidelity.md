@@ -1,81 +1,78 @@
 # TAM paper environment fidelity
 
-This document defines the fidelity boundary of `tam_paper_env_v1` relative to
-Chen, Luo, and Guo, *Aerospace Science and Technology* 176 (2026) 112537.
-New outputs are identified by `environment_fidelity_revision =
-published_rules_simplified_v2`.
+Current revision: `published_rules_simplified_v3`. Outputs from v1/v2 and older
+low-perturbation 2v2 experiments are **pre-v3 fidelity diagnostics**. Formal v3
+checkpoint loading rejects missing or mismatched environment lineage.
 
-## A. Explicitly implemented from the paper
+## A. PUBLISHED_EXACT
 
-- The nominal initial states in Tables 5, 6, and 7.
-- A 60 Hz simulation loop, 5 Hz decisions, and 12 physics frames per action.
-- Four direct-control dimensions with 40 categorical levels per dimension.
-- The published action endpoints, situation equations and weights, UAV reward
-  equations and weights, PN guidance gains, attack range, launch interval, and
-  missile mass and geometry metadata.
+- Tables 5–7 nominal initial states.
+- 60 Hz physics, 5 Hz decisions, 12 physics frames per action, and 1000 steps.
+- Four direct-control dimensions, 40 levels each, throttle `[0.4, 0.9]`, and
+  aileron/elevator/rudder `[-1, 1]`.
+- The published UAV speed, angle, distance, dodge, and event reward formulas and
+  weights, except for the separately identified paper-silent height function.
+- Point-mass PN equations, gains, 30 g limit, 14 km attack range, 25 s launch
+  interval, and missile mass/length/diameter metadata.
 
-The action mapping is consumed by `paper.task`, situation weights by
-`paper.situation`, and reward weights by `paper.reward`; these remain code
-constants where the existing implementation defines them as such.
+## B. UNIQUELY_DERIVED
 
-## B. Implementations directly determined by published rules
+- Missile timeout is `2 * 14000 / 500 = 56 s`.
+- Incoming-missile observation capacity is scenario-derived: four opposing
+  attack UAVs times two missiles equals eight fixed slots.
 
-- Episode-limit outcomes are truncated draws when both sides retain combat UAVs.
-- Simultaneous elimination of both sides' combat UAVs is a terminated draw.
-- The 400 m/s and 9 g values are diagnostic performance-limit exceedances only.
-- The 750 m value is consumed by reward and low-altitude diagnostics. The paper
-  does not publish a low-level hard-constraint or protection implementation.
-- Missile mass, length, and diameter are published metadata, not consumed by the
-  current minimal point-mass dynamics.
+## C. PAPER_SILENT_SIMPLIFICATION
 
-## C. Removed non-paper mechanisms
+- UAV direct detection equals the published attack range: 14 km.
+- MAV detection is twice that range: 28 km. Alive-MAV tracks are shared with red
+  attack UAVs perfectly, instantaneously, without delay, loss, noise, bandwidth,
+  or link modelling. Sharing stops immediately when the MAV dies; blue has no
+  MAV sharing.
+- Horizontal combat-zone radius and position normalization are 28 km.
+- Altitude and situation-height normalization use the table-based nominal 6000 m.
+- Height reward is `-1` at ground, `0` at 750 m, rises linearly to `1` at 6000 m,
+  and remains `1` above 6000 m.
+- MAV distances derive from `R=14 km`: danger `0.5R`, safe/optimal `R`, maximum
+  `2R`. MAV death is `-200`; each same-step eligible team kill is `+200`, without
+  an additional cap.
+- The blue policy is a **minimal greedy basic-manoeuvre reconstruction** over
+  level, accelerate, decelerate, left turn, right turn, climb, and dive. Its
+  0.2 s aircraft/constant-velocity threat predictor remains paper-silent.
+- Automatic launch against the selected visible target requires an alive attack
+  UAV, inventory, a live target, `1e-6 m < distance <= 14 km`, and a 25 s interval.
+- MAV is excluded from combat-unit elimination. Mutual elimination is a draw;
+  episode limit is a truncated draw. Resolution occurs at
+  `termination_resolution = decision_step_boundary`: all 12 physics frames finish
+  before one outcome is computed.
 
-- The 0.2 s structural-limit grace and structural death reasons.
-- Direct destruction after exceeding 400 m/s or 9 g.
-- The 300 m tactical minimum launch range.
-- Episode-limit winner selection from survivor or kill counts.
-- Perturbed ordinary 2v2/3v2 evaluations.
+## D. PAPER_SILENT_REQUIRED_PARAMETER
 
-`structural_failures` remains only as a compatibility output fixed to zero.
+- F-16/F-22 JSBSim model selection.
+- Missile initial speed, powered duration, powered acceleration, effective
+  quadratic drag, and hit radius.
+- Missile-speed reward normalization and global reward scale.
+- The remaining MAV safety/support form and blue predictor constants.
 
-## D. Retained minimal paper-silent assumptions
+## E. REMOVED_UNSUPPORTED_COMPLEXITY
 
-- F-16 and F-22 JSBSim model selection; the paper does not publish these models.
-- Combat-zone radius, UAV/MAV detection ranges, observation normalization, and
-  incoming-missile slot count.
-- Missile initial speed, powered duration, powered acceleration, effective drag,
-  maximum speed, lifetime, and hit radius.
-- MAV reward thresholds and event constants, plus height-reward approximation
-  parameters.
-- The blue-side basic manoeuvre set and termination treatment of the MAV role.
+- 20/80 km independent detection assumptions and 50 km independent combat zone.
+- Independent position/altitude/situation normalization parameters.
+- Three-segment quadratic height curve and optimal/maximum-altitude parameters.
+- Independent MAV distance/event parameters and cumulative bonus cap state.
+- Four compound blue manoeuvres.
+- Duplicate weapon-layer visibility gate and the old 300 m minimum range.
+- Independent maximum missile speed and missile lifetime parameters.
+- Structural grace and structural death reasons; limit exceedances remain
+  diagnostics only and `structural_failures` remains a zero compatibility field.
 
-These inferred values were not changed or tuned in this revision.
+## F. OPEN_FIDELITY_ITEMS
 
-## E. Nominal experiment protocol
-
-`paper_nominal` permits 2v2, 3v2, and 5v4 only with
-`initial_perturbation = none`. Ordinary training, periodic evaluation,
-independent evaluation, baseline diagnosis, and nominal rule evaluation use this
-protocol. Old low-perturbation 2v2 outputs are pre-fidelity diagnostics and must
-not be combined with this revision.
-
-## F. 5v4 generalization protocol
-
-`paper_5v4_generalization` is evaluation-only, fixed to scenario 5v4 and levels
-`low`, `medium`, and `large`. The formal protocol uses 50 episodes per level,
-one trained 5v4 checkpoint, and independent reproducible seed sequences. `none`,
-2v2, and 3v2 cannot enter this result set.
-
-## G. Open fidelity items
-
-- The blue FSM is not yet closed against reference [8].
-- Sensor ranges remain engineering assumptions.
-- MAV reward thresholds remain engineering assumptions.
-- Missile initial speed, propulsion, drag, lifetime, and hit radius remain
-  engineering assumptions.
-- Aircraft model identity remains unpublished.
-
-Therefore this revision identifies and narrows paper-silent assumptions but does
-not claim an exact reproduction.
+- Aircraft identity, sensor/communication physics, MAV reward constants, blue
+  predictor constants, and missile propulsion/drag/hit engineering remain
+  unpublished.
+- The blue reconstruction is not claimed to be reference [8]'s exact FSM.
+- `paper_nominal` uses only `none`; `paper_5v4_generalization` evaluates only
+  low/medium/large with a v3 nominal 5v4 vanilla-HAPPO baseline checkpoint.
+- Vanilla-HAPPO baseline results are not TAM-HAPPO results.
 
 PAPER_ENVIRONMENT_EXACTLY_REPRODUCED = false
