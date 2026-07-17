@@ -612,7 +612,7 @@ class MissileSimulator(BaseSimulator):
     @classmethod
     def create(cls, parent: AircraftSimulator, target: AircraftSimulator,
                uid: str, missile_model: str = "AIM-9L",
-               guidance_mode: str = "paper_eq9", config=None, rng=None,
+               guidance_mode: str = "paper_3v3_eq9_11_v1", config=None, rng=None,
                launch_speed_mps: float | None = None,
                overshoot_window_s: float | None = None,
                overshoot_distance_hysteresis_m: float = 0.0,
@@ -627,21 +627,7 @@ class MissileSimulator(BaseSimulator):
             positive_closing_threshold_mps=positive_closing_threshold_mps)
         missile.launch(parent)
         missile.target(target)
-        if (guidance_mode == "paper_minimal_point_mass_v1"
-                and launch_speed_mps is not None):
-            los = np.asarray(target.get_position(), dtype=np.float64) - np.asarray(
-                missile.get_position(), dtype=np.float64)
-            distance = float(np.linalg.norm(los))
-            if distance > 1e-9:
-                missile._velocity[:] = los / distance * float(launch_speed_mps)
-                speed = float(np.linalg.norm(missile._velocity))
-                pitch = float(np.arcsin(np.clip(
-                    missile._velocity[2] / max(speed, 1e-9), -1.0, 1.0)))
-                heading = float(np.arctan2(
-                    missile._velocity[1], missile._velocity[0]))
-                missile._posture[:] = [0.0, pitch, heading]
-        elif (guidance_mode == "paper_learnable_point_mass_v1"
-              and launch_speed_mps is not None):
+        if launch_speed_mps is not None:
             roll, pitch, heading = np.asarray(parent.get_rpy(), dtype=np.float64)
             body_x = body_vector_to_inertial_neu(
                 np.array([1.0, 0.0, 0.0], dtype=np.float64),
@@ -654,18 +640,14 @@ class MissileSimulator(BaseSimulator):
         return missile
 
     def __init__(self, uid="A0101", color="Red", model="AIM-9L", dt=1 / 12,
-                 guidance_mode: str = "paper_eq9", config=None, rng=None,
+                 guidance_mode: str = "paper_3v3_eq9_11_v1", config=None, rng=None,
                  launch_speed_mps: float | None = None,
                  overshoot_window_s: float | None = None,
                  overshoot_distance_hysteresis_m: float = 0.0,
                  positive_closing_threshold_mps: float = 0.0):
         super().__init__(uid, color, dt)
-        if guidance_mode not in (
-                "paper_eq9", "legacy_simplified", "paper_minimal_point_mass_v1",
-                "paper_learnable_point_mass_v1"):
-            raise ValueError(
-                "guidance_mode must be 'paper_eq9', 'legacy_simplified', or "
-                "'paper_minimal_point_mass_v1'")
+        if guidance_mode != "paper_3v3_eq9_11_v1":
+            raise ValueError("guidance_mode must be 'paper_3v3_eq9_11_v1'")
         self.guidance_mode = guidance_mode
         self._status = MissileSimulator.INACTIVE
         from configs.brma_mappo_paper_spec import MissileConfig
@@ -680,23 +662,11 @@ class MissileSimulator(BaseSimulator):
         self._target_id: str = ""
         self._termination_reason: str = ""  # "hit", "p_hit_fail", "timeout", "low_speed", "overshoot", "target_dead"
 
-        # Missile physical parameters (modern short-range AAM)
-        # Isp=240 → Δv ≈ 568 m/s (rocket equation), peak speed ≈ 850–900 m/s (M2.5+)
-        # cD=0.22 → energy retention over 10 km tail-chase, still lethal at 60 s
         self._g = 9.81
         self._t_max = float(self.config.maximum_flight_time_s.value)
-        self._t_thrust = float(self.config.thrust_time_s.value)
-        self._Isp = float(self.config.specific_impulse_s.value)
-        self._Length = float(self.config.length_m.value)
-        self._Diameter = float(self.config.diameter_m.value)
-        self._cD = float(self.config.drag_coefficient.value)
-        self._m0 = float(self.config.initial_mass_kg.value)
-        self._dm = float(self.config.mass_flow_kg_s.value)
         self._K = float(self.config.navigation_constant.value)
         self._nyz_max = float(self.config.maximum_overload_g.value)
         self._Rc = float(self.config.hit_radius_m.value)
-        self._v_min = float(self.config.minimum_speed_mps.value)
-        self._t_arm = float(self.config.arming_time_s.value)
         self._launch_speed_mps = launch_speed_mps
         self._overshoot_window_s = float(
             5.0 if overshoot_window_s is None else overshoot_window_s)
@@ -711,6 +681,7 @@ class MissileSimulator(BaseSimulator):
         self._pn_guidance_frames = 0
         self._pn_nonzero_command_frames = 0
         self._maximum_command_g = 0.0
+        self._contact_checks_started = False
 
     @property
     def is_alive(self):
@@ -725,22 +696,8 @@ class MissileSimulator(BaseSimulator):
         return self._status in (MissileSimulator.HIT, MissileSimulator.MISS)
 
     @property
-    def Isp(self):
-        return self._Isp if self._t < self._t_thrust else 0
-
-    @property
     def K(self):
         return self._K  # constant 3.0 — paper §2.1.3 proportional guidance law
-
-    @property
-    def S(self):
-        S0 = np.pi * (self._Diameter / 2) ** 2
-        S0 += np.linalg.norm([np.sin(self._dtheta), np.sin(self._dphi)]) * self._Diameter * self._Length
-        return S0
-
-    @property
-    def rho(self):
-        return 1.225 * np.exp(-self._geodetic[-1] / 9300)
 
     @property
     def target_distance(self) -> float:
@@ -761,8 +718,6 @@ class MissileSimulator(BaseSimulator):
         self._posture[0] = 0
         self.lon0, self.lat0, self.alt0 = parent.lon0, parent.lat0, parent.alt0
         self._t = 0
-        self._m = self._m0
-        self._dtheta, self._dphi = 0, 0
         self._status = MissileSimulator.LAUNCHED
         self._distance_pre = np.inf
         self._distance_increment = deque(maxlen=max(
@@ -773,6 +728,7 @@ class MissileSimulator(BaseSimulator):
         self._pn_guidance_frames = 0
         self._pn_nonzero_command_frames = 0
         self._maximum_command_g = 0.0
+        self._contact_checks_started = False
         self._left_t = int(1 / self.dt)
         self.render_explosion = False
 
@@ -783,6 +739,8 @@ class MissileSimulator(BaseSimulator):
 
     def run(self):
         self._t += self.dt
+        allow_contact = self._contact_checks_started
+        self._contact_checks_started = True
         zero_action = np.zeros(2, dtype=np.float64)
         if self.target_aircraft is None or not self.target_aircraft.is_alive:
             self._status = MissileSimulator.MISS
@@ -802,15 +760,7 @@ class MissileSimulator(BaseSimulator):
                 zero_action, distance, self._distance_pre))
             return
 
-        armed = (
-            self.guidance_mode == "paper_minimal_point_mass_v1"
-            or (self.guidance_mode == "paper_learnable_point_mass_v1"
-                and self._t >= self._t_arm)
-            or (self.guidance_mode not in (
-                    "paper_minimal_point_mass_v1",
-                    "paper_learnable_point_mass_v1")
-                and self._t > self._t_arm))
-        if armed and distance <= self._Rc:
+        if allow_contact and distance <= self._Rc:
             if self._roll_hit_probability():
                 self._status = MissileSimulator.HIT
                 self.target_aircraft.shotdown()
@@ -854,23 +804,7 @@ class MissileSimulator(BaseSimulator):
         diagnostic = self._intercept_diagnostic(
             action, distance, previous_distance)
 
-        if (self.guidance_mode not in (
-                "paper_minimal_point_mass_v1",
-                "paper_learnable_point_mass_v1")
-                and np.linalg.norm(self.get_velocity()) < self._v_min):
-            self._status = MissileSimulator.MISS
-            self._termination_reason = "low_speed"
-        elif (self.guidance_mode in (
-                "paper_minimal_point_mass_v1",
-                "paper_learnable_point_mass_v1")
-              and self._overshoot_counter >= self._distance_increment.maxlen):
-            self._status = MissileSimulator.MISS
-            self._termination_reason = "overshoot"
-        elif (self.guidance_mode not in (
-                "paper_minimal_point_mass_v1",
-                "paper_learnable_point_mass_v1")
-              and len(self._distance_increment) == self._distance_increment.maxlen
-              and np.sum(self._distance_increment) >= self._distance_increment.maxlen):
+        if self._overshoot_counter >= self._distance_increment.maxlen:
             self._status = MissileSimulator.MISS
             self._termination_reason = "overshoot"
         self._emit_trajectory_sample(diagnostic)
@@ -1000,71 +934,25 @@ class MissileSimulator(BaseSimulator):
         """Proportional navigation guidance law."""
         x_m, y_m, z_m = self.get_position()
         dx_m, dy_m, dz_m = self.get_velocity()
-        v_m = np.linalg.norm([dx_m, dy_m, dz_m])
-        theta_m = np.arcsin(dz_m / v_m) if v_m > 0 else 0
         x_t, y_t, z_t = self.target_aircraft.get_position()
         dx_t, dy_t, dz_t = self.target_aircraft.get_velocity()
-        Rxy = np.linalg.norm([x_m - x_t, y_m - y_t])
         Rxyz = max(np.linalg.norm([x_m - x_t, y_m - y_t, z_t - z_m]), 1e-8)
-
-        if self.guidance_mode in (
-                "paper_eq9", "paper_minimal_point_mass_v1",
-                "paper_learnable_point_mass_v1"):
-            relative_position = np.array([x_t - x_m, y_t - y_m, z_t - z_m])
-            relative_velocity = np.array([dx_t - dx_m, dy_t - dy_m, dz_t - dz_m])
-            ny, nz = compute_paper_eq9_overloads(
-                relative_position, relative_velocity, self.get_velocity(),
-                navigation_constant=self.K, gravity=self._g)
-        else:
-            dbeta = ((dy_t - dy_m) * (x_t - x_m) - (dx_t - dx_m) * (y_t - y_m)) / (Rxy ** 2 + 1e-8)
-            deps = ((dz_t - dz_m) * Rxy ** 2 - (z_t - z_m) * (
-                (x_t - x_m) * (dx_t - dx_m) + (y_t - y_m) * (dy_t - dy_m))) / (Rxyz ** 2 * Rxy + 1e-8)
-            ny = self.K * v_m / self._g * np.cos(theta_m) * dbeta
-            nz = self.K * v_m / self._g * deps + np.cos(theta_m)
+        relative_position = np.array([x_t - x_m, y_t - y_m, z_t - z_m])
+        relative_velocity = np.array([dx_t - dx_m, dy_t - dy_m, dz_t - dz_m])
+        ny, nz = compute_paper_eq9_overloads(
+            relative_position, relative_velocity, self.get_velocity(),
+            navigation_constant=self.K, gravity=self._g)
         command = np.asarray([ny, nz], dtype=np.float64)
-        if self.guidance_mode in (
-                "paper_eq9", "paper_minimal_point_mass_v1",
-                "paper_learnable_point_mass_v1"):
-            norm = float(np.linalg.norm(command))
-            if not np.isfinite(norm):
-                raise FloatingPointError("non-finite PN command")
-            if norm > self._nyz_max:
-                command *= self._nyz_max / norm
-        else:
-            command = np.clip(command, -self._nyz_max, self._nyz_max)
+        norm = float(np.linalg.norm(command))
+        if not np.isfinite(norm):
+            raise FloatingPointError("non-finite PN command")
+        if norm > self._nyz_max:
+            command *= self._nyz_max / norm
         return command, Rxyz
 
     def _state_trans(self, action):
-        """Update missile position, velocity, and attitude."""
-        if self.guidance_mode in (
-                "paper_minimal_point_mass_v1",
-                "paper_learnable_point_mass_v1"):
-            self._state_trans_minimal_point_mass(action)
-            return
-        self._position[:] += self.dt * self.get_velocity()
-        self._geodetic[:] = NEU2LLA(*self.get_position(), self.lon0, self.lat0, self.alt0)
-        v = np.linalg.norm(self.get_velocity())
-        theta, phi = self.get_rpy()[1:]
-        T = self._g * self.Isp * self._dm
-        D = 0.5 * self._cD * self.S * self.rho * v ** 2
-        nx = (T - D) / (self._m * self._g)
-        ny, nz = action
-
-        dv = self._g * (nx - np.sin(theta))
-        self._dphi = self._g / max(v, 1e-8) * (ny / max(np.cos(theta), 1e-8))
-        self._dtheta = self._g / max(v, 1e-8) * (nz - np.cos(theta))
-
-        v += self.dt * dv
-        phi += self.dt * self._dphi
-        theta += self.dt * self._dtheta
-        self._velocity[:] = np.array([
-            v * np.cos(theta) * np.cos(phi),
-            v * np.cos(theta) * np.sin(phi),
-            v * np.sin(theta),
-        ])
-        self._posture[:] = np.array([0, theta, phi])
-        if self._t < self._t_thrust:
-            self._m = self._m - self.dt * self._dm
+        """Update the single constant-speed point-mass model."""
+        self._state_trans_minimal_point_mass(action)
 
     def _state_trans_minimal_point_mass(self, action):
         """Constant-speed point mass with the published PN steering command."""

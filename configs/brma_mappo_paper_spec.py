@@ -188,7 +188,9 @@ class MissileConfig:
     minimum_speed_mps: SourcedValue = field(default_factory=lambda: sv(150.0, PAPER_ENGINEERING))
     arming_time_s: SourcedValue = field(default_factory=lambda: sv(0.15, PAPER_ENGINEERING))
     density_model: SourcedValue = field(default_factory=lambda: sv("rho0_exp_altitude_over_9300", PAPER_ENGINEERING))
-    guidance_mode: SourcedValue = field(default_factory=lambda: sv("paper_eq9", PAPER_EQUATION))
+    guidance_mode: SourcedValue = field(
+        default_factory=lambda: sv("paper_3v3_eq9_11_v1", PAPER_EQUATION)
+    )
 
 
 @dataclass(frozen=True)
@@ -229,7 +231,7 @@ DEFAULT_PAPER_ENVIRONMENT_CONFIG = PaperEnvironmentConfig()
 def environment_config_snapshot(config: PaperEnvironmentConfig, *, num_red: int,
                                 num_blue: int, sim_freq: int,
                                 agent_interaction_steps: int, seed: int | None,
-                                blue_policy_profile: str = "paper_pursuit") -> dict:
+                                blue_policy_profile: str = "simple_dynamic_pursuit_with_mws") -> dict:
     payload = asdict(config)
     payload.update({"num_red": int(num_red), "num_blue": int(num_blue),
                     "sim_freq": int(sim_freq),

@@ -21,11 +21,10 @@ from my_uav_env import UavCombatEnv
 
 
 def main() -> None:
-    print("Creating 1v1 env (max_steps=2) ...", flush=True)
+    print("Creating formal 3v3 env (max_steps=2) ...", flush=True)
     env = UavCombatEnv(
-        max_num_blue=1, max_num_red=1,
+        max_num_blue=3, max_num_red=3,
         max_steps=2,
-        enable_gcas_for_blue=False,
         suppress_jsbsim_output=True,
     )
     try:

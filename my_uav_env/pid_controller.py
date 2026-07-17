@@ -1,5 +1,7 @@
 from __future__ import annotations
-"""Bank-to-Turn PID controller for the paper environment."""
+
+"""Single bank-to-turn PID implementation for ``paper_3v3_v1``."""
+
 import numpy as np
 
 
@@ -13,24 +15,15 @@ SETPOINT_VELOCITY_TOLERANCE_MPS = 1e-8
 
 
 class PIDLoop:
-    """Single PID controller with back-calculation anti-windup.
-
-    Anti-windup logic (paper-consistent):
-      - When P+D already saturates the output, the integral is frozen
-        (preventing "integrator lock" during sustained large errors).
-      - When P+I+D would saturate, the integral is clamped so total output
-        lands exactly at the limit — the integral unwinds immediately when
-        the error reverses sign.
-      - An absolute safety ceiling prevents unbounded growth in edge cases.
-    """
+    """Bounded PID loop with first-sample derivative suppression."""
 
     def __init__(self, kp, ki, kd, output_min, output_max, name="",
                  integral_error_limit=float("inf"), angular_error=False):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.output_min = output_min
-        self.output_max = output_max
+        self.kp = float(kp)
+        self.ki = float(ki)
+        self.kd = float(kd)
+        self.output_min = float(output_min)
+        self.output_max = float(output_max)
         self.name = name
         self.integral_error_limit = float(integral_error_limit)
         self.angular_error = bool(angular_error)
@@ -47,62 +40,42 @@ class PIDLoop:
         }
 
     def step(self, error, dt, suppress_derivative: bool = False):
-        # Proportional
+        error = float(error)
         p = self.kp * error
-
-        # Derivative (computed before integral clamp so d-term informs anti-windup)
         if self._prev_error is None or suppress_derivative:
             d = 0.0
         else:
-            delta_error = float(error - self._prev_error)
+            delta = error - self._prev_error
             if self.angular_error:
-                wrapped = (delta_error + np.pi) % (2.0 * np.pi) - np.pi
-                if np.isclose(wrapped, -np.pi) and delta_error > 0.0:
+                wrapped = (delta + np.pi) % (2.0 * np.pi) - np.pi
+                if np.isclose(wrapped, -np.pi) and delta > 0.0:
                     wrapped = np.pi
-                delta_error = float(wrapped)
-            d = self.kd * delta_error / max(dt, 1e-8)
-        self._prev_error = float(error)
+                delta = float(wrapped)
+            d = self.kd * delta / max(float(dt), 1e-8)
+        self._prev_error = error
 
-        # Accumulate integral
         integral_enabled = abs(error) <= self.integral_error_limit
         if integral_enabled:
-            self._integral += self.ki * error * dt
+            self._integral += self.ki * error * float(dt)
 
-        # -----------------------------------------------------------------
-        #  Back-calculation anti-windup
-        #
-        #  Case 1: P+D already saturated → freeze integral in that direction
-        #  Case 2: P+D within range → clamp integral so P+I+D ∈ [min, max]
-        #  Case 3: absolute safety ceiling (belt-and-suspenders)
-        # -----------------------------------------------------------------
         pd = p + d
-        if pd >= self.output_max:
-            # Saturated HIGH — integral must be ≤ 0
-            if self._integral > 0.0:
-                self._integral = 0.0
-        elif pd <= self.output_min:
-            # Saturated LOW — integral must be ≥ 0
-            if self._integral < 0.0:
-                self._integral = 0.0
-        else:
-            # P+D within range — clamp integral so pd + i ∈ [min, max]
-            i_max_allowed = self.output_max - pd
-            i_min_allowed = self.output_min - pd
-            if self._integral > i_max_allowed:
-                self._integral = i_max_allowed
-            elif self._integral < i_min_allowed:
-                self._integral = i_min_allowed
+        if pd >= self.output_max and self._integral > 0.0:
+            self._integral = 0.0
+        elif pd <= self.output_min and self._integral < 0.0:
+            self._integral = 0.0
+        elif self.output_min < pd < self.output_max:
+            self._integral = float(np.clip(
+                self._integral, self.output_min - pd, self.output_max - pd))
 
-        # Absolute safety ceiling (prevents runaway in extreme transients)
-        i_safety = max(abs(self.output_max), abs(self.output_min)) * 3.0 / max(self.ki, 1e-8)
-        self._integral = np.clip(self._integral, -i_safety, i_safety)
-
-        i = self._integral
-        unsaturated = float(p + i + d)
-        output = float(np.clip(unsaturated, self.output_min, self.output_max))
+        safety = (max(abs(self.output_max), abs(self.output_min)) * 3.0
+                  / max(self.ki, 1e-8))
+        self._integral = float(np.clip(self._integral, -safety, safety))
+        unsaturated = float(p + self._integral + d)
+        output = float(np.clip(
+            unsaturated, self.output_min, self.output_max))
         self._prev_output = output
         self._last_diagnostic = {
-            "p": float(p), "i": float(i), "d": float(d),
+            "p": float(p), "i": float(self._integral), "d": float(d),
             "unsaturated": unsaturated, "saturated": output,
             "integral_enabled": bool(integral_enabled),
         }
@@ -110,473 +83,165 @@ class PIDLoop:
 
 
 class PIDController:
-    """
-    Bank-to-Turn (BTT) three-loop PID flight controller (paper §2.4).
+    """Paper Eq.12-Eq.14 operational BTT controller."""
 
-    - Roll PID:    roll_error  → aileron_cmd   [−1, 1]
-    - Pitch PID:   pitch_error → elevator_cmd  [−1, 1]
-    - Velocity PID: vel_error  → throttle_cmd  [0, 1]
-    - Rudder:      0.0 (hard-locked per paper)
-    """
-
-    def __init__(self, dt, profile: str = "paper", debug: bool = False,
+    def __init__(self, dt, profile: str = "paper_3v3_pid_v1",
+                 debug: bool = False,
                  integral_error_limits: tuple[float, float, float] | None = None,
-                 throttle_base: float = 0.0, config=None):
+                 throttle_base: float = 0.8, config=None):
         from configs.brma_mappo_paper_spec import PIDConfig
+
+        if profile != "paper_3v3_pid_v1":
+            raise ValueError("profile must be 'paper_3v3_pid_v1'")
         self.config = config or PIDConfig()
-        if profile not in ("paper", "engineering_safe", "paper_minimal_shared_v1"):
-            raise ValueError(
-                "profile must be 'paper', 'engineering_safe', or "
-                "'paper_minimal_shared_v1'")
-        self.dt = dt
+        self.dt = float(dt)
         self.profile = profile
-        self._debug = debug
-        self._debug_step = 0          # throttled debug counter
-        self._prev_target_heading = None   # for low-pass filter (Fix 2)
-        self._prev_roll_error = None        # for D-term guard (clipped-error jump detection)
+        self._debug = bool(debug)
         self._previous_upper_targets = None
         if not 0.0 <= float(throttle_base) <= 1.0:
             raise ValueError("throttle_base must be in [0, 1]")
         self.throttle_base = float(throttle_base)
         self._last_diagnostic = {}
+        limits = (self.config.integral_error_limits.value
+                  if integral_error_limits is None else integral_error_limits)
+        self.integral_error_limits = tuple(float(value) for value in limits)
 
-        # --- Roll PID (drives aileron) ---
-        # F-16 aero has strong natural roll-damping (Cl_p ≈ −0.5 rad⁻¹ at
-        # M0.8).  External D-gain is kept tiny to prevent derivative kick when
-        # the 5 Hz Actor updates the target_heading, causing a step-change in
-        # d_I_des → d_B_des → roll_error at the 60 Hz PID rate.
-        if integral_error_limits is None:
-            integral_error_limits = self.config.integral_error_limits.value
-        self.integral_error_limits = tuple(float(v) for v in integral_error_limits)
-
-        roll_kp, roll_ki, roll_kd = self.config.roll_gains.value
+        roll_gains = self.config.roll_gains.value
+        pitch_gains = self.config.pitch_gains.value
+        speed_gains = self.config.speed_gains.value
         self._roll_pid = PIDLoop(
-            kp=roll_kp, ki=roll_ki, kd=roll_kd,
-            output_min=-1.0, output_max=1.0,
-            name="roll", integral_error_limit=self.integral_error_limits[0],
-            angular_error=True,
-        )
-
-        # --- Pitch PID (drives elevator) ---
-        # fcs/elevator-cmd-norm is a G-command in the F-16 FCS.
-        # Positive cmd → pitch DOWN, so output is negated in compute_control.
-        # kd kept low (0.1): the dual-frequency system (Actor 5 Hz / PID 60 Hz)
-        # means target_pitch step-changes every 0.2 s; a large D-gain would
-        # spike the elevator on every update frame.
-        pitch_kp, pitch_ki, pitch_kd = self.config.pitch_gains.value
+            *roll_gains, -1.0, 1.0, name="roll",
+            integral_error_limit=self.integral_error_limits[0],
+            angular_error=True)
         self._pitch_pid = PIDLoop(
-            kp=pitch_kp, ki=pitch_ki, kd=pitch_kd,
-            output_min=-1.0, output_max=1.0,
-            name="pitch", integral_error_limit=self.integral_error_limits[1],
-            angular_error=True,
-        )
-
-        # --- Velocity PID ---
-        # fcs/throttle-cmd-norm: throttle-pos-norm = cmd-norm × 2.
-        # Afterburner engages at throttle-pos-norm > 0.77 → cmd-norm > 0.385.
-        speed_kp, speed_ki, speed_kd = self.config.speed_gains.value
+            *pitch_gains, -1.0, 1.0, name="pitch",
+            integral_error_limit=self.integral_error_limits[1],
+            angular_error=True)
         self._velocity_pid = PIDLoop(
-            kp=speed_kp, ki=speed_ki, kd=speed_kd,
-            output_min=-self.throttle_base,
-            output_max=1.0 - self.throttle_base,
-            name="velocity", integral_error_limit=self.integral_error_limits[2],
-        )
+            *speed_gains, -self.throttle_base, 1.0 - self.throttle_base,
+            name="velocity", integral_error_limit=self.integral_error_limits[2])
 
     def reset(self):
         self._roll_pid.reset()
         self._pitch_pid.reset()
         self._velocity_pid.reset()
-        self._prev_target_heading = None     # clear heading LPF state
-        self._prev_roll_error = None         # clear D-term guard state
         self._previous_upper_targets = None
         self._last_diagnostic = {}
 
-    # ------------------------------------------------------------------
-    #  Rotation matrix helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _r_x(angle: float) -> np.ndarray:
-        """Elementary rotation about x-axis (roll)."""
         c, s = np.cos(angle), np.sin(angle)
-        return np.array([[1.0, 0.0, 0.0],
-                         [0.0, c,   -s],
-                         [0.0, s,    c]], dtype=np.float64)
+        return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
 
     @staticmethod
     def _r_y(angle: float) -> np.ndarray:
-        """Elementary rotation about y-axis (pitch)."""
         c, s = np.cos(angle), np.sin(angle)
-        return np.array([[c,   0.0,  s],
-                         [0.0, 1.0, 0.0],
-                         [-s,  0.0,  c]], dtype=np.float64)
+        return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
 
     @staticmethod
     def _r_z(angle: float) -> np.ndarray:
-        """Elementary rotation about z-axis (yaw)."""
         c, s = np.cos(angle), np.sin(angle)
-        return np.array([[c,   -s, 0.0],
-                         [s,    c, 0.0],
-                         [0.0, 0.0, 1.0]], dtype=np.float64)
+        return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
     @classmethod
-    def body_to_ned_matrix(cls, roll: float, pitch: float, yaw: float) -> np.ndarray:
-        """Rotation matrix from body frame to NED inertial frame.
-
-        Aerospace Z-Y-X Euler sequence: R_IB = R_z(yaw) · R_y(pitch) · R_x(roll).
-
-        Body axes: x=forward, y=right, z=down.
-        NED axes:  x=North,  y=East,  z=Down.
-        """
+    def body_to_ned_matrix(cls, roll, pitch, yaw) -> np.ndarray:
         return cls._r_z(yaw) @ cls._r_y(pitch) @ cls._r_x(roll)
 
     @classmethod
-    def ned_to_body_matrix(cls, roll: float, pitch: float, yaw: float) -> np.ndarray:
-        """Rotation matrix from NED inertial frame to body frame.
-
-        R_BI = R_IB^T = R_x(−roll) · R_y(−pitch) · R_z(−yaw).
-        """
+    def ned_to_body_matrix(cls, roll, pitch, yaw) -> np.ndarray:
         return cls.body_to_ned_matrix(roll, pitch, yaw).T
-
-    # ------------------------------------------------------------------
-    #  BTT control computation (paper formulas 12–13)
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    #  Gimbal-safe R_BI (Fix 3) — velocity-vector construction
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _r_bi_from_velocity(ned_velocity: np.ndarray) -> np.ndarray:
-        """Build body→NED rotation from velocity vector, avoiding Euler angles.
-
-        When pitch approaches ±90° the Z-Y-X Euler sequence degenerates
-        (gimbal lock).  The velocity vector is always well-defined and
-        provides a stable estimate of the body x-axis direction in NED.
-
-        Construction (Gram-Schmidt):
-          x_ned = normalize(velocity)            — body forward
-          y_ned = normalize([0,0,1] × x_ned)     — body right
-          z_ned = x_ned × y_ned                  — body down (orthogonal)
-          R_IB  = [x_ned | y_ned | z_ned]        — columns
-          R_BI  = R_IB^T
-        """
-        speed = float(np.linalg.norm(ned_velocity))
-        if speed < 1e-6:
-            return np.eye(3, dtype=np.float64)
-
-        x_ned = ned_velocity / speed                          # body x in NED
-        world_down = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        y_ned = np.cross(world_down, x_ned)                   # body y (right)
-        y_norm = float(np.linalg.norm(y_ned))
-        if y_norm < 1e-9:
-            # Velocity is exactly vertical — fall back to a default horizontal
-            # right vector (any horizontal direction perpendicular to x_ned).
-            y_ned = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-            y_ned = np.cross(x_ned, y_ned)
-            y_ned = y_ned / float(np.linalg.norm(y_ned))
-        else:
-            y_ned = y_ned / y_norm
-        z_ned = np.cross(x_ned, y_ned)                        # body z (down)
-        z_ned = z_ned / float(np.linalg.norm(z_ned))
-
-        R_IB = np.column_stack([x_ned, y_ned, z_ned])
-        return R_IB.T                                          # R_BI = R_IB^T
 
     @classmethod
     def paper_direction_errors(cls, current_rpy, target_pitch, target_heading):
-        """Return the quadrant-preserving operational Eq.12/Eq.13 errors.
-
-        Environment vectors are NEU. The desired NEU direction is converted
-        once to NED, then rotated into the standard body-down frame by the
-        Euler-angle ``R_BI`` matrix.
-        """
-        roll, pitch, yaw = [float(v) for v in current_rpy]
+        roll, pitch, yaw = [float(value) for value in current_rpy]
         c_theta = np.cos(target_pitch)
-        d_des_neu = np.array([
+        desired_neu = np.array([
             c_theta * np.cos(target_heading),
             c_theta * np.sin(target_heading),
             np.sin(target_pitch),
         ], dtype=np.float64)
-        d_des_ned = d_des_neu * np.array([1.0, 1.0, -1.0])
+        desired_ned = desired_neu * np.array([1.0, 1.0, -1.0])
         r_bi = cls.ned_to_body_matrix(roll, pitch, yaw)
-        d_body = r_bi @ d_des_ned
-        if d_body[0] < 0.0 and abs(d_body[1]) < PAPER_EQ13_ZERO_EPS:
+        desired_body = r_bi @ desired_ned
+        if desired_body[0] < 0.0 and abs(desired_body[1]) < PAPER_EQ13_ZERO_EPS:
             roll_error = float(np.pi)
         else:
-            roll_error = float(np.arctan2(d_body[1], d_body[0]))
-        horizontal = float(np.hypot(d_body[0], d_body[1]))
-        pitch_error = (0.0 if abs(d_body[2]) < PAPER_EQ13_ZERO_EPS
-                       else float(np.arctan2(d_body[2], horizontal)))
-        return (roll_error, pitch_error, d_des_neu, d_des_ned,
-                d_body, r_bi)
+            roll_error = float(np.arctan2(
+                desired_body[1], desired_body[0]))
+        horizontal = float(np.hypot(desired_body[0], desired_body[1]))
+        pitch_error = (0.0 if abs(desired_body[2]) < PAPER_EQ13_ZERO_EPS
+                       else float(np.arctan2(desired_body[2], horizontal)))
+        return (roll_error, pitch_error, desired_neu, desired_ned,
+                desired_body, r_bi)
 
     def compute_control(self, current_rpy, current_velocity,
                         target_pitch, target_heading, target_velocity,
                         ned_velocity=None):
-        """
-        Args:
-            current_rpy:       (roll φ, pitch θ, yaw ψ)  — radians
-            current_velocity:  true airspeed               — m/s  (scalar)
-            target_pitch:      desired absolute pitch      — radians  [−π/2, π/2]
-            target_heading:    desired absolute heading    — radians  [−π, π]
-            target_velocity:   desired true airspeed       — m/s
-            ned_velocity:      (vn, ve, vd) in NED         — m/s  (optional, for Fix 3)
-
-        Returns:
-            (aileron, elevator, rudder, throttle) — all in [−1, 1]
-        """
-        roll, pitch, yaw = float(current_rpy[0]), float(current_rpy[1]), float(current_rpy[2])
-
-        if not np.all(np.isfinite([
-                roll, pitch, yaw, current_velocity, target_pitch,
-                target_heading, target_velocity])):
+        values = [*current_rpy, current_velocity, target_pitch,
+                  target_heading, target_velocity]
+        if not np.all(np.isfinite(values)):
             self.reset()
             return 0.0, 0.0, 0.0, 0.0
 
-        if self.profile in ("paper", "paper_minimal_shared_v1"):
-            current_targets = (
-                float(target_pitch), float(target_heading),
-                float(target_velocity))
-            if self._previous_upper_targets is None:
-                pitch_setpoint_delta = 0.0
-                heading_setpoint_delta = 0.0
-                velocity_setpoint_delta = 0.0
-                setpoint_changed = False
-            else:
-                previous_pitch, previous_heading, previous_velocity = (
-                    self._previous_upper_targets)
-                pitch_setpoint_delta = float(
-                    current_targets[0] - previous_pitch)
-                raw_heading_delta = float(
-                    current_targets[1] - previous_heading)
-                heading_setpoint_delta = float(
-                    (raw_heading_delta + np.pi) % (2.0 * np.pi) - np.pi)
-                if (np.isclose(heading_setpoint_delta, -np.pi)
-                        and raw_heading_delta > 0.0):
-                    heading_setpoint_delta = float(np.pi)
-                velocity_setpoint_delta = float(
-                    current_targets[2] - previous_velocity)
-                setpoint_changed = bool(
-                    abs(pitch_setpoint_delta)
-                    > SETPOINT_ANGLE_TOLERANCE_RAD
-                    or abs(heading_setpoint_delta)
-                    > SETPOINT_ANGLE_TOLERANCE_RAD
-                    or abs(velocity_setpoint_delta)
-                    > SETPOINT_VELOCITY_TOLERANCE_MPS)
-            self._previous_upper_targets = current_targets
-            roll_error, pitch_error, d_i_des, d_i_ned, d_b_des, r_bi = (
-                self.paper_direction_errors(
-                current_rpy, target_pitch, target_heading)
-            )
-            aileron = self._roll_pid.step(
-                roll_error, self.dt,
-                suppress_derivative=setpoint_changed)
-            elevator = self._pitch_pid.step(
-                pitch_error, self.dt,
-                suppress_derivative=setpoint_changed)
-            velocity_error = target_velocity - current_velocity
-            correction = self._velocity_pid.step(
-                velocity_error, self.dt,
-                suppress_derivative=setpoint_changed)
-            throttle = float(np.clip(
-                self.throttle_base + correction, 0.0, 1.0))
-            unsaturated = (
-                self._roll_pid._last_diagnostic["unsaturated"],
-                self._pitch_pid._last_diagnostic["unsaturated"],
-                0.0,
-                self.throttle_base
-                + self._velocity_pid._last_diagnostic["unsaturated"],
-            )
-            saturated = (aileron, elevator, 0.0, throttle)
-            self._last_diagnostic = {
-                "formula_version": PAPER_PID_ERROR_DEFINITION,
-                "derivative_semantics": PAPER_PID_DERIVATIVE_SEMANTICS,
-                "setpoint_changed_this_frame": bool(setpoint_changed),
-                "pitch_setpoint_delta_rad": float(pitch_setpoint_delta),
-                "heading_setpoint_delta_rad": float(
-                    heading_setpoint_delta),
-                "velocity_setpoint_delta_mps": float(
-                    velocity_setpoint_delta),
-                "derivative_suppressed_for_setpoint_change": bool(
-                    setpoint_changed),
-                "d_I_des": tuple(float(value) for value in d_i_des),
-                "d_I_des_ned": tuple(float(value) for value in d_i_ned),
-                "d_B_des": tuple(float(value) for value in d_b_des),
-                "R_BI": np.asarray(r_bi, dtype=np.float64).tolist(),
-                "e_phi": float(roll_error),
-                "e_theta": float(pitch_error),
-                "e_velocity": float(velocity_error),
-                "roll_pid": dict(self._roll_pid._last_diagnostic),
-                "pitch_pid": dict(self._pitch_pid._last_diagnostic),
-                "velocity_pid": dict(self._velocity_pid._last_diagnostic),
-                "unsaturated_commands": tuple(float(value) for value in unsaturated),
-                "saturated_commands": tuple(float(value) for value in saturated),
-                "degenerate_arctan_ratio": False,
-                "jsbsim_elevator_sign_adapter": 1.0,
-            }
-            return aileron, elevator, 0.0, throttle
+        current_targets = (
+            float(target_pitch), float(target_heading), float(target_velocity))
+        pitch_delta = heading_delta = velocity_delta = 0.0
+        setpoint_changed = False
+        if self._previous_upper_targets is not None:
+            old_pitch, old_heading, old_velocity = self._previous_upper_targets
+            pitch_delta = current_targets[0] - old_pitch
+            raw_heading_delta = current_targets[1] - old_heading
+            heading_delta = (raw_heading_delta + np.pi) % (2.0 * np.pi) - np.pi
+            if np.isclose(heading_delta, -np.pi) and raw_heading_delta > 0.0:
+                heading_delta = float(np.pi)
+            velocity_delta = current_targets[2] - old_velocity
+            setpoint_changed = bool(
+                abs(pitch_delta) > SETPOINT_ANGLE_TOLERANCE_RAD
+                or abs(heading_delta) > SETPOINT_ANGLE_TOLERANCE_RAD
+                or abs(velocity_delta) > SETPOINT_VELOCITY_TOLERANCE_MPS)
+        self._previous_upper_targets = current_targets
 
-        # =================================================================
-        #  Fix 1 — PITCH GIMBAL PROTECTION
-        #
-        #  When |pitch| > 85° the Z-Y-X Euler angles degenerate (gimbal
-        #  lock).  Roll and yaw become indistinguishable — the BTT arctan2
-        #  errors are meaningless and the PID fights itself.
-        #
-        #  Strategy: FREEZE all control surfaces at neutral (0.0) and
-        #  reset PID integrators.  The aircraft passively weathervanes
-        #  under natural aerodynamic stability until pitch drops below
-        #  the threshold, at which point normal BTT resumes.
-        # =================================================================
-        GIMBAL_LOCK_THRESHOLD = np.deg2rad(85.0)
-        if abs(pitch) > GIMBAL_LOCK_THRESHOLD:
-            # Reset all integrators and derivative memory so we start
-            # clean when the aircraft exits the vertical zone.
-            self._roll_pid.reset()
-            self._pitch_pid.reset()
-            self._velocity_pid.reset()
-            if self._debug:
-                self._debug_step += 1
-                if self._debug_step % 300 == 0:
-                    print(
-                        f"[PID GIMBAL] step={self._debug_step} "
-                        f"pitch={np.rad2deg(pitch):.1f}° → surfaces neutral, PIDs reset",
-                        flush=True,
-                    )
-            return 0.0, 0.0, 0.0, 0.0
-
-        # =================================================================
-        #  Fix 2 — HEADING LOW-PASS FILTER
-        #
-        #  The Actor runs at 5 Hz — target_heading step-changes every
-        #  0.2 s.  These step discontinuities propagate through d_I_des
-        #  → d_B_des → roll_error, causing a D-kick at the 60 Hz PID
-        #  rate.  A first-order low-pass with α = 0.2 smooths the step
-        #  into an exponential approach, reducing D-term excitation.
-        # =================================================================
-        HEADING_LPF_ALPHA = 0.2
-        if self._prev_target_heading is not None:
-            # Circular low-pass: follow the shortest arc
-            diff = (target_heading - self._prev_target_heading + np.pi) % (2 * np.pi) - np.pi
-            target_heading = self._prev_target_heading + HEADING_LPF_ALPHA * diff
-            # Re-normalise to [−π, π]
-            target_heading = (target_heading + np.pi) % (2 * np.pi) - np.pi
-        self._prev_target_heading = float(target_heading)
-
-        # ---- Formula (12): desired direction vector in inertial (NED) frame ----
-        # Paper: d_I_des = [cos(θ)cos(ψ), cos(θ)sin(ψ), sin(θ)]^T
-        # NED convention (z = Down):
-        #   positive pitch θ → nose UP   → d_I_des[2] = −sin(θ)
-        #   zero pitch       → level      → d_I_des[2] = 0
-        #   negative pitch   → nose DOWN  → d_I_des[2] = +sin(|θ|)
-        c_theta = np.cos(target_pitch)
-        d_I_des = np.array([
-            c_theta * np.cos(target_heading),   # North
-            c_theta * np.sin(target_heading),   # East
-            -np.sin(target_pitch),               # Down (= −up)
-        ], dtype=np.float64)
-
-        # ---- Formula (13): body-frame desired direction ----
-        # Fix 3: when |pitch| > 80° use velocity-vector construction to
-        # avoid Euler-angle gimbal-lock in R_BI.
-        VELOCITY_R_BI_THRESHOLD = np.deg2rad(80.0)
-        if abs(pitch) > VELOCITY_R_BI_THRESHOLD and ned_velocity is not None:
-            R_BI = self._r_bi_from_velocity(np.asarray(ned_velocity, dtype=np.float64))
-        else:
-            R_BI = self.ned_to_body_matrix(roll, pitch, yaw)
-        d_B_des = R_BI @ d_I_des   # desired direction expressed in body axes
-
-        # ---- BTT tracking errors ----
-        # e_φ (roll error):  arctan2(y_body, z_body)
-        #   → 0 when desired direction lies in the body x-z plane
-        #
-        # arctan2 ∈ [−π, π].  When d_B_des crosses the body x-z plane
-        # (d_B_y sign change at d_B_z<0), arctan2 wraps ≈+π↔≈−π — a 2π
-        # raw jump whose circular-distance is only a few degrees.
-        #
-        # We DO NOT unwrap.  Raw sign flips are physically meaningful
-        # (target crossed from right to left).  Soft-clip to [−90°,90°]
-        # keeps bank commands within the F-16 envelope.
-        #
-        # D-TERM GUARD:  the soft-clip itself can cause a 180° jump
-        # (+89°→+91° clips to +89°→−89°).  We detect frame-to-frame
-        # jumps >30° in the *clipped* error (F-16 max roll rate ≈ 400°/s
-        # = 7°/frame @60Hz) and clear derivative memory to avoid a spike.
-        roll_error_raw = float(np.arctan2(d_B_des[1], d_B_des[2] + 1e-12))
-        roll_error = float(np.clip(roll_error_raw, -np.pi / 2, np.pi / 2))
-
-        if self._prev_roll_error is not None:
-            clipped_delta = abs(roll_error - self._prev_roll_error)
-            if clipped_delta > np.deg2rad(30):          # >1800°/s — impossible aerodynamically
-                self._roll_pid._prev_error = 0.0        # suppress D-kick
-        self._prev_roll_error = float(roll_error)
-
-        # Deadband: ignore roll errors below 1° to prevent high-frequency
-        # aileron fluttering during straight-line flight or mild pursuit.
-        #
-        # LIMIT-CYCLE FIX: when the error enters the deadband we must also
-        # zero the integral AND the previous-error memory.  Otherwise:
-        #   1. residual i_term slowly pushes the aircraft out of the deadband
-        #   2. when roll_error re-crosses 1°, a large D-kick fires because
-        #      prev_error jumped from 0 (deadband) to >1° (active), causing
-        #      the aileron to jerk → overshoot → re-enter deadband → repeat.
-        ROLL_DEADBAND = np.deg2rad(1.0)   # 0.0175 rad
-        if abs(roll_error) < ROLL_DEADBAND:
-            roll_error = 0.0
-            self._roll_pid._integral = 0.0
-            self._roll_pid._prev_error = 0.0
-
-        # e_θ (pitch error): arctan2(−z_body, x_body)
-        #   → 0 when body x-axis points at d_I_des
-        pitch_error = float(np.arctan2(-d_B_des[2], d_B_des[0] + 1e-12))
-
-        # ---- Anti-inversion protection ----
-        # When d_B_des[0] < 0 the target is behind the aircraft.  Without
-        # correction, arctan2(-z, negative) → ±π, commanding a 180° pull-up
-        # that drives the aircraft into an inverted loop or flat spin.
-        #
-        # Fix: clamp pitch_error to [−π/2, π/2] so the nose never pulls
-        # past the vertical.  If the aircraft is nearly level in roll,
-        # inject a roll bias to force a lateral turn instead of a vertical
-        # loop.
-        if d_B_des[0] < 0.0:
-            pitch_error = float(np.clip(pitch_error, -np.pi / 2, np.pi / 2))
-            if abs(roll_error) < np.deg2rad(5):
-                roll_error = np.deg2rad(90.0)
-
-        # ---- Debug logging (once per 3 s @ 60 Hz) ----
-        if self._debug:
-            self._debug_step += 1
-            if self._debug_step % 180 == 0:
-                print(
-                    f"[PID DEBG] step={self._debug_step} "
-                    f"pitch_rad={pitch:.4f} "
-                    f"d_I_NED=({d_I_des[0]:.4f},{d_I_des[1]:.4f},{d_I_des[2]:.4f}) "
-                    f"d_B_Body=({d_B_des[0]:.4f},{d_B_des[1]:.4f},{d_B_des[2]:.4f}) "
-                    f"R_BI=[{R_BI[0,0]:.3f},{R_BI[0,1]:.3f},{R_BI[0,2]:.3f}|"
-                    f"{R_BI[1,0]:.3f},{R_BI[1,1]:.3f},{R_BI[1,2]:.3f}|"
-                    f"{R_BI[2,0]:.3f},{R_BI[2,1]:.3f},{R_BI[2,2]:.3f}] "
-                    f"err=(roll={np.rad2deg(roll_error):.2f}°,raw={np.rad2deg(roll_error_raw):.1f}°"
-                    f",pitch={np.rad2deg(pitch_error):.2f}°) "
-                    f"anti_inv={d_B_des[0] < 0.0}",
-                    flush=True,
-                )
-
-        # ---- PID outputs ----
-        # Roll error → aileron (roll about body x-axis)
-        aileron = self._roll_pid.step(roll_error, self.dt)
-
-        # Pitch error → elevator
-        # F-16 FCS: positive elevator-cmd-norm → pitch DOWN, so negate
-        elevator = -self._pitch_pid.step(pitch_error, self.dt)
-
-        # Velocity error → throttle
-        velocity_error = target_velocity - current_velocity
-        correction = self._velocity_pid.step(velocity_error, self.dt)
+        roll_error, pitch_error, d_neu, d_ned, d_body, r_bi = (
+            self.paper_direction_errors(
+                current_rpy, target_pitch, target_heading))
+        aileron = self._roll_pid.step(
+            roll_error, self.dt, suppress_derivative=setpoint_changed)
+        elevator = self._pitch_pid.step(
+            pitch_error, self.dt, suppress_derivative=setpoint_changed)
+        velocity_error = float(target_velocity - current_velocity)
+        correction = self._velocity_pid.step(
+            velocity_error, self.dt, suppress_derivative=setpoint_changed)
         throttle = float(np.clip(
             self.throttle_base + correction, 0.0, 1.0))
-
-        # Rudder: hard-locked to 0 per paper specification
-        rudder = 0.0
-
-        return aileron, elevator, rudder, throttle
+        unsaturated = (
+            self._roll_pid._last_diagnostic["unsaturated"],
+            self._pitch_pid._last_diagnostic["unsaturated"],
+            0.0,
+            self.throttle_base
+            + self._velocity_pid._last_diagnostic["unsaturated"],
+        )
+        saturated = (aileron, elevator, 0.0, throttle)
+        self._last_diagnostic = {
+            "formula_version": PAPER_PID_ERROR_DEFINITION,
+            "derivative_semantics": PAPER_PID_DERIVATIVE_SEMANTICS,
+            "setpoint_changed_this_frame": setpoint_changed,
+            "pitch_setpoint_delta_rad": float(pitch_delta),
+            "heading_setpoint_delta_rad": float(heading_delta),
+            "velocity_setpoint_delta_mps": float(velocity_delta),
+            "derivative_suppressed_for_setpoint_change": setpoint_changed,
+            "d_I_des": tuple(float(value) for value in d_neu),
+            "d_I_des_ned": tuple(float(value) for value in d_ned),
+            "d_B_des": tuple(float(value) for value in d_body),
+            "R_BI": r_bi.tolist(),
+            "e_phi": float(roll_error),
+            "e_theta": float(pitch_error),
+            "e_velocity": velocity_error,
+            "roll_pid": dict(self._roll_pid._last_diagnostic),
+            "pitch_pid": dict(self._pitch_pid._last_diagnostic),
+            "velocity_pid": dict(self._velocity_pid._last_diagnostic),
+            "unsaturated_commands": tuple(float(value) for value in unsaturated),
+            "saturated_commands": tuple(float(value) for value in saturated),
+            "degenerate_arctan_ratio": False,
+            "jsbsim_elevator_sign_adapter": 1.0,
+        }
+        return aileron, elevator, 0.0, throttle

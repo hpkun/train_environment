@@ -20,10 +20,9 @@ from my_uav_env.alignment.state_extractor import (
 
 def main():
     env = UavCombatEnv(
-        max_num_blue=1,
-        max_num_red=1,
+        max_num_blue=3,
+        max_num_red=3,
         max_steps=2,
-        enable_gcas_for_blue=False,
         suppress_jsbsim_output=True,
     )
     try:

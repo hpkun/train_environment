@@ -24,21 +24,14 @@ from my_uav_env.alignment.reward_utils import (
     DEFAULT_ALTITUDE_REWARD_CONFIG,
     REWARD_VERSION,
 )
-from configs.paper_minimal_3v3_spec import (
-    PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-    REFERENCE_ENVIRONMENT_PROFILE,
-    minimal_environment_snapshot,
-)
-from configs.paper_learnable_3v3_spec import (
-    LEARNABLE_INITIALIZATION_MODES,
-    LEARNABLE_MISSILE_GUIDANCE_MODE,
-    LEARNABLE_PID_THROTTLE_BASE,
-    PAPER_LEARNABLE_ENVIRONMENT_PROFILE,
-    learnable_environment_snapshot,
-)
-from configs.brma_mappo_paper_spec import (
-    DEFAULT_PAPER_ENVIRONMENT_CONFIG,
-    environment_config_snapshot,
+from configs.paper_3v3_spec import (
+    PAPER_BLUE_POLICY_PROFILE,
+    PAPER_ENVIRONMENT_PROFILE,
+    PAPER_MISSILE_GUIDANCE_MODE,
+    PAPER_PID_PROFILE,
+    PAPER_REWARD_MODE,
+    PID_THROTTLE_BASE,
+    paper_environment_snapshot,
 )
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
@@ -50,11 +43,13 @@ from train_vanilla_mappo import (
     ACTION_STD_MIN,
     ACTION_STD_MAX,
     VanillaActor,
+    Config,
     _classify_death_reason,
     _compute_global_state_dim,
     _compute_obs_dim,
     _episode_outcome,
     _flatten_obs,
+    _checkpoint_metadata,
     _joint_team_reward_once,
     _minimal_altitude_reward_config,
     _ratio_with_denominator_zero,
@@ -73,7 +68,7 @@ EVALUATION_FIELDNAMES = [
     "RedDeathsMissile", "RedDeathsCrash",
     "RedDeathsOther", "BlueDeathsMissile", "BlueDeathsCrash",
     "BlueDeathsOther", "CheckpointSchema", "NumRed", "NumBlue", "MaxSteps",
-    "EnableBlueGCAS", "RewardVersion", "RewardMode", "ObsNormalization",
+    "RewardVersion", "RewardMode", "ObsNormalization",
     "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
     "ActionDistribution", "EntropyEstimator", "AltitudeRewardConfigVersion",
     "AltitudeRewardConfig",
@@ -124,7 +119,7 @@ EVALUATION_SUMMARY_FIELDNAMES = [
     "RedMissilesFired", "BlueMissilesFired",
     "RedMissileHits", "BlueMissileHits",
     "RedMissileHitRate", "BlueMissileHitRate",
-    "CheckpointSchema", "NumRed", "NumBlue", "MaxSteps", "EnableBlueGCAS",
+    "CheckpointSchema", "NumRed", "NumBlue", "MaxSteps",
     "RewardVersion", "RewardMode", "ObsNormalization",
     "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
     "ActionDistribution", "EntropyEstimator", "AltitudeRewardConfigVersion",
@@ -147,37 +142,29 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, choices=("auto", "cpu", "cuda"),
                         default="auto")
-    parser.add_argument("--enable-blue-gcas", action="store_true", default=False)
-    parser.add_argument("--blue-policy-profile", choices=(
-        "paper_pursuit", "fixed_pair_pursuit_v1", "fixed_pair_no_mws_v1",
-        "fixed_pair_hold_after_kill_v1", "frozen_route_blue_v1",
-        "paper_minimal_fixed_pair_v1", "paper_minimal_straight_patrol_v1",
-        "paper_learnable_fixed_pair_v1"),
-        default="paper_pursuit")
-    parser.add_argument("--environment-profile", choices=(
-        REFERENCE_ENVIRONMENT_PROFILE, PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-        PAPER_LEARNABLE_ENVIRONMENT_PROFILE),
-        default=REFERENCE_ENVIRONMENT_PROFILE)
+    parser.add_argument("--blue-policy-profile",
+                        choices=(PAPER_BLUE_POLICY_PROFILE,),
+                        default=PAPER_BLUE_POLICY_PROFILE)
+    parser.add_argument("--environment-profile",
+                        choices=(PAPER_ENVIRONMENT_PROFILE,),
+                        default=PAPER_ENVIRONMENT_PROFILE)
     parser.add_argument("--obs-mode", type=str,
-                        choices=("paper_strict", "engineering"),
+                        choices=("paper_strict",),
                         default="paper_strict")
     parser.add_argument("--obs-normalization", type=str,
                         choices=("paper_fixed_v1", "none"),
                         default="paper_fixed_v1")
-    parser.add_argument("--pid-profile", choices=(
-        "paper", "engineering_safe", "paper_minimal_shared_v1"),
-                        default="paper")
-    parser.add_argument("--pid-throttle-base", type=float, default=0.0)
-    parser.add_argument("--reward-mode", choices=(
-        "paper_joint", "engineering_local", "paper_minimal_joint_v1"),
-                        default="paper_joint")
+    parser.add_argument("--pid-profile", choices=(PAPER_PID_PROFILE,),
+                        default=PAPER_PID_PROFILE)
+    parser.add_argument("--pid-throttle-base", type=float,
+                        default=PID_THROTTLE_BASE)
+    parser.add_argument("--reward-mode", choices=(PAPER_REWARD_MODE,),
+                        default=PAPER_REWARD_MODE)
     parser.add_argument("--missile-guidance-mode",
-                        choices=("paper_eq9", "legacy_simplified",
-                                 "paper_minimal_point_mass_v1",
-                                 LEARNABLE_MISSILE_GUIDANCE_MODE),
-                        default="paper_eq9")
+                        choices=(PAPER_MISSILE_GUIDANCE_MODE,),
+                        default=PAPER_MISSILE_GUIDANCE_MODE)
     parser.add_argument("--initial-condition-randomization-mode",
-                        choices=LEARNABLE_INITIALIZATION_MODES,
+                        choices=("deterministic_v1",),
                         default="deterministic_v1")
     parser.add_argument("--output", type=str,
                         default="results/eval_vanilla_mappo.csv")
@@ -247,82 +234,23 @@ def _load_actor(args, device: torch.device):
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
     obs_dim = _compute_obs_dim(
         args.num_red, args.num_blue, is_red=True, obs_mode=args.obs_mode)
-    if args.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
-        environment_snapshot = minimal_environment_snapshot(
-            num_red=args.num_red, num_blue=args.num_blue,
-            sim_freq=60, agent_interaction_steps=12,
-            max_episode_length=args.max_steps, seed=args.seed,
-            blue_policy_profile=args.blue_policy_profile)
-    elif args.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
-        environment_snapshot = learnable_environment_snapshot(
-            num_red=args.num_red, num_blue=args.num_blue,
-            sim_freq=60, agent_interaction_steps=12,
-            max_episode_length=args.max_steps, seed=args.seed,
-            blue_policy_profile=args.blue_policy_profile,
-            initial_condition_randomization_mode=(
-                args.initial_condition_randomization_mode))
-    else:
-        environment_snapshot = environment_config_snapshot(
-            DEFAULT_PAPER_ENVIRONMENT_CONFIG,
-            num_red=args.num_red, num_blue=args.num_blue,
-            sim_freq=60, agent_interaction_steps=12, seed=args.seed,
-            blue_policy_profile=args.blue_policy_profile)
-    expected_metadata = {
-        "schema_version": CHECKPOINT_SCHEMA_VERSION,
-        "obs_mode": args.obs_mode,
-        "obs_normalization": args.obs_normalization,
-        "reward_version": (
-            "paper_literal_minimal_unspecified_v1"
-            if args.environment_profile in (
-                PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-                PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
-            else REWARD_VERSION),
-        "reward_mode": args.reward_mode,
-        "pid_profile": args.pid_profile,
-        "pid_throttle_base": float(args.pid_throttle_base),
-        "pid_error_definition": environment_snapshot.get(
-            "pid_error_definition", {}).get(
-                "value", PAPER_PID_ERROR_DEFINITION),
-        "derivative_semantics": environment_snapshot.get(
-            "derivative_semantics", {}).get(
-                "value", PAPER_PID_DERIVATIVE_SEMANTICS),
-        "missile_guidance_mode": args.missile_guidance_mode,
-        "altitude_reward_config": asdict(
-            _minimal_altitude_reward_config()
-            if args.environment_profile in (
-                PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-                PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
-            else DEFAULT_ALTITUDE_REWARD_CONFIG),
-        "action_distribution": ACTION_DISTRIBUTION_VERSION,
-        "entropy_estimator": ENTROPY_ESTIMATOR_VERSION,
-        "action_log_std_init": ACTION_LOG_STD_INIT,
-        "action_std_init": ACTION_STD_INIT,
-        "action_std_bounds": [ACTION_STD_MIN, ACTION_STD_MAX],
-        "action_std_parameterization": "gru_state_tanh_bounded_log_std_head_v1",
-        "actor_hidden_sizes": [128, 128],
-        "actor_rnn_hidden_size": 128,
-        "recurrent_n": 1,
-        "blue_policy_profile": args.blue_policy_profile,
-        "environment_profile": args.environment_profile,
-        "initial_condition_randomization_mode": (
-            args.initial_condition_randomization_mode),
-        "num_red": args.num_red,
-        "num_blue": args.num_blue,
-        "max_episode_length": args.max_steps,
-        "environment_config_fingerprint": environment_snapshot[
-            "environment_config_fingerprint"],
-        "global_state_dim": _compute_global_state_dim(args.num_red, args.obs_mode),
-        "actor_obs_dim": obs_dim,
-    }
-    if args.environment_profile == PAPER_MINIMAL_ENVIRONMENT_PROFILE:
-        expected_metadata.update({
-            "red_mws_mode": environment_snapshot["red_mws_mode"]["value"],
-            "blue_mws_mode": environment_snapshot["blue_mws_mode"]["value"],
-            "blue_missile_evasion_enabled": environment_snapshot[
-                "blue_missile_evasion_enabled"]["value"],
-            "mws_asymmetry_reason": environment_snapshot[
-                "mws_asymmetry_reason"]["value"],
-        })
+    config = Config()
+    config.num_red = args.num_red
+    config.num_blue = args.num_blue
+    config.max_episode_length = args.max_steps
+    config.seed = args.seed
+    config.obs_mode = args.obs_mode
+    config.obs_normalization = args.obs_normalization
+    config.pid_profile = args.pid_profile
+    config.pid_throttle_base = args.pid_throttle_base
+    config.reward_mode = args.reward_mode
+    config.missile_guidance_mode = args.missile_guidance_mode
+    config.blue_policy_profile = args.blue_policy_profile
+    config.environment_profile = args.environment_profile
+    config.environment_version = args.environment_profile
+    expected_metadata = _checkpoint_metadata(
+        config, obs_dim,
+        _compute_global_state_dim(args.num_red, args.obs_mode))
     try:
         state = _unpack_and_validate_checkpoint(
             payload, expected_metadata, "actor")
@@ -359,14 +287,14 @@ def _death_counts(death_reasons: dict[str, str], ids: list[str]) -> Counter:
 
 def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                     max_steps: int, device: torch.device, episode_idx: int,
-                    enable_blue_gcas: bool, obs_mode: str,
+                    obs_mode: str,
                     obs_normalization: str = "paper_fixed_v1",
-                    pid_profile: str = "paper",
-                    pid_throttle_base: float = 0.0,
-                    reward_mode: str = "paper_joint",
-                    missile_guidance_mode: str = "paper_eq9",
-                    blue_policy_profile: str = "paper_pursuit",
-                    environment_profile: str = REFERENCE_ENVIRONMENT_PROFILE,
+                    pid_profile: str = PAPER_PID_PROFILE,
+                    pid_throttle_base: float = PID_THROTTLE_BASE,
+                    reward_mode: str = PAPER_REWARD_MODE,
+                    missile_guidance_mode: str = PAPER_MISSILE_GUIDANCE_MODE,
+                    blue_policy_profile: str = PAPER_BLUE_POLICY_PROFILE,
+                    environment_profile: str = PAPER_ENVIRONMENT_PROFILE,
                     initial_condition_randomization_mode: str = "deterministic_v1",
                     seed: int | None = None,
                     deterministic: bool = True):
@@ -383,7 +311,6 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         environment_profile=environment_profile,
         initial_condition_randomization_mode=(
             initial_condition_randomization_mode),
-        enable_gcas_for_blue=enable_blue_gcas,
         suppress_jsbsim_output=True,
     )
     try:
@@ -520,11 +447,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             value = environment_metadata.get(name, "")
             return value.get("value", "") if isinstance(value, dict) else value
 
-        altitude_config = (_minimal_altitude_reward_config()
-                           if environment_profile in (
-                               PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-                               PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
-                           else DEFAULT_ALTITUDE_REWARD_CONFIG)
+        altitude_config = _minimal_altitude_reward_config()
         return {
             "Episode": episode_idx,
             "Outcome": outcome,
@@ -552,13 +475,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "NumRed": num_red,
             "NumBlue": num_blue,
             "MaxSteps": max_steps,
-            "EnableBlueGCAS": bool(enable_blue_gcas),
-            "RewardVersion": (
-                "paper_literal_minimal_unspecified_v1"
-                if environment_profile in (
-                    PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-                    PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
-                else REWARD_VERSION),
+            "RewardVersion": "paper_3v3_joint_eq15_23_v1",
             "RewardMode": reward_mode,
             "ObsNormalization": obs_normalization,
             "PIDProfile": pid_profile,
@@ -722,7 +639,7 @@ def _aggregate_evaluation_summary(rows: list[dict]) -> dict:
         **{
             key: semantics.get(key, "") for key in (
                 "CheckpointSchema", "NumRed", "NumBlue", "MaxSteps",
-                "EnableBlueGCAS", "RewardVersion", "RewardMode", "ObsNormalization",
+                "RewardVersion", "RewardMode", "ObsNormalization",
                 "PIDProfile", "PIDThrottleBase", "MissileGuidanceMode",
                 "ActionDistribution", "EntropyEstimator",
                 "AltitudeRewardConfigVersion",
@@ -761,23 +678,14 @@ def _write_and_print_summary(rows: list[dict], output_path: str,
 
 def main():
     args = parse_args()
-    if args.environment_profile == PAPER_LEARNABLE_ENVIRONMENT_PROFILE:
-        args.pid_throttle_base = LEARNABLE_PID_THROTTLE_BASE
     _set_seed(args.seed)
     device = _select_device(args.device)
     actor, rnn_hidden_size, _checkpoint = _load_actor(args, device)
-    print(f"enable_blue_gcas: {args.enable_blue_gcas}", flush=True)
-    minimal = args.environment_profile in (
-        PAPER_MINIMAL_ENVIRONMENT_PROFILE,
-        PAPER_LEARNABLE_ENVIRONMENT_PROFILE)
-    print("reward_version: " + (
-        "paper_literal_minimal_unspecified_v1" if minimal else REWARD_VERSION),
-        flush=True)
+    print("reward_version: paper_3v3_joint_eq15_23_v1", flush=True)
     print(f"environment_profile: {args.environment_profile}", flush=True)
     print(f"pid_throttle_base: {args.pid_throttle_base}", flush=True)
     print(f"action_distribution: {ACTION_DISTRIBUTION_VERSION}", flush=True)
-    altitude_config = (_minimal_altitude_reward_config()
-                       if minimal else DEFAULT_ALTITUDE_REWARD_CONFIG)
+    altitude_config = _minimal_altitude_reward_config()
     print("altitude_reward_config: "
           f"{json.dumps(asdict(altitude_config), sort_keys=True)}",
           flush=True)
@@ -800,7 +708,6 @@ def main():
                 max_steps=args.max_steps,
                 device=device,
                 episode_idx=ep,
-                enable_blue_gcas=args.enable_blue_gcas,
                 obs_mode=args.obs_mode,
                 obs_normalization=args.obs_normalization,
                 pid_profile=args.pid_profile,

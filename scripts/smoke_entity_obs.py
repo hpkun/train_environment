@@ -25,11 +25,10 @@ def _print_entity_info(agent_id: str, obs_np: dict):
 
 def main():
     env = UavCombatEnv(
-        max_num_blue=1,
-        max_num_red=1,
+        max_num_blue=3,
+        max_num_red=3,
         max_steps=2,
         suppress_jsbsim_output=True,
-        enable_gcas_for_blue=False,
     )
     try:
         obs, _ = env.reset()
@@ -37,7 +36,7 @@ def main():
         _print_entity_info("blue_0", obs["blue_0"])
 
         zero = np.zeros(3, dtype=np.float32)
-        actions = {"red_0": zero, "blue_0": zero}
+        actions = {f"red_{idx}": zero for idx in range(3)}
         obs, _rewards, _terminated, _truncated, _info = env.step(actions)
         _print_entity_info("red_0", obs["red_0"])
     finally:

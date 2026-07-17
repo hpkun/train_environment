@@ -313,18 +313,19 @@ def build_strict_paper_entity_observation(env, agent_id: str):
         mask.append(1)
 
     radar_mode = "true_or_existing_env_method"
-    for _aid, sim in allies + enemies:
+    for slot_group, slots in (("ally", allies), ("enemy", enemies)):
+      for _aid, sim in slots:
         if not _is_valid_sim(ego_sim) or not _is_valid_sim(sim):
             rows.append(np.zeros(10, dtype=np.float32))
             mask.append(1)
             continue
         radar_detected = True
         target_position_override = None
-        if hasattr(env, "_get_sensor_track"):
+        if slot_group == "enemy" and hasattr(env, "_get_sensor_track"):
             track = env._get_sensor_track(ego_sim, sim)
             radar_detected = track.source == "radar_full"
             target_position_override = track.position_estimate
-        elif hasattr(env, "_is_detected_by_radar"):
+        elif slot_group == "enemy" and hasattr(env, "_is_detected_by_radar"):
             radar_detected = bool(env._is_detected_by_radar(ego_sim, sim))
         rows.append(extract_relative_state(
             ego_sim, sim, radar_detected=radar_detected,
