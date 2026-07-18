@@ -11,40 +11,35 @@ import torch
 def resolve_device(name):return torch.device("cuda" if name=="auto" and torch.cuda.is_available() else "cpu" if name=="auto" else name)
 
 def evaluate_model(model,scenario,episodes,device,deterministic=True,seed=1,return_rows=False):
-    numpy_state=np.random.get_state();torch_state=torch.random.get_rng_state();cuda_states=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-    try:
-        rows=[]
-        for episode in range(episodes):
-            episode_seed=seed+episode
-            np.random.seed(episode_seed);torch.manual_seed(episode_seed)
-            if torch.cuda.is_available():torch.cuda.manual_seed_all(episode_seed)
-            env=SimpleTAMCombatEnv(scenario,"red");adapter=SimpleMAPPOAdapter(env);obs,state,info=adapter.reset(seed=episode_seed)
-            active=np.ones(adapter.num_agents,np.float32);episode_return=0.;action_trace=[]
-            try:
-                for step in range(1000):
-                    with torch.no_grad():actions,_,_,_=model.act(torch.as_tensor(obs,device=device),torch.as_tensor(state,device=device),deterministic)
-                    action_np=actions.cpu().numpy();action_trace.append(action_np.tolist())
-                    obs,state,rewards,done,next_active,info=adapter.step(action_np)
-                    episode_return+=float((rewards*active).sum()/max(active.sum(),1.));active=next_active
-                    if done:break
-                rows.append({"return":episode_return,"length":step+1,"winner":info["winner"],"timeout":info["termination_reason"]=="timeout",
-                  "red_alive":info["alive_red"],"blue_alive":info["alive_blue"],"missile_launches":info["missiles_fired"],"missile_hits":info["missile_hits"],
-                  "crashes":info["red_crashes"]+info["blue_crashes"],"boundary_deaths":info["boundary_deaths"],
-                  "numerical_invalid":info["numerical_invalid"],"envelope":info["flight_envelope_violation"],"action_trace":action_trace})
-            finally:env.close()
-        n=max(len(rows),1)
-        result={"episodes":len(rows),"mean_return":float(np.mean([r["return"] for r in rows])),"return_std":float(np.std([r["return"] for r in rows])),"mean_episode_length":float(np.mean([r["length"] for r in rows])),
-          "red_win_rate":sum(r["winner"]=="red" for r in rows)/n,"blue_win_rate":sum(r["winner"]=="blue" for r in rows)/n,
-          "draw_rate":sum(r["winner"]=="draw" for r in rows)/n,"timeout_rate":sum(r["timeout"] for r in rows)/n,
-          "mean_red_alive":float(np.mean([r["red_alive"] for r in rows])),"mean_blue_alive":float(np.mean([r["blue_alive"] for r in rows])),
-          "missile_launches":sum(r["missile_launches"] for r in rows),"missile_hits":sum(r["missile_hits"] for r in rows),
-          "crashes":sum(r["crashes"] for r in rows),"boundary_deaths":sum(r["boundary_deaths"] for r in rows),
-          "numerical_invalid_episodes":sum(r["numerical_invalid"]>0 for r in rows),"flight_envelope_violation_episodes":sum(r["envelope"] for r in rows)}
-        if return_rows:result["rows"]=rows
-        return result
-    finally:
-        np.random.set_state(numpy_state);torch.random.set_rng_state(torch_state)
-        if cuda_states is not None:torch.cuda.set_rng_state_all(cuda_states)
+    rows=[]
+    for episode in range(episodes):
+        episode_seed=seed+episode
+        np.random.seed(episode_seed);torch.manual_seed(episode_seed)
+        if torch.cuda.is_available():torch.cuda.manual_seed_all(episode_seed)
+        env=SimpleTAMCombatEnv(scenario,"red");adapter=SimpleMAPPOAdapter(env);obs,state,info=adapter.reset(seed=episode_seed)
+        active=np.ones(adapter.num_agents,np.float32);episode_return=0.;action_trace=[]
+        try:
+            for step in range(1000):
+                with torch.no_grad():actions,_,_,_=model.act(torch.as_tensor(obs,device=device),torch.as_tensor(state,device=device),deterministic)
+                action_np=actions.cpu().numpy();action_trace.append(action_np.tolist())
+                obs,state,rewards,done,next_active,info=adapter.step(action_np)
+                episode_return+=float((rewards*active).sum()/max(active.sum(),1.));active=next_active
+                if done:break
+            rows.append({"return":episode_return,"length":step+1,"winner":info["winner"],"timeout":info["termination_reason"]=="timeout",
+              "red_alive":info["alive_red"],"blue_alive":info["alive_blue"],"missile_launches":info["missiles_fired"],"missile_hits":info["missile_hits"],
+              "crashes":info["red_crashes"]+info["blue_crashes"],"boundary_deaths":info["boundary_deaths"],
+              "numerical_invalid":info["numerical_invalid"],"envelope":info["flight_envelope_violation"],"action_trace":action_trace})
+        finally:env.close()
+    n=max(len(rows),1)
+    result={"episodes":len(rows),"mean_return":float(np.mean([r["return"] for r in rows])),"return_std":float(np.std([r["return"] for r in rows])),"mean_episode_length":float(np.mean([r["length"] for r in rows])),
+      "red_win_rate":sum(r["winner"]=="red" for r in rows)/n,"blue_win_rate":sum(r["winner"]=="blue" for r in rows)/n,
+      "draw_rate":sum(r["winner"]=="draw" for r in rows)/n,"timeout_rate":sum(r["timeout"] for r in rows)/n,
+      "mean_red_alive":float(np.mean([r["red_alive"] for r in rows])),"mean_blue_alive":float(np.mean([r["blue_alive"] for r in rows])),
+      "missile_launches":sum(r["missile_launches"] for r in rows),"missile_hits":sum(r["missile_hits"] for r in rows),
+      "crashes":sum(r["crashes"] for r in rows),"boundary_deaths":sum(r["boundary_deaths"] for r in rows),
+      "numerical_invalid_episodes":sum(r["numerical_invalid"]>0 for r in rows),"flight_envelope_violation_episodes":sum(r["envelope"] for r in rows)}
+    if return_rows:result["rows"]=rows
+    return result
 
 def load_checkpoint(path,scenario,device):
     checkpoint=torch.load(path,map_location=device,weights_only=False);env=SimpleTAMCombatEnv(scenario);adapter=SimpleMAPPOAdapter(env);env.close()
