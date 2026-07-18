@@ -15,6 +15,10 @@ python -m pytest aircombat_env_v1/tests -q
 python -m pytest aircombat_env_v1/tests -q -m integration
 ```
 
+### Minimal MAPPO baseline
+
+`simple_mappo.py` 为 `SimpleTAMCombatEnv` 提供标准前馈 MAPPO：红方共享参数Actor、拼接红方局部观测的集中式Critic、tanh-squashed Gaussian、GAE、PPO裁剪和死亡智能体mask。训练与评估入口分别为 `scripts/train_simple_mappo.py` 和 `scripts/eval_simple_mappo.py`，不运行时依赖 `hetero_uav`。名义场景是确定性的，多次确定性评估主要用于流程一致性，不代表独立随机样本的统计置信度。
+
 ## experimental_or_legacy
 
 ### formal_paper_environment
