@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +9,10 @@ import pytest
 import torch
 
 from algorithms.pure_happo import ALGORITHM_CONTRACT, PureHAPPOPolicy
-from scripts.audit_hetero_3v2_reward_v5_ranking import _load_actor_only
+from scripts.audit_hetero_3v2_reward_v5_ranking import (
+    _load_actor_only,
+    _paired_scenarios,
+)
 from scripts.eval_hetero_3v2_pure_happo_v1 import _validate_checkpoint_meta
 from scripts.train_hetero_3v2_pure_happo_v1 import (
     _contract_meta,
@@ -25,9 +29,15 @@ from uav_env.JSBSim.formal_v2.reward_v5 import (
     POTENTIAL_GAMMA,
     _terminal_components,
     compute_team_rewards,
+    discounted_potential_return,
     potential_shaping_reward,
+    potential_targets,
     role_potential_components,
+    theoretical_discounted_potential_return,
+    v5_uav_dodge_potential_components,
 )
+from uav_env.JSBSim.formal_v2.reward import uav_dodge_components
+from uav_env.JSBSim.formal_v1.missile import FormalMissile
 from uav_env.make_env import make_env
 
 V4_CONFIG = "uav_env/JSBSim/configs/hetero_3v2_pure_happo_v2.yaml"
@@ -58,6 +68,14 @@ def _meta(env):
         "policy_distribution": "tanh_squashed_gaussian_raw_action",
         "critic_contract": "centralized_shared_scalar_v",
         "gae_contract": "separated_termination_truncation",
+    }
+
+
+def _controller_state(controller):
+    return {
+        key: copy.deepcopy(
+            value.__dict__ if hasattr(value, "__dict__") else value)
+        for key, value in controller.__dict__.items()
     }
 
 
@@ -178,19 +196,28 @@ def test_v5_terminal_outcome_and_retention_formula():
 def test_v5_potential_formula_direction_boundary_and_fixed_divisor():
     positive, effective = potential_shaping_reward(-0.5, 0.5, False)
     negative, _ = potential_shaping_reward(0.5, -0.5, False)
-    boundary, boundary_effective = potential_shaping_reward(0.5, 0.9, True)
+    boundary, boundary_effective = potential_shaping_reward(
+        0.5, 0.9, terminated=True)
+    timeout, timeout_effective = potential_shaping_reward(
+        0.5, 0.9, terminated=False, truncated=True)
+    invalid, invalid_effective = potential_shaping_reward(
+        0.5, 0.9, terminated=False, invalid=True)
     assert positive > 0.0
     assert negative < 0.0
     assert boundary == pytest.approx(-POTENTIAL_BETA * 0.5)
     assert effective == 0.5 and boundary_effective == 0.0
+    assert timeout_effective == 0.9
+    assert timeout == pytest.approx(POTENTIAL_BETA * (0.99 * 0.9 - 0.5))
+    assert invalid_effective == 0.0
+    assert invalid == pytest.approx(-POTENTIAL_BETA * 0.5)
 
     env = make_env(V5_CONFIG)
     env.reset(seed=5)
-    details = role_potential_components(env, env.selected_targets)
+    details = role_potential_components(env)
     expected = sum(details[aid]["phi"] for aid in env.red_ids) / 3.0
     assert env.v5_phi_previous == pytest.approx(expected)
     env.aircraft["red_1"].shotdown()
-    details = role_potential_components(env, env.selected_targets)
+    details = role_potential_components(env)
     assert details["red_1"]["phi"] == 0.0
     env.close()
 
@@ -207,6 +234,133 @@ def test_v5_reset_reinitializes_previous_potential():
     assert env.v5_terminal_applied is False
     assert env.v5_last_event_step == -1
     env.close()
+
+
+def test_v5_potential_targets_use_current_state_and_ignore_cached_targets():
+    env = make_env(V5_CONFIG)
+    env.reset(seed=7)
+    first = potential_targets(env)
+    assert first["red_0"] is None
+    assert first["red_1"] in env.blue_ids
+    assert first["red_2"] in env.blue_ids
+    expected_phi = sum(
+        row["phi"] for row in role_potential_components(env).values()) / 3.0
+    assert env.v5_phi_previous == pytest.approx(expected_phi)
+
+    env.selected_targets.update({
+        "red_0": "blue_0", "red_1": None, "red_2": "blue_1"})
+    second = potential_targets(env)
+    assert second == first
+    assert role_potential_components(env) == role_potential_components(env)
+
+    env.aircraft[first["red_1"]].shotdown()
+    switched = potential_targets(env)
+    assert switched["red_1"] != first["red_1"]
+    env.close()
+
+
+def test_v5_potential_evaluation_has_no_environment_side_effects():
+    env = make_env(V5_CONFIG)
+    env.reset(seed=8)
+    env.selected_targets["red_1"] = "blue_1"
+    env.last_fire_gates = {"red_1": {"allowed": True}}
+    env.last_launch_time["red_1"] = 12.5
+    env.previous_missile_speed = {"existing": 321.0}
+    before = {
+        "selected_targets": dict(env.selected_targets),
+        "last_fire_gates": {key: dict(value) for key, value in env.last_fire_gates.items()},
+        "last_launch_time": dict(env.last_launch_time),
+        "previous_missile_speed": dict(env.previous_missile_speed),
+        "missiles": [(m.state, m.position.copy(), m.velocity.copy()) for m in env.missiles],
+        "aircraft": {aid: (
+            aircraft.get_position().copy(), aircraft.get_velocity().copy(),
+            aircraft.get_rpy().copy(), aircraft.is_alive,
+        ) for aid, aircraft in env.aircraft.items()},
+        "controllers": {aid: _controller_state(controller)
+                        for aid, controller in env.controllers.items()},
+        "v5_phi_previous": env.v5_phi_previous,
+        "v5_terminal_applied": env.v5_terminal_applied,
+        "v5_last_event_step": env.v5_last_event_step,
+    }
+    first = role_potential_components(env)
+    second = role_potential_components(env)
+    assert first == second
+    assert env.selected_targets == before["selected_targets"]
+    assert env.last_fire_gates == before["last_fire_gates"]
+    assert env.last_launch_time == before["last_launch_time"]
+    assert env.previous_missile_speed == before["previous_missile_speed"]
+    assert env.v5_phi_previous == before["v5_phi_previous"]
+    assert env.v5_terminal_applied == before["v5_terminal_applied"]
+    assert env.v5_last_event_step == before["v5_last_event_step"]
+    assert len(env.missiles) == len(before["missiles"])
+    for aid, aircraft in env.aircraft.items():
+        position, velocity, rpy, alive = before["aircraft"][aid]
+        assert np.array_equal(aircraft.get_position(), position)
+        assert np.array_equal(aircraft.get_velocity(), velocity)
+        assert np.array_equal(aircraft.get_rpy(), rpy)
+        assert aircraft.is_alive == alive
+        assert _controller_state(env.controllers[aid]) == before["controllers"][aid]
+    env.close()
+
+
+def test_v5_dodge_is_pure_and_v4_history_behavior_is_unchanged():
+    env = make_env(V5_CONFIG)
+    env.reset(seed=9)
+    target = env.aircraft["red_1"]
+    position = target.get_position() - np.asarray([1_000.0, 0.0, 0.0])
+    missile = FormalMissile(
+        "blue_0_m0", "blue_0", "red_1", position.copy(),
+        np.asarray([600.0, 0.0, 0.0]),
+    )
+    env.missiles.append(missile)
+    env.previous_missile_speed.clear()
+    first = v5_uav_dodge_potential_components(env, "red_1")
+    second = v5_uav_dodge_potential_components(env, "red_1")
+    assert first == second
+    assert first["dodge_speed"] == 0.0
+    assert env.previous_missile_speed == {}
+
+    v4_result = uav_dodge_components(env, "red_1")
+    assert v4_result["dodge_speed"] == 0.0
+    assert env.previous_missile_speed[missile.missile_id] == pytest.approx(600.0)
+    env.close()
+
+
+@pytest.mark.parametrize(
+    ("phis", "terminated", "truncated", "expected_final"),
+    [
+        ([0.2, 0.4, -0.1], False, False, -0.1),
+        ([0.2, 0.4, -0.1], True, False, 0.0),
+        ([0.2, 0.4, -0.1], False, True, -0.1),
+    ],
+)
+def test_v5_discounted_potential_telescoping_identity(
+        phis, terminated, truncated, expected_final):
+    rewards = []
+    for index in range(len(phis) - 1):
+        is_last = index == len(phis) - 2
+        reward, effective = potential_shaping_reward(
+            phis[index], phis[index + 1],
+            terminated=terminated and is_last,
+            truncated=truncated and is_last,
+        )
+        rewards.append(reward)
+    actual = discounted_potential_return(rewards)
+    theoretical = theoretical_discounted_potential_return(
+        phis[0], expected_final, len(rewards))
+    assert effective == pytest.approx(expected_final)
+    assert actual == pytest.approx(theoretical, abs=1e-12)
+
+
+def test_v5_audit_scenarios_are_distinct_and_reusable_across_policies():
+    first_policy = _paired_scenarios(2_000, 20)
+    second_policy = _paired_scenarios(2_000, 20)
+    assert first_policy == second_policy
+    signatures = {
+        json.dumps(row["perturbation"], sort_keys=True)
+        for row in first_policy
+    }
+    assert len(signatures) == 20
 
 
 def test_v5_gamma_mismatch_is_rejected():

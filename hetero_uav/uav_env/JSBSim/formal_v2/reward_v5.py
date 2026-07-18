@@ -9,6 +9,7 @@ import math
 import numpy as np
 
 from ..formal_v1.geometry import combat_geometry
+from ..formal_v1.targeting import select_target
 from .reward import (
     MAV_DENSE_NORMALIZER,
     MAV_SAFETY_WEIGHTS,
@@ -19,7 +20,6 @@ from .reward import (
     mav_support_components,
     uav_angle_reward,
     uav_distance_reward,
-    uav_dodge_components,
     uav_height_reward,
     uav_speed_reward,
 )
@@ -76,8 +76,56 @@ def _zero_uav_dense() -> dict[str, float]:
     }
 
 
-def role_potential_components(env, selected_targets: dict) -> dict[str, dict]:
-    """Evaluate the unchanged V4 role-dense formulas at the current state."""
+def potential_targets(env) -> dict[str, str | None]:
+    """Return a current-state target map without touching fire-control state."""
+    return {
+        agent_id: (
+            None if env.roles[agent_id] == "mav"
+            else select_target(env, agent_id)
+        )
+        for agent_id in env.red_ids
+    }
+
+
+def v5_uav_dodge_potential_components(env, agent_id: str) -> dict[str, float]:
+    """Evaluate current incoming-missile geometry without history writes."""
+    aircraft = env.aircraft[agent_id]
+    incoming = [
+        missile for missile in env.missiles
+        if missile.is_launched and missile.target_id == agent_id
+    ]
+    if not incoming:
+        return {
+            "dodge": 0.0, "dodge_angle": 0.0, "dodge_speed": 0.0,
+            "missile_risk": 0.0,
+        }
+    missile = min(
+        incoming,
+        key=lambda item: float(np.linalg.norm(
+            item.position - aircraft.get_position())),
+    )
+    velocity = np.asarray(missile.velocity, dtype=np.float64)
+    los = np.asarray(aircraft.get_position(), dtype=np.float64) - missile.position
+    speed = float(np.linalg.norm(velocity))
+    distance = float(np.linalg.norm(los))
+    if speed <= 1e-9 or distance <= 1e-9:
+        dodge_angle = 0.0
+    else:
+        cos_lambda = float(np.clip(
+            np.dot(velocity, los) / (speed * distance), -1.0, 1.0))
+        dodge_angle = -cos_lambda
+    return {
+        "dodge": _clip(dodge_angle),
+        "dodge_angle": _clip(dodge_angle),
+        "dodge_speed": 0.0,
+        "missile_risk": float(np.clip(
+            math.exp(-distance / 5_000.0), 0.0, 1.0)),
+    }
+
+
+def role_potential_components(env) -> dict[str, dict]:
+    """Evaluate V5 role potential as a pure function of current state."""
+    selected_targets = potential_targets(env)
     details: dict[str, dict] = {}
     mav = env.aircraft["red_0"]
     if not mav.is_alive:
@@ -116,7 +164,7 @@ def role_potential_components(env, selected_targets: dict) -> dict[str, dict]:
             angle = uav_angle_reward(
                 geometry["ata_rad"], geometry["ta_rad"])
             distance = uav_distance_reward(geometry["range_m"])
-        dodge = uav_dodge_components(env, agent_id)
+        dodge = v5_uav_dodge_potential_components(env, agent_id)
         dense = float(
             UAV_WEIGHTS["height"] * height
             + UAV_WEIGHTS["speed"] * speed
@@ -142,7 +190,7 @@ def _phi_team(details: dict[str, dict]) -> float:
 
 
 def reset_episode_state(env) -> None:
-    details = role_potential_components(env, env.selected_targets)
+    details = role_potential_components(env)
     env.v5_phi_previous = _phi_team(details)
     env.v5_terminal_applied = False
 
@@ -225,14 +273,41 @@ def _terminal_components(context: dict) -> dict[str, float]:
 
 
 def potential_shaping_reward(
-    phi_previous: float, phi_next: float, team_done: bool,
+    phi_previous: float,
+    phi_next: float,
+    terminated: bool,
+    truncated: bool = False,
+    invalid: bool = False,
 ) -> tuple[float, float]:
-    phi_next_effective = 0.0 if team_done else float(phi_next)
+    del truncated  # A pure time-limit truncation preserves the next potential.
+    phi_next_effective = 0.0 if (terminated or invalid) else float(phi_next)
     shaping = POTENTIAL_BETA * (
         POTENTIAL_GAMMA * phi_next_effective - float(phi_previous))
     if not math.isfinite(shaping):
         raise ValueError("non-finite V5 potential shaping")
     return float(shaping), phi_next_effective
+
+
+def discounted_potential_return(
+    shaping_rewards, gamma: float = POTENTIAL_GAMMA,
+) -> float:
+    return float(sum(
+        float(reward) * float(gamma) ** step
+        for step, reward in enumerate(shaping_rewards)
+    ))
+
+
+def theoretical_discounted_potential_return(
+    phi_initial: float,
+    phi_final_effective: float,
+    transition_count: int,
+    gamma: float = POTENTIAL_GAMMA,
+    beta: float = POTENTIAL_BETA,
+) -> float:
+    return float(beta * (
+        -float(phi_initial)
+        + float(gamma) ** int(transition_count) * float(phi_final_effective)
+    ))
 
 
 def _per_agent_diagnostics(
@@ -282,17 +357,23 @@ def _per_agent_diagnostics(
 
 def compute_team_rewards(
     env,
-    selected_targets: dict,
+    _selected_targets: dict,
     step_events: list[dict],
     transition_context: dict,
 ) -> tuple[dict, dict]:
-    role_details = role_potential_components(env, selected_targets)
+    role_details = role_potential_components(env)
     phi_previous = float(env.v5_phi_previous)
     phi_next = _phi_team(role_details)
     team_done = bool(transition_context["team_done"])
     repeated_terminal = team_done and bool(env.v5_terminal_applied)
+    terminated = bool(transition_context["terminated"])
+    truncated = bool(transition_context["truncated"])
+    invalid = bool(
+        transition_context["outcome"] == "invalid"
+        or transition_context["end_reason"] == "numeric_anomaly"
+    )
     shaping, phi_next_effective = potential_shaping_reward(
-        phi_previous, phi_next, team_done)
+        phi_previous, phi_next, terminated, truncated, invalid)
     if repeated_terminal:
         shaping = 0.0
 

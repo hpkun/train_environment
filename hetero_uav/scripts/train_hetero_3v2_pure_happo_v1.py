@@ -403,6 +403,9 @@ def main():
             "terminal_retention_reward", "terminal_reward", "phi_mav",
             "phi_uav_1", "phi_uav_2", "phi_team_previous", "phi_team_next",
             "phi_team_next_effective", "potential_shaping_reward",
+            "mav_dense_diagnostic", "mav_phi_diagnostic",
+            "uav_dense_diagnostic", "uav_phi_diagnostic",
+            "shared_training_reward",
         ])
     for role in ("mav", "uav"):
         for dimension in ("pitch", "heading", "speed"):
@@ -545,6 +548,20 @@ def main():
                             "phi_team_next_effective",
                             "potential_shaping_reward"):
                         stats[key].append(float(reward_components[key]))
+                    stats["mav_dense_diagnostic"].append(float(
+                        components["red_0"].get("dense", 0.0)))
+                    stats["mav_phi_diagnostic"].append(float(
+                        reward_components["phi_mav"]))
+                    stats["uav_dense_diagnostic"].append(float(np.mean([
+                        components[aid].get("dense", 0.0)
+                        for aid in ("red_1", "red_2")
+                    ])))
+                    stats["uav_phi_diagnostic"].append(float(np.mean([
+                        reward_components["phi_uav_1"],
+                        reward_components["phi_uav_2"],
+                    ])))
+                    stats["shared_training_reward"].append(float(
+                        reward_components["team_reward"]))
                 event_values = np.asarray([components[aid].get("event", 0.0) for aid in env.red_ids])
                 stats["team_event"].append(float(
                     event_values.sum() / 3.0 if is_v2
@@ -701,6 +718,9 @@ def main():
                     "terminal_reward", "phi_mav", "phi_uav_1", "phi_uav_2",
                     "phi_team_previous", "phi_team_next",
                     "phi_team_next_effective", "potential_shaping_reward",
+                    "mav_dense_diagnostic", "mav_phi_diagnostic",
+                    "uav_dense_diagnostic", "uav_phi_diagnostic",
+                    "shared_training_reward",
                 )})
             for role in ("mav", "uav"):
                 for dimension in ("pitch", "heading", "speed"):
@@ -761,10 +781,22 @@ def main():
                     _save(policy, output / "checkpoints" / f"step_{requested_step:06d}",
                           checkpoint_meta)
                     saved_checkpoint_steps.add(requested_step)
-            print(f"[{env.formal_contract}] it={iteration:04d} "
-                  f"steps={total_steps}/{args.total_env_steps} "
-                  f"reward:M/U={row['avg_role_reward_mav']:+.3f}/{row['avg_role_reward_uav']:+.3f} "
-                  f"launch:R/B={row['red_launches']}/{row['blue_launches']}", flush=True)
+            if is_v5:
+                print(
+                    f"[{env.formal_contract}] it={iteration:04d} "
+                    f"steps={total_steps}/{args.total_env_steps} "
+                    f"shared_reward={row['shared_training_reward']:+.3f} "
+                    f"event={row['shared_event_reward']:+.3f} "
+                    f"terminal={row['terminal_reward']:+.3f} "
+                    f"shaping={row['potential_shaping_reward']:+.3f} "
+                    f"launch:R/B={row['red_launches']}/{row['blue_launches']}",
+                    flush=True,
+                )
+            else:
+                print(f"[{env.formal_contract}] it={iteration:04d} "
+                      f"steps={total_steps}/{args.total_env_steps} "
+                      f"reward:M/U={row['avg_role_reward_mav']:+.3f}/{row['avg_role_reward_uav']:+.3f} "
+                      f"launch:R/B={row['red_launches']}/{row['blue_launches']}", flush=True)
     _save(policy, output / "latest", {
         **meta, "checkpoint_stage": "latest",
         "total_env_steps_actual": total_steps, "iteration": iteration,

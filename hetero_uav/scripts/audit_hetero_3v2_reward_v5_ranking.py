@@ -6,6 +6,7 @@ optimizer, rollout buffer, or training state from a different reward contract.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 import sys
@@ -18,9 +19,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from algorithms.pure_happo import ALGORITHM_CONTRACT, PureHAPPOPolicy
+from scripts.hetero_3v2_v2_audit_common import perturbation
 from uav_env.make_env import make_env
 from uav_env.JSBSim.formal_v1.opponent import PaperGreedyOpponent
 from uav_env.JSBSim.formal_v2.contract import V5_REWARD_CONTRACT_VERSION
+from uav_env.JSBSim.formal_v2.reward_v5 import (
+    POTENTIAL_GAMMA,
+    discounted_potential_return,
+    theoretical_discounted_potential_return,
+)
 
 
 def _checkpoint_spec(value: str) -> tuple[str, Path]:
@@ -35,6 +42,19 @@ def _checkpoint_spec(value: str) -> tuple[str, Path]:
     if not path.is_file():
         raise argparse.ArgumentTypeError(f"checkpoint does not exist: {path}")
     return label, path
+
+
+def _paired_scenarios(seed: int, episodes: int) -> list[dict]:
+    scenarios = [
+        {"seed": seed + episode,
+         "perturbation": perturbation(seed + episode)}
+        for episode in range(episodes)
+    ]
+    if len(scenarios) > 1 and len({
+            json.dumps(row["perturbation"], sort_keys=True)
+            for row in scenarios}) == 1:
+        raise ValueError("audit perturbations are identical across episodes")
+    return scenarios
 
 
 def _validate_actor_contract(meta: dict) -> None:
@@ -88,22 +108,32 @@ def _load_actor_only(
 
 
 def _rollout(
-    env, label: str, episodes: int, seed: int,
+    env, label: str, scenarios: list[dict],
     policy: PureHAPPOPolicy | None, rule: PaperGreedyOpponent | None,
 ) -> dict:
     rows = []
-    for episode in range(episodes):
-        obs, info = env.reset(seed=seed + episode)
+    for episode, scenario in enumerate(scenarios):
+        obs, info = env.reset(
+            seed=scenario["seed"],
+            options={"audit_initial_perturbation": scenario["perturbation"]},
+        )
+        initial_phi = float(env.v5_phi_previous)
         sums = {
-            "shared_event_return": 0.0,
-            "terminal_return": 0.0,
-            "potential_shaping_return": 0.0,
-            "total_team_return": 0.0,
+            "undiscounted_shared_event_return": 0.0,
+            "undiscounted_terminal_return": 0.0,
+            "undiscounted_potential_return": 0.0,
+            "undiscounted_team_return": 0.0,
+            "discounted_shared_event_return": 0.0,
+            "discounted_terminal_return": 0.0,
+            "discounted_team_return": 0.0,
             "phi_mav": 0.0,
             "phi_uav_1": 0.0,
             "phi_uav_2": 0.0,
         }
+        potential_rewards = []
+        red_kills = 0
         steps = 0
+        terminated = truncated = False
         while True:
             if rule is not None:
                 actions = rule.actions(env, "red")
@@ -120,17 +150,28 @@ def _rollout(
                 }
             obs, rewards, terminations, truncations, info = env.step(actions)
             components = info["reward_components"]
-            sums["shared_event_return"] += components["shared_event_reward"]
-            sums["terminal_return"] += components["terminal_reward"]
-            sums["potential_shaping_return"] += components[
-                "potential_shaping_reward"]
-            sums["total_team_return"] += components["team_reward"]
+            discount = POTENTIAL_GAMMA ** steps
+            event_reward = float(components["shared_event_reward"])
+            terminal_reward = float(components["terminal_reward"])
+            potential_reward = float(components["potential_shaping_reward"])
+            team_reward = float(components["team_reward"])
+            sums["undiscounted_shared_event_return"] += event_reward
+            sums["undiscounted_terminal_return"] += terminal_reward
+            sums["undiscounted_potential_return"] += potential_reward
+            sums["undiscounted_team_return"] += team_reward
+            sums["discounted_shared_event_return"] += discount * event_reward
+            sums["discounted_terminal_return"] += discount * terminal_reward
+            sums["discounted_team_return"] += discount * team_reward
+            potential_rewards.append(potential_reward)
+            red_kills += int(components["red_kill_count"])
             for key in ("phi_mav", "phi_uav_1", "phi_uav_2"):
                 sums[key] += components[key]
             if not np.allclose(list(rewards.values()), components["team_reward"]):
                 raise ValueError("V5 audit observed non-shared red rewards")
             steps += 1
-            if any(terminations.values()) or any(truncations.values()):
+            terminated = bool(any(terminations.values()))
+            truncated = bool(any(truncations.values()))
+            if terminated or truncated:
                 break
         events = env.event_log
         red_launches = sum(
@@ -141,16 +182,33 @@ def _rollout(
             event["event"] == "hit"
             and str(event.get("shooter_id", "")).startswith("red")
             for event in events)
+        discounted_potential = discounted_potential_return(potential_rewards)
+        final_phi_effective = float(components["phi_team_next_effective"])
+        theoretical_potential = theoretical_discounted_potential_return(
+            initial_phi, final_phi_effective, steps)
         row = {
             "episode": episode,
+            "seed": scenario["seed"],
+            "initial_perturbation": scenario["perturbation"],
             "outcome": info["outcome"],
             "red_launches": red_launches,
             "red_hits": red_hits,
-            "red_kills": red_hits,
+            "red_kills": red_kills,
             "mav_survived": int(info["mav_alive"]),
             "red_attack_survival": info["red_attack_alive"] / 2.0,
+            "red_attack_alive_final": int(info["red_attack_alive"]),
+            "blue_attack_alive_final": int(info["blue_attack_alive"]),
             "episode_length": steps,
+            "phi_initial": initial_phi,
+            "phi_final": float(components["phi_team_next"]),
+            "phi_final_effective": final_phi_effective,
+            "terminated": terminated,
+            "truncated": truncated,
             **sums,
+            "discounted_potential_return": discounted_potential,
+            "theoretical_discounted_potential_return": theoretical_potential,
+            "potential_telescoping_error": (
+                discounted_potential - theoretical_potential),
             "phi_mav_mean": sums["phi_mav"] / steps,
             "phi_uav_1_mean": sums["phi_uav_1"] / steps,
             "phi_uav_2_mean": sums["phi_uav_2"] / steps,
@@ -163,7 +221,7 @@ def _rollout(
     mean = lambda key: float(np.mean([row[key] for row in rows]))
     return {
         "label": label,
-        "episodes": episodes,
+        "episodes": len(scenarios),
         "red_win_rate": float(np.mean([
             row["outcome"] == "red_win" for row in rows])),
         "blue_win_rate": float(np.mean([
@@ -178,10 +236,21 @@ def _rollout(
         "mav_survival_rate": mean("mav_survived"),
         "red_attack_uav_survival": mean("red_attack_survival"),
         "episode_length_mean": mean("episode_length"),
-        "shared_event_return_mean": mean("shared_event_return"),
-        "terminal_return_mean": mean("terminal_return"),
-        "potential_shaping_return_mean": mean("potential_shaping_return"),
-        "total_team_return_mean": mean("total_team_return"),
+        "undiscounted_shared_event_return_mean": mean(
+            "undiscounted_shared_event_return"),
+        "undiscounted_terminal_return_mean": mean(
+            "undiscounted_terminal_return"),
+        "undiscounted_potential_return_mean": mean(
+            "undiscounted_potential_return"),
+        "undiscounted_team_return_mean": mean("undiscounted_team_return"),
+        "discounted_shared_event_return_mean": mean(
+            "discounted_shared_event_return"),
+        "discounted_terminal_return_mean": mean("discounted_terminal_return"),
+        "discounted_potential_return_mean": mean(
+            "discounted_potential_return"),
+        "discounted_team_return_mean": mean("discounted_team_return"),
+        "potential_telescoping_error_max_abs": float(max(
+            abs(row["potential_telescoping_error"]) for row in rows)),
         "phi_mav_mean": mean("phi_mav_mean"),
         "phi_uav_1_mean": mean("phi_uav_1_mean"),
         "phi_uav_2_mean": mean("phi_uav_2_mean"),
@@ -192,28 +261,62 @@ def _rollout(
 
 def _ranking_checks(results: list[dict]) -> dict:
     by_label = {row["label"]: row for row in results}
-    order = [
-        "rule_red_success",
-        "checkpoint_100k_attack",
-        "initial_policy",
-        "checkpoint_250k_collapsed",
-    ]
-    ranking_available = all(label in by_label for label in order)
-    ranking_pass = None
-    if ranking_available:
-        values = [by_label[label]["total_team_return_mean"] for label in order]
-        ranking_pass = all(left > right for left, right in zip(values, values[1:]))
     episodes = [row for result in results for row in result["episode_rows"]]
+
+    def monotonic_check(key_a: str, key_b: str, smaller_better: bool) -> dict:
+        comparisons = []
+        for index, left in enumerate(episodes):
+            for right in episodes[index + 1:]:
+                if left["outcome"] != right["outcome"]:
+                    continue
+                fixed = {
+                    "blue_attack_alive_final", "red_attack_alive_final",
+                    "mav_survived",
+                } - {key_a}
+                if any(left[key] != right[key] for key in fixed):
+                    continue
+                if left[key_a] == right[key_a]:
+                    continue
+                better, worse = (
+                    (left, right) if (
+                        left[key_a] < right[key_a]) == smaller_better
+                    else (right, left)
+                )
+                comparisons.append(
+                    better["discounted_team_return"]
+                    > worse["discounted_team_return"])
+        return {
+            "comparison_count": len(comparisons),
+            "pass": all(comparisons) if comparisons else None,
+        }
+
+    blue_loss = monotonic_check(
+        "blue_attack_alive_final", "blue_attack_alive_final", True)
+    red_loss = monotonic_check(
+        "red_attack_alive_final", "red_attack_alive_final", False)
+    mav_death = monotonic_check("mav_survived", "mav_survived", False)
+    attack_100k_not_below_250k = None
+    if {"checkpoint_100k_attack", "checkpoint_250k_collapsed"} <= set(by_label):
+        attack_100k_not_below_250k = (
+            by_label["checkpoint_100k_attack"]["discounted_team_return_mean"]
+            >= by_label["checkpoint_250k_collapsed"][
+                "discounted_team_return_mean"]
+        )
     return {
-        "expected_ranking_available": ranking_available,
-        "expected_ranking_pass": ranking_pass,
         "blue_win_without_red_kill_all_negative": all(
-            row["total_team_return"] < 0
+            row["discounted_team_return"] < 0
             for row in episodes
             if row["outcome"] == "blue_win" and row["red_kills"] == 0),
         "red_win_all_positive": all(
-            row["total_team_return"] > 0
+            row["discounted_team_return"] > 0
             for row in episodes if row["outcome"] == "red_win"),
+        "more_blue_losses_raise_return_when_matched": blue_loss,
+        "more_red_attack_losses_lower_return_when_matched": red_loss,
+        "mav_death_lowers_return_when_matched": mav_death,
+        "checkpoint_100k_not_below_250k": attack_100k_not_below_250k,
+        "potential_telescoping_within_tolerance": all(
+            abs(row["potential_telescoping_error"]) <= 1e-6
+            for row in episodes),
     }
 
 
@@ -226,20 +329,38 @@ def _write_report(output_dir: Path, payload: dict) -> None:
         "",
         "This is an actor-only cross-reward audit. It is not checkpoint resume.",
         "",
-        "| Policy | Source reward | Episodes | R win | B win | Launch | Hit | Team return |",
-        "|---|---|---:|---:|---:|---:|---:|---:|",
+        "| Policy | Source reward | Episodes | R win | B win | Launch | Hit | Kill | Discounted return |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     sources = payload["source_reward_contracts"]
     for row in payload["results"]:
         lines.append(
             f"| {row['label']} | {sources[row['label']]} | {row['episodes']} | "
             f"{row['red_win_rate']:.3f} | {row['blue_win_rate']:.3f} | "
-            f"{row['red_launches']} | {row['red_hits']} | "
-            f"{row['total_team_return_mean']:.4f} |")
+            f"{row['red_launches']} | {row['red_hits']} | {row['red_kills']} | "
+            f"{row['discounted_team_return_mean']:.4f} |")
+    lines.extend(["", "Observational ranking by mean discounted return:", ""])
+    for index, row in enumerate(payload["observational_ranking"], 1):
+        lines.append(
+            f"{index}. {row['label']}: {row['discounted_team_return_mean']:.6f}")
     lines.extend(["", "## Ranking checks", "", "```json",
                   json.dumps(payload["ranking_checks"], indent=2), "```", ""])
     (output_dir / "reward_v5_ranking_audit.md").write_text(
         "\n".join(lines), encoding="utf-8")
+    episode_rows = []
+    for result in payload["results"]:
+        for row in result["episode_rows"]:
+            episode_rows.append({
+                "label": result["label"],
+                **row,
+                "initial_perturbation": json.dumps(
+                    row["initial_perturbation"], sort_keys=True),
+            })
+    with (output_dir / "reward_v5_ranking_episodes.csv").open(
+            "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(episode_rows[0]))
+        writer.writeheader()
+        writer.writerows(episode_rows)
 
 
 def main() -> None:
@@ -282,11 +403,13 @@ def main() -> None:
         policies.append((label, policy, None))
         sources[label] = meta["reward_contract"]
     if args.include_rule:
-        policies.append(("rule_red_success", None, PaperGreedyOpponent()))
-        sources["rule_red_success"] = "rule_policy_no_checkpoint"
+        policies.append(("rule_red_policy", None, PaperGreedyOpponent()))
+        sources["rule_red_policy"] = "rule_policy_no_checkpoint"
+
+    scenarios = _paired_scenarios(args.seed, args.episodes)
 
     results = [
-        _rollout(env, label, args.episodes, args.seed, policy, rule)
+        _rollout(env, label, scenarios, policy, rule)
         for label, policy, rule in policies
     ]
     payload = {
@@ -297,6 +420,14 @@ def main() -> None:
         "source_reward_contracts": sources,
         "results": results,
         "ranking_checks": _ranking_checks(results),
+        "paired_scenarios": scenarios,
+        "observational_ranking": sorted(
+            ({"label": row["label"],
+              "discounted_team_return_mean": row[
+                  "discounted_team_return_mean"]} for row in results),
+            key=lambda row: row["discounted_team_return_mean"],
+            reverse=True,
+        ),
     }
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():

@@ -83,11 +83,31 @@ potential_shaping_reward = 0.25 * (
     0.99 * phi_team_next_effective - phi_team_previous)
 ```
 
-At reset, `phi_team_previous` is initialized from the initial state. A normal
-transition uses the real next potential and then advances the cache. A
-terminated, truncated or invalid boundary uses `phi_team_next_effective=0`.
-Gamma, beta and this potential-shaping choice are DESIGN_CHOICE. The training
-entry rejects a PPO gamma different from 0.99.
+At reset, `phi_team_previous` is initialized from the initial state using a
+fresh, current-state-only potential target map. Attack-UAV potential targets
+use the same observable/alive target ranking as formal target selection, but
+the map is computed independently from the fire-control
+`env.selected_targets` cache. Potential evaluation does not mutate fire gates,
+launch state, missiles, controllers or reward settlement state.
+
+V5 dodge potential uses only current incoming-missile geometry. With the
+formal fixed-speed missile, `dodge_speed=0`; unlike V4 reward settlement, V5
+potential evaluation does not read or write historical missile speed.
+
+A normal transition uses the real next potential and then advances the cache.
+A true termination, invalid outcome or numeric anomaly uses
+`phi_team_next_effective=0`. A pure time-limit truncation preserves
+`phi_team_next_effective=phi_team_next`, matching truncation bootstrap
+semantics. Timeout terminal retention is still settled. Gamma, beta and this
+potential-shaping choice are DESIGN_CHOICE. The training entry rejects a PPO
+gamma different from 0.99.
+
+For a trajectory of `T` transitions, the audit checks the discounted identity:
+
+```text
+sum_t gamma^t * shaping_t
+  = beta * (-phi_initial + gamma^T * phi_final_effective)
+```
 
 ## Version isolation
 
@@ -105,6 +125,19 @@ Resume and normal evaluation require an exact reward-contract match. The
 ranking audit may load compatible actor parameters from V4 or V5 checkpoints,
 but never loads their critic, optimizers or training state and labels the run
 as a cross-reward actor-only audit.
+
+The ranking audit uses the same paired initial perturbations for every policy,
+reports discounted and undiscounted component returns separately, and treats
+discounted team return as the primary mathematical metric. Its sorted policy
+list is observational, not a hard-coded success order. `red_hits` comes from
+missile events while `red_kills` comes from V5 event settlement.
+
+Legacy `raw_mav_reward`, `normalized_mav_reward`, `raw_uav_reward` and
+`normalized_uav_reward` columns remain for compatibility. Under V5 they are
+role-potential diagnostics, not separate actor training rewards. The explicit
+V5 columns `mav_dense_diagnostic`, `mav_phi_diagnostic`,
+`uav_dense_diagnostic`, `uav_phi_diagnostic` and `shared_training_reward`
+should be used for interpretation.
 
 ## Classification summary
 
