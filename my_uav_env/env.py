@@ -248,11 +248,19 @@ class UavCombatEnv(gymnasium.Env):
         self.reward_mode = reward_mode
         self._reward_summary_step: dict = {}
         self.missile_guidance_mode = missile_guidance_mode
-        self.altitude_reward_config = AltitudeRewardConfig(
-            version="eq17_finite_engineering_mean_v1",
-            h_min_m=0.0, h_att_m=2000.0, h_adv_m=5000.0,
-            h_max_m=10000.0, d_att_max_m=10000.000001,
-            high_altitude_tail=0.0)
+        if altitude_reward_config is None:
+            altitude_reward_config = AltitudeRewardConfig(
+                version="eq17_finite_engineering_mean_v1",
+                h_min_m=0.0, h_att_m=2000.0, h_adv_m=5000.0,
+                h_max_m=10000.0, d_att_max_m=10000.000001,
+                high_altitude_tail=0.0)
+        elif isinstance(altitude_reward_config, dict):
+            altitude_reward_config = AltitudeRewardConfig(
+                **altitude_reward_config)
+        elif not isinstance(altitude_reward_config, AltitudeRewardConfig):
+            raise TypeError(
+                "altitude_reward_config must be AltitudeRewardConfig or dict")
+        self.altitude_reward_config = altitude_reward_config
         self.sim_freq = sim_freq
         self.agent_interaction_steps = agent_interaction_steps
         self.max_steps = max_steps

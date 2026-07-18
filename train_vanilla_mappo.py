@@ -934,6 +934,168 @@ def _unpack_and_validate_checkpoint(payload, expected_metadata: dict,
     return payload["state_dict"]
 
 
+def _actor_evaluation_expected_metadata(
+        *, num_red: int, num_blue: int, obs_dim: int, obs_mode: str,
+        obs_normalization: str, pid_profile: str, pid_throttle_base: float,
+        reward_mode: str, missile_guidance_mode: str,
+        blue_policy_profile: str, environment_profile: str,
+        max_episode_length: int,
+        initial_condition_randomization_mode: str) -> dict:
+    """Return only runtime semantics required to interpret an Actor."""
+    environment_snapshot = paper_environment_snapshot(seed=None)
+    return {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "obs_mode": obs_mode,
+        "obs_normalization": obs_normalization,
+        "reward_version": "paper_3v3_joint_eq15_23_v1",
+        "reward_mode": reward_mode,
+        "pid_profile": pid_profile,
+        "pid_throttle_base": float(pid_throttle_base),
+        "pid_error_definition": environment_snapshot.get(
+            "pid_error_definition", {}).get(
+                "value", PAPER_PID_ERROR_DEFINITION),
+        "derivative_semantics": environment_snapshot.get(
+            "derivative_semantics", {}).get(
+                "value", PAPER_PID_DERIVATIVE_SEMANTICS),
+        "missile_guidance_mode": missile_guidance_mode,
+        "missile_hit_radius_m": float(
+            environment_snapshot["missile_hit_radius_m"]["value"]),
+        "action_distribution": ACTION_DISTRIBUTION_VERSION,
+        "entropy_estimator": ENTROPY_ESTIMATOR_VERSION,
+        "algorithm_type": "mappo_mlp",
+        "environment_version": environment_profile,
+        "environment_profile": environment_profile,
+        "blue_policy_profile": blue_policy_profile,
+        "initial_condition_randomization_mode": (
+            initial_condition_randomization_mode),
+        "q_los_version": "observer_velocity_to_target_los_3d_v1",
+        "altitude_reward_interpretation": (
+            "paper_unspecified_engineering_mean_over_alive_enemies"),
+        "num_red": int(num_red),
+        "num_blue": int(num_blue),
+        "max_episode_length": int(max_episode_length),
+        "actor_obs_dim": int(obs_dim),
+        "recurrent_n": 1,
+        "action_std_bounds": [ACTION_STD_MIN, ACTION_STD_MAX],
+        "action_std_parameterization": (
+            "gru_state_tanh_bounded_log_std_head_v1"),
+        "environment_config_fingerprint": environment_snapshot[
+            "environment_config_fingerprint"],
+    }
+
+
+def _unpack_actor_checkpoint_for_evaluation(
+        payload, *, num_red: int, num_blue: int, obs_dim: int,
+        action_dim: int, obs_mode: str, obs_normalization: str,
+        pid_profile: str, pid_throttle_base: float, reward_mode: str,
+        missile_guidance_mode: str, blue_policy_profile: str,
+        environment_profile: str, max_episode_length: int,
+        initial_condition_randomization_mode: str):
+    """Validate the Actor inference contract and restore its reward config."""
+    if not isinstance(payload, dict):
+        raise ValueError("actor checkpoint payload must be a dictionary")
+    if payload.get("model_kind") != "actor":
+        raise ValueError(
+            "checkpoint model_kind mismatch: expected 'actor', "
+            f"got {payload.get('model_kind')!r}")
+    if "state_dict" not in payload or not isinstance(payload["state_dict"], dict):
+        raise ValueError("actor checkpoint lacks an Actor state_dict")
+    if "metadata" not in payload or not isinstance(payload["metadata"], dict):
+        raise ValueError("actor checkpoint lacks required evaluation metadata")
+
+    metadata = dict(payload["metadata"])
+    expected = _actor_evaluation_expected_metadata(
+        num_red=num_red, num_blue=num_blue, obs_dim=obs_dim,
+        obs_mode=obs_mode, obs_normalization=obs_normalization,
+        pid_profile=pid_profile, pid_throttle_base=pid_throttle_base,
+        reward_mode=reward_mode,
+        missile_guidance_mode=missile_guidance_mode,
+        blue_policy_profile=blue_policy_profile,
+        environment_profile=environment_profile,
+        max_episode_length=max_episode_length,
+        initial_condition_randomization_mode=(
+            initial_condition_randomization_mode))
+    mismatches = {
+        key: (metadata.get(key), value)
+        for key, value in expected.items()
+        if metadata.get(key) != value
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{key}: checkpoint={actual!r}, evaluation={required!r}"
+            for key, (actual, required) in mismatches.items())
+        raise ValueError(f"actor evaluation contract mismatch: {details}")
+
+    raw_altitude_config = metadata.get("altitude_reward_config")
+    if not isinstance(raw_altitude_config, dict):
+        raise ValueError(
+            "actor checkpoint metadata lacks altitude_reward_config")
+    try:
+        altitude_reward_config = AltitudeRewardConfig(**raw_altitude_config)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"invalid checkpoint altitude_reward_config: {exc}") from exc
+
+    state = payload["state_dict"]
+    required_weights = (
+        "fc_in.weight", "fc_hidden.weight", "rnn.weight_ih",
+        "rnn.weight_hh", "action_head.weight",
+        "action_log_std_head.weight")
+    missing = [key for key in required_weights if key not in state]
+    if missing:
+        raise ValueError(
+            f"actor state_dict lacks required parameters: {missing}")
+    try:
+        fc_in_shape = tuple(state["fc_in.weight"].shape)
+        fc_hidden_shape = tuple(state["fc_hidden.weight"].shape)
+        rnn_ih_shape = tuple(state["rnn.weight_ih"].shape)
+        rnn_hh_shape = tuple(state["rnn.weight_hh"].shape)
+        action_shape = tuple(state["action_head.weight"].shape)
+        action_std_shape = tuple(state["action_log_std_head.weight"].shape)
+    except (AttributeError, TypeError) as exc:
+        raise ValueError("actor state_dict contains invalid parameters") from exc
+    if len(fc_in_shape) != 2:
+        raise ValueError(f"invalid fc_in.weight shape: {fc_in_shape}")
+    hidden, checkpoint_obs_dim = fc_in_shape
+    if checkpoint_obs_dim != int(obs_dim):
+        raise ValueError(
+            f"actor obs_dim mismatch: checkpoint={checkpoint_obs_dim}, "
+            f"evaluation={obs_dim}")
+    if fc_hidden_shape != (hidden, hidden):
+        raise ValueError(
+            f"actor MLP hidden shape mismatch: {fc_hidden_shape}")
+    if len(rnn_hh_shape) != 2 or rnn_hh_shape[0] % 3 != 0:
+        raise ValueError(f"invalid GRU hidden shape: {rnn_hh_shape}")
+    rnn_hidden = rnn_hh_shape[1]
+    if rnn_hh_shape != (3 * rnn_hidden, rnn_hidden):
+        raise ValueError(f"invalid GRU recurrent shape: {rnn_hh_shape}")
+    if rnn_ih_shape != (3 * rnn_hidden, hidden):
+        raise ValueError(f"actor MLP/GRU interface mismatch: {rnn_ih_shape}")
+    if action_shape != (int(action_dim), rnn_hidden):
+        raise ValueError(
+            f"actor action_dim mismatch: checkpoint_shape={action_shape}, "
+            f"evaluation_action_dim={action_dim}")
+    if action_std_shape != action_shape:
+        raise ValueError(
+            "actor action mean/std head shape mismatch: "
+            f"mean={action_shape}, std={action_std_shape}")
+    if metadata.get("actor_hidden_sizes") != [hidden, hidden]:
+        raise ValueError(
+            "actor metadata MLP hidden size does not match state_dict")
+    if metadata.get("actor_rnn_hidden_size") != rnn_hidden:
+        raise ValueError(
+            "actor metadata GRU hidden size does not match state_dict")
+
+    probe = VanillaActor(
+        obs_dim=obs_dim, action_dim=action_dim,
+        hidden=hidden, rnn_hidden=rnn_hidden)
+    try:
+        probe.load_state_dict(state, strict=True)
+    except RuntimeError as exc:
+        raise ValueError(f"actor state_dict shape mismatch: {exc}") from exc
+    return state, metadata, altitude_reward_config, hidden, rnn_hidden
+
+
 def _empty_launch_diag_totals() -> dict:
     return {team: {key: 0 for key in LAUNCH_DIAG_BASE_KEYS}
             for team in ("red", "blue")}
@@ -2813,6 +2975,7 @@ def _run_periodic_evaluation(
                 environment_profile=config.environment_profile,
                 initial_condition_randomization_mode=(
                     config.initial_condition_randomization_mode),
+                altitude_reward_config=config.altitude_reward_config,
                 seed=base_seed + episode,
                 deterministic=True))
         red_wins = sum(int(row["RedWin"]) for row in rows)

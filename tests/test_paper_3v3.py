@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 import ast
 from pathlib import Path
@@ -18,6 +19,7 @@ from configs.paper_3v3_spec import (
     paper_environment_snapshot,
 )
 from my_uav_env.alignment.reward_utils import (
+    DEFAULT_ALTITUDE_REWARD_CONFIG,
     ta_angle_advantage_fixed,
     td_distance_advantage,
 )
@@ -37,12 +39,18 @@ from my_uav_env.sensors import (
 from my_uav_env.simulator import MissileSimulator
 from train_vanilla_mappo import (
     CHECKPOINT_SCHEMA_VERSION,
+    TRAINING_STATE_SCHEMA_VERSION,
     Config,
+    VanillaActor,
     _checkpoint_metadata,
     _compute_global_state_dim,
     _compute_obs_dim,
     _flatten_obs,
+    _minimal_altitude_reward_config,
+    _training_core_config,
     _unpack_and_validate_checkpoint,
+    _unpack_actor_checkpoint_for_evaluation,
+    _validate_training_state,
 )
 
 
@@ -85,6 +93,45 @@ class FakeAircraft:
         if name not in values:
             raise KeyError(name)
         return values[name]
+
+
+def _evaluation_actor_payload() -> tuple[dict, Config]:
+    config = Config()
+    config.seed = 3
+    config.total_env_steps = 100_000
+    config.num_envs = 32
+    config.replay_buffer_size = 2000
+    config.altitude_reward_config = _minimal_altitude_reward_config()
+    metadata = _checkpoint_metadata(config, 60, 30)
+    actor = VanillaActor(
+        obs_dim=60, action_dim=3,
+        hidden=config.mlp_hidden, rnn_hidden=config.rnn_hidden_size)
+    return {
+        "state_dict": actor.state_dict(),
+        "metadata": metadata,
+        "model_kind": "actor",
+    }, config
+
+
+def _unpack_evaluation_actor(payload: dict, **overrides):
+    arguments = {
+        "num_red": 3,
+        "num_blue": 3,
+        "obs_dim": 60,
+        "action_dim": 3,
+        "obs_mode": "paper_strict",
+        "obs_normalization": "paper_fixed_v1",
+        "pid_profile": PAPER_PID_PROFILE,
+        "pid_throttle_base": 0.8,
+        "reward_mode": "paper_joint",
+        "missile_guidance_mode": PAPER_MISSILE_GUIDANCE_MODE,
+        "blue_policy_profile": PAPER_BLUE_POLICY_PROFILE,
+        "environment_profile": PAPER_ENVIRONMENT_PROFILE,
+        "max_episode_length": 1400,
+        "initial_condition_randomization_mode": "deterministic_v1",
+    }
+    arguments.update(overrides)
+    return _unpack_actor_checkpoint_for_evaluation(payload, **arguments)
 
 
 def test_formal_profile_contract_and_dimensions():
@@ -371,6 +418,151 @@ def test_checkpoint_fingerprint_rejects_old_environment():
         "3686728c40163c88388932de0beb132e15024687879e03f982fd4715aa6d4d9d")
     with pytest.raises(ValueError):
         _unpack_and_validate_checkpoint(payload, expected, "actor")
+
+
+def test_actor_evaluation_ignores_seed_budget_and_rollout_layout():
+    payload, config = _evaluation_actor_payload()
+    metadata = payload["metadata"]
+    assert config.seed == 3
+    assert metadata["total_env_steps"] == 100_000
+    assert metadata["rollout_horizon_per_env"] == 62
+    assert metadata["transitions_per_update"] == 1984
+    assert metadata["unused_replay_slots"] == 16
+
+    state, restored, altitude_config, hidden, rnn_hidden = (
+        _unpack_evaluation_actor(payload))
+
+    assert state is payload["state_dict"]
+    assert restored["environment_config"]["seed"] == 3
+    assert altitude_config == _minimal_altitude_reward_config()
+    assert hidden == config.mlp_hidden
+    assert rnn_hidden == config.rnn_hidden_size
+
+
+def test_actor_evaluation_ignores_num_envs_and_buffer_metadata():
+    payload, _ = _evaluation_actor_payload()
+    payload["metadata"].update({
+        "num_envs": 32,
+        "replay_buffer_size": 2000,
+        "requested_replay_buffer_size": 2000,
+    })
+    _unpack_evaluation_actor(payload)
+
+
+def test_actor_evaluation_restores_checkpoint_altitude_reward_config():
+    payload, _ = _evaluation_actor_payload()
+    _, _, restored, _, _ = _unpack_evaluation_actor(payload)
+    assert restored.version == "eq17_minimal_finite_tail_v1"
+    assert restored.d_att_max_m == pytest.approx(10000.000001)
+    assert restored.high_altitude_tail == pytest.approx(0.0)
+    assert restored != DEFAULT_ALTITUDE_REWARD_CONFIG
+
+    env = UavCombatEnv(altitude_reward_config=restored)
+    try:
+        assert env.altitude_reward_config is restored
+        assert env.altitude_reward_config.version == (
+            "eq17_minimal_finite_tail_v1")
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("field, incompatible", [
+    ("environment_config_fingerprint", "incompatible"),
+    ("action_distribution", "incompatible"),
+    ("pid_profile", "incompatible"),
+    ("reward_mode", "incompatible"),
+    ("missile_guidance_mode", "incompatible"),
+    ("blue_policy_profile", "incompatible"),
+])
+def test_actor_evaluation_rejects_runtime_semantic_mismatch(
+        field, incompatible):
+    payload, _ = _evaluation_actor_payload()
+    payload = copy.deepcopy(payload)
+    payload["metadata"][field] = incompatible
+    with pytest.raises(ValueError, match=field):
+        _unpack_evaluation_actor(payload)
+
+
+def test_actor_evaluation_rejects_obs_and_action_shape_mismatch():
+    payload, _ = _evaluation_actor_payload()
+    with pytest.raises(ValueError, match="actor_obs_dim|obs_dim"):
+        _unpack_evaluation_actor(payload, obs_dim=50)
+
+    action_payload = copy.deepcopy(payload)
+    action_payload["state_dict"] = VanillaActor(
+        obs_dim=60, action_dim=4, hidden=128, rnn_hidden=128).state_dict()
+    with pytest.raises(ValueError, match="action_dim"):
+        _unpack_evaluation_actor(action_payload)
+
+
+@pytest.mark.parametrize("field, incompatible, message", [
+    ("actor_hidden_sizes", [64, 64], "MLP hidden"),
+    ("actor_rnn_hidden_size", 64, "GRU hidden"),
+])
+def test_actor_evaluation_rejects_metadata_network_shape_mismatch(
+        field, incompatible, message):
+    payload, _ = _evaluation_actor_payload()
+    payload["metadata"][field] = incompatible
+    with pytest.raises(ValueError, match=message):
+        _unpack_evaluation_actor(payload)
+
+
+def test_actor_evaluation_rejects_unsupported_schema_and_missing_state():
+    payload, _ = _evaluation_actor_payload()
+    incompatible = copy.deepcopy(payload)
+    incompatible["metadata"]["schema_version"] = "unsupported"
+    with pytest.raises(ValueError, match="schema_version"):
+        _unpack_evaluation_actor(incompatible)
+
+    missing_state = copy.deepcopy(payload)
+    missing_state.pop("state_dict")
+    with pytest.raises(ValueError, match="state_dict"):
+        _unpack_evaluation_actor(missing_state)
+
+
+def test_actor_evaluation_requires_altitude_reward_config():
+    payload, _ = _evaluation_actor_payload()
+    payload["metadata"].pop("altitude_reward_config")
+    with pytest.raises(ValueError, match="altitude_reward_config"):
+        _unpack_evaluation_actor(payload)
+
+
+def test_evaluate_and_acmi_import_the_shared_evaluation_contract():
+    evaluate_source = Path("evaluate_vanilla_mappo.py").read_text(
+        encoding="utf-8")
+    acmi_source = Path("eval_acmi.py").read_text(encoding="utf-8")
+    helper = "_unpack_actor_checkpoint_for_evaluation"
+    assert helper in evaluate_source
+    assert helper in acmi_source
+    assert "_unpack_and_validate_checkpoint(" not in evaluate_source
+    assert "_unpack_and_validate_checkpoint(" not in acmi_source
+
+
+def test_training_resume_contract_still_rejects_rollout_mismatch():
+    _, config = _evaluation_actor_payload()
+    metadata = _checkpoint_metadata(config, 60, 30)
+    payload = {
+        "schema_version": TRAINING_STATE_SCHEMA_VERSION,
+        "checkpoint_metadata": metadata,
+        "core_config": _training_core_config(config, metadata),
+        "runtime": {"total_steps": 100_000},
+    }
+    payload["core_config"]["replay_buffer_size"] = 500
+    with pytest.raises(ValueError, match="core configuration mismatch"):
+        _validate_training_state(payload, config, metadata)
+
+
+def test_random_evaluation_does_not_resolve_or_validate_checkpoint():
+    import torch
+    from evaluate_vanilla_mappo import _load_actor
+
+    args = SimpleNamespace(random=True, checkpoint="does-not-exist.pt")
+    actor, rnn_hidden, checkpoint, altitude_config = _load_actor(
+        args, torch.device("cpu"))
+    assert actor is None
+    assert rnn_hidden == 128
+    assert checkpoint is None
+    assert altitude_config == _minimal_altitude_reward_config()
 
 
 def test_speed_envelope_is_monitor_only(monkeypatch):

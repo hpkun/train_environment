@@ -16,14 +16,6 @@ import numpy as np
 import torch
 
 from my_uav_env import UavCombatEnv
-from my_uav_env.pid_controller import (
-    PAPER_PID_DERIVATIVE_SEMANTICS,
-    PAPER_PID_ERROR_DEFINITION,
-)
-from my_uav_env.alignment.reward_utils import (
-    DEFAULT_ALTITUDE_REWARD_CONFIG,
-    REWARD_VERSION,
-)
 from configs.paper_3v3_spec import (
     PAPER_BLUE_POLICY_PROFILE,
     PAPER_ENVIRONMENT_PROFILE,
@@ -31,30 +23,22 @@ from configs.paper_3v3_spec import (
     PAPER_PID_PROFILE,
     PAPER_REWARD_MODE,
     PID_THROTTLE_BASE,
-    paper_environment_snapshot,
 )
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     CHECKPOINT_SCHEMA_VERSION,
     ACTION_DISTRIBUTION_VERSION,
     ENTROPY_ESTIMATOR_VERSION,
-    ACTION_LOG_STD_INIT,
-    ACTION_STD_INIT,
-    ACTION_STD_MIN,
-    ACTION_STD_MAX,
     VanillaActor,
-    Config,
     _classify_death_reason,
-    _compute_global_state_dim,
     _compute_obs_dim,
     _episode_outcome,
     _flatten_obs,
-    _checkpoint_metadata,
     _joint_team_reward_once,
     _minimal_altitude_reward_config,
     _ratio_with_denominator_zero,
     _safe_div,
-    _unpack_and_validate_checkpoint,
+    _unpack_actor_checkpoint_for_evaluation,
 )
 
 
@@ -194,19 +178,6 @@ def _select_device(device_arg: str) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _infer_actor_shapes(state: dict):
-    obs_dim = None
-    hidden = 128
-    rnn_hidden = 128
-    for key, tensor in state.items():
-        if key == "fc_in.weight":
-            hidden = int(tensor.shape[0])
-            obs_dim = int(tensor.shape[1])
-        elif key == "rnn.weight_ih":
-            rnn_hidden = int(tensor.shape[0] // 3)
-    return obs_dim, hidden, rnn_hidden
-
-
 def _resolve_checkpoint(path: str | None) -> str | None:
     if path:
         return path
@@ -223,48 +194,34 @@ def _resolve_checkpoint(path: str | None) -> str | None:
 def _load_actor(args, device: torch.device):
     if args.random:
         print("[INFO] --random set; red team uses random actions.", flush=True)
-        return None, 128, None
+        return None, 128, None, _minimal_altitude_reward_config()
 
     checkpoint = _resolve_checkpoint(args.checkpoint)
     if checkpoint is None:
         print("[WARN] No checkpoint found; red team uses random actions.",
               flush=True)
-        return None, 128, None
+        return None, 128, None, _minimal_altitude_reward_config()
 
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
     obs_dim = _compute_obs_dim(
         args.num_red, args.num_blue, is_red=True, obs_mode=args.obs_mode)
-    config = Config()
-    config.num_red = args.num_red
-    config.num_blue = args.num_blue
-    config.max_episode_length = args.max_steps
-    config.seed = args.seed
-    config.obs_mode = args.obs_mode
-    config.obs_normalization = args.obs_normalization
-    config.pid_profile = args.pid_profile
-    config.pid_throttle_base = args.pid_throttle_base
-    config.reward_mode = args.reward_mode
-    config.missile_guidance_mode = args.missile_guidance_mode
-    config.blue_policy_profile = args.blue_policy_profile
-    config.environment_profile = args.environment_profile
-    config.environment_version = args.environment_profile
-    expected_metadata = _checkpoint_metadata(
-        config, obs_dim,
-        _compute_global_state_dim(args.num_red, args.obs_mode))
     try:
-        state = _unpack_and_validate_checkpoint(
-            payload, expected_metadata, "actor")
+        state, _metadata, altitude_config, hidden, rnn_hidden = (
+            _unpack_actor_checkpoint_for_evaluation(
+                payload, num_red=args.num_red, num_blue=args.num_blue,
+                obs_dim=obs_dim, action_dim=3, obs_mode=args.obs_mode,
+                obs_normalization=args.obs_normalization,
+                pid_profile=args.pid_profile,
+                pid_throttle_base=args.pid_throttle_base,
+                reward_mode=args.reward_mode,
+                missile_guidance_mode=args.missile_guidance_mode,
+                blue_policy_profile=args.blue_policy_profile,
+                environment_profile=args.environment_profile,
+                max_episode_length=args.max_steps,
+                initial_condition_randomization_mode=(
+                    args.initial_condition_randomization_mode)))
     except ValueError as exc:
         raise SystemExit(f"ERROR: {exc}") from exc
-    ckpt_obs_dim, hidden, rnn_hidden = _infer_actor_shapes(state)
-    if ckpt_obs_dim != obs_dim:
-        raise SystemExit(
-            "ERROR: checkpoint obs_dim does not match current evaluation scale.\n"
-            f"  checkpoint obs_dim: {ckpt_obs_dim}\n"
-            f"  current obs_dim:    {obs_dim}\n"
-            "  vanilla MLP baseline has fixed flattened observation size and "
-            "cannot be evaluated zero-shot across a different scale."
-        )
 
     actor = VanillaActor(obs_dim=obs_dim, action_dim=3,
                          hidden=hidden, rnn_hidden=rnn_hidden).to(device)
@@ -273,7 +230,7 @@ def _load_actor(args, device: torch.device):
     print(f"[INFO] Loaded actor checkpoint: {checkpoint}", flush=True)
     print(f"[INFO] Actor shape: obs_dim={obs_dim}, hidden={hidden}, "
           f"rnn_hidden={rnn_hidden}", flush=True)
-    return actor, rnn_hidden, checkpoint
+    return actor, rnn_hidden, checkpoint, altitude_config
 
 
 def _death_counts(death_reasons: dict[str, str], ids: list[str]) -> Counter:
@@ -295,8 +252,9 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
                     missile_guidance_mode: str = PAPER_MISSILE_GUIDANCE_MODE,
                     blue_policy_profile: str = PAPER_BLUE_POLICY_PROFILE,
                     environment_profile: str = PAPER_ENVIRONMENT_PROFILE,
-                    initial_condition_randomization_mode: str = "deterministic_v1",
-                    seed: int | None = None,
+                     initial_condition_randomization_mode: str = "deterministic_v1",
+                     altitude_reward_config=None,
+                     seed: int | None = None,
                     deterministic: bool = True):
     env = UavCombatEnv(
         max_num_blue=num_blue,
@@ -311,6 +269,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
         environment_profile=environment_profile,
         initial_condition_randomization_mode=(
             initial_condition_randomization_mode),
+        altitude_reward_config=altitude_reward_config,
         suppress_jsbsim_output=True,
     )
     try:
@@ -447,7 +406,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             value = environment_metadata.get(name, "")
             return value.get("value", "") if isinstance(value, dict) else value
 
-        altitude_config = _minimal_altitude_reward_config()
+        altitude_config = env.altitude_reward_config
         return {
             "Episode": episode_idx,
             "Outcome": outcome,
@@ -680,12 +639,12 @@ def main():
     args = parse_args()
     _set_seed(args.seed)
     device = _select_device(args.device)
-    actor, rnn_hidden_size, _checkpoint = _load_actor(args, device)
+    actor, rnn_hidden_size, _checkpoint, altitude_config = _load_actor(
+        args, device)
     print("reward_version: paper_3v3_joint_eq15_23_v1", flush=True)
     print(f"environment_profile: {args.environment_profile}", flush=True)
     print(f"pid_throttle_base: {args.pid_throttle_base}", flush=True)
     print(f"action_distribution: {ACTION_DISTRIBUTION_VERSION}", flush=True)
-    altitude_config = _minimal_altitude_reward_config()
     print("altitude_reward_config: "
           f"{json.dumps(asdict(altitude_config), sort_keys=True)}",
           flush=True)
@@ -718,6 +677,7 @@ def main():
                 environment_profile=args.environment_profile,
                 initial_condition_randomization_mode=(
                     args.initial_condition_randomization_mode),
+                altitude_reward_config=altitude_config,
                 seed=None if args.seed is None else args.seed + ep - 1,
             )
             rows.append(row)

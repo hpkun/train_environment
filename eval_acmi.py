@@ -38,10 +38,6 @@ except Exception:
     pass
 
 from my_uav_env import UavCombatEnv
-from my_uav_env.pid_controller import (
-    PAPER_PID_DERIVATIVE_SEMANTICS,
-    PAPER_PID_ERROR_DEFINITION,
-)
 from acmi_boundary_utils import (
     battlefield_boundary_acmi_lines as _battlefield_boundary_acmi_lines,
     maybe_write_battlefield_boundary_acmi as _maybe_write_battlefield_boundary_acmi,
@@ -55,10 +51,6 @@ try:
 except Exception:
     pass
 
-from my_uav_env.alignment.reward_utils import (
-    DEFAULT_ALTITUDE_REWARD_CONFIG,
-    REWARD_VERSION,
-)
 from configs.paper_3v3_spec import (
     PAPER_BLUE_POLICY_PROFILE,
     PAPER_ENVIRONMENT_PROFILE,
@@ -69,22 +61,17 @@ from configs.paper_3v3_spec import (
 )
 from train_vanilla_mappo import (
     ACTION_DISTRIBUTION_VERSION,
-    ACTION_LOG_STD_INIT,
-    CHECKPOINT_SCHEMA_VERSION,
     ENTROPY_ESTIMATOR_VERSION,
     VanillaActor,
-    Config,
     _classify_death_reason,
-    _compute_global_state_dim,
     _compute_obs_dim,
     _episode_outcome,
     _flatten_obs,
-    _checkpoint_metadata,
     _joint_team_reward_once,
     _minimal_altitude_reward_config,
     _ratio_with_denominator_zero,
     _safe_div,
-    _unpack_and_validate_checkpoint,
+    _unpack_actor_checkpoint_for_evaluation,
 )
 
 # Diagnostic marker 4
@@ -214,6 +201,36 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rnn_hidden_size = 128  # default; overridden by checkpoint auto-inference
+    actor_state = None
+    hidden = 128
+    altitude_reward_config = _minimal_altitude_reward_config()
+    obs_dim = _compute_obs_dim(
+        num_red, num_blue, is_red=True, obs_mode=obs_mode)
+
+    if checkpoint_path is not None:
+        print(f"加载模型: {checkpoint_path} ...", flush=True)
+        try:
+            payload = torch.load(
+                checkpoint_path, map_location=device, weights_only=False)
+            (actor_state, _metadata, altitude_reward_config,
+             hidden, rnn_hidden_size) = (
+                _unpack_actor_checkpoint_for_evaluation(
+                    payload, num_red=num_red, num_blue=num_blue,
+                    obs_dim=obs_dim, action_dim=3, obs_mode=obs_mode,
+                    obs_normalization=obs_normalization,
+                    pid_profile=pid_profile,
+                    pid_throttle_base=pid_throttle_base,
+                    reward_mode=reward_mode,
+                    missile_guidance_mode=missile_guidance_mode,
+                    blue_policy_profile=blue_policy_profile,
+                    environment_profile=environment_profile,
+                    max_episode_length=max_steps,
+                    initial_condition_randomization_mode=(
+                        initial_condition_randomization_mode)))
+        except Exception:
+            print("ERROR: 模型加载失败:", flush=True)
+            traceback.print_exc()
+            return
 
     # ---- 1. 创建环境 ----
     print("创建环境...", flush=True)
@@ -229,6 +246,7 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
                            environment_profile=environment_profile,
                            initial_condition_randomization_mode=(
                                initial_condition_randomization_mode),
+                           altitude_reward_config=altitude_reward_config,
                            suppress_jsbsim_output=True)
     except Exception:
         print("ERROR: 环境创建失败:", flush=True)
@@ -237,72 +255,11 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
 
     # ---- 2. 加载模型 (可选) ----
     actor = None
-    if checkpoint_path is not None:
-        print(f"加载模型: {checkpoint_path} ...", flush=True)
+    if actor_state is not None:
         try:
-            payload = torch.load(
-                checkpoint_path, map_location=device, weights_only=False)
-            obs_dim = _compute_obs_dim(
-                num_red, num_blue, is_red=True, obs_mode=obs_mode)
-            config = Config()
-            config.num_red = num_red
-            config.num_blue = num_blue
-            config.max_episode_length = max_steps
-            config.obs_mode = obs_mode
-            config.obs_normalization = obs_normalization
-            config.pid_profile = pid_profile
-            config.pid_throttle_base = pid_throttle_base
-            config.reward_mode = reward_mode
-            config.missile_guidance_mode = missile_guidance_mode
-            config.blue_policy_profile = blue_policy_profile
-            config.environment_profile = environment_profile
-            config.environment_version = environment_profile
-            expected_metadata = _checkpoint_metadata(
-                config, obs_dim,
-                _compute_global_state_dim(num_red, obs_mode))
-            state = _unpack_and_validate_checkpoint(
-                payload, expected_metadata, "actor")
-
-            # Auto-infer model architecture from checkpoint weights, so the eval
-            # script works with any training config (different hidden sizes, etc.)
-            ckpt_hidden = None
-            ckpt_rnn_hidden = None
-            ckpt_obs_dim = None
-            for key, tensor in state.items():
-                if key == "fc_in.weight":
-                    ckpt_hidden = tensor.shape[0]
-                    ckpt_obs_dim = tensor.shape[1]
-                elif key == "rnn.weight_ih":
-                    ckpt_rnn_hidden = tensor.shape[0] // 3  # GRU 3 gates
-                if ckpt_hidden and ckpt_rnn_hidden and ckpt_obs_dim:
-                    break
-
-            if ckpt_obs_dim is None:
-                print("ERROR: 无法从 checkpoint 推断 obs_dim", flush=True)
-                env.close()
-                return
-
-            if ckpt_obs_dim != obs_dim:
-                if obs_mode == "paper_strict":
-                    total_agents = ckpt_obs_dim // 11
-                else:
-                    total_agents = (ckpt_obs_dim - 5) // 12
-                print(f"ERROR: 维度不匹配！", flush=True)
-                print(f"  Checkpoint obs_dim = {ckpt_obs_dim}  (训练时约 {total_agents} 个智能体总数)",
-                      flush=True)
-                print(f"  当前请求 obs_dim   = {obs_dim}  (--num-red={num_red} --num-blue={num_blue})",
-                      flush=True)
-                print(f"  请调整 --num-red 和 --num-blue，使总数 = {total_agents}",
-                      flush=True)
-                env.close()
-                return
-
-            hidden = ckpt_hidden or 128
-            rnn_hidden_size = ckpt_rnn_hidden or 128
-
             actor = VanillaActor(obs_dim=obs_dim, action_dim=3,
                                  hidden=hidden, rnn_hidden=rnn_hidden_size).to(device)
-            actor.load_state_dict(state)
+            actor.load_state_dict(actor_state)
             actor.eval()
             print(f"  模型已加载 (obs_dim={obs_dim}, hidden={hidden}, rnn={rnn_hidden_size})",
                   flush=True)
