@@ -6,6 +6,8 @@
 
 `temporary_learnability_abstraction`: the paper low-level direct-FCS action is replaced by a high-level pitch-heading-speed command executed by a fixed PID controller.
 
+`temporary_learnability_abstraction`: the first heterogeneous environment represents role and armament heterogeneity while reusing the same JSBSim aircraft dynamics for MAV and UAV agents.
+
 武器由环境自动管理，直接复用论文导弹、观测槽位与奖励结构。默认红方由学习接口控制，蓝方使用包含 `level_hold`、`pursuit`、转向、升降和加减速的有限高层候选，并按论文奖励结构即时贪心选择。该蓝方是基于论文有限基本机动思想构建的简化贪心规则策略，不是论文未公开 FSM 的精确复现。
 
 ```powershell

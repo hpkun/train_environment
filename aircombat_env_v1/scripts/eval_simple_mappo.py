@@ -55,6 +55,6 @@ def load_checkpoint(path,scenario,device):
     model=SharedMAPPOActorCritic(adapter.obs_dim,adapter.state_dim,adapter.action_dim).to(device);model.load_state_dict(checkpoint["model_state_dict"]);model.eval();return model
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument("--model",required=True);p.add_argument("--scenario",choices=("simple_paper_1v1","simple_paper_2v2"),required=True);p.add_argument("--episodes",type=int,default=5);p.add_argument("--device",default="auto");p.add_argument("--deterministic",action="store_true");p.add_argument("--seed",type=int,default=1);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("--model",required=True);p.add_argument("--scenario",choices=("simple_paper_1v1","simple_paper_2v2","simple_paper_3v2_hetero"),required=True);p.add_argument("--episodes",type=int,default=5);p.add_argument("--device",default="auto");p.add_argument("--deterministic",action="store_true");p.add_argument("--seed",type=int,default=1);a=p.parse_args()
     device=resolve_device(a.device);model=load_checkpoint(a.model,a.scenario,device);print(json.dumps(evaluate_model(model,a.scenario,a.episodes,device,a.deterministic,a.seed),indent=2))
 if __name__=="__main__":main()

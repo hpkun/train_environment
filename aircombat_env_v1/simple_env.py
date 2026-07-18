@@ -11,6 +11,7 @@ from .geometry import LLA2NEU
 from .opponent import paper_greedy_action
 from .paper_observation import PaperObservation
 from .paper_reward import PaperReward
+from .simple_hetero_reward import SimpleMAVReward
 from .paper_situation import assess_pair
 from .paper_weapon import PaperWeaponManager
 from .pid import PaperAutopilot
@@ -26,17 +27,24 @@ INFERRED={"missile_initial_speed_mps":500.,"powered_duration_s":3.,"powered_acce
 SIMPLE_SCENARIOS={
  "simple_paper_1v1":[("red_0","red",120.,60.,0.),("blue_0","blue",120.,60.2,180.)],
  "simple_paper_2v2":[("red_0","red",120.,60.,0.),("red_1","red",120.02,60.,0.),
-                        ("blue_0","blue",120.,60.2,180.),("blue_1","blue",120.02,60.2,180.)]}
+                        ("blue_0","blue",120.,60.2,180.),("blue_1","blue",120.02,60.2,180.)],
+ "simple_paper_3v2_hetero":[("red_uav_0","red",120.,60.,0.),("red_uav_1","red",120.04,60.,0.),
+                        ("red_mav_0","red",120.02,59.98,0.),("blue_0","blue",120.,60.2,180.),
+                        ("blue_1","blue",120.04,60.2,180.)]}
+HETERO_SCENARIO="simple_paper_3v2_hetero"
+HETERO_ROLES={"red_uav_0":"uav","red_uav_1":"uav","red_mav_0":"mav","blue_0":"uav","blue_1":"uav"}
+HETERO_MISSILES={"red_uav_0":2,"red_uav_1":2,"red_mav_0":0,"blue_0":2,"blue_1":2}
 
 @dataclass
 class SimplePIDAircraft:
     agent_id:str;side:str;longitude:float;latitude:float;initial_heading_deg:float;config:dict
+    role:str="uav";missile_capacity:int=2
     def __post_init__(self):
         self.simulator=AircraftSimulator(self.config["timing"]["sim_frequency_hz"])
         self.autopilot=PaperAutopilot.from_config(self.config);self._state=None;self.reset()
     def reset(self):
         trim=self.config["trim"];self.alive=True;self.death_reason=None;self.out_of_boundary=False
-        self.missile_left=2;self.current_target=None;self.incoming_missiles=[];self.autopilot.reset()
+        self.missile_left=self.missile_capacity;self.current_target=None;self.incoming_missiles=[];self.autopilot.reset()
         self._state=self.simulator.reset(6000.,250.,self.initial_heading_deg,0.,0.,self.latitude,self.longitude,
                                          trim["elevator_trim"],trim["throttle_base"])
         for name in ("gear/gear-cmd-norm","gear/gear-pos-norm","fcs/flap-cmd-norm","fcs/flap-pos-norm"):
@@ -79,12 +87,14 @@ class SimpleTAMCombatEnv(gym.Env):
         self.controlled_ids=[x[0] for x in self.agent_specs if controlled_side=="all" or x[1]=="red"]
         self.action_space=spaces.Dict({aid:spaces.Box(-1.,1.,(3,),np.float32) for aid in self.controlled_ids})
         self.paper_observation=PaperObservation(self.max_red,self.max_blue)
-        dim=61 if self.max_red==self.max_blue==1 else 73
+        base_dim=7+6*((self.max_red-1)+self.max_blue+8);dim=base_dim+(2 if scenario_mode==HETERO_SCENARIO else 0)
         self.observation_space=spaces.Dict({aid:spaces.Box(-np.inf,np.inf,(dim,),np.float32) for aid in self.controlled_ids})
-        self.weapon=PaperWeaponManager(PUBLISHED,INFERRED);self.reward_model=PaperReward();self.agents=[]
+        self.weapon=PaperWeaponManager(PUBLISHED,INFERRED);self.reward_model=PaperReward();self.mav_reward_model=SimpleMAVReward();self.agents=[]
     def reset(self,*,seed=None,options=None):
         super().reset(seed=seed);del options
-        if not self.agents:self.agents=[SimplePIDAircraft(*spec,self.config) for spec in self.agent_specs]
+        if not self.agents:
+            self.agents=[SimplePIDAircraft(*spec,self.config,role=HETERO_ROLES.get(spec[0],"uav"),
+                         missile_capacity=HETERO_MISSILES.get(spec[0],2)) for spec in self.agent_specs]
         else:
             for agent in self.agents:agent.reset()
         self.by_id={a.agent_id:a for a in self.agents};self.weapon.reset();self.step_count=0;self.simulation_time_s=0.
@@ -108,7 +118,7 @@ class SimpleTAMCombatEnv(gym.Env):
         selected=set(self.controlled_ids if agent_ids is None else agent_ids);result={}
         for aid in selected:
             a=self.by_id[aid];target=self.by_id.get(a.current_target)
-            result[aid]=np.zeros(3,np.float32) if target is None else paper_greedy_action(a.state,target.state)
+            result[aid]=np.array([0.,-.5,0.],np.float32) if a.role=="mav" else np.zeros(3,np.float32) if target is None else paper_greedy_action(a.state,target.state)
         return result
     def step(self,actions):
         self._update_targets();self.weapon.begin_decision_step();alive_start={a.agent_id:a.alive for a in self.agents};events=[]
@@ -142,10 +152,21 @@ class SimpleTAMCombatEnv(gym.Env):
             target=self.by_id.get(a.current_target)
             if target is not None:pairs[a.agent_id]=assess_pair(a.position,a.velocity,target.position,target.velocity)
         rewards,components=self.reward_model.compute(self.agents,self.current_targets,pairs,self.weapon.missiles,events,alive_start,out_step)
+        if self.scenario_mode==HETERO_SCENARIO:
+            mav=self.by_id["red_mav_0"];rewards[mav.agent_id],components[mav.agent_id]=self.mav_reward_model.compute(
+                mav,self.agents,self.weapon.missiles,events,alive_start,out_step)
         red_alive=sum(a.alive for a in self.agents if a.side=="red");blue_alive=sum(a.alive for a in self.agents if a.side=="blue")
-        terminated=red_alive==0 or blue_alive==0;truncated=not terminated and self.step_count>=self.max_steps
-        winner="draw" if red_alive==blue_alive==0 else "red" if blue_alive==0 else "blue" if red_alive==0 else "draw" if truncated else None
-        reason="mutual_elimination" if red_alive==blue_alive==0 else "blue_eliminated" if blue_alive==0 else "red_eliminated" if red_alive==0 else "timeout" if truncated else None
+        if self.scenario_mode==HETERO_SCENARIO:
+            mav_lost=not self.by_id["red_mav_0"].alive;uavs_lost=not any(self.by_id[aid].alive for aid in ("red_uav_0","red_uav_1"))
+            red_failed=mav_lost or uavs_lost;blue_eliminated=blue_alive==0;terminated=red_failed or blue_eliminated
+            winner="draw" if red_failed and blue_eliminated else "blue" if red_failed else "red" if blue_eliminated else None
+            reason="mutual_mission_failure" if red_failed and blue_eliminated else "mav_lost" if mav_lost else "red_uavs_eliminated" if uavs_lost else "blue_eliminated" if blue_eliminated else None
+        else:
+            terminated=red_alive==0 or blue_alive==0
+            winner="draw" if red_alive==blue_alive==0 else "red" if blue_alive==0 else "blue" if red_alive==0 else None
+            reason="mutual_elimination" if red_alive==blue_alive==0 else "blue_eliminated" if blue_alive==0 else "red_eliminated" if red_alive==0 else None
+        truncated=not terminated and self.step_count>=self.max_steps
+        if truncated:winner="draw";reason="timeout"
         self._update_targets();info=self._info(winner,reason);info["events"]=events;info["reward_components"]=components
         return self._observations(),{aid:float(rewards[aid]) for aid in self.controlled_ids},bool(terminated),bool(truncated),info
     def _check_frame(self,out_step):
@@ -160,10 +181,16 @@ class SimpleTAMCombatEnv(gym.Env):
             if a.alive and np.linalg.norm(a.position[:2])>28000:a.kill("boundary");out_step.add(a.agent_id)
     def _observations(self):
         structured=self.paper_observation.build(self.agents,self.weapon.missiles)
-        return {aid:self.paper_observation.flatten(structured[aid]) for aid in self.controlled_ids}
+        result={}
+        for aid in self.controlled_ids:
+            flat=self.paper_observation.flatten(structured[aid])
+            if self.scenario_mode==HETERO_SCENARIO:
+                flat=np.concatenate([flat,np.array([1.,0.] if self.by_id[aid].role=="mav" else [0.,1.],np.float32)])
+            result[aid]=flat.astype(np.float32)
+        return result
     def _info(self,winner,reason):
         red=[a for a in self.agents if a.side=="red"];blue=[a for a in self.agents if a.side=="blue"]
-        return {"scenario_mode":self.scenario_mode,"decision_step":self.step_count,"simulation_time_s":self.simulation_time_s,
+        info={"scenario_mode":self.scenario_mode,"decision_step":self.step_count,"simulation_time_s":self.simulation_time_s,
           "winner":winner,"termination_reason":reason,"alive_red":sum(a.alive for a in red),"alive_blue":sum(a.alive for a in blue),
           "missiles_fired":self.weapon.total_fired,"missile_hits":self.weapon.total_hits,"red_missile_kills":self.red_missile_kills,
           "blue_missile_kills":self.blue_missile_kills,"red_crashes":sum(a.death_reason=="crash" for a in red),
@@ -177,5 +204,12 @@ class SimpleTAMCombatEnv(gym.Env):
           "minimum_altitude_by_agent":dict(self.minimum_altitude_by_agent),"maximum_speed_by_agent":dict(self.maximum_speed_by_agent),
           "death_reason":{a.agent_id:a.death_reason for a in self.agents},
           "weapon_enabled_agent_ids":None if self.weapon_enabled_agent_ids is None else sorted(self.weapon_enabled_agent_ids)}
+        if self.scenario_mode==HETERO_SCENARIO:
+            mav=self.by_id["red_mav_0"];uavs=[self.by_id[aid] for aid in ("red_uav_0","red_uav_1")]
+            info.update({"agent_roles":{a.agent_id:a.role for a in self.agents},"mav_alive":mav.alive,
+              "red_uav_alive":sum(a.alive for a in uavs),"red_uav_missiles_left":{a.agent_id:a.missile_left for a in uavs},
+              "mav_missiles_left":mav.missile_left,"red_team_failed_by_mav_loss":not mav.alive,
+              "red_team_failed_by_uav_loss":not any(a.alive for a in uavs)})
+        return info
     def close(self):
         for a in self.agents:a.close()

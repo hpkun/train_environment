@@ -157,7 +157,7 @@ def train_seed(seed,seed_dir,scenario=DEFAULT_SCENARIO,total_env_steps=100000):
     return return_code,time.perf_counter()-started
 
 def build_parser():
-    parser=argparse.ArgumentParser();parser.add_argument("--scenario",choices=("simple_paper_1v1","simple_paper_2v2"),default=DEFAULT_SCENARIO)
+    parser=argparse.ArgumentParser();parser.add_argument("--scenario",choices=("simple_paper_1v1","simple_paper_2v2","simple_paper_3v2_hetero"),default=DEFAULT_SCENARIO)
     parser.add_argument("--total-env-steps",type=int,default=100000);parser.add_argument("--seeds",type=int,nargs="+",default=list(DEFAULT_SEEDS))
     parser.add_argument("--output-dir","--output-root",dest="output_dir",type=Path,default=DEFAULT_OUTPUT);return parser
 
