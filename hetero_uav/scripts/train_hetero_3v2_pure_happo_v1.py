@@ -31,6 +31,7 @@ from uav_env.JSBSim.formal_v2.contract import (
     ENV_TYPE as V2_ENV_TYPE,
     OBSERVATION_CONTRACT as V2_OBSERVATION_CONTRACT,
     REWARD_CONTRACT_VERSION as V2_REWARD_CONTRACT_VERSION,
+    V5_REWARD_CONTRACT_VERSION,
 )
 from uav_env.JSBSim.formal_v2.reward import (
     EVENT_NORMALIZER as V2_EVENT_NORMALIZER,
@@ -270,11 +271,13 @@ def _contract_meta(env) -> dict:
         "num_agents": len(env.red_ids),
     }
     if env.formal_contract == V2_ENV_TYPE:
-        return {
+        contract = {
             **common,
             "observation_contract": V2_OBSERVATION_CONTRACT,
-            "reward_contract": V2_REWARD_CONTRACT_VERSION,
-            "reward_contract_details": {
+            "reward_contract": env.reward_contract,
+        }
+        if env.reward_contract == V2_REWARD_CONTRACT_VERSION:
+            contract["reward_contract_details"] = {
                 "uav_weights": V2_UAV_WEIGHTS,
                 "mav_safety_weights": V2_MAV_SAFETY_WEIGHTS,
                 "mav_support_weights": V2_MAV_SUPPORT_WEIGHTS,
@@ -282,8 +285,10 @@ def _contract_meta(env) -> dict:
                 "uav_dense_normalizer": V2_UAV_DENSE_NORMALIZER,
                 "mav_dense_normalizer": V2_MAV_DENSE_NORMALIZER,
                 "event_normalizer": V2_EVENT_NORMALIZER,
-            },
-        }
+            }
+        else:
+            contract.update(env.reward_metadata)
+        return contract
     return {
         **common,
         "reward_contract": {
@@ -294,6 +299,16 @@ def _contract_meta(env) -> dict:
             "event_rewards": EVENT_REWARDS,
         },
     }
+
+
+def _validate_training_reward_contract(env, gamma: float) -> None:
+    if (env.reward_contract == V5_REWARD_CONTRACT_VERSION
+            and not math.isclose(
+                float(gamma), float(env.potential_gamma),
+                rel_tol=0.0, abs_tol=1e-12)):
+        raise ValueError(
+            "V5 training gamma must equal potential_gamma: "
+            f"{gamma} != {env.potential_gamma}")
 
 
 def main():
@@ -313,6 +328,7 @@ def main():
     env = make_env(str(config))
     if env.formal_contract not in {ENV_TYPE, V2_ENV_TYPE} or env.action_dim != ACTION_DIM:
         raise ValueError("formal runner accepts only formal V1/V2 Box(3) contracts")
+    _validate_training_reward_contract(env, args.gamma)
     requested_device = str(args.device)
     if requested_device.startswith("cuda") and not torch.cuda.is_available():
         raise ValueError(f"CUDA requested but unavailable: {requested_device}")
@@ -341,6 +357,7 @@ def main():
             "critic_contract": "centralized_shared_scalar_v",
             "gae_contract": "separated_termination_truncation"}
     is_v2 = env.formal_contract == V2_ENV_TYPE
+    is_v5 = env.reward_contract == V5_REWARD_CONTRACT_VERSION
     log_path = output / "train_log.csv"
     fields = [
         "record_type", "iteration", "total_steps", "episodes_completed", "avg_role_reward_mav",
@@ -377,6 +394,15 @@ def main():
             "raw_mav_reward", "raw_uav_reward", "normalized_mav_reward",
             "normalized_uav_reward", "final_team_reward",
             "red_attack_alive", "mav_alive", "blue_attack_alive",
+        ])
+    if is_v5:
+        fields.extend([
+            "shared_event_raw", "shared_event_reward", "red_kill_count",
+            "red_attack_death_count", "mav_death_count", "out_of_zone_count",
+            "outcome_bonus", "terminal_retention_raw",
+            "terminal_retention_reward", "terminal_reward", "phi_mav",
+            "phi_uav_1", "phi_uav_2", "phi_team_previous", "phi_team_next",
+            "phi_team_next_effective", "potential_shaping_reward",
         ])
     for role in ("mav", "uav"):
         for dimension in ("pitch", "heading", "speed"):
@@ -506,6 +532,19 @@ def main():
                         stats[key].append(float(np.mean([
                             components[aid].get(key, 0.0)
                             for aid in ("red_1", "red_2")])))
+                if is_v5:
+                    reward_components = next_info["reward_components"]
+                    for key in (
+                            "shared_event_raw", "shared_event_reward",
+                            "red_kill_count", "red_attack_death_count",
+                            "mav_death_count", "out_of_zone_count",
+                            "outcome_bonus", "terminal_retention_raw",
+                            "terminal_retention_reward", "terminal_reward",
+                            "phi_mav", "phi_uav_1", "phi_uav_2",
+                            "phi_team_previous", "phi_team_next",
+                            "phi_team_next_effective",
+                            "potential_shaping_reward"):
+                        stats[key].append(float(reward_components[key]))
                 event_values = np.asarray([components[aid].get("event", 0.0) for aid in env.red_ids])
                 stats["team_event"].append(float(
                     event_values.sum() / 3.0 if is_v2
@@ -653,6 +692,16 @@ def main():
                     "mav_alive": episode_mean("mav"),
                     "blue_attack_alive": episode_mean("blue_attack_alive"),
                 })
+            if is_v5:
+                row.update({key: mean(key) for key in (
+                    "shared_event_raw", "shared_event_reward",
+                    "red_kill_count", "red_attack_death_count",
+                    "mav_death_count", "out_of_zone_count", "outcome_bonus",
+                    "terminal_retention_raw", "terminal_retention_reward",
+                    "terminal_reward", "phi_mav", "phi_uav_1", "phi_uav_2",
+                    "phi_team_previous", "phi_team_next",
+                    "phi_team_next_effective", "potential_shaping_reward",
+                )})
             for role in ("mav", "uav"):
                 for dimension in ("pitch", "heading", "speed"):
                     row[f"{role}_action_mean_{dimension}"] = metric(

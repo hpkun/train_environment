@@ -19,11 +19,13 @@ from uav_env.JSBSim.formal_v2.contract import (
     ENV_TYPE as V2_ENV_TYPE,
     OBSERVATION_CONTRACT as V2_OBSERVATION_CONTRACT,
     REWARD_CONTRACT_VERSION as V2_REWARD_CONTRACT_VERSION,
+    V5_REWARD_CONTRACT_VERSION,
 )
 
 
 def _validate_checkpoint_meta(
     meta: dict, expected_formal_contract: str | None = None,
+    expected_reward_contract: str | None = None,
 ) -> None:
     formal_contract = meta.get("formal_contract")
     if expected_formal_contract is not None and formal_contract != expected_formal_contract:
@@ -35,7 +37,13 @@ def _validate_checkpoint_meta(
     if formal_contract == V2_ENV_TYPE:
         if meta.get("credit_mode") != V2_CREDIT_MODE:
             raise ValueError("checkpoint credit_mode is not formal V2")
-        if meta.get("reward_contract") != V2_REWARD_CONTRACT_VERSION:
+        required_reward_contract = (
+            expected_reward_contract or V2_REWARD_CONTRACT_VERSION)
+        if required_reward_contract not in {
+                V2_REWARD_CONTRACT_VERSION, V5_REWARD_CONTRACT_VERSION}:
+            raise ValueError(
+                f"unsupported formal V2 reward contract: {required_reward_contract}")
+        if meta.get("reward_contract") != required_reward_contract:
             raise ValueError("checkpoint reward_contract is not formal V2")
         if meta.get("observation_contract") != V2_OBSERVATION_CONTRACT:
             raise ValueError("checkpoint observation_contract is not formal V2")
@@ -70,7 +78,7 @@ def main():
     env = make_env(str(ROOT / a.config) if not Path(a.config).is_absolute() else a.config)
     model = Path(a.checkpoint); model = model if model.is_absolute() else ROOT / model
     meta = json.loads((model.parent / "meta.json").read_text(encoding="utf-8"))
-    _validate_checkpoint_meta(meta, env.formal_contract)
+    _validate_checkpoint_meta(meta, env.formal_contract, env.reward_contract)
     for key, actual in (
             ("actor_obs_dim", env.actor_obs_dim),
             ("critic_state_dim", env.critic_state_dim),
@@ -108,6 +116,12 @@ def main():
                     for aid in ("red_1", "red_2")]))
                 stats["team_reward"] += float(
                     info["reward_components"].get("team_reward", 0.0))
+                if env.reward_contract == V5_REWARD_CONTRACT_VERSION:
+                    for key in (
+                            "shared_event_reward", "terminal_reward",
+                            "potential_shaping_reward", "phi_mav",
+                            "phi_uav_1", "phi_uav_2"):
+                        stats[key] += float(info["reward_components"][key])
             for key in ("dense","safety","support_position","shared_information"):
                 stats[f"mav_{key}"] += float(components["red_0"].get(key,0.0))
             for key in ("dense","flight","speed","angle","distance","dodge"):
@@ -147,6 +161,12 @@ def main():
                     "raw_mav_reward", "normalized_mav_reward",
                     "raw_uav_reward", "normalized_uav_reward", "team_reward"):
                 row[f"{key}_mean"] = stats[key] / step_denominator
+            if env.reward_contract == V5_REWARD_CONTRACT_VERSION:
+                for key in (
+                        "shared_event_reward", "terminal_reward",
+                        "potential_shaping_reward", "phi_mav",
+                        "phi_uav_1", "phi_uav_2"):
+                    row[f"{key}_mean"] = stats[key] / step_denominator
         for key in ("dense","safety","support_position","shared_information"):
             row[f"mav_{key}_mean"]=stats[f"mav_{key}"]/step_denominator
         for key in ("dense","flight","speed","angle","distance","dodge"):
@@ -184,6 +204,13 @@ def main():
                 ("red_attack_alive_mean", "red_attack_alive"),
                 ("blue_attack_alive_mean", "blue_attack_alive")):
             summary[output_key] = float(np.mean([x[row_key] for x in rows]))
+        if env.reward_contract == V5_REWARD_CONTRACT_VERSION:
+            for key in (
+                    "shared_event_reward", "terminal_reward",
+                    "potential_shaping_reward", "phi_mav",
+                    "phi_uav_1", "phi_uav_2"):
+                summary[f"{key}_mean"] = float(np.mean([
+                    x[f"{key}_mean"] for x in rows]))
     summary["finite"]=bool(all(
         np.isfinite(value) for row in rows for value in row.values() if not isinstance(value,str)))
     numeric_episode_keys = [

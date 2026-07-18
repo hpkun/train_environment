@@ -1,0 +1,116 @@
+# Formal 3V2 Reward V5 Contract
+
+## Scope
+
+`task_aligned_shared_potential_reward_v5` is an independent reward contract
+for `hetero_3v2_pure_happo_v2`. It does not replace V4. The V4 and V5 YAML
+files select their reward contract explicitly, and their checkpoints cannot be
+used interchangeably for resume training.
+
+V5 leaves the 73-dimensional actor observation, 219-dimensional critic state,
+3-dimensional action, JSBSim dynamics, PID, sensing, target selection, fire
+gate, missile, `PaperGreedyOpponent`, scenario geometry and combat-capability
+termination unchanged.
+
+## Shared team reward
+
+Every red actor receives the same scalar:
+
+```text
+team_reward = shared_event_reward
+            + terminal_reward
+            + potential_shaping_reward
+```
+
+Pure HAPPO still applies `fixed_three_agent_team_mean`; the mean of three
+identical rewards is exactly `team_reward`.
+
+## Shared events
+
+```text
+shared_event_raw = 200 * red_kill_count
+                   - 200 * red_attack_death_count
+                   - 200 * mav_death_count
+                   - 100 * out_of_zone_count
+shared_event_reward = shared_event_raw / 200
+```
+
+A red out-of-zone transition receives only -100 and is not also counted as a
+-200 death. A blue loss counts as a red kill only when a real red missile hit
+event identifies it. Event magnitudes are PUBLISHED TAM role-event values;
+sharing them across the red team and dividing by 200 are DESIGN_CHOICE.
+
+## Terminal reward
+
+```text
+outcome_bonus = +1 red_win, -1 blue_win, 0 otherwise
+
+terminal_retention_raw = 30 * (
+    (2 - blue_attack_alive)
+    - (2 - red_attack_alive)
+    - (1 - mav_alive)
+)
+
+terminal_reward = outcome_bonus + terminal_retention_raw / 200
+```
+
+The BRMA final-loss-difference idea is ADAPTED to heterogeneous 3V2. The
+explicit outcome bonus and common 200 scale are DESIGN_CHOICE. Terminal reward
+is zero on non-boundary transitions and is settled once. An invalid numeric
+episode has no win/loss bonus.
+
+## Role potential
+
+V5 reuses the V4 role formulas without changing their thresholds or weights:
+
+```text
+phi_mav = clip((R_safety + R_support) / 1.8, -1, 1)
+phi_uav_i = clip((10 R_height + 10 R_speed + 15 R_angle
+                  + 10 R_distance + 30 R_dodge) / 75, -1, 1)
+phi_team = (phi_mav + phi_uav_1 + phi_uav_2) / 3
+```
+
+Dead roles have zero potential. MAV safety/support and UAV category weights
+are PUBLISHED; unpublished normalizations remain the same DESIGN_CHOICE as V4.
+The shared-information metric remains diagnostic and is not an active reward.
+
+## Potential shaping
+
+```text
+potential_gamma = 0.99
+potential_beta = 0.25
+potential_shaping_reward = 0.25 * (
+    0.99 * phi_team_next_effective - phi_team_previous)
+```
+
+At reset, `phi_team_previous` is initialized from the initial state. A normal
+transition uses the real next potential and then advances the cache. A
+terminated, truncated or invalid boundary uses `phi_team_next_effective=0`.
+Gamma, beta and this potential-shaping choice are DESIGN_CHOICE. The training
+entry rejects a PPO gamma different from 0.99.
+
+## Version isolation
+
+V5 checkpoint metadata records:
+
+```text
+reward_contract = task_aligned_shared_potential_reward_v5
+potential_gamma = 0.99
+potential_beta = 0.25
+event_scale = 200.0
+shared_team_reward = true
+```
+
+Resume and normal evaluation require an exact reward-contract match. The
+ranking audit may load compatible actor parameters from V4 or V5 checkpoints,
+but never loads their critic, optimizers or training state and labels the run
+as a cross-reward actor-only audit.
+
+## Classification summary
+
+- PUBLISHED: TAM role weights and attack-UAV event magnitudes.
+- ADAPTED: BRMA final loss-difference idea for heterogeneous 3V2.
+- DESIGN_CHOICE: shared events, outcome bonus, event scale, potential shaping,
+  beta, gamma and unpublished normalizations.
+- UNCHANGED: dynamics, action/observation contracts, PID, sensing, fire gate,
+  missile, opponent, initial geometry and termination rules.

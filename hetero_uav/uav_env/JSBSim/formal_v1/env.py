@@ -34,11 +34,40 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
                 CRITIC_STATE_DIM as contract_critic_state_dim,
                 ENV_TYPE as formal_contract,
                 OBSERVATION_CONTRACT as observation_contract,
-                REWARD_CONTRACT_VERSION as reward_contract,
+                REWARD_CONTRACT_VERSION as v4_reward_contract,
+                V5_REWARD_CONTRACT_VERSION as v5_reward_contract,
                 validate_formal_config as validate_config,
             )
             from ..formal_v2.observation import build_team_observations as observation_builder
-            from ..formal_v2.reward import compute_role_rewards as reward_builder
+            requested_reward_contract = config.get("reward_contract")
+            if requested_reward_contract == v4_reward_contract:
+                from ..formal_v2.reward import compute_role_rewards as reward_builder
+                reward_reset = None
+                reward_uses_transition_context = False
+                reward_metadata = {}
+            elif requested_reward_contract == v5_reward_contract:
+                from ..formal_v2.reward_v5 import (
+                    EVENT_SCALE,
+                    POTENTIAL_BETA,
+                    POTENTIAL_GAMMA,
+                    compute_team_rewards as reward_builder,
+                    reset_episode_state as reward_reset,
+                    reward_metadata as build_reward_metadata,
+                )
+                if float(config.get("potential_gamma", -1.0)) != POTENTIAL_GAMMA:
+                    raise ValueError(
+                        f"V5 requires potential_gamma={POTENTIAL_GAMMA}")
+                if float(config.get("potential_beta", -1.0)) != POTENTIAL_BETA:
+                    raise ValueError(
+                        f"V5 requires potential_beta={POTENTIAL_BETA}")
+                if float(config.get("event_scale", -1.0)) != EVENT_SCALE:
+                    raise ValueError(f"V5 requires event_scale={EVENT_SCALE}")
+                reward_uses_transition_context = True
+                reward_metadata = build_reward_metadata()
+            else:
+                raise ValueError(
+                    "formal V2 reward_contract must be selected explicitly")
+            reward_contract = requested_reward_contract
         else:
             contract_actor_obs_dim = ACTOR_OBS_DIM
             contract_critic_state_dim = CRITIC_STATE_DIM
@@ -48,6 +77,9 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
             validate_config = validate_formal_config
             observation_builder = build_team_observations
             reward_builder = compute_role_rewards
+            reward_reset = None
+            reward_uses_transition_context = False
+            reward_metadata = {}
         validate_config(config)
         self.config = dict(config)
         self.formal_contract = formal_contract
@@ -56,6 +88,11 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.credit_mode = str(config["credit_mode"])
         self._observation_builder = observation_builder
         self._reward_builder = reward_builder
+        self._reward_reset = reward_reset
+        self._reward_uses_transition_context = reward_uses_transition_context
+        self.reward_metadata = dict(reward_metadata)
+        self.potential_gamma = self.reward_metadata.get("potential_gamma")
+        self.potential_beta = self.reward_metadata.get("potential_beta")
         self.red_ids = list(RED_IDS)
         self.blue_ids = list(BLUE_IDS)
         self.agent_ids = self.red_ids
@@ -108,6 +145,9 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.previous_missile_risk = {aid: 0.0 for aid in self.red_ids}
         self.previous_missile_speed: dict[str, float] = {}
         self.v2_mav_team_credit_used = 0.0
+        self.v5_phi_previous = 0.0
+        self.v5_terminal_applied = False
+        self.v5_last_event_step = -1
         self.last_fire_gates: dict[str, dict] = {}
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -142,8 +182,13 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
         self.previous_missile_risk = {aid: 0.0 for aid in self.red_ids}
         self.previous_missile_speed = {}
         self.v2_mav_team_credit_used = 0.0
+        self.v5_phi_previous = 0.0
+        self.v5_terminal_applied = False
+        self.v5_last_event_step = -1
         self.last_fire_gates = {}
         self.audit_initial_perturbation = perturbation
+        if self._reward_reset is not None:
+            self._reward_reset(self)
         obs, self.last_critic_state = self._observation_builder(self)
         return obs, self._info([], {})
 
@@ -205,11 +250,6 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
             if was_alive and not self.aircraft[aid].is_alive:
                 self.newly_dead.add(aid)
         self.step_count += 1
-        rewards, reward_components = self._reward_builder(
-            self, self.selected_targets, missile_events)
-        for aid in self.red_ids:
-            self.previous_missile_risk[aid] = float(
-                reward_components["per_agent"][aid].get("missile_risk", 0.0))
         red_alive = sum(self.aircraft[aid].is_alive for aid in self.red_ids)
         blue_alive = sum(self.aircraft[aid].is_alive for aid in self.blue_ids)
         red_attack_alive = sum(
@@ -253,6 +293,26 @@ class Hetero3v2PureHAPPOEnv(gym.Env):
             outcome, reason = "draw", "timeout"
         else:
             outcome, reason = "ongoing", ""
+        transition_context = {
+            "red_attack_alive": int(red_attack_alive),
+            "blue_attack_alive": int(blue_attack_alive),
+            "mav_alive": bool(self.aircraft["red_0"].is_alive),
+            "terminated": bool(terminated),
+            "truncated": bool(truncated),
+            "team_done": bool(terminated or truncated),
+            "outcome": outcome,
+            "end_reason": reason,
+        }
+        if self._reward_uses_transition_context:
+            rewards, reward_components = self._reward_builder(
+                self, self.selected_targets, missile_events,
+                transition_context)
+        else:
+            rewards, reward_components = self._reward_builder(
+                self, self.selected_targets, missile_events)
+        for aid in self.red_ids:
+            self.previous_missile_risk[aid] = float(
+                reward_components["per_agent"][aid].get("missile_risk", 0.0))
         observations, self.last_critic_state = self._observation_builder(self)
         terminations = {aid: terminated for aid in self.red_ids}
         truncations = {aid: truncated for aid in self.red_ids}

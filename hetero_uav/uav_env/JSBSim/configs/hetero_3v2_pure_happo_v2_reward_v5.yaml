@@ -6,7 +6,10 @@ agent_interaction_steps: 12
 max_steps: 1000
 action_mode: continuous_high_level_pid
 credit_mode: fixed_three_agent_team_mean
-reward_contract: paper_aligned_role_reward_v4
+reward_contract: task_aligned_shared_potential_reward_v5
+potential_gamma: 0.99
+potential_beta: 0.25
+event_scale: 200.0
 suppress_jsbsim_output: true
 
 sensing:

@@ -21,9 +21,9 @@ two rule-controlled blue attack UAVs. The blue opponent remains
 | Episode decisions | 1000 | PUBLISHED |
 | Approximate episode time | 200 s | DERIVED |
 | Red/blue composition | 1 MAV + 2 UAV vs 2 UAV | PUBLISHED |
-| Action | target pitch, target heading, target speed | PUBLISHED |
-| Low-level control | PID | PUBLISHED |
-| Action dimension | 3 | DERIVED |
+| Action | target pitch, target heading, target speed | PROJECT_ACTION_CONTRACT |
+| Low-level control | PID | ENGINEERING_SIMPLIFICATION |
+| Action dimension | 3 | PROJECT_ACTION_CONTRACT |
 
 V2 does not change action decoding, PID gains, aircraft XML, aircraft model,
 initial geometry, physical dynamics, or Pure HAPPO actor/critic/update logic.
