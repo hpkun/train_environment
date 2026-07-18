@@ -1,6 +1,23 @@
 # aircombat_env_v1
 
-## formal_paper_environment
+## recommended: SimpleTAMCombatEnv
+
+`SimpleTAMCombatEnv` 是当前推荐的简化 JSBSim 多智能体空战环境，支持 `simple_paper_1v1` 与 `simple_paper_2v2`。飞机使用本地 F-16 六自由度模型；学习动作是 `Box(-1, 1, (3,))` 高层目标 `[pitch, relative_heading, speed]`，分别映射为俯仰 ±20°、相对航向 ±60° 和速度 200–300 m/s。每个决策持续 12 个 60 Hz 物理帧，每帧均由现有 `f16_pid_v1.yaml` 固定 PID 执行，不包含 fire 或底层舵面动作。
+
+`temporary_learnability_abstraction`: the paper low-level direct-FCS action is replaced by a high-level pitch-heading-speed command executed by a fixed PID controller.
+
+武器由环境自动管理，直接复用论文导弹、观测槽位与奖励结构。默认红方由学习接口控制，蓝方使用包含 `level_hold`、`pursuit`、转向、升降和加减速的有限高层候选，并按论文奖励结构即时贪心选择。该蓝方是基于论文有限基本机动思想构建的简化贪心规则策略，不是论文未公开 FSM 的精确复现。
+
+```powershell
+python aircombat_env_v1/scripts/check_simple_environment.py
+python aircombat_env_v1/scripts/run_simple_rule_combat.py --check all --episodes 10
+python -m pytest aircombat_env_v1/tests -q
+python -m pytest aircombat_env_v1/tests -q -m integration
+```
+
+## experimental_or_legacy
+
+### formal_paper_environment
 
 `TAMPaperCombatEnv` 是正式论文对齐路径，支持 `paper_nominal_1v1` 和 `paper_nominal_2v2`。每架受控 F-16 使用 `MultiDiscrete([40,40,40,40])`，直接映射为 throttle、aileron、elevator、rudder；每个决策保持 12 个 60 Hz 物理帧，不经过 PID。
 
@@ -27,6 +44,8 @@ python -m pytest aircombat_env_v1/tests -q
 python -m pytest aircombat_env_v1/tests -q -m integration
 ```
 
-## legacy_debug_environment
+### legacy_debug_environment
 
-`AirCombat1v1Env`、三维 pitch-heading-speed PID 路径、Dict maneuver/fire、PPO 与 recurrent PPO 仅保留为历史调试实验，不属于正式论文环境。本轮正式环境不调用或修改这些实现。
+旧 `AirCombat1v1Env` 的 Dict maneuver/fire 接口、PPO 与 recurrent PPO 仅保留为历史调试实验；当前推荐环境不调用这些实现。
+
+`TAMPaperCombatEnv` 四维40档直接飞控、`paper_trim.py`、配平搜索和固定四维基础机动校准均保留为实验记录，不是当前推荐环境的运行路径。旧 PPO、recurrent PPO 及含 fire 动作的 `AirCombat1v1Env` 同样只归档保留。
