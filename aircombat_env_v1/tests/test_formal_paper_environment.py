@@ -9,6 +9,7 @@ from aircombat_env_v1.paper_env import PaperAircraft,TAMPaperCombatEnv,PUBLISHED
 from aircombat_env_v1.paper_missile import PaperMissile
 from aircombat_env_v1.paper_observation import PaperObservation
 from aircombat_env_v1.paper_reward import PaperReward
+from aircombat_env_v1.paper_trim import PaperTrimState
 from aircombat_env_v1.paper_weapon import PaperWeaponManager
 
 def fake(aid,side,pos):
@@ -50,6 +51,21 @@ def test_formal_aircraft_saves_required_finite_state():
     try:assert np.isfinite([aircraft.position[2],aircraft.speed,aircraft.roll,aircraft.pitch,aircraft.heading,
                             aircraft.vertical_speed,aircraft.load_factor_g,aircraft.alpha,aircraft.beta]).all()
     finally:aircraft.close()
+
+def test_paper_trim_state_contains_full_initial_state_and_controls():
+    trim=PaperTrimState(pitch_deg=1.,alpha_deg=1.,flight_path_angle_deg=0.,throttle=.43,elevator=-.05)
+    values=trim.to_dict()
+    for key in ("pitch_deg","alpha_deg","flight_path_angle_deg","throttle","aileron","elevator","rudder"):
+        assert key in values and np.isfinite(values[key])
+
+def test_explicit_alpha_gamma_initialization_is_finite_and_consistent():
+    from aircombat_env_v1.aircraft import AircraftSimulator
+    simulator=AircraftSimulator(60)
+    state=simulator.reset(6000.,250.,0.,0.,5.,alpha_deg=5.,beta_deg=0.,flight_path_angle_deg=0.)
+    assert np.isfinite(tuple(state.values())).all()
+    assert np.rad2deg(state["alpha"])==pytest.approx(5.)
+    assert np.rad2deg(state["pitch"])==pytest.approx(5.)
+    assert -state["v_down"]==pytest.approx(0.,abs=1e-8)
 
 def test_formal_env_does_not_reference_paper_autopilot():
     import aircombat_env_v1.paper_env as module

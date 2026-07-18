@@ -20,6 +20,7 @@
 
 ```powershell
 python aircombat_env_v1/scripts/check_paper_environment.py
+python aircombat_env_v1/scripts/solve_paper_trim.py
 python aircombat_env_v1/scripts/check_paper_direct_fcs_health.py
 python aircombat_env_v1/scripts/run_paper_rule_combat.py --scenario paper_nominal_2v2 --episodes 20
 python -m pytest aircombat_env_v1/tests -q

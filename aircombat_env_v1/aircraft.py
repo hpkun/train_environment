@@ -44,7 +44,8 @@ class AircraftSimulator:
 
     def reset(self, altitude_m=6000.0, speed_mps=250.0, heading_deg=0.0,
               roll_deg=0.0, pitch_deg=0.0, latitude_deg=60.0,
-              longitude_deg=120.0, elevator_trim=0.0, throttle_base=0.3):
+              longitude_deg=120.0, elevator_trim=0.0, throttle_base=0.3,
+              alpha_deg=None, beta_deg=0.0, flight_path_angle_deg=None):
         """Reset initial conditions without constructing another FGFDMExec."""
         initial = {
             "ic/long-gc-deg": longitude_deg,
@@ -53,15 +54,22 @@ class AircraftSimulator:
             "ic/psi-true-deg": heading_deg,
             "ic/phi-deg": roll_deg,
             "ic/theta-deg": pitch_deg,
-            "ic/u-fps": speed_mps * M_TO_FT,
-            "ic/v-fps": 0.0,
-            "ic/w-fps": 0.0,
             "ic/p-rad_sec": 0.0,
             "ic/q-rad_sec": 0.0,
             "ic/r-rad_sec": 0.0,
             "ic/roc-fpm": 0.0,
             "ic/terrain-elevation-ft": 0.0,
         }
+        if alpha_deg is None and flight_path_angle_deg is None:
+            initial.update({"ic/u-fps": speed_mps * M_TO_FT,
+                            "ic/v-fps": 0.0,"ic/w-fps": 0.0})
+        else:
+            alpha = float(alpha_deg if alpha_deg is not None else
+                          pitch_deg - flight_path_angle_deg)
+            gamma = float(flight_path_angle_deg if flight_path_angle_deg is not None else
+                          pitch_deg - alpha)
+            initial.update({"ic/vt-fps": speed_mps * M_TO_FT,"ic/alpha-deg":alpha,
+                            "ic/beta-deg":beta_deg,"ic/gamma-deg":gamma})
         # The first engine/FCS initialization of a newly loaded FDM differs
         # slightly from later resets. Prime it once through this same path so
         # the first recorded episode and every reused episode are reproducible.
