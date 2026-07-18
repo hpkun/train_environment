@@ -36,7 +36,7 @@ def main():
     def run_eval(step):
         model.eval();summary=evaluate_model(model,args.scenario,args.eval_episodes,device,args.deterministic_eval,args.seed+100000+step);model.train()
         eval_writer.writerow({key:step if key=="env_steps" else summary[key] for key in EVAL_FIELDS});eval_file.flush();return summary
-    best_score=(-float("inf"),-float("inf"));initial_eval=run_eval(0);save_checkpoint(output/"best.pt",model,adapter,args,0);best_score=(initial_eval["red_win_rate"],initial_eval["mean_return"])
+    best_score=(-float("inf"),-float("inf"));initial_eval=run_eval(0);save_checkpoint(output/"initial.pt",model,adapter,args,0);save_checkpoint(output/"best.pt",model,adapter,args,0);best_score=(initial_eval["red_win_rate"],initial_eval["mean_return"])
     obs,state,info=adapter.reset(seed=args.seed);active=np.ones(adapter.num_agents,np.float32);env_steps=updates=episodes_completed=0
     episode_return=0.;episode_length=0;recent=deque(maxlen=20);next_eval=args.eval_interval;start=time.perf_counter()
     try:
