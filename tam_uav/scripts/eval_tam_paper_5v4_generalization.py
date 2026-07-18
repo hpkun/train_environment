@@ -18,7 +18,9 @@ if str(ROOT) not in sys.path:
 from algorithms.happo.vanilla_happo_checkpoint import (
     load_vanilla_happo_checkpoint, read_vanilla_happo_checkpoint_metadata)
 from scripts.tam_output_paths import resolve_tam_output
-from scripts.vanilla_happo_runtime import deterministic_evaluate, infer_policy, make_paper_env
+from scripts.vanilla_happo_runtime import (
+    deterministic_evaluate, infer_policy, make_paper_env,
+    policy_architecture_from_config)
 from uav_env.JSBSim.paper.protocol import (
     BLUE_POLICY_FIDELITY, ENVIRONMENT_FIDELITY_REVISION,
     GENERALIZATION_EPISODES_PER_LEVEL,
@@ -86,7 +88,8 @@ def main():
             experiment_protocol=PAPER_5V4_GENERALIZATION_PROTOCOL)
         try:
             policy, obs_dim, state_dim = infer_policy(
-                env, metadata["actor_sharing"], metadata["hidden_dim"], device)
+                env, metadata["actor_sharing"], device=device,
+                **policy_architecture_from_config(metadata))
             if obs_dim != metadata["actor_obs_dim"] or state_dim != metadata["critic_state_dim"]:
                 raise ValueError("checkpoint dimensions do not match 5v4 environment")
             load_vanilla_happo_checkpoint(

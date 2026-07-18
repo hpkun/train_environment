@@ -69,12 +69,30 @@ def make_paper_env(root: Path, scenario: str, *, initial_perturbation=None,
                     **kwargs)
 
 
-def infer_policy(env, actor_sharing="independent", hidden_dim=128, device="cpu"):
+def policy_architecture_from_config(config):
+    """Resolve explicit paper widths or the legacy hidden_dim-only contract."""
+    if ("actor_hidden_sizes" in config) != ("critic_hidden_sizes" in config):
+        raise ValueError("actor and critic hidden-size metadata must appear together")
+    if "actor_hidden_sizes" in config:
+        return {
+            "hidden_dim": config.get("hidden_dim"),
+            "actor_hidden_sizes": tuple(config["actor_hidden_sizes"]),
+            "critic_hidden_sizes": tuple(config["critic_hidden_sizes"]),
+        }
+    hidden = int(config.get("hidden_dim", 128))
+    return {"hidden_dim": hidden, "actor_hidden_sizes": None,
+            "critic_hidden_sizes": None}
+
+
+def infer_policy(env, actor_sharing="independent", hidden_dim=None, device="cpu",
+                 actor_hidden_sizes=None, critic_hidden_sizes=None):
     obs, _ = env.reset(seed=0)
     obs_dim = len(env.flatten_observation(obs[env.agent_ids[0]]))
     state_dim = len(env.get_state())
     policy = VanillaHAPPOPolicy(env.agent_ids, env.agent_roles, obs_dim, state_dim,
-                                hidden_dim=hidden_dim, actor_sharing=actor_sharing)
+                                hidden_dim=hidden_dim, actor_sharing=actor_sharing,
+                                actor_hidden_sizes=actor_hidden_sizes,
+                                critic_hidden_sizes=critic_hidden_sizes)
     return policy.to(device), obs_dim, state_dim
 
 

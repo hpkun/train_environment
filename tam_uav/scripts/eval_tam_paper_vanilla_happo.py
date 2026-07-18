@@ -13,7 +13,8 @@ from algorithms.happo.vanilla_happo_checkpoint import (
     load_vanilla_happo_checkpoint, read_vanilla_happo_checkpoint_metadata)
 from scripts.tam_output_paths import resolve_tam_output
 from scripts.vanilla_happo_runtime import (deterministic_evaluate, infer_policy,
-                                           make_paper_env, seed_all)
+                                           make_paper_env,
+                                           policy_architecture_from_config, seed_all)
 from uav_env.JSBSim.paper.protocol import (
     ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION, PAPER_NOMINAL_PROTOCOL,
     PAPER_SILENT_ASSUMPTIONS_PRESENT, checkpoint_lineage, protocol_metadata,
@@ -56,7 +57,8 @@ def main():
         if metadata["scenario"] != args.scenario:
             raise ValueError("checkpoint scenario does not match evaluation scenario")
         policy, obs_dim, state_dim = infer_policy(
-            env, metadata["actor_sharing"], metadata["hidden_dim"], device)
+            env, metadata["actor_sharing"], device=device,
+            **policy_architecture_from_config(metadata))
         if obs_dim != metadata["actor_obs_dim"] or state_dim != metadata["critic_state_dim"]:
             raise ValueError("checkpoint dimensions do not match evaluation environment")
         load_vanilla_happo_checkpoint(
@@ -69,7 +71,7 @@ def main():
                 PAPER_SILENT_ASSUMPTIONS_PRESENT))
     else:
         seed_all(args.seed)
-        policy, _, _ = infer_policy(env, "independent", 128, device)
+        policy, _, _ = infer_policy(env, "independent", device=device)
     result = deterministic_evaluate(env, policy, args.episodes, args.seed, args.baseline)
     result["algorithm_label"] = (
         "vanilla_happo" if metadata and metadata["actor_sharing"] == "independent"

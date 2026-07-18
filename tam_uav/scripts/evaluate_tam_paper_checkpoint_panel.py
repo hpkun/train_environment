@@ -22,7 +22,8 @@ from algorithms.happo.vanilla_happo_checkpoint import (
     FORMAT, load_vanilla_happo_checkpoint, save_vanilla_happo_checkpoint)
 from scripts.tam_output_paths import resolve_tam_output
 from scripts.vanilla_happo_runtime import (
-    evaluate_policy_panel, infer_policy, make_paper_env, seed_all)
+    evaluate_policy_panel, infer_policy, make_paper_env,
+    policy_architecture_from_config, seed_all)
 from uav_env.JSBSim.paper.protocol import (
     ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION,
     PAPER_NOMINAL_PROTOCOL, PAPER_SILENT_ASSUMPTIONS_PRESENT)
@@ -142,8 +143,9 @@ def _load_config(run_directory):
 def _make_initial_policy(config, device):
     seed_all(int(config["seed"]))
     env = make_paper_env(ROOT, config["scenario"])
+    architecture = policy_architecture_from_config(config)
     policy, _, _ = infer_policy(
-        env, config["actor_sharing"], int(config["hidden_dim"]), device)
+        env, config["actor_sharing"], device=device, **architecture)
     return env, policy
 
 
@@ -194,7 +196,10 @@ def evaluate_run(run_directory, steps, panel_size, environment_seed,
                             original["red_episode_return"],
                             rel_tol=1e-9, abs_tol=1e-6)):
                     raise RuntimeError("reconstructed step-0 policy does not match evaluation_0")
-                trainer = VanillaHAPPOTrainer(policy)
+                trainer = VanillaHAPPOTrainer(
+                    policy, value_loss_type=config.get(
+                        "value_loss_type", "legacy_clipped_mse"),
+                    huber_delta=float(config.get("huber_delta", 10.0)))
                 reconstructed = output / "reconstructed_checkpoint_0.pt"
                 save_vanilla_happo_checkpoint(
                     reconstructed, policy, trainer, environment_steps=0, episodes=0,

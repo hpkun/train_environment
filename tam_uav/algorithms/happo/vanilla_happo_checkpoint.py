@@ -115,6 +115,16 @@ def save_vanilla_happo_checkpoint(
         "action_spec": [policy.action_levels] * policy.action_dim,
         "actor_sharing": policy.actor_sharing,
         "hidden_dim": policy.hidden_dim,
+        "actor_hidden_sizes": list(policy.actor_hidden_sizes),
+        "critic_hidden_sizes": list(policy.critic_hidden_sizes),
+        "value_loss_type": getattr(
+            trainer, "value_loss_type", "legacy_clipped_mse"),
+        "huber_delta": float(getattr(trainer, "huber_delta", 10.0)),
+        "paper_table_4_feedforward_alignment": bool(
+            tuple(policy.actor_hidden_sizes) == (256, 128)
+            and tuple(policy.critic_hidden_sizes) == (256, 128)
+            and getattr(trainer, "value_loss_type", None) == "clipped_huber"
+            and float(getattr(trainer, "huber_delta", 0.0)) == 10.0),
         "critic_architecture": "shared_centralized_backbone_independent_agent_heads",
         "critic_head_ids": list(policy.critic.heads.keys()),
     }
@@ -180,6 +190,19 @@ def load_vanilla_happo_checkpoint(
         "hidden_dim": policy.hidden_dim,
         "critic_head_ids": list(policy.critic.heads.keys()),
     }
+    checkpoint_hidden = int(payload.get("hidden_dim", 128))
+    checkpoint_actor_sizes = tuple(payload.get(
+        "actor_hidden_sizes", (checkpoint_hidden, checkpoint_hidden)))
+    checkpoint_critic_sizes = tuple(payload.get(
+        "critic_hidden_sizes", (checkpoint_hidden, checkpoint_hidden)))
+    if checkpoint_actor_sizes != tuple(policy.actor_hidden_sizes):
+        raise ValueError(
+            "checkpoint actor architecture mismatch: "
+            f"{checkpoint_actor_sizes} != {tuple(policy.actor_hidden_sizes)}")
+    if checkpoint_critic_sizes != tuple(policy.critic_hidden_sizes):
+        raise ValueError(
+            "checkpoint critic architecture mismatch: "
+            f"{checkpoint_critic_sizes} != {tuple(policy.critic_hidden_sizes)}")
     if expected_scenario is not None:
         expected["scenario"] = expected_scenario
     expected_lineage = {
@@ -195,10 +218,17 @@ def load_vanilla_happo_checkpoint(
     for key, value in expected.items():
         if payload.get(key) != value:
             raise ValueError(f"checkpoint {key} mismatch: {payload.get(key)!r} != {value!r}")
-    policy.load_state_dict(payload["policy"])
+    try:
+        policy.load_state_dict(payload["policy"])
+    except RuntimeError as exc:
+        raise ValueError("checkpoint policy architecture mismatch") from exc
     if trainer is not None:
         if payload.get("algorithm_mode") != trainer.algorithm_mode:
             raise ValueError("checkpoint algorithm mode does not match trainer")
+        checkpoint_value_loss = payload.get(
+            "value_loss_type", "legacy_clipped_mse")
+        if getattr(trainer, "value_loss_type", checkpoint_value_loss) != checkpoint_value_loss:
+            raise ValueError("checkpoint value loss type does not match trainer")
         for key, state in payload["actor_optimizers"].items():
             trainer.actor_optimizers[key].load_state_dict(state)
         if payload.get("critic_optimizer") is not None:

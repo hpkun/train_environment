@@ -11,21 +11,61 @@ from torch import nn
 from torch.distributions import Categorical
 
 
-def _mlp(input_dim, output_dim, hidden_dim):
-    return nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.Tanh(),
-                         nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
-                         nn.Linear(hidden_dim, output_dim))
+PAPER_ACTOR_HIDDEN_SIZES = (256, 128)
+PAPER_CRITIC_HIDDEN_SIZES = (256, 128)
+
+
+def _hidden_sizes(explicit, hidden_dim, published_default):
+    sizes = (tuple(int(value) for value in explicit) if explicit is not None
+             else (int(hidden_dim), int(hidden_dim)) if hidden_dim is not None
+             else tuple(published_default))
+    if len(sizes) != 2 or any(value <= 0 for value in sizes):
+        raise ValueError("feedforward hidden sizes must contain two positive widths")
+    return sizes
+
+
+def _mlp(input_dim, output_dim, hidden_sizes):
+    first, second = hidden_sizes
+    return nn.Sequential(nn.Linear(input_dim, first), nn.Tanh(),
+                         nn.Linear(first, second), nn.Tanh(),
+                         nn.Linear(second, output_dim))
+
+
+def huber_loss(error, delta):
+    """Elementwise Huber loss with an explicit positive delta."""
+    if delta <= 0:
+        raise ValueError("huber delta must be positive")
+    absolute = error.abs()
+    delta_tensor = torch.as_tensor(delta, dtype=error.dtype, device=error.device)
+    return torch.where(absolute <= delta_tensor,
+                       0.5 * error.pow(2),
+                       delta_tensor * (absolute - 0.5 * delta_tensor))
+
+
+def clipped_value_loss(predicted, old_value, returns, clip_param,
+                       value_loss_type="clipped_huber", huber_delta=10.0):
+    """Elementwise maximum of unclipped and value-clipped critic losses."""
+    clipped = old_value + (predicted - old_value).clamp(-clip_param, clip_param)
+    errors = predicted - returns
+    clipped_errors = clipped - returns
+    if value_loss_type == "clipped_huber":
+        return torch.maximum(huber_loss(errors, huber_delta),
+                             huber_loss(clipped_errors, huber_delta))
+    if value_loss_type == "legacy_clipped_mse":
+        return 0.5 * torch.maximum(errors.pow(2), clipped_errors.pow(2))
+    raise ValueError(f"unsupported value_loss_type {value_loss_type!r}")
 
 
 class HeterogeneousCentralCritic(nn.Module):
     """Shared centralized backbone with one scalar value head per agent."""
 
-    def __init__(self, state_dim, agent_ids, hidden_dim):
+    def __init__(self, state_dim, agent_ids, hidden_sizes):
         super().__init__()
+        first, second = hidden_sizes
         self.backbone = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim), nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim), nn.Tanh())
-        self.heads = nn.ModuleDict({aid: nn.Linear(hidden_dim, 1) for aid in agent_ids})
+            nn.Linear(state_dim, first), nn.Tanh(),
+            nn.Linear(first, second), nn.Tanh())
+        self.heads = nn.ModuleDict({aid: nn.Linear(second, 1) for aid in agent_ids})
 
     def forward(self, states):
         features = self.backbone(states)
@@ -36,8 +76,9 @@ class VanillaHAPPOPolicy(nn.Module):
     """Independent local actors and a heterogeneous centralized critic."""
 
     def __init__(self, agent_ids, role_by_agent, actor_obs_dim, critic_state_dim,
-                 action_dim=4, action_levels=40, hidden_dim=128,
-                 actor_sharing="independent"):
+                 action_dim=4, action_levels=40, hidden_dim=None,
+                 actor_sharing="independent", actor_hidden_sizes=None,
+                 critic_hidden_sizes=None):
         super().__init__()
         if actor_sharing == "role_shared_ablation":
             warnings.warn(
@@ -52,15 +93,21 @@ class VanillaHAPPOPolicy(nn.Module):
         self.critic_state_dim = int(critic_state_dim)
         self.action_dim = int(action_dim)
         self.action_levels = int(action_levels)
-        self.hidden_dim = int(hidden_dim)
+        self.actor_hidden_sizes = _hidden_sizes(
+            actor_hidden_sizes, hidden_dim, PAPER_ACTOR_HIDDEN_SIZES)
+        self.critic_hidden_sizes = _hidden_sizes(
+            critic_hidden_sizes, hidden_dim, PAPER_CRITIC_HIDDEN_SIZES)
+        self.hidden_dim = int(hidden_dim if hidden_dim is not None
+                              else self.actor_hidden_sizes[-1])
         self.actor_sharing = actor_sharing
         keys = (self.agent_ids if actor_sharing == "independent"
                 else sorted(set(self.role_by_agent.values())))
         self.actors = nn.ModuleDict({key: _mlp(
-            self.actor_obs_dim, self.action_dim * self.action_levels, self.hidden_dim)
+            self.actor_obs_dim, self.action_dim * self.action_levels,
+            self.actor_hidden_sizes)
             for key in keys})
         self.critic = HeterogeneousCentralCritic(
-            self.critic_state_dim, self.agent_ids, self.hidden_dim)
+            self.critic_state_dim, self.agent_ids, self.critic_hidden_sizes)
 
     def actor_key(self, agent_id):
         return agent_id if self.actor_sharing == "independent" else self.role_by_agent[agent_id]
@@ -204,7 +251,8 @@ class VanillaHAPPOTrainer:
     def __init__(self, policy, actor_lr=5e-4, critic_lr=5e-4, clip_param=0.2,
                  value_coef=0.5, entropy_coef=0.01, max_grad_norm=10.0,
                  ppo_epochs=2, minibatch_size=256, gamma=0.99,
-                 gae_lambda=0.95, randomize_order=True, seed=0):
+                 gae_lambda=0.95, randomize_order=True, seed=0,
+                 value_loss_type="clipped_huber", huber_delta=10.0):
         if policy.actor_sharing != "independent":
             raise ValueError("formal VanillaHAPPOTrainer requires independent actors")
         self.policy = policy
@@ -215,6 +263,12 @@ class VanillaHAPPOTrainer:
         self.entropy_coef, self.max_grad_norm = entropy_coef, max_grad_norm
         self.ppo_epochs, self.minibatch_size = int(ppo_epochs), int(minibatch_size)
         self.gamma, self.gae_lambda = gamma, gae_lambda
+        if value_loss_type not in {"clipped_huber", "legacy_clipped_mse"}:
+            raise ValueError("unsupported value_loss_type")
+        if huber_delta <= 0:
+            raise ValueError("huber_delta must be positive")
+        self.value_loss_type = value_loss_type
+        self.huber_delta = float(huber_delta)
         self.randomize_order = randomize_order
         self.rng = np.random.default_rng(seed)
         self.update_count = 0
@@ -347,16 +401,15 @@ class VanillaHAPPOTrainer:
                 batch = permutation[start:start + self.minibatch_size]
                 predicted = self.policy.value(data["states"][batch])
                 old_value = data["values"][batch]
-                clipped = old_value + (predicted - old_value).clamp(
-                    -self.clip_param, self.clip_param)
                 losses = []
                 for index, aid in enumerate(self.policy.agent_ids):
                     valid = active[batch, index] > 0.5
                     if not valid.any():
                         continue
-                    per_sample = 0.5 * torch.maximum(
-                        (predicted[:, index] - returns[batch, index]).pow(2),
-                        (clipped[:, index] - returns[batch, index]).pow(2))
+                    per_sample = clipped_value_loss(
+                        predicted[:, index], old_value[:, index],
+                        returns[batch, index], self.clip_param,
+                        self.value_loss_type, self.huber_delta)
                     agent_loss = per_sample[valid].mean()
                     losses.append(agent_loss)
                     critic_losses[aid].append(float(agent_loss.detach()))

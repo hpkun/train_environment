@@ -174,6 +174,11 @@ def parse_args(argv=None):
                                                 "role_shared_ablation"),
                    default="independent")
     p.add_argument("--hidden-dim", type=int, default=128)
+    p.add_argument("--actor-hidden-sizes", type=int, nargs=2, default=[256, 128])
+    p.add_argument("--critic-hidden-sizes", type=int, nargs=2, default=[256, 128])
+    p.add_argument("--value-loss-type", choices=(
+        "clipped_huber", "legacy_clipped_mse"), default="clipped_huber")
+    p.add_argument("--huber-delta", type=float, default=10.0)
     p.add_argument("--evaluation-seed-base", type=int, default=None)
     p.add_argument("--evaluation-perturbation", choices=(NOMINAL_PERTURBATION,),
                    default=NOMINAL_PERTURBATION,
@@ -192,16 +197,21 @@ def main():
     output = select_run_directory(ROOT, args.output_directory)
     env = make_paper_env(ROOT, args.scenario)
     policy, obs_dim, state_dim = infer_policy(
-        env, args.actor_sharing, args.hidden_dim, device)
+        env, args.actor_sharing, hidden_dim=args.hidden_dim, device=device,
+        actor_hidden_sizes=args.actor_hidden_sizes,
+        critic_hidden_sizes=args.critic_hidden_sizes)
     if args.actor_sharing == "role_shared_ablation":
         warnings.warn("role_shared_ablation is a legacy alias for "
                       "parameter_sharing_ppo_ablation", FutureWarning)
     if policy.actor_sharing == "independent":
         trainer = VanillaHAPPOTrainer(
-            policy, args.actor_lr, args.critic_lr, args.clip_param,
-            args.value_loss_coef, args.entropy_coef, args.max_gradient_norm,
-            args.ppo_epochs, args.minibatch_size, args.gamma, args.gae_lambda,
-            seed=args.seed)
+            policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
+            clip_param=args.clip_param, value_coef=args.value_loss_coef,
+            entropy_coef=args.entropy_coef,
+            max_grad_norm=args.max_gradient_norm,
+            ppo_epochs=args.ppo_epochs, minibatch_size=args.minibatch_size,
+            gamma=args.gamma, gae_lambda=args.gae_lambda, seed=args.seed,
+            value_loss_type=args.value_loss_type, huber_delta=args.huber_delta)
     else:
         trainer = ParameterSharingPPOTrainer(
             policy, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
@@ -250,6 +260,18 @@ def main():
                              for aid in env.agent_ids},
         "critic_parameters": sum(p.numel() for p in policy.critic.parameters()),
         "uses_tam": False, "uses_recurrence": False, "uses_attention": False,
+        "tam": False, "recurrent": False, "attention": False,
+        "pure_happo": True,
+        "actor_hidden_sizes": list(policy.actor_hidden_sizes),
+        "critic_hidden_sizes": list(policy.critic_hidden_sizes),
+        "value_loss_type": getattr(
+            trainer, "value_loss_type", args.value_loss_type),
+        "huber_delta": float(getattr(trainer, "huber_delta", args.huber_delta)),
+        "paper_table_4_feedforward_alignment": bool(
+            tuple(policy.actor_hidden_sizes) == (256, 128)
+            and tuple(policy.critic_hidden_sizes) == (256, 128)
+            and getattr(trainer, "value_loss_type", None) == "clipped_huber"
+            and float(getattr(trainer, "huber_delta", 0.0)) == 10.0),
         "algorithm_mode": trainer.algorithm_mode,
         "algorithm_label": ("vanilla_happo" if args.actor_sharing == "independent"
                             else "parameter_sharing_ppo_ablation"),

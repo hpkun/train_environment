@@ -122,7 +122,7 @@ def main():
                 ROOT, args.scenario, initial_perturbation=args.perturbation)
             policy = None
             if baseline == "untrained_happo":
-                policy, _, _ = infer_policy(env, "independent", 128, device)
+                policy, _, _ = infer_policy(env, "independent", device=device)
             result = deterministic_evaluate(
                 env, policy, args.episodes, args.seed, baseline)
             result["scenario"] = args.scenario
