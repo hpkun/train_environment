@@ -27,19 +27,35 @@ def evaluate_model(model,scenario,episodes,device,deterministic=True,seed=1,retu
                     obs,state,rewards,done,next_active,info=adapter.step(action_np)
                     episode_return+=float((rewards*active).sum()/max(active.sum(),1.));active=next_active
                     if done:break
-                rows.append({"return":episode_return,"length":step+1,"winner":info["winner"],"timeout":info["termination_reason"]=="timeout",
-                  "red_alive":info["alive_red"],"blue_alive":info["alive_blue"],"missile_launches":info["missiles_fired"],"missile_hits":info["missile_hits"],
-                  "crashes":info["red_crashes"]+info["blue_crashes"],"boundary_deaths":info["boundary_deaths"],
-                  "numerical_invalid":info["numerical_invalid"],"envelope":info["flight_envelope_violation"],"action_trace":action_trace})
+                row={"return":float(episode_return),"length":int(step+1),"winner":str(info["winner"]),
+                  "timeout":bool(info["termination_reason"]=="timeout"),"red_alive":int(info["alive_red"]),
+                  "blue_alive":int(info["alive_blue"]),"missile_launches":int(info["missiles_fired"]),
+                  "missile_hits":int(info["missile_hits"]),"crashes":int(info["red_crashes"]+info["blue_crashes"]),
+                  "boundary_deaths":int(info["boundary_deaths"]),"numerical_invalid":int(info["numerical_invalid"]),
+                  "envelope":bool(info["flight_envelope_violation"]),"action_trace":action_trace}
+                if scenario=="simple_paper_3v2_hetero":
+                    row.update({"mav_alive":bool(info["mav_alive"]),"red_uav_alive":int(info["red_uav_alive"]),
+                      "mav_lost":bool(info["red_team_failed_by_mav_loss"]),
+                      "red_uav_team_lost":bool(info["red_team_failed_by_uav_loss"]),
+                      "red_missile_kills":int(info["red_missile_kills"]),"blue_missile_kills":int(info["blue_missile_kills"])})
+                rows.append(row)
             finally:env.close()
         n=max(len(rows),1)
-        result={"episodes":len(rows),"mean_return":float(np.mean([r["return"] for r in rows])),"return_std":float(np.std([r["return"] for r in rows])),"mean_episode_length":float(np.mean([r["length"] for r in rows])),
-          "red_win_rate":sum(r["winner"]=="red" for r in rows)/n,"blue_win_rate":sum(r["winner"]=="blue" for r in rows)/n,
-          "draw_rate":sum(r["winner"]=="draw" for r in rows)/n,"timeout_rate":sum(r["timeout"] for r in rows)/n,
+        result={"episodes":int(len(rows)),"mean_return":float(np.mean([r["return"] for r in rows])),"return_std":float(np.std([r["return"] for r in rows])),"mean_episode_length":float(np.mean([r["length"] for r in rows])),
+          "red_win_rate":float(sum(r["winner"]=="red" for r in rows)/n),"blue_win_rate":float(sum(r["winner"]=="blue" for r in rows)/n),
+          "draw_rate":float(sum(r["winner"]=="draw" for r in rows)/n),"timeout_rate":float(sum(r["timeout"] for r in rows)/n),
           "mean_red_alive":float(np.mean([r["red_alive"] for r in rows])),"mean_blue_alive":float(np.mean([r["blue_alive"] for r in rows])),
-          "missile_launches":sum(r["missile_launches"] for r in rows),"missile_hits":sum(r["missile_hits"] for r in rows),
-          "crashes":sum(r["crashes"] for r in rows),"boundary_deaths":sum(r["boundary_deaths"] for r in rows),
-          "numerical_invalid_episodes":sum(r["numerical_invalid"]>0 for r in rows),"flight_envelope_violation_episodes":sum(r["envelope"] for r in rows)}
+          "missile_launches":int(sum(r["missile_launches"] for r in rows)),"missile_hits":int(sum(r["missile_hits"] for r in rows)),
+          "crashes":int(sum(r["crashes"] for r in rows)),"boundary_deaths":int(sum(r["boundary_deaths"] for r in rows)),
+          "numerical_invalid_episodes":int(sum(r["numerical_invalid"]>0 for r in rows)),
+          "flight_envelope_violation_episodes":int(sum(r["envelope"] for r in rows))}
+        if scenario=="simple_paper_3v2_hetero":
+            result.update({"mav_survival_rate":float(sum(r["mav_alive"] for r in rows)/n),
+              "mean_red_uav_alive":float(np.mean([r["red_uav_alive"] for r in rows])),
+              "mav_loss_rate":float(sum(r["mav_lost"] for r in rows)/n),
+              "red_uav_team_loss_rate":float(sum(r["red_uav_team_lost"] for r in rows)/n),
+              "red_missile_kills":int(sum(r["red_missile_kills"] for r in rows)),
+              "blue_missile_kills":int(sum(r["blue_missile_kills"] for r in rows))})
         if return_rows:result["rows"]=rows
         return result
     finally:

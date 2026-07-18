@@ -2,10 +2,61 @@ import json,subprocess,sys
 from pathlib import Path
 import numpy as np
 import pytest
+from aircombat_env_v1.scripts import eval_simple_mappo as eval_module
 from aircombat_env_v1.scripts.eval_simple_mappo import evaluate_model
 from aircombat_env_v1.scripts.run_simple_mappo_multiseed import build_parser,classify,mean_std,summarize_root
 from aircombat_env_v1.simple_mappo import SharedMAPPOActorCritic
 import torch
+
+class _OneStepModel:
+    def act(self,obs,state,deterministic):
+        return torch.zeros((obs.shape[0],3)),None,None,None
+
+class _OneStepEnv:
+    def __init__(self,scenario,controlled_team="red"):
+        self.scenario=scenario
+    def close(self):
+        pass
+
+class _OneStepAdapter:
+    num_agents=1
+    def __init__(self,env):
+        self.env=env
+    def reset(self,seed=None):
+        return np.zeros((1,1),np.float32),np.zeros(1,np.float32),{}
+    def step(self,actions):
+        info={"winner":"red","termination_reason":"timeout","alive_red":np.int64(2),"alive_blue":np.int64(1),
+          "missiles_fired":np.int64(3),"missile_hits":np.int64(2),"red_crashes":np.int64(1),"blue_crashes":np.int64(0),
+          "boundary_deaths":np.int64(1),"numerical_invalid":np.bool_(False),"flight_envelope_violation":np.bool_(True),
+          "mav_alive":np.bool_(True),"red_uav_alive":np.int64(1),"red_team_failed_by_mav_loss":np.bool_(False),
+          "red_team_failed_by_uav_loss":np.bool_(True),"red_missile_kills":np.int64(2),"blue_missile_kills":np.int64(1)}
+        return np.zeros((1,1),np.float32),np.zeros(1,np.float32),np.zeros(1,np.float32),True,np.zeros(1,np.float32),info
+
+def _one_step_evaluation(monkeypatch,scenario):
+    monkeypatch.setattr(eval_module,"SimpleTAMCombatEnv",_OneStepEnv)
+    monkeypatch.setattr(eval_module,"SimpleMAPPOAdapter",_OneStepAdapter)
+    return eval_module.evaluate_model(_OneStepModel(),scenario,1,torch.device("cpu"),True,1,True)
+
+def test_evaluation_result_and_numpy_episode_fields_are_json_serializable(monkeypatch):
+    result=_one_step_evaluation(monkeypatch,"simple_paper_3v2_hetero")
+    json.dumps(result)
+    for key in ("missile_launches","missile_hits","crashes","boundary_deaths","numerical_invalid_episodes","flight_envelope_violation_episodes"):
+        assert type(result[key]) is int
+    row=result["rows"][0]
+    for key in ("length","red_alive","blue_alive","missile_launches","missile_hits","crashes","boundary_deaths","numerical_invalid"):
+        assert type(row[key]) is int
+    assert type(row["timeout"]) is bool and type(row["envelope"]) is bool
+
+def test_3v2_role_metrics_exist_with_native_types(monkeypatch):
+    result=_one_step_evaluation(monkeypatch,"simple_paper_3v2_hetero")
+    for key in ("mav_survival_rate","mean_red_uav_alive","mav_loss_rate","red_uav_team_loss_rate"):
+        assert type(result[key]) is float
+    assert type(result["red_missile_kills"]) is int and type(result["blue_missile_kills"]) is int
+
+@pytest.mark.parametrize("scenario",["simple_paper_1v1","simple_paper_2v2"])
+def test_non_heterogeneous_evaluation_does_not_add_role_metrics(monkeypatch,scenario):
+    result=_one_step_evaluation(monkeypatch,scenario)
+    assert "mav_survival_rate" not in result and "mean_red_uav_alive" not in result
 
 def evaluate(model,deterministic,seed):
     return evaluate_model(model,"simple_paper_1v1",1,torch.device("cpu"),deterministic,seed,True)
