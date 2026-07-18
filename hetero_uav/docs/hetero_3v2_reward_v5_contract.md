@@ -132,6 +132,22 @@ discounted team return as the primary mathematical metric. Its sorted policy
 list is observational, not a hard-coded success order. `red_hits` comes from
 missile events while `red_kills` comes from V5 event settlement.
 
+Audit criteria are separated by purpose:
+
+- **Task reward checks** use
+  `undiscounted_task_return = undiscounted_shared_event_return +
+  undiscounted_terminal_return`. Structural loss comparisons are made only
+  between episodes with the same seed and paired initial perturbation. A check
+  with no eligible samples or pairs reports `pass=null` (`N/A` in Markdown),
+  never a vacuous pass.
+- **Policy performance** uses mean discounted team return for checkpoint
+  comparison and observational ranking.
+- **Potential consistency** uses the discounted telescoping error only.
+
+Every audit episode must have a unique stable-JSON perturbation signature.
+The JSON payload reports scenario count, unique perturbation count and the
+resulting uniqueness flag; any duplicate perturbation aborts the audit.
+
 Legacy `raw_mav_reward`, `normalized_mav_reward`, `raw_uav_reward` and
 `normalized_uav_reward` columns remain for compatibility. Under V5 they are
 role-potential diagnostics, not separate actor training rewards. The explicit

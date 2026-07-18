@@ -29,6 +29,26 @@ from uav_env.JSBSim.formal_v2.reward_v5 import (
     theoretical_discounted_potential_return,
 )
 
+RULE_POLICY_LABEL = "rule_red_policy"
+
+
+def _undiscounted_task_return(event_return: float, terminal_return: float) -> float:
+    return float(event_return) + float(terminal_return)
+
+
+def _red_combat_counts(events: list[dict], red_kills: int) -> dict[str, int]:
+    return {
+        "red_launches": sum(
+            event.get("event") == "launch"
+            and str(event.get("shooter_id", "")).startswith("red")
+            for event in events),
+        "red_hits": sum(
+            event.get("event") == "hit"
+            and str(event.get("shooter_id", "")).startswith("red")
+            for event in events),
+        "red_kills": int(red_kills),
+    }
+
 
 def _checkpoint_spec(value: str) -> tuple[str, Path]:
     if "=" not in value:
@@ -50,11 +70,21 @@ def _paired_scenarios(seed: int, episodes: int) -> list[dict]:
          "perturbation": perturbation(seed + episode)}
         for episode in range(episodes)
     ]
-    if len(scenarios) > 1 and len({
-            json.dumps(row["perturbation"], sort_keys=True)
-            for row in scenarios}) == 1:
-        raise ValueError("audit perturbations are identical across episodes")
+    _validate_scenario_uniqueness(scenarios)
     return scenarios
+
+
+def _validate_scenario_uniqueness(scenarios: list[dict]) -> int:
+    signatures = [
+        json.dumps(row["perturbation"], sort_keys=True, separators=(",", ":"))
+        for row in scenarios
+    ]
+    unique_count = len(set(signatures))
+    if unique_count != len(scenarios):
+        raise ValueError(
+            "audit perturbations must be unique: "
+            f"episodes={len(scenarios)}, unique_perturbations={unique_count}")
+    return unique_count
 
 
 def _validate_actor_contract(meta: dict) -> None:
@@ -174,14 +204,7 @@ def _rollout(
             if terminated or truncated:
                 break
         events = env.event_log
-        red_launches = sum(
-            event["event"] == "launch"
-            and str(event.get("shooter_id", "")).startswith("red")
-            for event in events)
-        red_hits = sum(
-            event["event"] == "hit"
-            and str(event.get("shooter_id", "")).startswith("red")
-            for event in events)
+        red_counts = _red_combat_counts(events, red_kills)
         discounted_potential = discounted_potential_return(potential_rewards)
         final_phi_effective = float(components["phi_team_next_effective"])
         theoretical_potential = theoretical_discounted_potential_return(
@@ -191,9 +214,7 @@ def _rollout(
             "seed": scenario["seed"],
             "initial_perturbation": scenario["perturbation"],
             "outcome": info["outcome"],
-            "red_launches": red_launches,
-            "red_hits": red_hits,
-            "red_kills": red_kills,
+            **red_counts,
             "mav_survived": int(info["mav_alive"]),
             "red_attack_survival": info["red_attack_alive"] / 2.0,
             "red_attack_alive_final": int(info["red_attack_alive"]),
@@ -205,6 +226,9 @@ def _rollout(
             "terminated": terminated,
             "truncated": truncated,
             **sums,
+            "undiscounted_task_return": _undiscounted_task_return(
+                sums["undiscounted_shared_event_return"],
+                sums["undiscounted_terminal_return"]),
             "discounted_potential_return": discounted_potential,
             "theoretical_discounted_potential_return": theoretical_potential,
             "potential_telescoping_error": (
@@ -243,6 +267,7 @@ def _rollout(
         "undiscounted_potential_return_mean": mean(
             "undiscounted_potential_return"),
         "undiscounted_team_return_mean": mean("undiscounted_team_return"),
+        "undiscounted_task_return_mean": mean("undiscounted_task_return"),
         "discounted_shared_event_return_mean": mean(
             "discounted_shared_event_return"),
         "discounted_terminal_return_mean": mean("discounted_terminal_return"),
@@ -261,40 +286,60 @@ def _rollout(
 
 def _ranking_checks(results: list[dict]) -> dict:
     by_label = {row["label"]: row for row in results}
-    episodes = [row for result in results for row in result["episode_rows"]]
+    episodes = [
+        {**row, "policy_label": result["label"]}
+        for result in results for row in result["episode_rows"]
+    ]
 
-    def monotonic_check(key_a: str, key_b: str, smaller_better: bool) -> dict:
+    def condition_check(rows: list[dict], predicate) -> dict:
+        return {
+            "sample_count": len(rows),
+            "pass": all(predicate(row) for row in rows) if rows else None,
+        }
+
+    def monotonic_check(
+        varied_key: str,
+        fixed_keys: tuple[str, ...],
+        higher_value_is_better: bool,
+    ) -> dict:
         comparisons = []
         for index, left in enumerate(episodes):
             for right in episodes[index + 1:]:
-                if left["outcome"] != right["outcome"]:
+                if left["seed"] != right["seed"]:
                     continue
-                fixed = {
-                    "blue_attack_alive_final", "red_attack_alive_final",
-                    "mav_survived",
-                } - {key_a}
-                if any(left[key] != right[key] for key in fixed):
+                if any(left[key] != right[key] for key in fixed_keys):
                     continue
-                if left[key_a] == right[key_a]:
+                if left[varied_key] == right[varied_key]:
                     continue
                 better, worse = (
                     (left, right) if (
-                        left[key_a] < right[key_a]) == smaller_better
+                        left[varied_key] > right[varied_key]
+                    ) == higher_value_is_better
                     else (right, left)
                 )
                 comparisons.append(
-                    better["discounted_team_return"]
-                    > worse["discounted_team_return"])
+                    better["undiscounted_task_return"]
+                    > worse["undiscounted_task_return"])
         return {
             "comparison_count": len(comparisons),
             "pass": all(comparisons) if comparisons else None,
         }
 
     blue_loss = monotonic_check(
-        "blue_attack_alive_final", "blue_attack_alive_final", True)
+        "blue_attack_alive_final",
+        ("outcome", "red_attack_alive_final", "mav_survived"),
+        False,
+    )
     red_loss = monotonic_check(
-        "red_attack_alive_final", "red_attack_alive_final", False)
-    mav_death = monotonic_check("mav_survived", "mav_survived", False)
+        "red_attack_alive_final",
+        ("outcome", "blue_attack_alive_final", "mav_survived"),
+        True,
+    )
+    mav_death = monotonic_check(
+        "mav_survived",
+        ("outcome", "blue_attack_alive_final", "red_attack_alive_final"),
+        True,
+    )
     attack_100k_not_below_250k = None
     if {"checkpoint_100k_attack", "checkpoint_250k_collapsed"} <= set(by_label):
         attack_100k_not_below_250k = (
@@ -303,21 +348,34 @@ def _ranking_checks(results: list[dict]) -> dict:
                 "discounted_team_return_mean"]
         )
     return {
-        "blue_win_without_red_kill_all_negative": all(
-            row["discounted_team_return"] < 0
-            for row in episodes
-            if row["outcome"] == "blue_win" and row["red_kills"] == 0),
-        "red_win_all_positive": all(
-            row["discounted_team_return"] > 0
-            for row in episodes if row["outcome"] == "red_win"),
+        "blue_win_without_red_kill_negative": condition_check(
+            [row for row in episodes
+             if row["outcome"] == "blue_win" and row["red_kills"] == 0],
+            lambda row: row["undiscounted_task_return"] < 0,
+        ),
+        "red_win_positive": condition_check(
+            [row for row in episodes if row["outcome"] == "red_win"],
+            lambda row: row["undiscounted_task_return"] > 0,
+        ),
         "more_blue_losses_raise_return_when_matched": blue_loss,
         "more_red_attack_losses_lower_return_when_matched": red_loss,
         "mav_death_lowers_return_when_matched": mav_death,
         "checkpoint_100k_not_below_250k": attack_100k_not_below_250k,
-        "potential_telescoping_within_tolerance": all(
-            abs(row["potential_telescoping_error"]) <= 1e-6
-            for row in episodes),
+        "potential_telescoping_within_tolerance": condition_check(
+            episodes,
+            lambda row: abs(row["potential_telescoping_error"]) <= 1e-6,
+        ),
     }
+
+
+def _observational_ranking(results: list[dict]) -> list[dict]:
+    return sorted(
+        ({"label": row["label"],
+          "discounted_team_return_mean": row[
+              "discounted_team_return_mean"]} for row in results),
+        key=lambda row: row["discounted_team_return_mean"],
+        reverse=True,
+    )
 
 
 def _write_report(output_dir: Path, payload: dict) -> None:
@@ -329,8 +387,12 @@ def _write_report(output_dir: Path, payload: dict) -> None:
         "",
         "This is an actor-only cross-reward audit. It is not checkpoint resume.",
         "",
-        "| Policy | Source reward | Episodes | R win | B win | Launch | Hit | Kill | Discounted return |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "## Policy performance",
+        "",
+        "Discounted team return is the policy-comparison metric.",
+        "",
+        "| Policy | Source reward | Episodes | R win | B win | Launch | Hit | Kill | Task return | Discounted return |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     sources = payload["source_reward_contracts"]
     for row in payload["results"]:
@@ -338,13 +400,47 @@ def _write_report(output_dir: Path, payload: dict) -> None:
             f"| {row['label']} | {sources[row['label']]} | {row['episodes']} | "
             f"{row['red_win_rate']:.3f} | {row['blue_win_rate']:.3f} | "
             f"{row['red_launches']} | {row['red_hits']} | {row['red_kills']} | "
+            f"{row['undiscounted_task_return_mean']:.4f} | "
             f"{row['discounted_team_return_mean']:.4f} |")
     lines.extend(["", "Observational ranking by mean discounted return:", ""])
     for index, row in enumerate(payload["observational_ranking"], 1):
         lines.append(
             f"{index}. {row['label']}: {row['discounted_team_return_mean']:.6f}")
-    lines.extend(["", "## Ranking checks", "", "```json",
-                  json.dumps(payload["ranking_checks"], indent=2), "```", ""])
+    task_check_names = (
+        "blue_win_without_red_kill_negative",
+        "red_win_positive",
+        "more_blue_losses_raise_return_when_matched",
+        "more_red_attack_losses_lower_return_when_matched",
+        "mav_death_lowers_return_when_matched",
+    )
+    lines.extend([
+        "", "## Task reward checks", "",
+        "These checks use undiscounted task return (shared event + terminal).",
+        "",
+        "| Check | Samples/comparisons | Status |",
+        "|---|---:|---|",
+    ])
+    for name in task_check_names:
+        check = payload["ranking_checks"][name]
+        count = check.get("sample_count", check.get("comparison_count", 0))
+        status = "N/A" if check["pass"] is None else (
+            "PASS" if check["pass"] else "FAIL")
+        lines.append(f"| {name} | {count} | {status} |")
+    performance_check = payload["ranking_checks"][
+        "checkpoint_100k_not_below_250k"]
+    lines.extend([
+        "", "100K vs 250K continues to use mean discounted team return: "
+        + ("N/A" if performance_check is None else (
+            "PASS" if performance_check else "FAIL")),
+        "", "## Potential consistency", "",
+    ])
+    potential_check = payload["ranking_checks"][
+        "potential_telescoping_within_tolerance"]
+    potential_status = "N/A" if potential_check["pass"] is None else (
+        "PASS" if potential_check["pass"] else "FAIL")
+    lines.append(
+        f"potential_telescoping_within_tolerance: "
+        f"samples={potential_check['sample_count']}, status={potential_status}")
     (output_dir / "reward_v5_ranking_audit.md").write_text(
         "\n".join(lines), encoding="utf-8")
     episode_rows = []
@@ -403,10 +499,11 @@ def main() -> None:
         policies.append((label, policy, None))
         sources[label] = meta["reward_contract"]
     if args.include_rule:
-        policies.append(("rule_red_policy", None, PaperGreedyOpponent()))
-        sources["rule_red_policy"] = "rule_policy_no_checkpoint"
+        policies.append((RULE_POLICY_LABEL, None, PaperGreedyOpponent()))
+        sources[RULE_POLICY_LABEL] = "rule_policy_no_checkpoint"
 
     scenarios = _paired_scenarios(args.seed, args.episodes)
+    unique_perturbation_count = _validate_scenario_uniqueness(scenarios)
 
     results = [
         _rollout(env, label, scenarios, policy, rule)
@@ -421,13 +518,11 @@ def main() -> None:
         "results": results,
         "ranking_checks": _ranking_checks(results),
         "paired_scenarios": scenarios,
-        "observational_ranking": sorted(
-            ({"label": row["label"],
-              "discounted_team_return_mean": row[
-                  "discounted_team_return_mean"]} for row in results),
-            key=lambda row: row["discounted_team_return_mean"],
-            reverse=True,
-        ),
+        "paired_scenario_count": len(scenarios),
+        "unique_perturbation_count": unique_perturbation_count,
+        "paired_scenarios_all_unique": (
+            unique_perturbation_count == len(scenarios)),
+        "observational_ranking": _observational_ranking(results),
     }
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():
