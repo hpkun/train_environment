@@ -34,14 +34,14 @@ def logs_are_finite(*logs):
                 except (TypeError,ValueError):pass
     return True
 
-def evaluate_checkpoints(seed_dir,device,scenario=DEFAULT_SCENARIO):
+def evaluate_checkpoints(seed_dir,device,scenario=DEFAULT_SCENARIO,hetero_perception_mode="paper_fused",hetero_reward_mode="paper_table1_v2"):
     results={}
     for name in CHECKPOINTS:
-        model=load_checkpoint(seed_dir/f"{name}.pt",scenario,device)
+        model=load_checkpoint(seed_dir/f"{name}.pt",scenario,device,hetero_perception_mode,hetero_reward_mode)
         parameters_finite=all(parameter.isfinite().all().item() for parameter in model.parameters())
-        deterministic=evaluate_model(model,scenario,1,device,True,10001,True)
+        deterministic=evaluate_model(model,scenario,1,device,True,10001,True,hetero_perception_mode,hetero_reward_mode)
         deterministic["winner"]=deterministic.pop("rows")[0]["winner"]
-        stochastic=evaluate_model(model,scenario,20,device,False,20001)
+        stochastic=evaluate_model(model,scenario,20,device,False,20001,False,hetero_perception_mode,hetero_reward_mode)
         results[name]={"parameters_finite":parameters_finite,"deterministic":deterministic,"stochastic":stochastic}
     return results
 
@@ -125,9 +125,10 @@ def add_required_aliases(row):
         if source in row:row[target]=row[source]
     return row
 
-def write_summary(output,rows,scenario=DEFAULT_SCENARIO,expected_seeds=DEFAULT_SEEDS):
+def write_summary(output,rows,scenario=DEFAULT_SCENARIO,expected_seeds=DEFAULT_SEEDS,hetero_perception_mode="paper_fused",hetero_reward_mode="paper_table1_v2"):
     output.mkdir(parents=True,exist_ok=True);rows=[add_required_aliases(dict(row)) for row in rows]
-    summary={"scenario":scenario,"expected_seeds":list(expected_seeds),"seeds":rows,"aggregate":aggregate(rows),"criteria":classify(rows)}
+    summary={"scenario":scenario,"hetero_perception_mode":hetero_perception_mode,"hetero_reward_mode":hetero_reward_mode,
+      "reward_contract_version":"heterogeneous_reward_v2","expected_seeds":list(expected_seeds),"seeds":rows,"aggregate":aggregate(rows),"criteria":classify(rows)}
     (output/"multiseed_summary.json").write_text(json.dumps(summary,indent=2),encoding="utf-8")
     flat_keys=("seed","completed","finite","training_seconds","env_steps","updates","episodes_completed","initial_deterministic_return","best_deterministic_return","latest_deterministic_return","best_checkpoint_env_steps","best_return_improvement","latest_return_improvement","initial_stochastic_return_mean","best_stochastic_return_mean","latest_stochastic_return_mean","initial_stochastic_red_win_rate","best_stochastic_red_win_rate","latest_stochastic_red_win_rate","initial_stochastic_mean_red_alive","best_stochastic_mean_red_alive","latest_stochastic_mean_red_alive","initial_stochastic_mean_blue_alive","best_stochastic_mean_blue_alive","latest_stochastic_mean_blue_alive","checkpoint_numerical_invalid_episodes","crash_count","boundary_death_count","envelope_violation_count","recent_train_numerical_invalid_episodes")
     with (output/"multiseed_summary.csv").open("w",newline="",encoding="utf-8") as handle:
@@ -138,16 +139,16 @@ def write_summary(output,rows,scenario=DEFAULT_SCENARIO,expected_seeds=DEFAULT_S
     (output/"multiseed_report.md").write_text("\n".join(lines),encoding="utf-8")
     return summary
 
-def summarize_root(output,expected_seeds=DEFAULT_SEEDS,scenario=DEFAULT_SCENARIO):
+def summarize_root(output,expected_seeds=DEFAULT_SEEDS,scenario=DEFAULT_SCENARIO,hetero_perception_mode="paper_fused",hetero_reward_mode="paper_table1_v2"):
     rows=[]
     for seed in expected_seeds:
         path=Path(output)/f"seed_{seed}"/"seed_summary.json"
         if path.exists():rows.append(json.loads(path.read_text(encoding="utf-8")))
         else:rows.append({"seed":seed,"completed":False,"finite":False,"failure":"missing seed_summary.json"})
-    return write_summary(Path(output),rows,scenario,expected_seeds)
+    return write_summary(Path(output),rows,scenario,expected_seeds,hetero_perception_mode,hetero_reward_mode)
 
-def train_seed(seed,seed_dir,scenario=DEFAULT_SCENARIO,total_env_steps=100000):
-    command=[sys.executable,"-u",str(ROOT/"aircombat_env_v1"/"scripts"/"train_simple_mappo.py"),"--scenario",scenario,"--total-env-steps",str(total_env_steps),"--rollout-length","256","--seed",str(seed),"--device","auto","--output-dir",str(seed_dir),"--eval-interval","10000","--eval-episodes","1","--deterministic-eval","--actor-lr","0.0003","--critic-lr","0.0003","--entropy-coef","0.01","--ppo-epochs","4"]
+def train_seed(seed,seed_dir,scenario=DEFAULT_SCENARIO,total_env_steps=100000,hetero_perception_mode="paper_fused",hetero_reward_mode="paper_table1_v2"):
+    command=[sys.executable,"-u",str(ROOT/"aircombat_env_v1"/"scripts"/"train_simple_mappo.py"),"--scenario",scenario,"--total-env-steps",str(total_env_steps),"--rollout-length","256","--seed",str(seed),"--device","auto","--output-dir",str(seed_dir),"--eval-interval","10000","--eval-episodes","1","--deterministic-eval","--actor-lr","0.0003","--critic-lr","0.0003","--entropy-coef","0.01","--ppo-epochs","4","--hetero-perception-mode",hetero_perception_mode,"--hetero-reward-mode",hetero_reward_mode]
     started=time.perf_counter()
     with (seed_dir/"training_stdout.log").open("w",encoding="utf-8") as log:
         process=subprocess.Popen(command,cwd=ROOT,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
@@ -159,20 +160,23 @@ def train_seed(seed,seed_dir,scenario=DEFAULT_SCENARIO,total_env_steps=100000):
 def build_parser():
     parser=argparse.ArgumentParser();parser.add_argument("--scenario",choices=("simple_paper_1v1","simple_paper_2v2","simple_paper_3v2_hetero"),default=DEFAULT_SCENARIO)
     parser.add_argument("--total-env-steps",type=int,default=100000);parser.add_argument("--seeds",type=int,nargs="+",default=list(DEFAULT_SEEDS))
-    parser.add_argument("--output-dir","--output-root",dest="output_dir",type=Path,default=DEFAULT_OUTPUT);return parser
+    parser.add_argument("--output-dir","--output-root",dest="output_dir",type=Path,default=DEFAULT_OUTPUT)
+    parser.add_argument("--hetero-perception-mode",choices=("paper_fused","uav_only_ablation"),default="paper_fused")
+    parser.add_argument("--hetero-reward-mode",choices=("legacy_v1","paper_table1_v2"),default="paper_table1_v2");return parser
 
 def main():
     args=build_parser().parse_args();output=args.output_dir.resolve();output.mkdir(parents=True,exist_ok=True);device=resolve_device("auto")
     for seed in args.seeds:
         seed_dir=output/f"seed_{seed}";seed_dir.mkdir(parents=True,exist_ok=True)
         try:
-            return_code,seconds=train_seed(seed,seed_dir,args.scenario,args.total_env_steps)
+            return_code,seconds=train_seed(seed,seed_dir,args.scenario,args.total_env_steps,args.hetero_perception_mode,args.hetero_reward_mode)
             if return_code:raise RuntimeError(f"training exited with code {return_code}")
-            evaluations=evaluate_checkpoints(seed_dir,device,args.scenario);row=collect_seed(seed,seed_dir,seconds,evaluations,args.total_env_steps)
+            evaluations=evaluate_checkpoints(seed_dir,device,args.scenario,args.hetero_perception_mode,args.hetero_reward_mode);row=collect_seed(seed,seed_dir,seconds,evaluations,args.total_env_steps)
         except Exception as exc:
             row={"seed":seed,"completed":False,"finite":False,"failure":f"{type(exc).__name__}: {exc}"}
             print(f"[seed {seed}] FAILED: {row['failure']}",flush=True)
+        row.update({"scenario":args.scenario,"hetero_perception_mode":args.hetero_perception_mode,"hetero_reward_mode":args.hetero_reward_mode,"reward_contract_version":"heterogeneous_reward_v2"})
         (seed_dir/"seed_summary.json").write_text(json.dumps(row,indent=2),encoding="utf-8")
-    summary=summarize_root(output,args.seeds,args.scenario);print(json.dumps(summary["criteria"],indent=2),flush=True)
+    summary=summarize_root(output,args.seeds,args.scenario,args.hetero_perception_mode,args.hetero_reward_mode);print(json.dumps(summary["criteria"],indent=2),flush=True)
 
 if __name__=="__main__":main()

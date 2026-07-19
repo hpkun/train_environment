@@ -5,6 +5,7 @@ import pytest
 from aircombat_env_v1.scripts import eval_simple_mappo as eval_module
 from aircombat_env_v1.scripts.eval_simple_mappo import evaluate_model
 from aircombat_env_v1.scripts.run_simple_mappo_multiseed import build_parser,classify,mean_std,summarize_root
+from aircombat_env_v1.scripts.train_simple_mappo import EPISODE_COMPONENT_FIELDS,build_parser as build_train_parser
 from aircombat_env_v1.simple_mappo import SharedMAPPOActorCritic
 import torch
 
@@ -13,13 +14,13 @@ class _OneStepModel:
         return torch.zeros((obs.shape[0],3)),None,None,None
 
 class _OneStepEnv:
-    def __init__(self,scenario,controlled_team="red",hetero_perception_mode="paper_fused"):
-        self.scenario=scenario;self.hetero_perception_mode=hetero_perception_mode
+    def __init__(self,scenario,controlled_team="red",hetero_perception_mode="paper_fused",hetero_reward_mode="paper_table1_v2"):
+        self.scenario=scenario;self.hetero_perception_mode=hetero_perception_mode;self.hetero_reward_mode=hetero_reward_mode
     def close(self):
         pass
 
 class _OneStepAdapter:
-    num_agents=1
+    num_agents=1;agent_ids=["red_mav_0"]
     def __init__(self,env):
         self.env=env
     def reset(self,seed=None):
@@ -35,7 +36,10 @@ class _OneStepAdapter:
           "visible_enemy_ids_by_agent":{"red_uav_0":["blue_0","blue_1"],"red_uav_1":["blue_0"]},
           "direct_enemy_ids_by_agent":{"red_uav_0":[],"red_uav_1":["blue_0"]},
           "shared_enemy_ids_by_agent":{"red_uav_0":["blue_0","blue_1"],"red_uav_1":["blue_0"]},
-          "red_uav_launches_using_shared_track":np.int64(1),"red_uav_launches_using_direct_track":np.int64(2)})
+          "red_uav_launches_using_shared_track":np.int64(1),"red_uav_launches_using_direct_track":np.int64(2),
+          "reward_components":{"red_mav_0":{"r_safety":np.float64(.1),"r_support":np.float64(.2),"r_event":np.float64(100),
+            "r_event_death":np.float64(0),"r_event_team_contribution":np.float64(100),"r_support_awareness":np.float64(.3),
+            "r_support_position":np.float64(.4),"total_dense":np.float64(.3)}}})
         return np.zeros((1,1),np.float32),np.zeros(1,np.float32),np.zeros(1,np.float32),True,np.zeros(1,np.float32),info
 
 def _one_step_evaluation(monkeypatch,scenario):
@@ -64,6 +68,10 @@ def test_3v2_role_metrics_exist_with_native_types(monkeypatch):
         assert type(result[key]) is float
     assert result["mean_relay_only_tracks_per_step"]==4. and result["fraction_steps_with_mav_support"]==1.
     assert result["red_uav_launches_using_shared_track"]==1 and result["red_uav_launches_using_direct_track"]==2
+    for key in ("mean_mav_return","mean_red_uav_return","mean_mav_safety_return","mean_mav_support_return","mean_mav_event_return",
+      "mean_mav_death_penalty","mean_mav_team_contribution","mean_mav_awareness_return","mean_mav_position_return","mean_mav_dense_return"):
+        assert type(result[key]) is float
+    assert result["hetero_reward_mode"]=="paper_table1_v2" and result["checkpoint_reward_contract_known"] is False
 
 def test_heterogeneous_checkpoint_shape_is_valid_in_both_perception_modes(tmp_path):
     model=SharedMAPPOActorCritic(81,243);path=tmp_path/"checkpoint.pt"
@@ -71,7 +79,18 @@ def test_heterogeneous_checkpoint_shape_is_valid_in_both_perception_modes(tmp_pa
       "agent_ids":["red_uav_0","red_uav_1","red_mav_0"],"model_state_dict":model.state_dict()},path)
     for mode in ("paper_fused","uav_only_ablation"):
         loaded=eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"),mode)
-        assert loaded.obs_dim==81 and loaded.state_dim==243
+        assert loaded.obs_dim==81 and loaded.state_dim==243 and loaded.checkpoint_reward_contract_known is False
+
+def test_checkpoint_reward_contract_mismatch_rejected_and_override_allowed(tmp_path):
+    model=SharedMAPPOActorCritic(81,243);path=tmp_path/"checkpoint.pt"
+    torch.save({"scenario":"simple_paper_3v2_hetero","obs_dim":81,"state_dim":243,"action_dim":3,
+      "agent_ids":["red_uav_0","red_uav_1","red_mav_0"],"model_state_dict":model.state_dict(),
+      "environment_contract":{"scenario":"simple_paper_3v2_hetero","obs_dim":81,"state_dim":243,"action_dim":3,
+        "agent_ids":["red_uav_0","red_uav_1","red_mav_0"],"hetero_reward_mode":"legacy_v1"}},path)
+    with pytest.raises(ValueError,match="does not match checkpoint"):
+        eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"),hetero_reward_mode="paper_table1_v2")
+    loaded=eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"),hetero_reward_mode="paper_table1_v2",allow_reward_mode_override=True)
+    assert loaded.checkpoint_reward_contract_known is True
 
 @pytest.mark.parametrize("scenario",["simple_paper_1v1","simple_paper_2v2"])
 def test_non_heterogeneous_evaluation_does_not_add_role_metrics(monkeypatch,scenario):
@@ -113,6 +132,13 @@ def test_training_saves_initial_checkpoint_at_zero_steps(tmp_path):
     subprocess.run([sys.executable,str(script),"--scenario","simple_paper_1v1","--total-env-steps","0","--eval-episodes","1","--output-dir",str(output)],check=True,capture_output=True,text=True)
     checkpoint=torch.load(output/"initial.pt",map_location="cpu",weights_only=False)
     assert checkpoint["env_steps"]==0 and checkpoint["training_args"]["scenario"]=="simple_paper_1v1" and "model_state_dict" in checkpoint
+    assert checkpoint["environment_contract"]["reward_contract_version"]=="heterogeneous_reward_v2"
+    with (output/"episode_reward_components.csv").open(encoding="utf-8") as handle:
+        assert tuple(handle.readline().strip().split(","))==EPISODE_COMPONENT_FIELDS
+
+def test_training_parser_accepts_heterogeneous_contract_modes():
+    args=build_train_parser().parse_args(["--scenario","simple_paper_3v2_hetero","--output-dir","out","--hetero-perception-mode","uav_only_ablation","--hetero-reward-mode","legacy_v1"])
+    assert args.hetero_perception_mode=="uav_only_ablation" and args.hetero_reward_mode=="legacy_v1"
 
 def seed_row(seed,initial=-10.,best=-5.,latest=-6.,completed=True,stochastic_best=None):
     stochastic_best=best if stochastic_best is None else stochastic_best
@@ -142,6 +168,10 @@ def test_single_seed_standard_deviation_is_zero():
 def test_parameterized_script_accepts_simple_paper_2v2():
     args=build_parser().parse_args(["--scenario","simple_paper_2v2","--total-env-steps","12","--seeds","3","4","--output-dir","out"])
     assert args.scenario=="simple_paper_2v2" and args.total_env_steps==12 and args.seeds==[3,4] and args.output_dir==Path("out")
+
+def test_multiseed_parser_accepts_heterogeneous_contract_modes():
+    args=build_parser().parse_args(["--scenario","simple_paper_3v2_hetero","--hetero-perception-mode","uav_only_ablation","--hetero-reward-mode","legacy_v1"])
+    assert args.hetero_perception_mode=="uav_only_ablation" and args.hetero_reward_mode=="legacy_v1"
 
 def test_2v2_summary_reads_minimal_fake_directory(tmp_path):
     make_fake_root(tmp_path,[seed_row(1)])

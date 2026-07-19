@@ -2,7 +2,7 @@
 
 ## recommended: SimpleTAMCombatEnv
 
-`SimpleTAMCombatEnv` 是当前推荐的简化 JSBSim 多智能体空战环境，支持 `simple_paper_1v1` 与 `simple_paper_2v2`。飞机使用本地 F-16 六自由度模型；学习动作是 `Box(-1, 1, (3,))` 高层目标 `[pitch, relative_heading, speed]`，分别映射为俯仰 ±20°、相对航向 ±60° 和速度 200–300 m/s。每个决策持续 12 个 60 Hz 物理帧，每帧均由现有 `f16_pid_v1.yaml` 固定 PID 执行，不包含 fire 或底层舵面动作。
+`SimpleTAMCombatEnv` 是当前推荐的简化 JSBSim 多智能体空战环境，支持 `simple_paper_1v1`、`simple_paper_2v2` 与 `simple_paper_3v2_hetero`。飞机使用本地 F-16 六自由度模型；学习动作是 `Box(-1, 1, (3,))` 高层目标 `[pitch, relative_heading, speed]`，分别映射为俯仰 ±20°、相对航向 ±60° 和速度 200–300 m/s。每个决策持续 12 个 60 Hz 物理帧，每帧均由现有 `f16_pid_v1.yaml` 固定 PID 执行，不包含 fire 或底层舵面动作。
 
 `temporary_learnability_abstraction`: the paper low-level direct-FCS action is replaced by a high-level pitch-heading-speed command executed by a fixed PID controller.
 
@@ -25,6 +25,22 @@
 ```powershell
 python -m pytest aircombat_env_v1/tests/test_hetero_perception.py aircombat_env_v1/tests/test_simple_hetero_environment.py aircombat_env_v1/tests/test_simple_mappo_multiseed.py -q
 python aircombat_env_v1/scripts/check_simple_hetero_environment.py
+```
+
+### Heterogeneous reward contracts
+
+3v2环境通过`hetero_reward_mode`显式选择MAV奖励契约，UAV始终使用原有`PaperReward`。`legacy_v1`完整保留早期可学习性工程奖励：战场中心只取存活红方攻击UAV，awareness使用最大项，aspect使用最小项，Safety和Support在顶层各乘10，并保留旧事件与boundary叠加；该模式只用于历史实验对照。
+
+默认`paper_table1_v2`采用论文Table 1的`Safety + Support + Event`结构：`Safety = 0.5 R_dist + 0.3 R_threat + 0.2 R_aspect`，`Support = 0.6 R_pos + 0.4 R_aware`。Aspect和awareness均对满足角度条件的目标求和。动态战场中心由所有存活红方攻击UAV与存活蓝方UAV的三维位置算术平均构成，明确排除MAV。MAV awareness使用12个物理帧推进后的当前MAV探测集合，而不是决策前航迹。
+
+v2 Event只包含MAV当步死亡`-200`和红方攻击UAV真实击杀蓝方UAV的团队贡献：每次`+100`、每回合最多`+200`，额度由奖励模型跨step维护并在环境reset时清零。boundary、crash、numerical invalid和导弹命中均统一触发一次MAV死亡成本，不再叠加旧boundary处罚。v2没有Safety/Support十倍倍率、terminal overlay、alive/relay/rear/launch/hit/timeout奖励；relay-only与共享航迹只作为诊断日志。
+
+`paper_unspecified_engineering`常数为：危险距离14 km、安全距离28 km、支援最优距离14 km、支援最大距离28 km、MAV死亡成本200、单次团队击杀额度100、回合上限200。这些数值分别映射当前导弹攻击距离、MAV工程探测距离和本项目事件尺度，不是论文公开的MAV阈值或成本。
+
+新checkpoint保存`environment_contract`，包含场景、感知模式、奖励模式、奖励契约版本、观测/状态/动作维度和agent IDs。评估默认拒绝奖励模式不匹配；感知模式允许覆盖以执行预定消融。旧checkpoint没有该契约时仍可加载，但评估结果将`checkpoint_reward_contract_known`标为`false`。训练同时输出逐回合`episode_reward_components.csv`和`train_log.csv`最近20回合MAV/UAV分量统计。
+
+```powershell
+python aircombat_env_v1/scripts/check_simple_hetero_reward.py
 ```
 
 武器由环境自动管理，直接复用论文导弹、观测槽位与奖励结构。默认红方由学习接口控制，蓝方使用包含 `level_hold`、`pursuit`、转向、升降和加减速的有限高层候选，并按论文奖励结构即时贪心选择。该蓝方是基于论文有限基本机动思想构建的简化贪心规则策略，不是论文未公开 FSM 的精确复现。

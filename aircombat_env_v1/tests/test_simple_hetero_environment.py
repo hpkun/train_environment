@@ -112,7 +112,9 @@ def test_mav_reward_components_are_present_and_finite():
     env,_,_=make_env(max_steps=1,weapon_enabled_agent_ids=set())
     try:
         _,rewards,_,_,info=env.step(zero_actions(env));components=info["reward_components"]["red_mav_0"]
-        assert set(components)=={"r_safety_distance","r_safety_threat","r_safety_aspect","r_safety","r_support_position","r_support_awareness","r_support","r_event","total"}
+        assert set(components)=={"r_safety_distance","r_safety_threat","r_safety_aspect","r_safety","battlefield_center_distance_m",
+          "r_support_position","r_support_awareness","r_support","r_event_death","r_event_team_contribution","r_event",
+          "team_credit_awarded_so_far","mav_detected_enemy_count_log","relay_only_track_count_log","total_dense","total"}
         assert np.isfinite(list(components.values())).all() and np.isfinite(rewards["red_mav_0"])
     finally:env.close()
 

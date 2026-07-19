@@ -12,7 +12,7 @@ from .hetero_perception import HeterogeneousPerceptionSystem,PERCEPTION_MODES
 from .opponent import paper_greedy_action
 from .paper_observation import PaperObservation
 from .paper_reward import PaperReward
-from .simple_hetero_reward import SimpleMAVReward
+from .simple_hetero_reward import HETERO_REWARD_CONTRACT_VERSION,HETERO_REWARD_MODES,build_mav_reward,mav_reward_config
 from .paper_situation import assess_pair,paper_situation_score
 from .paper_weapon import PaperWeaponManager
 from .pid import PaperAutopilot
@@ -78,15 +78,20 @@ class SimplePIDAircraft:
 class SimpleTAMCombatEnv(gym.Env):
     metadata={"render_modes":[]}
     def __init__(self,scenario_mode="simple_paper_1v1",controlled_side="red",max_steps=1000,
-                 weapon_enabled_agent_ids=None,config_path=DEFAULT_CONFIG,hetero_perception_mode="paper_fused"):
+                 weapon_enabled_agent_ids=None,config_path=DEFAULT_CONFIG,hetero_perception_mode="paper_fused",
+                 hetero_reward_mode="paper_table1_v2"):
         if scenario_mode not in SIMPLE_SCENARIOS:raise ValueError("unsupported simple scenario")
         if controlled_side not in ("red","all"):raise ValueError("controlled_side must be red or all")
         if scenario_mode!=HETERO_SCENARIO and hetero_perception_mode!="paper_fused":
             raise ValueError("hetero_perception_mode is only configurable for simple_paper_3v2_hetero")
         if hetero_perception_mode not in PERCEPTION_MODES:
             raise ValueError(f"hetero_perception_mode must be one of {PERCEPTION_MODES}")
+        if scenario_mode!=HETERO_SCENARIO and hetero_reward_mode!="paper_table1_v2":
+            raise ValueError("hetero_reward_mode is only configurable for simple_paper_3v2_hetero")
+        if hetero_reward_mode not in HETERO_REWARD_MODES:
+            raise ValueError(f"hetero_reward_mode must be one of {HETERO_REWARD_MODES}")
         self.scenario_mode=scenario_mode;self.controlled_side=controlled_side;self.max_steps=int(max_steps)
-        self.hetero_perception_mode=hetero_perception_mode
+        self.hetero_perception_mode=hetero_perception_mode;self.hetero_reward_mode=hetero_reward_mode
         self.weapon_enabled_agent_ids=None if weapon_enabled_agent_ids is None else set(weapon_enabled_agent_ids)
         self.config=load_config(config_path);self.agent_specs=SIMPLE_SCENARIOS[scenario_mode]
         self.max_red=sum(x[1]=="red" for x in self.agent_specs);self.max_blue=sum(x[1]=="blue" for x in self.agent_specs)
@@ -95,7 +100,7 @@ class SimpleTAMCombatEnv(gym.Env):
         self.paper_observation=PaperObservation(self.max_red,self.max_blue)
         base_dim=7+6*((self.max_red-1)+self.max_blue+8);dim=base_dim+(2 if scenario_mode==HETERO_SCENARIO else 0)
         self.observation_space=spaces.Dict({aid:spaces.Box(-np.inf,np.inf,(dim,),np.float32) for aid in self.controlled_ids})
-        self.weapon=PaperWeaponManager(PUBLISHED,INFERRED);self.reward_model=PaperReward();self.mav_reward_model=SimpleMAVReward();self.agents=[]
+        self.weapon=PaperWeaponManager(PUBLISHED,INFERRED);self.reward_model=PaperReward();self.mav_reward_model=build_mav_reward(hetero_reward_mode);self.agents=[]
         self.hetero_perception=HeterogeneousPerceptionSystem(hetero_perception_mode) if scenario_mode==HETERO_SCENARIO else None
     def reset(self,*,seed=None,options=None):
         super().reset(seed=seed);del options
@@ -104,7 +109,7 @@ class SimpleTAMCombatEnv(gym.Env):
                          missile_capacity=HETERO_MISSILES.get(spec[0],2)) for spec in self.agent_specs]
         else:
             for agent in self.agents:agent.reset()
-        self.by_id={a.agent_id:a for a in self.agents};self.weapon.reset();self.step_count=0;self.simulation_time_s=0.
+        self.by_id={a.agent_id:a for a in self.agents};self.weapon.reset();self.mav_reward_model.reset();self.step_count=0;self.simulation_time_s=0.
         self.current_targets={};self.target_change_events=[];self.valid_target_reselections=0
         self.perception_result={};self.target_selection_scores={};self.target_selection_source={}
         self.red_uav_launches_using_shared_track=0;self.red_uav_launches_using_direct_track=0
@@ -181,14 +186,16 @@ class SimpleTAMCombatEnv(gym.Env):
             if e.get("reason")=="hit":
                 if self.by_id[e["shooter_id"]].side=="red":self.red_missile_kills+=1
                 else:self.blue_missile_kills+=1
-        self.step_count+=1;pairs={}
+        self.step_count+=1
+        post_perception=self.hetero_perception.build(self.agents) if self.hetero_perception is not None else None
+        pairs={}
         for a in self.agents:
             target=self.by_id.get(a.current_target)
             if target is not None:pairs[a.agent_id]=assess_pair(a.position,a.velocity,target.position,target.velocity)
         rewards,components=self.reward_model.compute(self.agents,self.current_targets,pairs,self.weapon.missiles,events,alive_start,out_step)
         if self.scenario_mode==HETERO_SCENARIO:
             mav=self.by_id["red_mav_0"];rewards[mav.agent_id],components[mav.agent_id]=self.mav_reward_model.compute(
-                mav,self.agents,self.weapon.missiles,events,alive_start,out_step)
+                mav,self.agents,self.weapon.missiles,events,alive_start,out_step,post_perception)
         red_alive=sum(a.alive for a in self.agents if a.side=="red");blue_alive=sum(a.alive for a in self.agents if a.side=="blue")
         if self.scenario_mode==HETERO_SCENARIO:
             mav_lost=not self.by_id["red_mav_0"].alive;uavs_lost=not any(self.by_id[aid].alive for aid in ("red_uav_0","red_uav_1"))
@@ -201,7 +208,8 @@ class SimpleTAMCombatEnv(gym.Env):
             reason="mutual_elimination" if red_alive==blue_alive==0 else "blue_eliminated" if blue_alive==0 else "red_eliminated" if red_alive==0 else None
         truncated=not terminated and self.step_count>=self.max_steps
         if truncated:winner="draw";reason="timeout"
-        self._update_perception();self._update_targets();info=self._info(winner,reason);info["events"]=events;info["reward_components"]=components
+        if post_perception is not None:self.perception_result=post_perception
+        self._update_targets();info=self._info(winner,reason);info["events"]=events;info["reward_components"]=components
         return self._observations(),{aid:float(rewards[aid]) for aid in self.controlled_ids},bool(terminated),bool(truncated),info
     def _check_frame(self,out_step):
         for a in self.agents:
@@ -250,7 +258,12 @@ class SimpleTAMCombatEnv(gym.Env):
               "red_uav_targets_visible":{a.agent_id:bool(a.current_target is not None and a.current_target in
                 self.perception_result["visible_enemy_ids_by_agent"].get(a.agent_id,[])) for a in uavs},
               "red_uav_launches_using_shared_track":int(self.red_uav_launches_using_shared_track),
-              "red_uav_launches_using_direct_track":int(self.red_uav_launches_using_direct_track)})
+              "red_uav_launches_using_direct_track":int(self.red_uav_launches_using_direct_track),
+              "hetero_reward_mode":self.hetero_reward_mode,"hetero_reward_contract_version":HETERO_REWARD_CONTRACT_VERSION,
+              "mav_reward_config":mav_reward_config(),
+              "mav_team_credit_awarded_so_far":float(getattr(self.mav_reward_model,"team_credit_awarded_so_far",0.0)),
+              "battlefield_center":getattr(self.mav_reward_model,"last_battlefield_center",None),
+              "battlefield_center_distance_m":float(getattr(self.mav_reward_model,"last_battlefield_center_distance_m",0.0))})
         return info
     def close(self):
         for a in self.agents:a.close()
