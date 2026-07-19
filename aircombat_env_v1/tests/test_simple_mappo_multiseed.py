@@ -13,8 +13,8 @@ class _OneStepModel:
         return torch.zeros((obs.shape[0],3)),None,None,None
 
 class _OneStepEnv:
-    def __init__(self,scenario,controlled_team="red"):
-        self.scenario=scenario
+    def __init__(self,scenario,controlled_team="red",hetero_perception_mode="paper_fused"):
+        self.scenario=scenario;self.hetero_perception_mode=hetero_perception_mode
     def close(self):
         pass
 
@@ -30,6 +30,12 @@ class _OneStepAdapter:
           "boundary_deaths":np.int64(1),"numerical_invalid":np.bool_(False),"flight_envelope_violation":np.bool_(True),
           "mav_alive":np.bool_(True),"red_uav_alive":np.int64(1),"red_team_failed_by_mav_loss":np.bool_(False),
           "red_team_failed_by_uav_loss":np.bool_(True),"red_missile_kills":np.int64(2),"blue_missile_kills":np.int64(1)}
+        info.update({"relay_only_track_count":np.int64(4),"mav_support_active":np.bool_(True),
+          "target_selection_source":{"red_uav_0":"mav_shared","red_uav_1":"direct"},
+          "visible_enemy_ids_by_agent":{"red_uav_0":["blue_0","blue_1"],"red_uav_1":["blue_0"]},
+          "direct_enemy_ids_by_agent":{"red_uav_0":[],"red_uav_1":["blue_0"]},
+          "shared_enemy_ids_by_agent":{"red_uav_0":["blue_0","blue_1"],"red_uav_1":["blue_0"]},
+          "red_uav_launches_using_shared_track":np.int64(1),"red_uav_launches_using_direct_track":np.int64(2)})
         return np.zeros((1,1),np.float32),np.zeros(1,np.float32),np.zeros(1,np.float32),True,np.zeros(1,np.float32),info
 
 def _one_step_evaluation(monkeypatch,scenario):
@@ -52,6 +58,20 @@ def test_3v2_role_metrics_exist_with_native_types(monkeypatch):
     for key in ("mav_survival_rate","mean_red_uav_alive","mav_loss_rate","red_uav_team_loss_rate"):
         assert type(result[key]) is float
     assert type(result["red_missile_kills"]) is int and type(result["blue_missile_kills"]) is int
+    for key in ("mean_relay_only_tracks_per_step","fraction_steps_with_mav_support",
+      "fraction_uav_target_selections_from_shared_tracks","mean_visible_enemies_per_red_uav",
+      "mean_direct_enemies_per_red_uav","mean_shared_enemies_per_red_uav"):
+        assert type(result[key]) is float
+    assert result["mean_relay_only_tracks_per_step"]==4. and result["fraction_steps_with_mav_support"]==1.
+    assert result["red_uav_launches_using_shared_track"]==1 and result["red_uav_launches_using_direct_track"]==2
+
+def test_heterogeneous_checkpoint_shape_is_valid_in_both_perception_modes(tmp_path):
+    model=SharedMAPPOActorCritic(81,243);path=tmp_path/"checkpoint.pt"
+    torch.save({"scenario":"simple_paper_3v2_hetero","obs_dim":81,"state_dim":243,"action_dim":3,
+      "agent_ids":["red_uav_0","red_uav_1","red_mav_0"],"model_state_dict":model.state_dict()},path)
+    for mode in ("paper_fused","uav_only_ablation"):
+        loaded=eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"),mode)
+        assert loaded.obs_dim==81 and loaded.state_dim==243
 
 @pytest.mark.parametrize("scenario",["simple_paper_1v1","simple_paper_2v2"])
 def test_non_heterogeneous_evaluation_does_not_add_role_metrics(monkeypatch,scenario):

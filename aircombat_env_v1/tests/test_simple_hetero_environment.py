@@ -1,6 +1,8 @@
+import json
 import numpy as np
 from gymnasium import spaces
 from aircombat_env_v1.paper_reward import PaperReward
+from aircombat_env_v1.paper_situation import paper_situation_score
 from aircombat_env_v1.simple_env import HETERO_SCENARIO,SimpleTAMCombatEnv
 from aircombat_env_v1.simple_mappo import MAPPOTrainer,RolloutBuffer,SharedMAPPOActorCritic,SimpleMAPPOAdapter
 import torch
@@ -30,6 +32,65 @@ def test_action_observation_roles_and_adapter_shapes():
         assert np.array_equal(obs["red_mav_0"][-2:],[1,0]) and all(np.array_equal(obs[aid][-2:],[0,1]) for aid in ("red_uav_0","red_uav_1"))
         adapter=SimpleMAPPOAdapter(env);actor,state,_=adapter.reset(seed=1)
         assert adapter.num_agents==3 and actor.shape==(3,81) and state.shape==(243,) and adapter.action_dim==3
+    finally:env.close()
+
+def test_initial_fused_and_ablation_observations_follow_visibility_masks():
+    fused,fused_obs,fused_info=make_env();ablation=SimpleTAMCombatEnv(HETERO_SCENARIO,hetero_perception_mode="uav_only_ablation")
+    try:
+        ablation_obs,ablation_info=ablation.reset(seed=1)
+        for aid in ("red_uav_0","red_uav_1"):
+            assert fused_info["direct_enemy_ids_by_agent"][aid]==[]
+            assert fused_info["shared_enemy_ids_by_agent"][aid]==["blue_0","blue_1"]
+            assert fused_info["visible_enemy_ids_by_agent"][aid]==["blue_0","blue_1"]
+            assert np.array_equal(fused_obs[aid][69:71],[1,1])
+            assert ablation_info["visible_enemy_ids_by_agent"][aid]==[]
+            assert np.all(ablation_obs[aid][17:27]==0) and np.array_equal(ablation_obs[aid][69:71],[0,0])
+            assert fused_obs[aid].shape==ablation_obs[aid].shape==(81,) and np.array_equal(fused_obs[aid][-2:],[0,1])
+        assert fused_info["relay_only_track_count"]==4
+    finally:fused.close();ablation.close()
+
+def test_non_heterogeneous_scenario_rejects_ablation_mode():
+    import pytest
+    with pytest.raises(ValueError,match="only configurable"):
+        SimpleTAMCombatEnv("simple_paper_1v1",hetero_perception_mode="uav_only_ablation")
+
+def test_paper_situation_score_weights_and_heterogeneous_target_selection():
+    env,_,_=make_env(weapon_enabled_agent_ids=set())
+    try:
+        ego=env.by_id["red_uav_0"];near=env.by_id["blue_0"];far=env.by_id["blue_1"]
+        near.position=ego.position+np.array([1000.,0.,3000.]);near.velocity=ego.velocity.copy()
+        far.position=ego.position+np.array([5000.,0.,-3000.]);far.velocity=ego.velocity.copy()
+        assert np.linalg.norm(near.position-ego.position)<np.linalg.norm(far.position-ego.position)
+        assert paper_situation_score(ego.position,ego.velocity,far.position,far.velocity)>paper_situation_score(ego.position,ego.velocity,near.position,near.velocity)
+        env._update_perception();env._update_targets(False)
+        assert ego.current_target=="blue_1"
+        far.position=near.position.copy();far.velocity=near.velocity.copy();env._update_perception();env._update_targets(False)
+        assert ego.current_target=="blue_0"
+    finally:env.close()
+
+def test_targets_visibility_fire_control_and_mav_weapon_invariants():
+    env=SimpleTAMCombatEnv(HETERO_SCENARIO,hetero_perception_mode="uav_only_ablation",max_steps=2);env.reset(seed=1)
+    try:
+        assert all(env.by_id[aid].current_target is None for aid in ("red_uav_0","red_uav_1"))
+        _,_,_,_,info=env.step(zero_actions(env));assert info["red_uav_launches_using_direct_track"]==0
+        uav=env.by_id["red_uav_0"];blue=env.by_id["blue_0"];blue.position=uav.position+np.array([1000.,0.,0.])
+        env._update_perception();env._update_targets(False)
+        assert uav.current_target=="blue_0" and env.target_selection_source[uav.agent_id]=="direct"
+        _,_,_,_,info=env.step(zero_actions(env))
+        launchers=[event["shooter_id"] for event in info["events"] if event["event_type"]=="missile_launch"]
+        assert "red_uav_0" in launchers and "red_mav_0" not in launchers
+        assert info["red_uav_launches_using_direct_track"]>=1 and env.by_id["red_mav_0"].missile_left==0
+    finally:env.close()
+
+def test_heterogeneous_info_is_json_serializable_and_targets_are_visible():
+    env,_,info=make_env()
+    try:
+        json.dumps(info)
+        assert set(info["target_selection_source"].values())<={"direct","mav_shared","none","global_rule_opponent"}
+        assert all(info["red_uav_targets_visible"].values())
+        for aid in ("red_uav_0","red_uav_1"):
+            assert info["current_targets"][aid] in info["visible_enemy_ids_by_agent"][aid]
+        assert env.by_id["red_mav_0"].current_target in info["mav_detected_enemy_ids"]
     finally:env.close()
 
 def test_dead_entity_slot_zero_but_role_is_retained():

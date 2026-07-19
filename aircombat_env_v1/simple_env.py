@@ -8,11 +8,12 @@ from .aircraft import AircraftSimulator
 from .combat import action_to_targets
 from .config import DEFAULT_CONFIG,load_config
 from .geometry import LLA2NEU
+from .hetero_perception import HeterogeneousPerceptionSystem,PERCEPTION_MODES
 from .opponent import paper_greedy_action
 from .paper_observation import PaperObservation
 from .paper_reward import PaperReward
 from .simple_hetero_reward import SimpleMAVReward
-from .paper_situation import assess_pair
+from .paper_situation import assess_pair,paper_situation_score
 from .paper_weapon import PaperWeaponManager
 from .pid import PaperAutopilot
 from .scenario import ORIGIN
@@ -77,10 +78,15 @@ class SimplePIDAircraft:
 class SimpleTAMCombatEnv(gym.Env):
     metadata={"render_modes":[]}
     def __init__(self,scenario_mode="simple_paper_1v1",controlled_side="red",max_steps=1000,
-                 weapon_enabled_agent_ids=None,config_path=DEFAULT_CONFIG):
+                 weapon_enabled_agent_ids=None,config_path=DEFAULT_CONFIG,hetero_perception_mode="paper_fused"):
         if scenario_mode not in SIMPLE_SCENARIOS:raise ValueError("unsupported simple scenario")
         if controlled_side not in ("red","all"):raise ValueError("controlled_side must be red or all")
+        if scenario_mode!=HETERO_SCENARIO and hetero_perception_mode!="paper_fused":
+            raise ValueError("hetero_perception_mode is only configurable for simple_paper_3v2_hetero")
+        if hetero_perception_mode not in PERCEPTION_MODES:
+            raise ValueError(f"hetero_perception_mode must be one of {PERCEPTION_MODES}")
         self.scenario_mode=scenario_mode;self.controlled_side=controlled_side;self.max_steps=int(max_steps)
+        self.hetero_perception_mode=hetero_perception_mode
         self.weapon_enabled_agent_ids=None if weapon_enabled_agent_ids is None else set(weapon_enabled_agent_ids)
         self.config=load_config(config_path);self.agent_specs=SIMPLE_SCENARIOS[scenario_mode]
         self.max_red=sum(x[1]=="red" for x in self.agent_specs);self.max_blue=sum(x[1]=="blue" for x in self.agent_specs)
@@ -90,6 +96,7 @@ class SimpleTAMCombatEnv(gym.Env):
         base_dim=7+6*((self.max_red-1)+self.max_blue+8);dim=base_dim+(2 if scenario_mode==HETERO_SCENARIO else 0)
         self.observation_space=spaces.Dict({aid:spaces.Box(-np.inf,np.inf,(dim,),np.float32) for aid in self.controlled_ids})
         self.weapon=PaperWeaponManager(PUBLISHED,INFERRED);self.reward_model=PaperReward();self.mav_reward_model=SimpleMAVReward();self.agents=[]
+        self.hetero_perception=HeterogeneousPerceptionSystem(hetero_perception_mode) if scenario_mode==HETERO_SCENARIO else None
     def reset(self,*,seed=None,options=None):
         super().reset(seed=seed);del options
         if not self.agents:
@@ -99,17 +106,36 @@ class SimpleTAMCombatEnv(gym.Env):
             for agent in self.agents:agent.reset()
         self.by_id={a.agent_id:a for a in self.agents};self.weapon.reset();self.step_count=0;self.simulation_time_s=0.
         self.current_targets={};self.target_change_events=[];self.valid_target_reselections=0
+        self.perception_result={};self.target_selection_scores={};self.target_selection_source={}
+        self.red_uav_launches_using_shared_track=0;self.red_uav_launches_using_direct_track=0
         self.invalid_episode=False;self.red_missile_kills=self.blue_missile_kills=0;self.simultaneous_kills=0
         self.minimum_altitude_by_agent={a.agent_id:a.position[2] for a in self.agents};self.maximum_speed_by_agent={a.agent_id:a.speed for a in self.agents}
         self.minimum_altitude_m=min(self.minimum_altitude_by_agent.values());self.maximum_altitude_m=max(a.position[2] for a in self.agents)
         self.minimum_speed_mps=min(a.speed for a in self.agents);self.maximum_speed_mps=max(self.maximum_speed_by_agent.values())
         self.maximum_load_factor_g=max(abs(a.load_factor_g) for a in self.agents);self.flight_envelope_violation=False
-        self._update_targets(False);return self._observations(),self._info(None,None)
+        self._update_perception();self._update_targets(False);return self._observations(),self._info(None,None)
+    def _update_perception(self):
+        if self.hetero_perception is not None:self.perception_result=self.hetero_perception.build(self.agents)
     def _update_targets(self,count_changes=True):
         for a in self.agents:
             previous=self.current_targets.get(a.agent_id);enemies=[e for e in self.agents if e.side!=a.side and e.alive]
-            target=min(enemies,key=lambda e:(float(np.linalg.norm(e.position-a.position)),e.agent_id)) if a.alive and enemies else None
+            scores={};source="none"
+            if self.scenario_mode==HETERO_SCENARIO and a.alive and a.side=="red":
+                key="mav_detected_enemy_ids" if a.role=="mav" else "visible_enemy_ids_by_agent"
+                ids=self.perception_result[key] if a.role=="mav" else self.perception_result[key].get(a.agent_id,[])
+                candidates=[self.by_id[aid] for aid in ids if self.by_id[aid].alive]
+                scores={e.agent_id:paper_situation_score(a.position,a.velocity,e.position,e.velocity) for e in candidates}
+                target=min(candidates,key=lambda e:(-scores[e.agent_id],e.agent_id)) if candidates else None
+                if target is not None:
+                    direct=self.perception_result["direct_enemy_ids_by_agent"].get(a.agent_id,[])
+                    source="direct" if target.agent_id in direct else "mav_shared"
+            else:
+                target=min(enemies,key=lambda e:(float(np.linalg.norm(e.position-a.position)),e.agent_id)) if a.alive and enemies else None
+                if self.scenario_mode==HETERO_SCENARIO and target is not None:source="global_rule_opponent"
             a.current_target=target.agent_id if target else None;self.current_targets[a.agent_id]=a.current_target
+            if self.scenario_mode==HETERO_SCENARIO:
+                self.target_selection_scores[a.agent_id]={key:float(value) for key,value in sorted(scores.items())}
+                self.target_selection_source[a.agent_id]=source
             if count_changes and previous is not None and a.current_target is not None and previous!=a.current_target:
                 self.valid_target_reselections+=1;self.target_change_events.append({"agent_id":a.agent_id,"previous_target":previous,
                   "current_target":a.current_target,"decision_step":self.step_count,"simulation_time_s":self.simulation_time_s})
@@ -121,7 +147,7 @@ class SimpleTAMCombatEnv(gym.Env):
             result[aid]=np.array([0.,-.5,0.],np.float32) if a.role=="mav" else np.zeros(3,np.float32) if target is None else paper_greedy_action(a.state,target.state)
         return result
     def step(self,actions):
-        self._update_targets();self.weapon.begin_decision_step();alive_start={a.agent_id:a.alive for a in self.agents};events=[]
+        self._update_perception();self._update_targets();self.weapon.begin_decision_step();alive_start={a.agent_id:a.alive for a in self.agents};events=[]
         action_map={str(k):np.asarray(v,dtype=np.float32) for k,v in actions.items()}
         for aid in self.controlled_ids:
             if self.by_id[aid].alive and aid not in action_map:raise KeyError(f"missing action for {aid}")
@@ -131,8 +157,16 @@ class SimpleTAMCombatEnv(gym.Env):
                     target=self.by_id.get(a.current_target);action_map[a.agent_id]=np.zeros(3,np.float32) if target is None else paper_greedy_action(a.state,target.state)
         for a in self.agents:
             if self.weapon_enabled_agent_ids is None or a.agent_id in self.weapon_enabled_agent_ids:
-                launch=self.weapon.try_launch(a,self.by_id.get(a.current_target),self.simulation_time_s)
-                if launch:launch.update({"simulation_time_s":self.simulation_time_s,"decision_step":self.step_count});events.append(launch)
+                target=self.by_id.get(a.current_target)
+                allowed=not (self.scenario_mode==HETERO_SCENARIO and a.side=="red" and
+                    (a.role=="mav" or target is None or target.agent_id not in self.perception_result["visible_enemy_ids_by_agent"].get(a.agent_id,[])))
+                launch=self.weapon.try_launch(a,target,self.simulation_time_s) if allowed else None
+                if launch:
+                    launch.update({"simulation_time_s":self.simulation_time_s,"decision_step":self.step_count});events.append(launch)
+                    if self.scenario_mode==HETERO_SCENARIO and a.side=="red" and a.role=="uav":
+                        if target.agent_id in self.perception_result["direct_enemy_ids_by_agent"].get(a.agent_id,[]):
+                            self.red_uav_launches_using_direct_track+=1
+                        else:self.red_uav_launches_using_shared_track+=1
         for a in self.agents:
             if a.alive:a.set_high_level_action(action_map.get(a.agent_id,np.zeros(3,np.float32)))
         out_step=set()
@@ -167,7 +201,7 @@ class SimpleTAMCombatEnv(gym.Env):
             reason="mutual_elimination" if red_alive==blue_alive==0 else "blue_eliminated" if blue_alive==0 else "red_eliminated" if red_alive==0 else None
         truncated=not terminated and self.step_count>=self.max_steps
         if truncated:winner="draw";reason="timeout"
-        self._update_targets();info=self._info(winner,reason);info["events"]=events;info["reward_components"]=components
+        self._update_perception();self._update_targets();info=self._info(winner,reason);info["events"]=events;info["reward_components"]=components
         return self._observations(),{aid:float(rewards[aid]) for aid in self.controlled_ids},bool(terminated),bool(truncated),info
     def _check_frame(self,out_step):
         for a in self.agents:
@@ -180,7 +214,8 @@ class SimpleTAMCombatEnv(gym.Env):
             if a.death_reason=="numerical_invalid":self.invalid_episode=True
             if a.alive and np.linalg.norm(a.position[:2])>28000:a.kill("boundary");out_step.add(a.agent_id)
     def _observations(self):
-        structured=self.paper_observation.build(self.agents,self.weapon.missiles)
+        visible=self.perception_result.get("visible_enemy_ids_by_agent") if self.scenario_mode==HETERO_SCENARIO else None
+        structured=self.paper_observation.build(self.agents,self.weapon.missiles,visible)
         result={}
         for aid in self.controlled_ids:
             flat=self.paper_observation.flatten(structured[aid])
@@ -209,7 +244,13 @@ class SimpleTAMCombatEnv(gym.Env):
             info.update({"agent_roles":{a.agent_id:a.role for a in self.agents},"mav_alive":mav.alive,
               "red_uav_alive":sum(a.alive for a in uavs),"red_uav_missiles_left":{a.agent_id:a.missile_left for a in uavs},
               "mav_missiles_left":mav.missile_left,"red_team_failed_by_mav_loss":not mav.alive,
-              "red_team_failed_by_uav_loss":not any(a.alive for a in uavs)})
+              "red_team_failed_by_uav_loss":not any(a.alive for a in uavs),"hetero_perception_mode":self.hetero_perception_mode,
+              **self.perception_result,"target_selection_scores":self.target_selection_scores,
+              "target_selection_source":self.target_selection_source,
+              "red_uav_targets_visible":{a.agent_id:bool(a.current_target is not None and a.current_target in
+                self.perception_result["visible_enemy_ids_by_agent"].get(a.agent_id,[])) for a in uavs},
+              "red_uav_launches_using_shared_track":int(self.red_uav_launches_using_shared_track),
+              "red_uav_launches_using_direct_track":int(self.red_uav_launches_using_direct_track)})
         return info
     def close(self):
         for a in self.agents:a.close()

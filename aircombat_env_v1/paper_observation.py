@@ -10,7 +10,7 @@ class PaperObservation:
         self.max_red=max_red; self.max_blue=max_blue; self.max_incoming=8
         self.position_norm_m=28000.; self.altitude_norm_m=6000.
     def shapes_for(self,side): return ((self.max_red if side=="red" else self.max_blue)-1,self.max_blue if side=="red" else self.max_red)
-    def build(self,agents,missiles):
+    def build(self,agents,missiles,visible_enemy_ids_by_agent=None):
         sides={s:sorted([a for a in agents if a.side==s],key=lambda a:a.agent_id) for s in ("red","blue")}; result={}
         for ego in agents:
             allies=[a for a in sides[ego.side] if a.agent_id!=ego.agent_id]; enemies=sides["blue" if ego.side=="red" else "red"]
@@ -19,8 +19,10 @@ class PaperObservation:
             if ego.alive:
                 for i,a in enumerate(allies[:na]):
                     if a.alive: ally[i]=self._relative(ego,a.position,a.velocity); am[i]=1
+                visible=None if visible_enemy_ids_by_agent is None else set(visible_enemy_ids_by_agent.get(ego.agent_id,()))
                 for i,a in enumerate(enemies[:ne]):
-                    if a.alive: enemy[i]=self._relative(ego,a.position,a.velocity); em[i]=1
+                    if a.alive and (visible is None or a.agent_id in visible):
+                        enemy[i]=self._relative(ego,a.position,a.velocity); em[i]=1
             incoming=sorted([m for m in missiles if m.alive and m.target_id==ego.agent_id],key=lambda m:(np.linalg.norm(m.position-ego.position)/max(m.speed_mps,1),m.missile_id))
             ms=np.zeros((self.max_incoming,5),np.float32); mm=np.zeros(self.max_incoming,np.float32)
             if ego.alive:

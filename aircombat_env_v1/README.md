@@ -8,6 +8,25 @@
 
 `temporary_learnability_abstraction`: the first heterogeneous environment represents role and armament heterogeneity while reusing the same JSBSim aircraft dynamics for MAV and UAV agents.
 
+### Paper-aligned heterogeneous perception and support
+
+`simple_paper_3v2_hetero` 使用 `HeterogeneousPerceptionSystem` 将红方 MAV 的战场感知支援落实到局部观测、目标选择和自动火控。默认 `hetero_perception_mode="paper_fused"`；`uav_only_ablation` 只关闭 MAV-to-UAV 信息共享，MAV 本身、初始部署、飞行、任务终止条件、动作/观测维度、奖励和武器模型均不变。因此，两种模式可以复用同一个 `(81, 243, 3)` MAPPO checkpoint，并用于隔离信息支援的因果作用，而不是创建新的训练场景。
+
+`paper_explicit`：环境按 POMDP 建模；每机观测由7维自身状态以及友机、敌机、来袭导弹的相对速度、相对高度、距离、ATA和AA构成；MAV增强异构编队战场感知并提供敌机位置、速度等信息，承担协调、信息支援和生存任务；UAV承担协同接敌、攻击和支援。目标优先级使用论文态势评分权重 `angle=0.35`、`distance=0.25`、`altitude=0.20`、`speed=0.20`，仅用于目标选择，不进入reward。论文没有建模通信约束、感知不确定性或控制时延。
+
+`paper_unspecified_engineering`：本项目令UAV直接探测距离为14 km、MAV探测距离为28 km，并采用理想、即时、无限通信距离的数据链。没有雷达视场、地形遮挡、探测概率、噪声、丢包、时延或航迹保持；目标在当前决策步不可见时立即清空对应敌机槽位和mask。态势评分中的14 km距离门槛、6000 m相对高度归一化和400 m/s相对速度归一化也是当前环境映射，不是论文公开参数。固定规则蓝方继续使用全局真实存活目标集合，这是保持规则对手简单的工程抽象，不代表蓝方局部观测模型。
+
+在 `paper_fused` 中，红方UAV可见集合是“自身14 km直接探测”与“存活MAV在28 km内探测并共享”的稳定排序并集；MAV只使用自身探测，不接收其他飞机共享。`uav_only_ablation` 中，红方UAV只保留自身直接探测，MAV仍独立探测但不共享。红方友机始终可见，锁定本机的存活来袭导弹不受敌机可见距离限制。Actor仍只接收原论文状态变量：3v2观测保持81维，末尾2维role one-hot不变，direct/shared来源只进入info诊断而不扩展观测。
+
+红方UAV只能从自身当前可见目标中按论文态势评分选靶；同分时按 `agent_id` 稳定排序。MAV也按同一评分从自身探测目标中选靶，但导弹容量和剩余弹药始终为0。目标失去可见性后会在同一决策步重新选择或清空；无可见目标时规则UAV稳定巡航，不追踪隐藏敌机，也不能自动发射。共享目标可以支持选靶和规则机动，但实际发射仍必须同时满足现有14 km最大攻击距离与25 s冷却约束。
+
+短验收命令：
+
+```powershell
+python -m pytest aircombat_env_v1/tests/test_hetero_perception.py aircombat_env_v1/tests/test_simple_hetero_environment.py aircombat_env_v1/tests/test_simple_mappo_multiseed.py -q
+python aircombat_env_v1/scripts/check_simple_hetero_environment.py
+```
+
 武器由环境自动管理，直接复用论文导弹、观测槽位与奖励结构。默认红方由学习接口控制，蓝方使用包含 `level_hold`、`pursuit`、转向、升降和加减速的有限高层候选，并按论文奖励结构即时贪心选择。该蓝方是基于论文有限基本机动思想构建的简化贪心规则策略，不是论文未公开 FSM 的精确复现。
 
 ```powershell
