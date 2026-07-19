@@ -67,6 +67,43 @@ def should_run_evaluation(interval, episodes, steps, total_steps):
                 and (steps % interval == 0 or steps == total_steps))
 
 
+def format_console_training_line(steps, total_steps, update_count, episode_count,
+                                 episode_records, elapsed_seconds):
+    recent = episode_records[-100:]
+    if recent:
+        reward_last = float(recent[-1]["red_team_episode_return"])
+        reward100 = float(np.mean([
+            record["red_team_episode_return"] for record in recent]))
+        win100 = float(np.mean([record["winner"] == "red" for record in recent]))
+        survival100 = float(np.mean([
+            record["red_survival_rate"] for record in recent]))
+        hit100 = float(np.mean([record["red_hit_rate"] for record in recent]))
+        crash100 = float(np.mean([
+            record["red_crashes"] / max(record["red_initial_count"], 1)
+            for record in recent]))
+        values = {
+            "reward_last": f"{reward_last:.1f}",
+            "reward100": f"{reward100:.1f}",
+            "win100": f"{win100:.2f}",
+            "survival100": f"{survival100:.2f}",
+            "hit100": f"{hit100:.2f}",
+            "crash100": f"{crash100:.2f}",
+        }
+    else:
+        values = {key: "N/A" for key in (
+            "reward_last", "reward100", "win100", "survival100", "hit100",
+            "crash100")}
+    speed = steps / max(elapsed_seconds, 1e-12)
+    progress = 100.0 * steps / max(total_steps, 1)
+    return (
+        f"[TRAIN] step={steps}/{total_steps} progress={progress:.2f}% "
+        f"update={update_count} episodes={episode_count} "
+        f"reward_last={values['reward_last']} reward100={values['reward100']} "
+        f"win100={values['win100']} survival100={values['survival100']} "
+        f"hit100={values['hit100']} crash100={values['crash100']} "
+        f"speed={speed:.2f}step/s")
+
+
 def select_run_directory(root, requested):
     output = resolve_tam_output(root, requested)
     if output.exists() and any(output.iterdir()):
@@ -164,6 +201,8 @@ def parse_args(argv=None):
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--evaluation-interval", type=int, default=1000)
     p.add_argument("--evaluation-episodes", type=int, default=2)
+    p.add_argument("--disable-evaluation", action="store_true")
+    p.add_argument("--console-log-interval", type=int, default=10240)
     p.add_argument("--checkpoint-interval", type=int, default=1000)
     p.add_argument("--output-directory", default="outputs/tam_paper_vanilla_happo")
     p.add_argument("--resume-checkpoint")
@@ -301,11 +340,19 @@ def main():
         snapshot["tensorboard_writer"] = "dependency_free_tfrecord_fallback"
     (output / "config_snapshot.json").write_text(
         json.dumps(snapshot, indent=2), encoding="utf-8")
-    print(json.dumps(snapshot, indent=2))
+    print(
+        f"[CONFIG] scenario={args.scenario} seed={args.seed} "
+        f"total_steps={args.total_environment_steps} device={device} "
+        f"actor=[{','.join(map(str, policy.actor_hidden_sizes))}] "
+        f"critic=[{','.join(map(str, policy.critic_hidden_sizes))}] "
+        f"value_loss={trainer.value_loss_type} huber_delta={trainer.huber_delta:g} "
+        f"pure_happo=true evaluation={str(not args.disable_evaluation).lower()}")
     csv_path = output / "training.csv"
     episode_writer = RecordWriter(output / "episodes.csv", output / "episodes.jsonl")
-    evaluation_writer = RecordWriter(
-        output / "evaluation_history.csv", output / "evaluation_history.jsonl")
+    evaluation_writer = None
+    if not args.disable_evaluation:
+        evaluation_writer = RecordWriter(
+            output / "evaluation_history.csv", output / "evaluation_history.jsonl")
     checkpoint_manifest_path = output / "checkpoints.jsonl"
     rows, episode_records, evaluation_records, checkpoint_records = [], [], [], []
     latest_eval = None
@@ -314,6 +361,7 @@ def main():
     best_evaluation_return = None
     best_checkpoint = None
     at_episode_boundary = False
+    last_console_log_step = 0
 
     def append_checkpoint_record(path, checkpoint_type, boundary, extra=None,
                                  update_boundary=False, discarded_steps=0):
@@ -361,52 +409,56 @@ def main():
             update_boundary, discarded_steps)
 
     try:
-        # Step-0 evaluation and baseline references all use this exact policy object.
-        def run_evaluation(baseline, count, seed, explicit_seeds):
-            eval_env = make_paper_env(ROOT, args.scenario)
-            try:
-                return deterministic_evaluate(
-                    eval_env, policy, count, seed, baseline=baseline,
-                    episode_seeds=explicit_seeds)
-            finally:
-                eval_env.close()
+        if not args.disable_evaluation:
+            # Step-0 evaluation and baselines use this exact policy object.
+            def run_evaluation(baseline, count, seed, explicit_seeds):
+                eval_env = make_paper_env(ROOT, args.scenario)
+                try:
+                    return deterministic_evaluate(
+                        eval_env, policy, count, seed, baseline=baseline,
+                        episode_seeds=explicit_seeds)
+                finally:
+                    eval_env.close()
 
-        evaluation_0 = run_evaluation(
-            "trained_happo", 1, evaluation_seed_base, [evaluation_seed_base])
-        evaluation_0.update({
-            "policy_update_count": 0, "environment_steps": 0,
-            "checkpoint": None, "evaluation_stage": "pre_training",
-            "evaluated_environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
-            "evaluated_experiment_protocol": PAPER_NOMINAL_PROTOCOL,
-            "algorithm_label": snapshot["algorithm_label"],
-            "step_0_policy_semantics": "untrained_initial_training_policy",
-        })
-        (output / "evaluation_0.json").write_text(
-            json.dumps(evaluation_0, indent=2), encoding="utf-8")
-        evaluation_0_row = flatten_evaluation(
-            evaluation_0, environment_steps=0, trainer_update_count=0,
-            policy_version=0, actor_sharing=policy.actor_sharing,
-            algorithm_label=snapshot["algorithm_label"],
-            evaluation_stage="pre_training", checkpoint=None)
-        evaluation_writer.append(evaluation_0_row)
-        evaluation_records.append(evaluation_0_row)
+            evaluation_0 = run_evaluation(
+                "trained_happo", 1, evaluation_seed_base, [evaluation_seed_base])
+            evaluation_0.update({
+                "policy_update_count": 0, "environment_steps": 0,
+                "checkpoint": None, "evaluation_stage": "pre_training",
+                "evaluated_environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+                "evaluated_experiment_protocol": PAPER_NOMINAL_PROTOCOL,
+                "algorithm_label": snapshot["algorithm_label"],
+                "step_0_policy_semantics": "untrained_initial_training_policy",
+            })
+            (output / "evaluation_0.json").write_text(
+                json.dumps(evaluation_0, indent=2), encoding="utf-8")
+            evaluation_0_row = flatten_evaluation(
+                evaluation_0, environment_steps=0, trainer_update_count=0,
+                policy_version=0, actor_sharing=policy.actor_sharing,
+                algorithm_label=snapshot["algorithm_label"],
+                evaluation_stage="pre_training", checkpoint=None)
+            evaluation_writer.append(evaluation_0_row)
+            evaluation_records.append(evaluation_0_row)
 
-        rule_seed, neutral_seed = evaluation_seed_base + 1, evaluation_seed_base + 2
-        random_seeds = [evaluation_seed_base + 100 + index for index in range(10)]
-        baseline_reference = {
-            "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
-            "experiment_protocol": PAPER_NOMINAL_PROTOCOL,
-            "scenario": args.scenario, "algorithm_label": snapshot["algorithm_label"],
-            "untrained_policy_is_training_policy_object": True,
-            "rule": summarize_baseline(run_evaluation("rule", 1, rule_seed, [rule_seed])),
-            "neutral": summarize_baseline(run_evaluation(
-                "neutral", 1, neutral_seed, [neutral_seed])),
-            "untrained_happo": summarize_baseline(evaluation_0),
-            "random": summarize_baseline(run_evaluation(
-                "random", 10, random_seeds[0], random_seeds)),
-        }
-        (output / "baseline_reference.json").write_text(
-            json.dumps(baseline_reference, indent=2), encoding="utf-8")
+            rule_seed = evaluation_seed_base + 1
+            neutral_seed = evaluation_seed_base + 2
+            random_seeds = [evaluation_seed_base + 100 + index for index in range(10)]
+            baseline_reference = {
+                "environment_fidelity_revision": ENVIRONMENT_FIDELITY_REVISION,
+                "experiment_protocol": PAPER_NOMINAL_PROTOCOL,
+                "scenario": args.scenario,
+                "algorithm_label": snapshot["algorithm_label"],
+                "untrained_policy_is_training_policy_object": True,
+                "rule": summarize_baseline(run_evaluation(
+                    "rule", 1, rule_seed, [rule_seed])),
+                "neutral": summarize_baseline(run_evaluation(
+                    "neutral", 1, neutral_seed, [neutral_seed])),
+                "untrained_happo": summarize_baseline(evaluation_0),
+                "random": summarize_baseline(run_evaluation(
+                    "random", 10, random_seeds[0], random_seeds)),
+            }
+            (output / "baseline_reference.json").write_text(
+                json.dumps(baseline_reference, indent=2), encoding="utf-8")
 
         obs, _ = env.reset(seed=next_episode_seed)
         episode_id = episodes
@@ -418,7 +470,10 @@ def main():
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
             horizon = min(args.rollout_length, args.total_environment_steps - steps)
-            for interval in (args.evaluation_interval, args.checkpoint_interval):
+            intervals = [args.checkpoint_interval]
+            if not args.disable_evaluation:
+                intervals.insert(0, args.evaluation_interval)
+            for interval in intervals:
                 if interval:
                     horizon = min(horizon, interval - steps % interval)
             buffer = VanillaHAPPORolloutBuffer(horizon, env.num_agents, obs_dim, state_dim)
@@ -627,9 +682,10 @@ def main():
             elif buffer.pos != horizon:
                 invalid_reason = "rollout horizon mismatch"
 
-            if invalid_reason is None and should_run_evaluation(
+            if (not args.disable_evaluation and invalid_reason is None
+                    and should_run_evaluation(
                     args.evaluation_interval, args.evaluation_episodes,
-                    steps, args.total_environment_steps):
+                    steps, args.total_environment_steps)):
                 evaluation_start = time.perf_counter()
                 latest_eval = run_evaluation(
                     "trained_happo", args.evaluation_episodes,
@@ -689,12 +745,21 @@ def main():
                     output / "latest_exact_resumable.pt",
                     "exact_update_and_episode_boundary", True,
                     update_boundary=True, discarded_steps=0)
-            if args.checkpoint_interval and (
+            checkpoint_due = bool(args.checkpoint_interval and (
                     steps % args.checkpoint_interval == 0
-                    or steps == args.total_environment_steps):
+                    or steps == args.total_environment_steps))
+            if checkpoint_due:
                 save_checkpoint(
                     output / f"checkpoint_{steps}.pt", "evaluation_weights", False,
                     update_boundary=True)
+            interval_due = bool(
+                args.console_log_interval > 0
+                and steps - last_console_log_step >= args.console_log_interval)
+            if interval_due or checkpoint_due or steps == args.total_environment_steps:
+                print(format_console_training_line(
+                    steps, args.total_environment_steps, trainer.update_count,
+                    episodes, episode_records, time.perf_counter() - run_start))
+                last_console_log_step = steps
 
         final_checkpoint = output / "checkpoint_final.pt"
         final_type = "evaluation_weights"
@@ -775,6 +840,9 @@ def main():
             snapshot | {"environment_steps": steps, "episodes": episodes})
         (output / "summary.json").write_text(
             json.dumps(summary, indent=2), encoding="utf-8")
+        print(
+            f"[DONE] steps={steps} updates={trainer.update_count} "
+            f"episodes={episodes} wall_time={total_wall_time:.1f}s output={output}")
     except Exception:
         failure = {
             "environment_steps": int(steps),
