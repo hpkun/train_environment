@@ -10,6 +10,24 @@ from aircombat_env_v1.simple_hetero_reward import LegacySimpleMAVReward,PaperTab
 from aircombat_env_v1.simple_mappo import MAPPOTrainer,RolloutBuffer,SharedMAPPOActorCritic,SimpleMAPPOAdapter
 import torch
 
+ROLE_IDS=("red_uav_0","red_uav_1","red_mav_0")
+UAV_IDS=("red_uav_0","red_uav_1")
+
+def actual_mav_dense(mav_reward,reward_components):
+    """Return the dense part actually delivered by the active reward mode."""
+    return float(mav_reward)-float(reward_components.get("r_event",0.))
+
+def active_agent_mean_reward(rewards,active):
+    active_count=sum(float(active.get(aid,0.)) for aid in ROLE_IDS)
+    return float(sum(float(rewards.get(aid,0.))*float(active.get(aid,0.)) for aid in ROLE_IDS)/max(active_count,1.))
+
+def accumulate_active_role_returns(role_returns,rewards,active):
+    return {aid:float(role_returns.get(aid,0.))+float(rewards.get(aid,0.))*float(active.get(aid,0.)) for aid in ROLE_IDS}
+
+def mav_abs_reward_fraction(role_returns):
+    denominator=sum(abs(float(role_returns.get(aid,0.))) for aid in ROLE_IDS)
+    return float(abs(float(role_returns.get("red_mav_0",0.)))/denominator) if denominator else 0.0
+
 def aircraft(agent_id,side,role,position,velocity=(1,0,0),alive=True,death_reason=None):
     return SimpleNamespace(agent_id=agent_id,side=side,role=role,position=np.asarray(position,float),velocity=np.asarray(velocity,float),alive=alive,death_reason=death_reason)
 
@@ -61,25 +79,34 @@ def rule_rollout(perception_mode,reward_mode,episodes=2,max_steps=200):
     rows=[]
     for episode in range(min(episodes,2)):
         env=SimpleTAMCombatEnv(HETERO_SCENARIO,max_steps=min(max_steps,200),hetero_perception_mode=perception_mode,hetero_reward_mode=reward_mode);_,info=env.reset(seed=100+episode)
-        returns={aid:0. for aid in env.controlled_ids};safety=support=event=relay=0.;abs_mav_dense=abs_uav_reward=0.
+        returns={aid:0. for aid in ROLE_IDS};safety=support=event=relay=0.;actual_dense_return=training_team_return=0.
+        abs_actual_dense=abs_uav_reward=previous_incorrect_abs_dense=0.
         try:
             for step in range(min(max_steps,200)):
+                active={aid:float(env.by_id[aid].alive) for aid in ROLE_IDS}
                 _,rewards,terminated,truncated,info=env.step(env.build_rule_actions())
-                for aid,value in rewards.items():returns[aid]+=float(value)
+                returns=accumulate_active_role_returns(returns,rewards,active)
+                training_team_return+=active_agent_mean_reward(rewards,active)
                 c=info["reward_components"]["red_mav_0"];safety+=c["r_safety"];support+=c["r_support"];event+=c["r_event"];relay+=info["relay_only_track_count"]
-                abs_mav_dense+=abs(float(c.get("total_dense",c.get("r_safety",0.)+c.get("r_support",0.))))
-                abs_uav_reward+=sum(abs(float(rewards.get(aid,0.))) for aid in ("red_uav_0","red_uav_1"))/2.
+                dense=actual_mav_dense(float(rewards["red_mav_0"])*active["red_mav_0"],c);actual_dense_return+=dense;abs_actual_dense+=abs(dense)
+                previous_incorrect_abs_dense+=abs(float(c.get("r_safety",0.))+float(c.get("r_support",0.)))
+                abs_uav_reward+=sum(abs(float(rewards.get(aid,0.))*active[aid]) for aid in UAV_IDS)/2.
                 if terminated or truncated:break
-            steps=step+1;mav_dense=safety+support;role_sum=sum(returns.values())
-            mean_abs_mav_dense=abs_mav_dense/max(steps,1);mean_abs_uav=abs_uav_reward/max(steps,1)
-            rows.append({"episode":episode,"steps":step+1,"termination_reason":info["termination_reason"],"mav_return":returns["red_mav_0"],
-              "mean_uav_return":float(np.mean([returns["red_uav_0"],returns["red_uav_1"]])),"mav_safety":safety,"mav_support":support,"mav_event":event,
-              "team_return":float(role_sum),"mav_dense_return":float(mav_dense),"mav_event_return":float(event),
-              "mean_abs_mav_dense_per_step":float(mean_abs_mav_dense),"mean_abs_red_uav_reward_per_step":float(mean_abs_uav),
-              "mav_dense_to_uav_reward_scale_ratio":float(mean_abs_mav_dense/mean_abs_uav) if mean_abs_uav>0 else 0.0,
-              "mav_total_reward_fraction_of_role_sum":float(abs(returns["red_mav_0"])/sum(abs(value) for value in returns.values())) if any(returns.values()) else 0.0,
-              "relay_only_accumulated":int(relay),"red_missile_kills":info["red_missile_kills"],"blue_missile_kills":info["blue_missile_kills"],
-              "mav_alive":info["mav_alive"],"numerical_invalid":info["numerical_invalid"],"crash":info["red_crashes"]+info["blue_crashes"],"boundary":info["boundary_deaths"]})
+            steps=step+1;role_sum=sum(returns.values());mean_abs_actual=abs_actual_dense/max(steps,1);mean_abs_uav=abs_uav_reward/max(steps,1)
+            previous_mean_abs=previous_incorrect_abs_dense/max(steps,1)
+            rows.append({"episode":int(episode),"steps":int(steps),"termination_reason":info["termination_reason"],
+              "red_mav_0_return":float(returns["red_mav_0"]),"red_uav_0_return":float(returns["red_uav_0"]),"red_uav_1_return":float(returns["red_uav_1"]),
+              "mean_red_uav_return":float(np.mean([returns["red_uav_0"],returns["red_uav_1"]])),"role_return_sum":float(role_sum),
+              "training_team_return":float(training_team_return),"mav_actual_dense_return":float(actual_dense_return),"mav_event_return":float(event),
+              "mean_abs_mav_actual_dense_per_step":float(mean_abs_actual),"mean_abs_red_uav_reward_per_step":float(mean_abs_uav),
+              "mav_actual_dense_to_uav_reward_scale_ratio":float(mean_abs_actual/mean_abs_uav) if mean_abs_uav>0 else 0.0,
+              "mav_abs_reward_fraction_of_abs_role_sum":mav_abs_reward_fraction(returns),
+              "previous_incorrect_mean_abs_mav_dense_per_step":float(previous_mean_abs),
+              "previous_incorrect_mav_dense_to_uav_reward_scale_ratio":float(previous_mean_abs/mean_abs_uav) if mean_abs_uav>0 else 0.0,
+              "mav_safety":float(safety),"mav_support":float(support),"relay_only_accumulated":int(relay),
+              "red_missile_kills":int(info["red_missile_kills"]),"blue_missile_kills":int(info["blue_missile_kills"]),
+              "mav_alive":bool(info["mav_alive"]),"numerical_invalid":int(info["numerical_invalid"]),
+              "crash":int(info["red_crashes"]+info["blue_crashes"]),"boundary":int(info["boundary_deaths"])})
         finally:env.close()
     return rows
 
@@ -98,7 +125,10 @@ def mappo_smoke(steps=256):
     finally:env.close()
 
 def run_checks():
-    return {"formula":formula_checks(),"support":support_checks(),"event":event_checks(),"reward_mode_comparison":reward_mode_comparison(),
+    return {"metadata":{"training_team_return_definition":"sum of per-step active-agent mean rewards",
+      "role_return_sum_definition":"algebraic sum of accumulated per-role returns",
+      "mav_actual_dense_definition":"actual MAV reward minus MAV event reward"},
+      "formula":formula_checks(),"support":support_checks(),"event":event_checks(),"reward_mode_comparison":reward_mode_comparison(),
       "rule_combinations":{"paper_fused+legacy_v1":rule_rollout("paper_fused","legacy_v1"),
         "paper_fused+paper_table1_v2":rule_rollout("paper_fused","paper_table1_v2"),
         "uav_only_ablation+paper_table1_v2":rule_rollout("uav_only_ablation","paper_table1_v2")},"mappo_smoke_256":mappo_smoke()}

@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 if __package__ in (None,""):sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from aircombat_env_v1.simple_env import SimpleTAMCombatEnv
+from aircombat_env_v1.environment_contract import ENVIRONMENT_CONTRACT_SCHEMA_VERSION
 from aircombat_env_v1.simple_hetero_reward import reward_contract_metadata
 from aircombat_env_v1.simple_mappo import MAPPOTrainer,RolloutBuffer,SharedMAPPOActorCritic,SimpleMAPPOAdapter
 from aircombat_env_v1.scripts.eval_simple_mappo import evaluate_model,resolve_device
@@ -15,7 +16,6 @@ TRAIN_FIELDS=("update","env_steps","episodes_completed","mean_episode_return","m
 EVAL_FIELDS=("env_steps","hetero_perception_mode","hetero_reward_mode","reward_contract_version","mean_return","red_win_rate","blue_win_rate","draw_rate","timeout_rate","mean_episode_length","mav_survival_rate","mean_red_uav_alive","mean_mav_return","mean_red_uav_return","mean_mav_safety_return","mean_mav_support_return","mean_mav_event_return","mean_mav_death_penalty","mean_mav_team_contribution","mean_mav_awareness_return","mean_mav_position_return","mean_mav_dense_return","mean_relay_only_tracks_per_step","fraction_steps_with_mav_support")
 EPISODE_COMPONENT_FIELDS=("episode","env_steps","length","winner","termination_reason","team_return","mav_return","red_uav_0_return","red_uav_1_return","mean_red_uav_return","mav_safety_sum","mav_support_sum","mav_event_sum","mav_event_death_sum","mav_event_team_contribution_sum","mav_awareness_sum","mav_position_sum","mav_dense_sum","red_uav_height_sum","red_uav_speed_sum","red_uav_angle_sum","red_uav_distance_sum","red_uav_dodge_sum","red_uav_event_sum","relay_only_track_steps","mav_support_steps","red_missile_kills","blue_missile_kills","mav_alive","red_uav_alive","numerical_invalid","crashes","boundary_deaths")
 COMPONENT_SUM_FIELDS=EPISODE_COMPONENT_FIELDS[10:26]
-ENVIRONMENT_CONTRACT_SCHEMA_VERSION="1"
 
 def build_environment_contract(args,adapter):
     heterogeneous=args.scenario=="simple_paper_3v2_hetero"

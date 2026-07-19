@@ -5,9 +5,12 @@ from pathlib import Path
 import numpy as np
 if __package__ in (None,""):sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from aircombat_env_v1.simple_env import SimpleTAMCombatEnv
+from aircombat_env_v1.environment_contract import ENVIRONMENT_CONTRACT_SCHEMA_VERSION
 from aircombat_env_v1.simple_hetero_reward import reward_contract_metadata
 from aircombat_env_v1.simple_mappo import SharedMAPPOActorCritic,SimpleMAPPOAdapter
 import torch
+
+SUPPORTED_ENVIRONMENT_CONTRACT_SCHEMA_VERSION=ENVIRONMENT_CONTRACT_SCHEMA_VERSION
 
 def resolve_device(name):return torch.device("cuda" if name=="auto" and torch.cuda.is_available() else "cpu" if name=="auto" else name)
 
@@ -116,7 +119,9 @@ def evaluate_model(model,scenario,episodes,device,deterministic=True,seed=1,retu
 def load_checkpoint(path,scenario,device,hetero_perception_mode="paper_fused",hetero_reward_mode="paper_table1_v2",allow_reward_mode_override=False):
     checkpoint=torch.load(path,map_location=device,weights_only=False)
     contract=checkpoint.get("environment_contract")
-    known=bool(isinstance(contract,dict) and contract.get("environment_contract_schema_version") is not None)
+    known=bool(isinstance(contract,dict) and "environment_contract_schema_version" in contract)
+    if known and contract["environment_contract_schema_version"]!=SUPPORTED_ENVIRONMENT_CONTRACT_SCHEMA_VERSION:
+        raise ValueError(f"unsupported environment_contract_schema_version={contract['environment_contract_schema_version']!r}; supported version is {SUPPORTED_ENVIRONMENT_CONTRACT_SCHEMA_VERSION!r}")
     trained_reward_mode=contract.get("hetero_reward_mode") if isinstance(contract,dict) else None
     trained_reward_version=contract.get("reward_contract_version") if isinstance(contract,dict) else None
     trained_perception_mode=contract.get("hetero_perception_mode") if isinstance(contract,dict) else None

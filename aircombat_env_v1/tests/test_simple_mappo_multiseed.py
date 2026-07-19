@@ -6,6 +6,7 @@ from aircombat_env_v1.scripts import eval_simple_mappo as eval_module
 from aircombat_env_v1.scripts.eval_simple_mappo import evaluate_model
 from aircombat_env_v1.scripts.run_simple_mappo_multiseed import build_parser,classify,experiment_reward_metadata,mean_std,summarize_root
 from aircombat_env_v1.scripts.train_simple_mappo import EPISODE_COMPONENT_FIELDS,EVAL_FIELDS,build_environment_contract,build_episode_component_row,build_parser as build_train_parser,save_checkpoint
+from aircombat_env_v1.environment_contract import ENVIRONMENT_CONTRACT_SCHEMA_VERSION
 from aircombat_env_v1.simple_hetero_reward import reward_contract_metadata
 from aircombat_env_v1.simple_mappo import SharedMAPPOActorCritic
 import torch
@@ -109,6 +110,19 @@ def test_checkpoint_reward_contract_mismatch_rejected_and_override_allowed(tmp_p
     loaded=eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"),hetero_perception_mode="uav_only_ablation",hetero_reward_mode="legacy_v1")
     assert loaded.checkpoint_trained_perception_mode=="paper_fused"
 
+def test_supported_environment_contract_schema_loads(tmp_path):
+    path=_write_checkpoint(tmp_path/"supported.pt",_checkpoint_contract("paper_table1_v2"))
+    loaded=eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"))
+    assert loaded.checkpoint_reward_contract_known is True
+    assert ENVIRONMENT_CONTRACT_SCHEMA_VERSION==eval_module.SUPPORTED_ENVIRONMENT_CONTRACT_SCHEMA_VERSION=="1"
+
+@pytest.mark.parametrize("schema",["2","",1])
+def test_unsupported_environment_contract_schema_is_rejected_before_other_contract_checks(tmp_path,schema):
+    contract=_checkpoint_contract("paper_table1_v2");contract["environment_contract_schema_version"]=schema
+    path=_write_checkpoint(tmp_path/f"schema_{schema!s}.pt",contract)
+    with pytest.raises(ValueError,match=rf"unsupported environment_contract_schema_version={schema!r}; supported version is '1'"):
+        eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"))
+
 def test_checkpoint_rejects_inconsistent_version_and_config(tmp_path):
     contract=_checkpoint_contract();contract["reward_contract_version"]="wrong"
     with pytest.raises(ValueError,match="version are inconsistent"):
@@ -122,6 +136,10 @@ def test_old_checkpoint_contract_remains_unknown_and_loadable(tmp_path):
       "agent_ids":["red_uav_0","red_uav_1","red_mav_0"],"hetero_reward_mode":"legacy_v1"}
     loaded=eval_module.load_checkpoint(_write_checkpoint(tmp_path/"old.pt",old),"simple_paper_3v2_hetero",torch.device("cpu"),hetero_reward_mode="paper_table1_v2")
     assert loaded.checkpoint_reward_contract_known is False and loaded.checkpoint_trained_reward_mode=="legacy_v1"
+
+def test_non_dict_environment_contract_remains_unknown_and_loadable(tmp_path):
+    loaded=eval_module.load_checkpoint(_write_checkpoint(tmp_path/"old_list.pt",[]),"simple_paper_3v2_hetero",torch.device("cpu"))
+    assert loaded.checkpoint_reward_contract_known is False
 
 @pytest.mark.parametrize("scenario",["simple_paper_1v1","simple_paper_2v2"])
 def test_non_heterogeneous_evaluation_does_not_add_role_metrics(monkeypatch,scenario):

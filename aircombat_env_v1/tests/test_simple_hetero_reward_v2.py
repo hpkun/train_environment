@@ -6,6 +6,8 @@ from aircombat_env_v1.simple_env import HETERO_SCENARIO,SimpleTAMCombatEnv
 from aircombat_env_v1.simple_hetero_reward import (LegacySimpleMAVReward,PaperTable1MAVReward,
   MAV_DANGER_DISTANCE_M,MAV_SAFE_DISTANCE_M,MAV_SUPPORT_OPTIMAL_DISTANCE_M,MAV_SUPPORT_MAX_DISTANCE_M,
   build_mav_reward,mav_reward_config,reward_contract_metadata)
+from aircombat_env_v1.scripts.check_simple_hetero_reward import (actual_mav_dense,active_agent_mean_reward,
+  accumulate_active_role_returns,mav_abs_reward_fraction)
 
 def aircraft(agent_id,side,role,position,velocity=(1,0,0),alive=True,death_reason=None):
     return SimpleNamespace(agent_id=agent_id,side=side,role=role,position=np.asarray(position,float),
@@ -35,6 +37,35 @@ def test_legacy_v1_fixed_numeric_regression():
     assert c==pytest.approx({"r_safety_distance":-.4,"r_safety_threat":0.,"r_safety_aspect":-1.,"r_safety":-.4,
       "r_support_position":1.,"r_support_awareness":.3,"r_support":.72,"r_event":0.,"total":3.2})
     assert total==pytest.approx(3.2)
+
+def test_legacy_actual_dense_uses_delivered_reward_minus_event_and_tenfold_scales():
+    components={"r_safety":-.4,"r_support":-.2,"r_event":5.}
+    delivered=10*components["r_safety"]+10*components["r_support"]+components["r_event"]
+    dense=actual_mav_dense(delivered,components)
+    assert dense==pytest.approx(delivered-components["r_event"])
+    assert dense==pytest.approx(10*components["r_safety"]+10*components["r_support"])
+    assert abs(dense)==pytest.approx(10*abs(components["r_safety"]+components["r_support"]))
+
+def test_v2_actual_dense_matches_total_dense_without_diagnostic_change():
+    components={"r_safety":-.4,"r_support":.2,"r_event":100.,"total_dense":-.2}
+    delivered=components["r_safety"]+components["r_support"]+components["r_event"]
+    dense=actual_mav_dense(delivered,components)
+    assert dense==pytest.approx(delivered-components["r_event"])
+    assert dense==pytest.approx(components["r_safety"]+components["r_support"])
+    assert dense==pytest.approx(components["total_dense"])
+
+def test_training_team_return_and_role_sum_have_distinct_active_mask_semantics():
+    returns={aid:0. for aid in ("red_uav_0","red_uav_1","red_mav_0")}
+    first_rewards={"red_uav_0":3.,"red_uav_1":6.,"red_mav_0":9.};first_active={aid:1. for aid in returns}
+    second_rewards={"red_uav_0":4.,"red_uav_1":8.,"red_mav_0":100.};second_active={"red_uav_0":1.,"red_uav_1":1.,"red_mav_0":0.}
+    training_return=active_agent_mean_reward(first_rewards,first_active)+active_agent_mean_reward(second_rewards,second_active)
+    returns=accumulate_active_role_returns(returns,first_rewards,first_active);returns=accumulate_active_role_returns(returns,second_rewards,second_active)
+    assert training_return==pytest.approx(12.)
+    assert sum(returns.values())==pytest.approx(30.) and sum(returns.values())!=training_return
+
+def test_mav_abs_reward_fraction_uses_absolute_role_returns_and_handles_zero():
+    assert mav_abs_reward_fraction({"red_mav_0":-3.,"red_uav_0":4.,"red_uav_1":-5.})==pytest.approx(3/12)
+    assert mav_abs_reward_fraction({"red_mav_0":0.,"red_uav_0":0.,"red_uav_1":0.})==0.
 
 @pytest.mark.parametrize("distance,expected",[(0,-1),(7000,-.5),(13999,-1/14000),(14000,-.5),(21000,-.25),(28000,.2),(30000,.2)])
 def test_distance_reward_all_table1_segments(distance,expected):
