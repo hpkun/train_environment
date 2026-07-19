@@ -12,7 +12,7 @@ from .hetero_perception import HeterogeneousPerceptionSystem,PERCEPTION_MODES
 from .opponent import paper_greedy_action
 from .paper_observation import PaperObservation
 from .paper_reward import PaperReward
-from .simple_hetero_reward import HETERO_REWARD_CONTRACT_VERSION,HETERO_REWARD_MODES,build_mav_reward,mav_reward_config
+from .simple_hetero_reward import HETERO_REWARD_MODES,build_mav_reward,reward_contract_metadata
 from .paper_situation import assess_pair,paper_situation_score
 from .paper_weapon import PaperWeaponManager
 from .pid import PaperAutopilot
@@ -249,6 +249,7 @@ class SimpleTAMCombatEnv(gym.Env):
           "weapon_enabled_agent_ids":None if self.weapon_enabled_agent_ids is None else sorted(self.weapon_enabled_agent_ids)}
         if self.scenario_mode==HETERO_SCENARIO:
             mav=self.by_id["red_mav_0"];uavs=[self.by_id[aid] for aid in ("red_uav_0","red_uav_1")]
+            reward_meta=reward_contract_metadata(self.hetero_reward_mode)
             info.update({"agent_roles":{a.agent_id:a.role for a in self.agents},"mav_alive":mav.alive,
               "red_uav_alive":sum(a.alive for a in uavs),"red_uav_missiles_left":{a.agent_id:a.missile_left for a in uavs},
               "mav_missiles_left":mav.missile_left,"red_team_failed_by_mav_loss":not mav.alive,
@@ -259,8 +260,10 @@ class SimpleTAMCombatEnv(gym.Env):
                 self.perception_result["visible_enemy_ids_by_agent"].get(a.agent_id,[])) for a in uavs},
               "red_uav_launches_using_shared_track":int(self.red_uav_launches_using_shared_track),
               "red_uav_launches_using_direct_track":int(self.red_uav_launches_using_direct_track),
-              "hetero_reward_mode":self.hetero_reward_mode,"hetero_reward_contract_version":HETERO_REWARD_CONTRACT_VERSION,
-              "mav_reward_config":mav_reward_config(),
+              "hetero_reward_mode":self.hetero_reward_mode,
+              "hetero_reward_contract_schema_version":reward_meta["reward_contract_schema_version"],
+              "hetero_reward_contract_version":reward_meta["reward_contract_version"],
+              "mav_reward_config":reward_meta["reward_config"],
               "mav_team_credit_awarded_so_far":float(getattr(self.mav_reward_model,"team_credit_awarded_so_far",0.0)),
               "battlefield_center":getattr(self.mav_reward_model,"last_battlefield_center",None),
               "battlefield_center_distance_m":float(getattr(self.mav_reward_model,"last_battlefield_center_distance_m",0.0))})

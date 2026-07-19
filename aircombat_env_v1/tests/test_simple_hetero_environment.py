@@ -19,7 +19,8 @@ def test_entities_roles_initial_state_and_weapons():
         expected={"red_uav_0":(120.,60.,0.),"red_uav_1":(120.04,60.,0.),"red_mav_0":(120.02,59.98,0.),"blue_0":(120.,60.2,180.),"blue_1":(120.04,60.2,180.)}
         for aid,(lon,lat,heading) in expected.items():
             a=env.by_id[aid];assert a.longitude==lon and a.latitude==lat and a.initial_heading_deg==heading
-            assert abs(a.state["altitude"]-6000)<1 and abs(a.speed-250)<1 and abs(np.rad2deg(a.heading)-heading)<1e-3
+            heading_error=(np.rad2deg(a.heading)-heading+180)%360-180
+            assert abs(a.state["altitude"]-6000)<1 and abs(a.speed-250)<1 and abs(heading_error)<1e-3
         assert env.by_id["red_mav_0"].missile_left==0
         assert all(env.by_id[aid].missile_left==2 for aid in ("red_uav_0","red_uav_1","blue_0","blue_1"))
     finally:env.close()

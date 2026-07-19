@@ -4,8 +4,9 @@ import numpy as np
 import pytest
 from aircombat_env_v1.scripts import eval_simple_mappo as eval_module
 from aircombat_env_v1.scripts.eval_simple_mappo import evaluate_model
-from aircombat_env_v1.scripts.run_simple_mappo_multiseed import build_parser,classify,mean_std,summarize_root
-from aircombat_env_v1.scripts.train_simple_mappo import EPISODE_COMPONENT_FIELDS,build_parser as build_train_parser
+from aircombat_env_v1.scripts.run_simple_mappo_multiseed import build_parser,classify,experiment_reward_metadata,mean_std,summarize_root
+from aircombat_env_v1.scripts.train_simple_mappo import EPISODE_COMPONENT_FIELDS,EVAL_FIELDS,build_environment_contract,build_episode_component_row,build_parser as build_train_parser,save_checkpoint
+from aircombat_env_v1.simple_hetero_reward import reward_contract_metadata
 from aircombat_env_v1.simple_mappo import SharedMAPPOActorCritic
 import torch
 
@@ -71,7 +72,11 @@ def test_3v2_role_metrics_exist_with_native_types(monkeypatch):
     for key in ("mean_mav_return","mean_red_uav_return","mean_mav_safety_return","mean_mav_support_return","mean_mav_event_return",
       "mean_mav_death_penalty","mean_mav_team_contribution","mean_mav_awareness_return","mean_mav_position_return","mean_mav_dense_return"):
         assert type(result[key]) is float
-    assert result["hetero_reward_mode"]=="paper_table1_v2" and result["checkpoint_reward_contract_known"] is False
+    assert result["hetero_perception_mode"]=="paper_fused" and result["hetero_reward_mode"]=="paper_table1_v2"
+    assert result["reward_contract_schema_version"]=="1" and result["reward_contract_version"]=="paper_table1_mav_reward_v2"
+    assert result["checkpoint_reward_contract_known"] is False
+    for key in ("checkpoint_trained_perception_mode","checkpoint_trained_reward_mode","checkpoint_trained_reward_contract_version"):
+        assert result[key] is None
 
 def test_heterogeneous_checkpoint_shape_is_valid_in_both_perception_modes(tmp_path):
     model=SharedMAPPOActorCritic(81,243);path=tmp_path/"checkpoint.pt"
@@ -81,16 +86,42 @@ def test_heterogeneous_checkpoint_shape_is_valid_in_both_perception_modes(tmp_pa
         loaded=eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"),mode)
         assert loaded.obs_dim==81 and loaded.state_dim==243 and loaded.checkpoint_reward_contract_known is False
 
-def test_checkpoint_reward_contract_mismatch_rejected_and_override_allowed(tmp_path):
-    model=SharedMAPPOActorCritic(81,243);path=tmp_path/"checkpoint.pt"
+def _checkpoint_contract(mode="legacy_v1"):
+    meta=reward_contract_metadata(mode)
+    return {"environment_contract_schema_version":"1","scenario":"simple_paper_3v2_hetero","obs_dim":81,"state_dim":243,"action_dim":3,
+      "agent_ids":["red_uav_0","red_uav_1","red_mav_0"],"hetero_perception_mode":"paper_fused","hetero_reward_mode":mode,
+      "reward_contract_schema_version":meta["reward_contract_schema_version"],"reward_contract_version":meta["reward_contract_version"],"reward_config":meta["reward_config"]}
+
+def _write_checkpoint(path,contract):
+    model=SharedMAPPOActorCritic(81,243)
     torch.save({"scenario":"simple_paper_3v2_hetero","obs_dim":81,"state_dim":243,"action_dim":3,
       "agent_ids":["red_uav_0","red_uav_1","red_mav_0"],"model_state_dict":model.state_dict(),
-      "environment_contract":{"scenario":"simple_paper_3v2_hetero","obs_dim":81,"state_dim":243,"action_dim":3,
-        "agent_ids":["red_uav_0","red_uav_1","red_mav_0"],"hetero_reward_mode":"legacy_v1"}},path)
+      "environment_contract":contract},path)
+    return path
+
+def test_checkpoint_reward_contract_mismatch_rejected_and_override_allowed(tmp_path):
+    path=_write_checkpoint(tmp_path/"checkpoint.pt",_checkpoint_contract("legacy_v1"))
     with pytest.raises(ValueError,match="does not match checkpoint"):
         eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"),hetero_reward_mode="paper_table1_v2")
     loaded=eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"),hetero_reward_mode="paper_table1_v2",allow_reward_mode_override=True)
-    assert loaded.checkpoint_reward_contract_known is True
+    assert loaded.checkpoint_reward_contract_known is True and loaded.checkpoint_trained_reward_mode=="legacy_v1"
+    assert loaded.checkpoint_trained_reward_contract_version=="legacy_mav_reward_v1"
+    loaded=eval_module.load_checkpoint(path,"simple_paper_3v2_hetero",torch.device("cpu"),hetero_perception_mode="uav_only_ablation",hetero_reward_mode="legacy_v1")
+    assert loaded.checkpoint_trained_perception_mode=="paper_fused"
+
+def test_checkpoint_rejects_inconsistent_version_and_config(tmp_path):
+    contract=_checkpoint_contract();contract["reward_contract_version"]="wrong"
+    with pytest.raises(ValueError,match="version are inconsistent"):
+        eval_module.load_checkpoint(_write_checkpoint(tmp_path/"version.pt",contract),"simple_paper_3v2_hetero",torch.device("cpu"),hetero_reward_mode="legacy_v1")
+    contract=_checkpoint_contract();contract["reward_config"]={"wrong":True}
+    with pytest.raises(ValueError,match="reward_config"):
+        eval_module.load_checkpoint(_write_checkpoint(tmp_path/"config.pt",contract),"simple_paper_3v2_hetero",torch.device("cpu"),hetero_reward_mode="legacy_v1")
+
+def test_old_checkpoint_contract_remains_unknown_and_loadable(tmp_path):
+    old={"scenario":"simple_paper_3v2_hetero","obs_dim":81,"state_dim":243,"action_dim":3,
+      "agent_ids":["red_uav_0","red_uav_1","red_mav_0"],"hetero_reward_mode":"legacy_v1"}
+    loaded=eval_module.load_checkpoint(_write_checkpoint(tmp_path/"old.pt",old),"simple_paper_3v2_hetero",torch.device("cpu"),hetero_reward_mode="paper_table1_v2")
+    assert loaded.checkpoint_reward_contract_known is False and loaded.checkpoint_trained_reward_mode=="legacy_v1"
 
 @pytest.mark.parametrize("scenario",["simple_paper_1v1","simple_paper_2v2"])
 def test_non_heterogeneous_evaluation_does_not_add_role_metrics(monkeypatch,scenario):
@@ -132,7 +163,9 @@ def test_training_saves_initial_checkpoint_at_zero_steps(tmp_path):
     subprocess.run([sys.executable,str(script),"--scenario","simple_paper_1v1","--total-env-steps","0","--eval-episodes","1","--output-dir",str(output)],check=True,capture_output=True,text=True)
     checkpoint=torch.load(output/"initial.pt",map_location="cpu",weights_only=False)
     assert checkpoint["env_steps"]==0 and checkpoint["training_args"]["scenario"]=="simple_paper_1v1" and "model_state_dict" in checkpoint
-    assert checkpoint["environment_contract"]["reward_contract_version"]=="heterogeneous_reward_v2"
+    assert checkpoint["environment_contract"]["hetero_reward_mode"] is None
+    assert checkpoint["environment_contract"]["reward_contract_version"] is None
+    assert checkpoint["environment_contract"]["reward_config"] is None
     with (output/"episode_reward_components.csv").open(encoding="utf-8") as handle:
         assert tuple(handle.readline().strip().split(","))==EPISODE_COMPONENT_FIELDS
 
@@ -157,6 +190,7 @@ def test_summary_reads_minimal_fake_directory_and_writes_outputs(tmp_path):
     make_fake_root(tmp_path,[seed_row(1),seed_row(2),seed_row(3)])
     summary=summarize_root(tmp_path)
     assert summary["aggregate"]["completed_seed_count"]==3
+    assert summary["hetero_reward_mode"] is None and summary["reward_contract_version"] is None
     assert (tmp_path/"multiseed_summary.json").exists() and (tmp_path/"multiseed_summary.csv").exists() and (tmp_path/"multiseed_report.md").exists()
 
 def test_mean_std_uses_sample_standard_deviation():
@@ -188,3 +222,49 @@ def test_abcd_criteria_apply_exact_cross_seed_thresholds():
     assert classify(passing)=={"A_stable":True,"B_learning_signal":True,"C_stochastic_robustness":True,"D_latest_retention":True,"best_improved_seed_count":3,"best_stochastic_improved_seed_count":3,"latest_improved_seed_count":2}
     one_seed_only=[seed_row(1),seed_row(2,best=-12.,latest=-12.,stochastic_best=-12.),seed_row(3,best=-12.,latest=-12.,stochastic_best=-12.)]
     result=classify(one_seed_only);assert not result["B_learning_signal"] and not result["C_stochastic_robustness"] and not result["D_latest_retention"]
+
+def test_environment_contract_and_multiseed_metadata_are_mode_specific():
+    adapter=type("Adapter",(),{"obs_dim":81,"state_dim":243,"action_dim":3,"agent_ids":["a","b","c"]})()
+    args=type("Args",(),{"scenario":"simple_paper_3v2_hetero","hetero_perception_mode":"paper_fused","hetero_reward_mode":"legacy_v1"})()
+    contract=build_environment_contract(args,adapter)
+    assert contract["reward_contract_version"]=="legacy_mav_reward_v1" and contract["reward_config"]["mav_danger_distance_m"]==5000
+    assert experiment_reward_metadata("simple_paper_3v2_hetero","paper_table1_v2")["reward_contract_version"]=="paper_table1_mav_reward_v2"
+    for scenario in ("simple_paper_1v1","simple_paper_2v2"):
+        meta=experiment_reward_metadata(scenario,"paper_table1_v2")
+        assert meta["hetero_reward_mode"] is None and meta["reward_contract_version"] is None and meta["reward_config"] is None
+
+def test_heterogeneous_multiseed_summary_uses_requested_reward_contract(tmp_path):
+    make_fake_root(tmp_path,[seed_row(1)])
+    summary=summarize_root(tmp_path,(1,),"simple_paper_3v2_hetero","paper_fused","legacy_v1")
+    assert summary["reward_contract_schema_version"]=="1"
+    assert summary["reward_contract_version"]=="legacy_mav_reward_v1"
+    assert summary["reward_config"]==reward_contract_metadata("legacy_v1")["reward_config"]
+
+@pytest.mark.parametrize("mode,version",[("legacy_v1","legacy_mav_reward_v1"),("paper_table1_v2","paper_table1_mav_reward_v2")])
+def test_saved_heterogeneous_checkpoint_uses_mode_contract(tmp_path,mode,version):
+    adapter=type("Adapter",(),{"obs_dim":81,"state_dim":243,"action_dim":3,"agent_ids":["red_uav_0","red_uav_1","red_mav_0"]})()
+    args=type("Args",(),{"scenario":"simple_paper_3v2_hetero","hetero_perception_mode":"paper_fused","hetero_reward_mode":mode})()
+    path=tmp_path/f"{mode}.pt";save_checkpoint(path,SharedMAPPOActorCritic(81,243),adapter,args,0)
+    contract=torch.load(path,map_location="cpu",weights_only=False)["environment_contract"]
+    assert contract["reward_contract_version"]==version and contract["reward_config"]==reward_contract_metadata(mode)["reward_config"]
+
+def test_episode_component_rows_are_isolated_csv_serializable_and_header_complete():
+    import csv,io
+    info={"winner":"red","termination_reason":"blue_eliminated","red_missile_kills":1,"blue_missile_kills":0,
+      "mav_alive":True,"red_uav_alive":2,"numerical_invalid":0,"red_crashes":0,"blue_crashes":0,"boundary_deaths":0}
+    first=build_episode_component_row(1,10,10,info,5.,{"red_mav_0":1.,"red_uav_0":2.,"red_uav_1":3.},{"mav_safety_sum":7.,"relay_only_track_steps":4.},"simple_paper_3v2_hetero")
+    second=build_episode_component_row(2,20,10,info,-1.,{"red_mav_0":-2.,"red_uav_0":0.,"red_uav_1":0.},{"mav_support_sum":9.},"simple_paper_3v2_hetero")
+    assert first["episode"]==1 and second["episode"]==2
+    assert first["mav_return"]==1 and second["mav_return"]==-2
+    assert first["mav_safety_sum"]==7 and second["mav_safety_sum"]==0
+    assert first["relay_only_track_steps"]==4 and second["relay_only_track_steps"]==0
+    assert second["mav_support_sum"]==9 and set(first)==set(second)==set(EPISODE_COMPONENT_FIELDS)
+    stream=io.StringIO();writer=csv.DictWriter(stream,fieldnames=EPISODE_COMPONENT_FIELDS);writer.writeheader();writer.writerows([first,second])
+    assert len(list(csv.DictReader(io.StringIO(stream.getvalue()))))==2
+
+def test_eval_fields_include_heterogeneous_periodic_diagnostics():
+    for key in ("hetero_perception_mode","hetero_reward_mode","reward_contract_version","mav_survival_rate","mean_red_uav_alive",
+      "mean_mav_return","mean_red_uav_return","mean_mav_safety_return","mean_mav_support_return","mean_mav_event_return",
+      "mean_mav_death_penalty","mean_mav_team_contribution","mean_mav_awareness_return","mean_mav_position_return",
+      "mean_mav_dense_return","mean_relay_only_tracks_per_step","fraction_steps_with_mav_support"):
+        assert key in EVAL_FIELDS

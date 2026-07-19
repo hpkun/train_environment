@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 if __package__ in (None,""):sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from aircombat_env_v1.simple_env import SimpleTAMCombatEnv
+from aircombat_env_v1.simple_hetero_reward import reward_contract_metadata
 from aircombat_env_v1.simple_mappo import SharedMAPPOActorCritic,SimpleMAPPOAdapter
 import torch
 
@@ -79,6 +80,7 @@ def evaluate_model(model,scenario,episodes,device,deterministic=True,seed=1,retu
         if scenario=="simple_paper_3v2_hetero":
             total_steps=max(sum(r["length"] for r in rows),1);uav_observation_slots=max(2*total_steps,1)
             target_selection_count=max(sum(r["uav_target_selections"] for r in rows),1)
+            reward_meta=reward_contract_metadata(hetero_reward_mode)
             result.update({"mav_survival_rate":float(sum(r["mav_alive"] for r in rows)/n),
               "mean_red_uav_alive":float(np.mean([r["red_uav_alive"] for r in rows])),
               "mav_loss_rate":float(sum(r["mav_lost"] for r in rows)/n),
@@ -93,8 +95,13 @@ def evaluate_model(model,scenario,episodes,device,deterministic=True,seed=1,retu
               "mean_visible_enemies_per_red_uav":float(sum(r["visible_enemy_observations"] for r in rows)/uav_observation_slots),
               "mean_direct_enemies_per_red_uav":float(sum(r["direct_enemy_observations"] for r in rows)/uav_observation_slots),
               "mean_shared_enemies_per_red_uav":float(sum(r["shared_enemy_observations"] for r in rows)/uav_observation_slots),
-              "hetero_reward_mode":hetero_reward_mode,"reward_contract_version":"heterogeneous_reward_v2",
+              "hetero_perception_mode":hetero_perception_mode,"hetero_reward_mode":hetero_reward_mode,
+              "reward_contract_schema_version":reward_meta["reward_contract_schema_version"],
+              "reward_contract_version":reward_meta["reward_contract_version"],
               "checkpoint_reward_contract_known":bool(getattr(model,"checkpoint_reward_contract_known",False)),
+              "checkpoint_trained_perception_mode":getattr(model,"checkpoint_trained_perception_mode",None),
+              "checkpoint_trained_reward_mode":getattr(model,"checkpoint_trained_reward_mode",None),
+              "checkpoint_trained_reward_contract_version":getattr(model,"checkpoint_trained_reward_contract_version",None),
               "mean_mav_return":float(np.mean([r["mav_return"] for r in rows])),"mean_red_uav_return":float(np.mean([r["mean_red_uav_return"] for r in rows])),
               "mean_mav_safety_return":float(np.mean([r["mav_safety_return"] for r in rows])),"mean_mav_support_return":float(np.mean([r["mav_support_return"] for r in rows])),
               "mean_mav_event_return":float(np.mean([r["mav_event_return"] for r in rows])),"mean_mav_death_penalty":float(np.mean([r["mav_death_penalty"] for r in rows])),
@@ -108,9 +115,22 @@ def evaluate_model(model,scenario,episodes,device,deterministic=True,seed=1,retu
 
 def load_checkpoint(path,scenario,device,hetero_perception_mode="paper_fused",hetero_reward_mode="paper_table1_v2",allow_reward_mode_override=False):
     checkpoint=torch.load(path,map_location=device,weights_only=False)
-    contract=checkpoint.get("environment_contract");known=contract is not None
-    if known and contract.get("hetero_reward_mode")!=hetero_reward_mode and not allow_reward_mode_override:
-        raise ValueError(f"requested hetero_reward_mode={hetero_reward_mode!r} does not match checkpoint reward mode {contract.get('hetero_reward_mode')!r}")
+    contract=checkpoint.get("environment_contract")
+    known=bool(isinstance(contract,dict) and contract.get("environment_contract_schema_version") is not None)
+    trained_reward_mode=contract.get("hetero_reward_mode") if isinstance(contract,dict) else None
+    trained_reward_version=contract.get("reward_contract_version") if isinstance(contract,dict) else None
+    trained_perception_mode=contract.get("hetero_perception_mode") if isinstance(contract,dict) else None
+    if known and scenario=="simple_paper_3v2_hetero":
+        try:trained_meta=reward_contract_metadata(trained_reward_mode)
+        except ValueError as exc:raise ValueError(f"checkpoint reward mode is invalid: {trained_reward_mode!r}") from exc
+        if trained_reward_version!=trained_meta["reward_contract_version"]:
+            raise ValueError("checkpoint reward mode and reward_contract_version are inconsistent")
+        if contract.get("reward_contract_schema_version")!=trained_meta["reward_contract_schema_version"]:
+            raise ValueError("checkpoint reward_contract_schema_version is inconsistent")
+        if contract.get("reward_config")!=trained_meta["reward_config"]:
+            raise ValueError("checkpoint reward_config does not match the current reward mode contract")
+        if trained_reward_mode!=hetero_reward_mode and not allow_reward_mode_override:
+            raise ValueError(f"requested hetero_reward_mode={hetero_reward_mode!r} does not match checkpoint reward mode {trained_reward_mode!r}")
     env=SimpleTAMCombatEnv(scenario,hetero_perception_mode=hetero_perception_mode,hetero_reward_mode=hetero_reward_mode) if scenario=="simple_paper_3v2_hetero" else SimpleTAMCombatEnv(scenario)
     adapter=SimpleMAPPOAdapter(env);env.close()
     expected={"scenario":scenario,"obs_dim":adapter.obs_dim,"state_dim":adapter.state_dim,"action_dim":adapter.action_dim}
@@ -122,7 +142,11 @@ def load_checkpoint(path,scenario,device,hetero_perception_mode="paper_fused",he
             if contract.get(key)!=value:raise ValueError(f"checkpoint environment_contract {key}={contract.get(key)!r} does not match expected {value!r}")
         if list(contract.get("agent_ids",[]))!=adapter.agent_ids:raise ValueError("checkpoint environment_contract agent_ids/num_agents mismatch")
     model=SharedMAPPOActorCritic(adapter.obs_dim,adapter.state_dim,adapter.action_dim).to(device);model.load_state_dict(checkpoint["model_state_dict"]);model.eval()
-    model.checkpoint_reward_contract_known=bool(known);model.checkpoint_environment_contract=contract
+    model.checkpoint_reward_contract_known=bool(known)
+    model.checkpoint_trained_reward_mode=trained_reward_mode
+    model.checkpoint_trained_reward_contract_version=trained_reward_version
+    model.checkpoint_trained_perception_mode=trained_perception_mode
+    model.checkpoint_environment_contract=contract
     return model
 
 def main():

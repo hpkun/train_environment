@@ -61,15 +61,23 @@ def rule_rollout(perception_mode,reward_mode,episodes=2,max_steps=200):
     rows=[]
     for episode in range(min(episodes,2)):
         env=SimpleTAMCombatEnv(HETERO_SCENARIO,max_steps=min(max_steps,200),hetero_perception_mode=perception_mode,hetero_reward_mode=reward_mode);_,info=env.reset(seed=100+episode)
-        returns={aid:0. for aid in env.controlled_ids};safety=support=event=relay=0.
+        returns={aid:0. for aid in env.controlled_ids};safety=support=event=relay=0.;abs_mav_dense=abs_uav_reward=0.
         try:
             for step in range(min(max_steps,200)):
                 _,rewards,terminated,truncated,info=env.step(env.build_rule_actions())
                 for aid,value in rewards.items():returns[aid]+=float(value)
                 c=info["reward_components"]["red_mav_0"];safety+=c["r_safety"];support+=c["r_support"];event+=c["r_event"];relay+=info["relay_only_track_count"]
+                abs_mav_dense+=abs(float(c.get("total_dense",c.get("r_safety",0.)+c.get("r_support",0.))))
+                abs_uav_reward+=sum(abs(float(rewards.get(aid,0.))) for aid in ("red_uav_0","red_uav_1"))/2.
                 if terminated or truncated:break
+            steps=step+1;mav_dense=safety+support;role_sum=sum(returns.values())
+            mean_abs_mav_dense=abs_mav_dense/max(steps,1);mean_abs_uav=abs_uav_reward/max(steps,1)
             rows.append({"episode":episode,"steps":step+1,"termination_reason":info["termination_reason"],"mav_return":returns["red_mav_0"],
               "mean_uav_return":float(np.mean([returns["red_uav_0"],returns["red_uav_1"]])),"mav_safety":safety,"mav_support":support,"mav_event":event,
+              "team_return":float(role_sum),"mav_dense_return":float(mav_dense),"mav_event_return":float(event),
+              "mean_abs_mav_dense_per_step":float(mean_abs_mav_dense),"mean_abs_red_uav_reward_per_step":float(mean_abs_uav),
+              "mav_dense_to_uav_reward_scale_ratio":float(mean_abs_mav_dense/mean_abs_uav) if mean_abs_uav>0 else 0.0,
+              "mav_total_reward_fraction_of_role_sum":float(abs(returns["red_mav_0"])/sum(abs(value) for value in returns.values())) if any(returns.values()) else 0.0,
               "relay_only_accumulated":int(relay),"red_missile_kills":info["red_missile_kills"],"blue_missile_kills":info["blue_missile_kills"],
               "mav_alive":info["mav_alive"],"numerical_invalid":info["numerical_invalid"],"crash":info["red_crashes"]+info["blue_crashes"],"boundary":info["boundary_deaths"]})
         finally:env.close()

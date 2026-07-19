@@ -5,12 +5,22 @@ from pathlib import Path
 
 if __package__ in (None,""):sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from aircombat_env_v1.scripts.eval_simple_mappo import evaluate_model,load_checkpoint,resolve_device
+from aircombat_env_v1.simple_hetero_reward import reward_contract_metadata
 
 DEFAULT_SCENARIO="simple_paper_1v1"
 DEFAULT_SEEDS=(1,2,3)
 CHECKPOINTS=("initial","best","latest")
 ROOT=Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT=ROOT/"aircombat_env_v1"/"outputs"/"simple_mappo_1v1_multiseed_100k"
+
+def experiment_reward_metadata(scenario,reward_mode):
+    if scenario!="simple_paper_3v2_hetero":
+        return {"hetero_reward_mode":None,"reward_contract_schema_version":None,
+          "reward_contract_version":None,"reward_config":None}
+    meta=reward_contract_metadata(reward_mode)
+    return {"hetero_reward_mode":reward_mode,
+      "reward_contract_schema_version":meta["reward_contract_schema_version"],
+      "reward_contract_version":meta["reward_contract_version"],"reward_config":meta["reward_config"]}
 
 def read_csv(path):
     if not path.exists():return []
@@ -127,8 +137,9 @@ def add_required_aliases(row):
 
 def write_summary(output,rows,scenario=DEFAULT_SCENARIO,expected_seeds=DEFAULT_SEEDS,hetero_perception_mode="paper_fused",hetero_reward_mode="paper_table1_v2"):
     output.mkdir(parents=True,exist_ok=True);rows=[add_required_aliases(dict(row)) for row in rows]
-    summary={"scenario":scenario,"hetero_perception_mode":hetero_perception_mode,"hetero_reward_mode":hetero_reward_mode,
-      "reward_contract_version":"heterogeneous_reward_v2","expected_seeds":list(expected_seeds),"seeds":rows,"aggregate":aggregate(rows),"criteria":classify(rows)}
+    reward_meta=experiment_reward_metadata(scenario,hetero_reward_mode)
+    summary={"scenario":scenario,"hetero_perception_mode":hetero_perception_mode if scenario=="simple_paper_3v2_hetero" else None,
+      **reward_meta,"expected_seeds":list(expected_seeds),"seeds":rows,"aggregate":aggregate(rows),"criteria":classify(rows)}
     (output/"multiseed_summary.json").write_text(json.dumps(summary,indent=2),encoding="utf-8")
     flat_keys=("seed","completed","finite","training_seconds","env_steps","updates","episodes_completed","initial_deterministic_return","best_deterministic_return","latest_deterministic_return","best_checkpoint_env_steps","best_return_improvement","latest_return_improvement","initial_stochastic_return_mean","best_stochastic_return_mean","latest_stochastic_return_mean","initial_stochastic_red_win_rate","best_stochastic_red_win_rate","latest_stochastic_red_win_rate","initial_stochastic_mean_red_alive","best_stochastic_mean_red_alive","latest_stochastic_mean_red_alive","initial_stochastic_mean_blue_alive","best_stochastic_mean_blue_alive","latest_stochastic_mean_blue_alive","checkpoint_numerical_invalid_episodes","crash_count","boundary_death_count","envelope_violation_count","recent_train_numerical_invalid_episodes")
     with (output/"multiseed_summary.csv").open("w",newline="",encoding="utf-8") as handle:
@@ -175,7 +186,8 @@ def main():
         except Exception as exc:
             row={"seed":seed,"completed":False,"finite":False,"failure":f"{type(exc).__name__}: {exc}"}
             print(f"[seed {seed}] FAILED: {row['failure']}",flush=True)
-        row.update({"scenario":args.scenario,"hetero_perception_mode":args.hetero_perception_mode,"hetero_reward_mode":args.hetero_reward_mode,"reward_contract_version":"heterogeneous_reward_v2"})
+        reward_meta=experiment_reward_metadata(args.scenario,args.hetero_reward_mode)
+        row.update({"scenario":args.scenario,"hetero_perception_mode":args.hetero_perception_mode if args.scenario=="simple_paper_3v2_hetero" else None,**reward_meta})
         (seed_dir/"seed_summary.json").write_text(json.dumps(row,indent=2),encoding="utf-8")
     summary=summarize_root(output,args.seeds,args.scenario,args.hetero_perception_mode,args.hetero_reward_mode);print(json.dumps(summary["criteria"],indent=2),flush=True)
 

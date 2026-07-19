@@ -18,7 +18,11 @@ MAV_DEATH_COST=200.0
 MAV_TEAM_KILL_CREDIT=100.0
 MAV_TEAM_CREDIT_CAP=200.0
 HETERO_REWARD_MODES=("legacy_v1","paper_table1_v2")
-HETERO_REWARD_CONTRACT_VERSION="heterogeneous_reward_v2"
+REWARD_CONTRACT_SCHEMA_VERSION="1"
+REWARD_CONTRACT_VERSIONS={
+    "legacy_v1":"legacy_mav_reward_v1",
+    "paper_table1_v2":"paper_table1_mav_reward_v2",
+}
 
 def _angle(a,b):
     return float(np.arccos(np.clip(np.dot(a,b)/max(float(np.linalg.norm(a)*np.linalg.norm(b)),1e-8),-1.,1.)))
@@ -99,7 +103,7 @@ class PaperTable1MAVReward:
 
     @staticmethod
     def battlefield_center(agents):
-        entities=[a for a in agents if a.alive and ((a.side=="red" and a.role=="uav") or a.side=="blue")]
+        entities=[a for a in agents if a.alive and a.role=="uav" and a.side in ("red","blue")]
         return None if not entities else np.mean([a.position for a in entities],axis=0)
 
     def compute(self,mav,agents,missiles,events,alive_start,out_of_zone,perception_result=None):
@@ -130,7 +134,10 @@ class PaperTable1MAVReward:
         valid_kills=0
         for event in events:
             shooter=by_id.get(event.get("shooter_id"));target=by_id.get(event.get("target_id"))
-            if event.get("reason")=="hit" and shooter is not None and target is not None and shooter.side=="red" and shooter.role=="uav" and target.side=="blue":valid_kills+=1
+            if (event.get("reason")=="hit" and shooter is not None and target is not None and
+                shooter.side=="red" and shooter.role=="uav" and
+                target.side=="blue" and target.role=="uav"):
+                valid_kills+=1
         available=max(MAV_TEAM_CREDIT_CAP-self.team_credit_awarded_so_far,0.0)
         r_team=float(min(MAV_TEAM_KILL_CREDIT*valid_kills,available));self.team_credit_awarded_so_far+=r_team
         r_event=r_death+r_team;total_dense=r_safety+r_support;total=total_dense+r_event
@@ -153,7 +160,25 @@ def build_mav_reward(mode):
     if mode=="paper_table1_v2":return PaperTable1MAVReward()
     raise ValueError(f"hetero_reward_mode must be one of {HETERO_REWARD_MODES}")
 
-def mav_reward_config():
-    return {"mav_danger_distance_m":MAV_DANGER_DISTANCE_M,"mav_safe_distance_m":MAV_SAFE_DISTANCE_M,
-      "mav_support_optimal_distance_m":MAV_SUPPORT_OPTIMAL_DISTANCE_M,"mav_support_max_distance_m":MAV_SUPPORT_MAX_DISTANCE_M,
-      "mav_death_cost":MAV_DEATH_COST,"mav_team_kill_credit":MAV_TEAM_KILL_CREDIT,"mav_team_credit_cap":MAV_TEAM_CREDIT_CAP}
+def mav_reward_config(mode):
+    if mode=="legacy_v1":
+        return {"mav_danger_distance_m":D_DANGER_M,"mav_safe_distance_m":D_SAFE_M,
+          "mav_support_optimal_distance_m":D_OPT_M,"mav_support_max_distance_m":D_SUPPORT_MAX_M,
+          "aspect_aggregation":"min","awareness_aggregation":"max",
+          "safety_top_level_scale":10.0,"support_top_level_scale":10.0,
+          "boundary_extra_penalty":-100.0,"mav_death_cost":200.0,
+          "mav_team_kill_credit":100.0,"mav_team_credit_cap":200.0}
+    if mode=="paper_table1_v2":
+        return {"mav_danger_distance_m":MAV_DANGER_DISTANCE_M,"mav_safe_distance_m":MAV_SAFE_DISTANCE_M,
+          "mav_support_optimal_distance_m":MAV_SUPPORT_OPTIMAL_DISTANCE_M,"mav_support_max_distance_m":MAV_SUPPORT_MAX_DISTANCE_M,
+          "aspect_aggregation":"sum","awareness_aggregation":"sum",
+          "safety_top_level_scale":1.0,"support_top_level_scale":1.0,
+          "boundary_extra_penalty":0.0,"mav_death_cost":MAV_DEATH_COST,
+          "mav_team_kill_credit":MAV_TEAM_KILL_CREDIT,"mav_team_credit_cap":MAV_TEAM_CREDIT_CAP}
+    raise ValueError(f"hetero_reward_mode must be one of {HETERO_REWARD_MODES}")
+
+def reward_contract_metadata(mode):
+    if mode not in REWARD_CONTRACT_VERSIONS:
+        raise ValueError(f"hetero_reward_mode must be one of {HETERO_REWARD_MODES}")
+    return {"reward_mode":mode,"reward_contract_schema_version":REWARD_CONTRACT_SCHEMA_VERSION,
+      "reward_contract_version":REWARD_CONTRACT_VERSIONS[mode],"reward_config":mav_reward_config(mode)}

@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 from aircombat_env_v1.simple_env import HETERO_SCENARIO,SimpleTAMCombatEnv
 from aircombat_env_v1.simple_hetero_reward import (LegacySimpleMAVReward,PaperTable1MAVReward,
-  MAV_DANGER_DISTANCE_M,MAV_SAFE_DISTANCE_M,MAV_SUPPORT_OPTIMAL_DISTANCE_M,MAV_SUPPORT_MAX_DISTANCE_M,build_mav_reward)
+  MAV_DANGER_DISTANCE_M,MAV_SAFE_DISTANCE_M,MAV_SUPPORT_OPTIMAL_DISTANCE_M,MAV_SUPPORT_MAX_DISTANCE_M,
+  build_mav_reward,mav_reward_config,reward_contract_metadata)
 
 def aircraft(agent_id,side,role,position,velocity=(1,0,0),alive=True,death_reason=None):
     return SimpleNamespace(agent_id=agent_id,side=side,role=role,position=np.asarray(position,float),
@@ -57,6 +58,11 @@ def test_battlefield_center_uses_alive_combatants_and_excludes_mav():
     for a in agents[1:]:a.alive=False
     assert PaperTable1MAVReward.battlefield_center(agents) is None
 
+def test_battlefield_center_excludes_blue_mav_and_future_roles():
+    agents=[aircraft("red_uav_0","red","uav",(0,0,0)),aircraft("blue_0","blue","uav",(4,0,0)),
+      aircraft("blue_mav_0","blue","mav",(100,0,0)),aircraft("blue_other","blue","support",(200,0,0))]
+    assert np.array_equal(PaperTable1MAVReward.battlefield_center(agents),[2,0,0])
+
 def test_awareness_sums_detected_targets_and_relay_is_diagnostic_only():
     mav=aircraft("red_mav_0","red","mav",(0,0,0),(1,0,0));blue0=aircraft("blue_0","blue","uav",(1000,0,0));blue1=aircraft("blue_1","blue","uav",(2000,0,0));agents=[mav,blue0,blue1]
     reward=PaperTable1MAVReward();_,none=compute(reward,mav,agents,perception={"mav_detected_enemy_ids":[]})
@@ -76,6 +82,36 @@ def test_event_team_credit_cap_reset_and_event_filtering():
     assert compute(reward,mav,agents,events=[hit()])[1]["r_event_team_contribution"]==0
     reward.reset();assert reward.team_credit_awarded_so_far==0
     assert compute(reward,mav,agents,events=[hit(reason="miss"),hit("blue_0","red_uav_0")])[1]["r_event_team_contribution"]==0
+
+def test_team_credit_requires_blue_uav_but_not_surviving_shooter():
+    mav=aircraft("red_mav_0","red","mav",(0,0,0));red=aircraft("red_uav_0","red","uav",(0,0,0),alive=False)
+    blue_uav=aircraft("blue_0","blue","uav",(0,0,0),alive=False);blue_mav=aircraft("blue_mav_0","blue","mav",(0,0,0),alive=False)
+    reward=PaperTable1MAVReward();agents=[mav,red,blue_uav,blue_mav]
+    assert compute(reward,mav,agents,events=[hit(target="blue_mav_0")])[1]["r_event_team_contribution"]==0
+    assert compute(reward,mav,agents,events=[hit(target="blue_0")])[1]["r_event_team_contribution"]==100
+
+def test_reward_contract_metadata_is_mode_specific():
+    legacy=reward_contract_metadata("legacy_v1");paper=reward_contract_metadata("paper_table1_v2")
+    assert legacy["reward_contract_version"]=="legacy_mav_reward_v1"
+    assert paper["reward_contract_version"]=="paper_table1_mav_reward_v2"
+    assert legacy["reward_contract_version"]!=paper["reward_contract_version"]
+    assert [mav_reward_config("legacy_v1")[key] for key in ("mav_danger_distance_m","mav_safe_distance_m","mav_support_optimal_distance_m","mav_support_max_distance_m")]==[5000,10000,4000,12000]
+    assert [mav_reward_config("paper_table1_v2")[key] for key in ("mav_danger_distance_m","mav_safe_distance_m","mav_support_optimal_distance_m","mav_support_max_distance_m")]==[14000,28000,14000,28000]
+    assert legacy["reward_config"]==mav_reward_config("legacy_v1")
+    assert legacy["reward_config"]["aspect_aggregation"]=="min" and legacy["reward_config"]["awareness_aggregation"]=="max"
+    assert legacy["reward_config"]["safety_top_level_scale"]==10 and legacy["reward_config"]["support_top_level_scale"]==10 and legacy["reward_config"]["boundary_extra_penalty"]==-100
+    assert paper["reward_config"]["aspect_aggregation"]=="sum" and paper["reward_config"]["awareness_aggregation"]=="sum"
+    assert paper["reward_config"]["safety_top_level_scale"]==1 and paper["reward_config"]["support_top_level_scale"]==1 and paper["reward_config"]["boundary_extra_penalty"]==0
+
+@pytest.mark.parametrize("mode,version,danger",[("legacy_v1","legacy_mav_reward_v1",5000),("paper_table1_v2","paper_table1_mav_reward_v2",14000)])
+def test_environment_info_matches_active_reward_contract(mode,version,danger):
+    env=SimpleTAMCombatEnv(HETERO_SCENARIO,hetero_reward_mode=mode)
+    try:
+        _,info=env.reset(seed=2)
+        assert info["hetero_reward_mode"]==mode and info["hetero_reward_contract_version"]==version
+        assert info["hetero_reward_contract_schema_version"]=="1"
+        assert info["mav_reward_config"]["mav_danger_distance_m"]==danger
+    finally:env.close()
 
 def test_mav_death_is_once_and_boundary_has_no_extra_penalty():
     mav,agents=reward_state();reward=PaperTable1MAVReward();mav.alive=False;mav.death_reason="boundary"
@@ -108,5 +144,8 @@ def test_uav_reward_contract_and_info_json_remain_valid():
     try:
         _,_,_,_,info=env.step({aid:np.zeros(3,np.float32) for aid in env.controlled_ids});json.dumps(info)
         assert set(info["reward_components"]["red_uav_0"])=={"r_height","r_speed","r_angle","r_distance","r_dodge_angle","r_dodge_speed","r_dodge","r_event","total"}
-        assert info["hetero_reward_mode"]=="paper_table1_v2" and info["hetero_reward_contract_version"]=="heterogeneous_reward_v2"
+        assert info["hetero_reward_mode"]=="paper_table1_v2"
+        assert info["hetero_reward_contract_schema_version"]=="1"
+        assert info["hetero_reward_contract_version"]=="paper_table1_mav_reward_v2"
+        assert info["mav_reward_config"]==mav_reward_config("paper_table1_v2")
     finally:env.close()
