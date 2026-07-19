@@ -10,11 +10,13 @@ from scripts.hetero_3v2_environment_stability_common import (
     append_jsonl, build_report, combat_event_counts, compare_continuous,
     compare_discrete, compare_traces, finite_failures, load_completed_cases,
     read_jsonl_strict, stable_signature, validate_active_mask,
-    validate_missile_step, validate_reset_state, validate_termination,
+    validate_action_replay_completion, validate_boundary_state,
+    validate_case_completion, validate_missile_step, validate_reset_state, validate_termination,
     validate_unique_perturbations,
 )
 from scripts.hetero_3v2_v2_audit_common import perturbation
-from scripts.audit_hetero_3v2_environment_stability import _warmup_seed
+from scripts.audit_hetero_3v2_environment_stability import (_actions,_prepare_output,
+  _warmup_seed,parse_args)
 
 
 def _context(**updates):
@@ -187,3 +189,109 @@ def test_report_na_fail_semantics_and_low_win_rate_is_not_failure(tmp_path):
     payload = build_report(tmp_path)
     assert payload["checks"]["NUMERICAL_FINITE"]["status"] == "FAIL"
     assert payload["overall_status"] == "FAIL"
+
+
+def _report_dir(tmp_path, rows, failures=()):
+    (tmp_path / "audit_meta.json").write_text(json.dumps({"formal_contract":"test"}),encoding="utf-8")
+    for row in rows:append_jsonl(tmp_path / "environment_stability_raw.jsonl",row)
+    (tmp_path / "environment_stability_failures.jsonl").touch()
+    for row in failures:append_jsonl(tmp_path / "environment_stability_failures.jsonl",row)
+    return tmp_path
+
+
+def _runtime_row(case_id,case_type,policy,runtime_ok=True,**extra):
+    return {"case_id":case_id,"case_completed":True,"runtime_ok":runtime_ok,
+      "case_type":case_type,"policy_type":policy,"steps":0,"outcome":"ongoing",
+      "end_reason":"","terminated":False,"truncated":False,"team_done":False,
+      "reset_failure_count":0,**extra}
+
+
+def test_deterministic_runtime_failures_are_fail_closed(tmp_path):
+    rows=[_runtime_row("deterministic_000_run_a","deterministic","rule_policy",False,deterministic_run="a",trace=[]),
+      _runtime_row("deterministic_000_run_b","deterministic","rule_policy",False,deterministic_run="b",trace=[],
+        deterministic_match=True,action_replay_contract_ok=True)]
+    payload=build_report(_report_dir(tmp_path,rows))
+    assert payload["checks"]["DETERMINISTIC_REPLAY"]["status"]=="FAIL"
+    assert payload["checks"]["CASE_RUNTIME_INTEGRITY"]["status"]=="FAIL"
+    assert payload["overall_status"]=="FAIL"
+
+
+def test_deterministic_action_contract_is_required_for_match(tmp_path):
+    rows=[_runtime_row("deterministic_000_run_a","deterministic","rule_policy",True,deterministic_run="a",trace=[]),
+      _runtime_row("deterministic_000_run_b","deterministic","rule_policy",True,deterministic_run="b",trace=[],
+        deterministic_match=True,action_replay_contract_ok=False)]
+    assert build_report(_report_dir(tmp_path,rows))["checks"]["DETERMINISTIC_REPLAY"]["status"]=="FAIL"
+
+
+@pytest.mark.parametrize("case_type,policy,check",[("reset","reset","RESET_ISOLATION"),("rule","rule_policy","RULE_POLICY_RUNTIME"),
+  ("zero","zero_action","ZERO_ACTION_RUNTIME"),("random","bounded_random","RANDOM_ACTION_RUNTIME")])
+def test_case_type_runtime_failure_reaches_fixed_check(tmp_path,case_type,policy,check):
+    payload=build_report(_report_dir(tmp_path,[_runtime_row(f"{case_type}_000",case_type,policy,False)]))
+    assert payload["checks"][check]["status"]=="FAIL" and payload["overall_status"]=="FAIL"
+
+
+def test_unmatched_runtime_exception_is_not_ignored_and_failure_count_is_records(tmp_path):
+    row=_runtime_row("rule_000","rule","rule_policy",False)
+    failures=[{"check_name":"runtime_exception","case_id":"rule_000","step":1,"message":"boom"},
+      {"check_name":"unexpected_audit_failure","case_id":"rule_000","step":1,"message":"also boom"}]
+    path=_report_dir(tmp_path,[row],failures);before=(path/"environment_stability_failures.jsonl").read_text()
+    payload=build_report(path)
+    assert payload["checks"]["CASE_RUNTIME_INTEGRITY"]["status"]=="FAIL"
+    assert payload["failure_record_count"]==2
+    assert (path/"environment_stability_failures.jsonl").read_text()==before
+
+
+def test_max_steps_requires_timeout_but_smoke_limit_does_not():
+    rows=validate_termination(False,False,False,"ongoing","",10,10,1,1,_context(step=10))
+    assert any(row["check_name"]=="termination_missing_timeout" for row in rows)
+    failures,artificial,complete=validate_case_completion(
+      steps=2,terminated=False,truncated=False,env_max_steps=1000,max_case_steps=2,
+      outcome="ongoing",end_reason="",context=_context())
+    assert failures==[] and artificial is True and complete is False
+    failures,artificial,complete=validate_case_completion(
+      steps=1000,terminated=False,truncated=False,env_max_steps=1000,max_case_steps=0,
+      outcome="ongoing",end_reason="",context=_context())
+    assert failures[0]["check_name"]=="termination_missing_timeout" and artificial is False and complete is False
+
+
+def test_run_b_actions_are_strictly_replayed_without_calling_rule():
+    class Rule:
+        def actions(self,*args):raise AssertionError("rule must not be called")
+    env=SimpleNamespace(red_ids=["red_0","red_1"])
+    source=[{"red_0":[0.1,0.2,0.3],"red_1":[-0.1,-0.2,-0.3]}]
+    actions=_actions(env,"rule_policy",None,Rule(),source,0)
+    assert all(value.dtype==np.float32 and value.shape==(3,) for value in actions.values())
+    assert actions["red_0"].tolist()==pytest.approx(source[0]["red_0"])
+    with pytest.raises(IndexError,match="exhausted"):_actions(env,"rule_policy",None,Rule(),source,1)
+
+
+def test_run_b_early_end_with_remaining_actions_fails():
+    rows=validate_action_replay_completion(
+      expected_length=3,consumed_steps=2,environment_episode_complete=True,context=_context())
+    assert rows[0]["check_name"]=="deterministic_action_replay_early_end"
+
+
+def _boundary_state(position=(0,0,1000),velocity=(1,0,0),rpy=(0,0,0),geodetic=(0,0,1000)):
+    return {"position":position,"velocity":velocity,"rpy":rpy,"geodetic":geodetic}
+
+
+def test_boundary_uses_combined_state_and_frozen_limits():
+    nan_velocity=_boundary_state(velocity=(np.nan,0,0))
+    assert validate_boundary_state(alive={"a":False},actual_newly_dead=["a"],death_reasons={"a":"numeric_anomaly"},states={"a":nan_velocity},context=_context())==[]
+    rows=validate_boundary_state(alive={"a":True},actual_newly_dead=[],death_reasons={},states={"a":nan_velocity},context=_context())
+    assert rows[0]["check_name"]=="boundary_nonfinite_aircraft_still_alive"
+    for state,name in ((_boundary_state(position=(0,0,99)),"boundary_crash_aircraft_still_alive"),
+      (_boundary_state(position=(50001,0,1000)),"boundary_out_of_zone_aircraft_still_alive"),
+      (_boundary_state(position=(0,0,10001)),"boundary_out_of_zone_aircraft_still_alive")):
+        rows=validate_boundary_state(alive={"a":True},actual_newly_dead=[],death_reasons={},states={"a":state},context=_context())
+        assert rows[0]["check_name"]==name
+    assert validate_boundary_state(alive={"a":False},actual_newly_dead=["a"],death_reasons={"a":"missile_hit"},states={"a":_boundary_state()},context=_context())==[]
+
+
+def test_report_every_cases_validation_and_resume_contract(tmp_path,monkeypatch):
+    monkeypatch.setattr("sys.argv",["audit","--output-dir",str(tmp_path),"--report-every-cases","0"])
+    with pytest.raises(SystemExit):parse_args()
+    meta={"report_every_cases":5};(tmp_path/"audit_meta.json").write_text(json.dumps(meta),encoding="utf-8")
+    (tmp_path/"environment_stability_raw.jsonl").touch()
+    args=SimpleNamespace(output_dir=str(tmp_path),resume=True)
+    with pytest.raises(ValueError,match="report_every_cases"):_prepare_output(args,{"report_every_cases":10})

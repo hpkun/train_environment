@@ -31,17 +31,28 @@ python -u scripts/audit_hetero_3v2_environment_stability.py \
   --reset-episodes 30 \
   --rule-episodes 30 \
   --zero-episodes 10 \
-  --random-episodes 20
+  --random-episodes 20 \
+  --report-every-cases 5
 ```
 
 Resume an interrupted audit with the identical command plus `--resume`.
 Configuration path, seed, requested case counts, environment contracts,
-dimensions, tolerances and the audit-only step cap must match `audit_meta.json`.
+dimensions, tolerances, the audit-only step cap and report interval must match
+`audit_meta.json`.
 The runner rejects a non-empty output directory unless `--resume` is explicit.
 
 `--max-case-steps` is an audit-only smoke control. Its default is zero, which
 uses the full environment `max_steps`; it must remain zero for the formal
-audit.
+audit. When a positive value below `env.max_steps` is used, reaching it records
+`audit_step_limit_reached=true` and `environment_episode_complete=false`; it
+does not require the environment to emit timeout truncation. A formal case that
+reaches `env.max_steps` must instead finish with `truncated=true`,
+`team_done=true`, `outcome=draw` and `end_reason=timeout`.
+
+Raw case and failure JSONL records are appended and flushed after every case.
+The aggregate JSON, CSV and Markdown reports are rebuilt every
+`--report-every-cases` completed cases, and always on normal completion,
+KeyboardInterrupt or an unhandled exception.
 
 Regenerate reports without running the environment:
 
@@ -54,9 +65,13 @@ python -u scripts/report_hetero_3v2_environment_stability.py \
 
 Initial perturbations reuse
 `scripts/hetero_3v2_v2_audit_common.py::perturbation`. Stable JSON signatures
-must be unique within each requested scenario group. Deterministic run A and B
-share the same seed, perturbation and red rule policy. Discrete fields are
-compared exactly. Continuous fields use:
+must be unique within each requested scenario group. Deterministic run A uses
+`PaperGreedyOpponent` and records the complete red action sequence. Run B uses
+an independent fresh environment with the same seed and perturbation, and
+strictly replays run A's recorded actions without calling the rule policy.
+The replay sequence is validated as an input contract before environment
+outputs are compared. Discrete output fields are compared exactly. Continuous
+output fields use:
 
 ```text
 rtol = 1e-7
@@ -86,6 +101,7 @@ resume and compare a missing run B.
 
 ## Report checks
 
+- `CASE_RUNTIME_INTEGRITY`
 - `DETERMINISTIC_REPLAY`
 - `RESET_ISOLATION`
 - `NUMERICAL_FINITE`
@@ -100,8 +116,18 @@ resume and compare a missing run B.
 
 Each check reports `PASS`, `FAIL` or `N/A` with sample and failure counts.
 Missing samples remain `N/A`; they are never converted into PASS. Any failed
-core consistency check makes the overall result FAIL. A low win rate, no red
-win, no launch or no hit does not by itself fail runtime stability.
+core consistency check makes the overall result FAIL. Runtime exceptions are
+fail-closed: deterministic, reset, rule, zero and random cases fail their
+corresponding fixed checks, and every unmatched failure is surfaced by
+`CASE_RUNTIME_INTEGRITY`. Failure counts are JSONL failure-record counts, not
+counts of cases containing a failure. A low win rate, no red win, no launch or
+no hit does not by itself fail runtime stability.
+
+The frozen hard-state checks are exact: `numeric_anomaly` covers non-finite
+position, velocity, RPY or geodetic state; `crash` requires altitude below
+100 m; and `out_of_zone` requires horizontal distance above 50 km or altitude
+above 10 km. Missile-hit and other permitted death reasons are not reclassified
+as boundary failures.
 
 ## Interpretation boundary
 

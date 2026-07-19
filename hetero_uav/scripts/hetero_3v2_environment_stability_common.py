@@ -11,11 +11,12 @@ from typing import Any
 import numpy as np
 
 
-AUDIT_VERSION = "hetero_3v2_environment_stability_v1"
+AUDIT_VERSION = "hetero_3v2_environment_stability_v2"
 DEFAULT_RTOL = 1e-7
 DEFAULT_ATOL = 1e-8
 
 CHECK_NAMES = (
+    "CASE_RUNTIME_INTEGRITY",
     "DETERMINISTIC_REPLAY",
     "RESET_ISOLATION",
     "NUMERICAL_FINITE",
@@ -30,6 +31,7 @@ CHECK_NAMES = (
 )
 
 CHECK_PREFIX = {
+    "CASE_RUNTIME_INTEGRITY": ("runtime_",),
     "DETERMINISTIC_REPLAY": ("deterministic_",),
     "RESET_ISOLATION": ("reset_",),
     "NUMERICAL_FINITE": ("non_finite",),
@@ -48,7 +50,7 @@ DISCRETE_TRACE_FIELDS = (
 CONTINUOUS_TRACE_FIELDS = (
     "position", "velocity", "rpy", "geodetic", "critic_state",
     "actor_observation", "reward", "control_target", "sim_time_sec",
-    "fire_gate_geometry", "actions",
+    "fire_gate_geometry",
 )
 
 
@@ -294,6 +296,21 @@ def validate_termination(
             "termination_step_limit", **context, expected=f"<= {max_steps}",
             actual=step_count, message="episode exceeded max_steps"))
     capability_lost = red_attack_alive == 0 or blue_attack_alive == 0
+    if step_count == max_steps and not capability_lost:
+        expected_timeout = {
+            "terminated": False, "truncated": True, "team_done": True,
+            "outcome": "draw", "end_reason": "timeout",
+        }
+        actual_timeout = {
+            "terminated": terminated, "truncated": truncated,
+            "team_done": team_done, "outcome": outcome,
+            "end_reason": end_reason,
+        }
+        if actual_timeout != expected_timeout:
+            rows.append(failure(
+                "termination_missing_timeout", **context,
+                expected=expected_timeout, actual=actual_timeout,
+                message="max_steps with both teams combat-capable must be a truncated draw"))
     if capability_lost and not terminated:
         rows.append(failure(
             "termination_capability_not_terminated", **context,
@@ -320,6 +337,97 @@ def validate_termination(
             expected=expected_outcome, actual=outcome,
             message="outcome disagrees with final combat capability"))
     return rows
+
+
+def validate_boundary_state(
+    *, alive: dict[str, bool], actual_newly_dead: list[str],
+    death_reasons: dict[str, str], states: dict[str, dict], context: dict,
+) -> list[dict]:
+    rows = []
+    for agent_id, state in states.items():
+        position = np.asarray(state["position"], dtype=np.float64)
+        velocity = np.asarray(state["velocity"], dtype=np.float64)
+        rpy = np.asarray(state["rpy"], dtype=np.float64)
+        geodetic = np.asarray(state["geodetic"], dtype=np.float64)
+        combined = np.r_[position, velocity, rpy, geodetic]
+        finite = bool(np.isfinite(combined).all())
+        altitude = float(position[2]) if position.size >= 3 else float("nan")
+        horizontal = float(np.linalg.norm(position[:2])) if position.size >= 2 else float("nan")
+        details = {"position": position, "velocity": velocity, "rpy": rpy,
+                   "geodetic": geodetic}
+        if alive.get(agent_id, False):
+            if not finite:
+                rows.append(failure(
+                    "boundary_nonfinite_aircraft_still_alive", **context,
+                    agent_id=agent_id, expected="numeric_anomaly death",
+                    actual=details,
+                    message="non-finite aircraft state remained alive"))
+            elif altitude < 100.0:
+                rows.append(failure(
+                    "boundary_crash_aircraft_still_alive", **context,
+                    agent_id=agent_id, expected="crash when altitude < 100 m",
+                    actual=details,
+                    message="aircraft below crash altitude remained alive"))
+            elif horizontal > 50_000.0 or altitude > 10_000.0:
+                rows.append(failure(
+                    "boundary_out_of_zone_aircraft_still_alive", **context,
+                    agent_id=agent_id,
+                    expected="out_of_zone beyond 50 km horizontal or 10 km altitude",
+                    actual=details,
+                    message="aircraft outside frozen boundary remained alive"))
+        if agent_id not in actual_newly_dead:
+            continue
+        reason = death_reasons.get(agent_id)
+        valid = True
+        expected = None
+        if reason == "numeric_anomaly":
+            valid = not finite
+            expected = "non-finite position, velocity, rpy, or geodetic"
+        elif reason == "crash":
+            valid = finite and altitude < 100.0
+            expected = "finite state and altitude < 100 m"
+        elif reason == "out_of_zone":
+            valid = finite and (horizontal > 50_000.0 or altitude > 10_000.0)
+            expected = "finite state beyond 50 km horizontal or 10 km altitude"
+        if reason in ("numeric_anomaly", "crash", "out_of_zone") and not valid:
+            rows.append(failure(
+                "boundary_death_reason_mismatch", **context,
+                agent_id=agent_id, expected=expected, actual={"reason": reason, **details},
+                message="death reason does not match frozen hard boundary"))
+    return rows
+
+
+def validate_case_completion(
+    *, steps: int, terminated: bool, truncated: bool, env_max_steps: int,
+    max_case_steps: int, outcome: str, end_reason: str, context: dict,
+) -> tuple[list[dict], bool, bool]:
+    environment_episode_complete = bool(terminated or truncated)
+    artificial_limit = bool(
+        0 < max_case_steps < env_max_steps and steps >= max_case_steps
+        and not environment_episode_complete)
+    rows = []
+    formal_limit = env_max_steps if max_case_steps <= 0 else min(max_case_steps, env_max_steps)
+    if not artificial_limit and not environment_episode_complete and steps >= formal_limit:
+        rows.append(failure(
+            "termination_missing_timeout", **{**context, "step": steps},
+            expected={"truncated": True, "outcome": "draw", "end_reason": "timeout"},
+            actual={"truncated": truncated, "outcome": outcome,
+                    "end_reason": end_reason},
+            message="formal case exhausted env.max_steps without termination or truncation"))
+    return rows, artificial_limit, environment_episode_complete
+
+
+def validate_action_replay_completion(
+    *, expected_length: int, consumed_steps: int,
+    environment_episode_complete: bool, context: dict,
+) -> list[dict]:
+    if environment_episode_complete and consumed_steps < expected_length:
+        return [failure(
+            "deterministic_action_replay_early_end",
+            **{**context, "step": consumed_steps},
+            expected=expected_length, actual=consumed_steps,
+            message="run_b ended before consuming all run_a actions")]
+    return []
 
 
 def validate_reset_state(env, obs: dict, info: dict, previous_controller_ids=None) -> tuple[list[dict], list[str]]:
@@ -510,11 +618,11 @@ def append_jsonl(path: Path, row: dict) -> None:
         handle.flush()
 
 
-def _status(sample_count: int, failure_count: int, summary: str) -> dict:
+def _status(sample_count: int, failure_count: int, summary: str, *, force_fail=False) -> dict:
     if sample_count == 0:
         state = "N/A"
     else:
-        state = "FAIL" if failure_count else "PASS"
+        state = "FAIL" if failure_count or force_fail else "PASS"
     return {"status": state, "sample_count": sample_count,
             "failure_count": failure_count, "summary": summary}
 
@@ -526,32 +634,75 @@ def build_report(input_dir: Path) -> dict:
     meta_path = input_dir / "audit_meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     checks = {}
+    all_known_prefixes = tuple(
+        prefix for prefixes in CHECK_PREFIX.values() for prefix in prefixes)
+    unmatched_failures = [row for row in failures if not any(
+        str(row.get("check_name", "")).startswith(prefix)
+        for prefix in all_known_prefixes)]
     for name in CHECK_NAMES:
-        if name.endswith("_RUNTIME"):
+        force_fail = False
+        if name == "CASE_RUNTIME_INTEGRITY":
+            samples = raw
+            relevant = [row for row in failures
+                        if str(row.get("check_name", "")).startswith("runtime_")]
+            relevant.extend(unmatched_failures)
+            force_fail = any(
+                not row.get("runtime_ok", False)
+                or int(row.get("reset_failure_count", 0)) > 0
+                for row in samples)
+        elif name.endswith("_RUNTIME"):
             case_type = {
                 "RULE_POLICY_RUNTIME": "rule",
                 "ZERO_ACTION_RUNTIME": "zero",
                 "RANDOM_ACTION_RUNTIME": "random",
             }[name]
             samples = [row for row in raw if row.get("case_type") == case_type]
-            count = sum(not row.get("runtime_ok", False) for row in samples)
+            case_ids = {row.get("case_id") for row in samples}
+            relevant = [row for row in failures if row.get("case_id") in case_ids
+                        and str(row.get("check_name", "")).startswith("runtime_")]
+            force_fail = any(
+                not row.get("runtime_ok", False)
+                or int(row.get("reset_failure_count", 0)) > 0
+                for row in samples)
         elif name == "DETERMINISTIC_REPLAY":
             samples = [row for row in raw
                        if row.get("case_type") == "deterministic"
                        and row.get("deterministic_run") == "b"]
-            count = sum(not row.get("deterministic_match", False) for row in samples)
+            by_id = {row.get("case_id"): row for row in raw}
+            pair_ids = set()
+            for row in samples:
+                pair_ids.add(row.get("case_id"))
+                pair_ids.add(str(row.get("case_id", "")).replace("_run_b", "_run_a"))
+                baseline = by_id.get(str(row.get("case_id", "")).replace("_run_b", "_run_a"))
+                force_fail |= not bool(
+                    baseline and baseline.get("runtime_ok", False)
+                    and row.get("runtime_ok", False)
+                    and row.get("action_replay_contract_ok", False)
+                    and row.get("deterministic_match", False))
+            relevant = [row for row in failures if row.get("case_id") in pair_ids and (
+                str(row.get("check_name", "")).startswith("deterministic_") or
+                str(row.get("check_name", "")).startswith("runtime_"))]
         elif name == "RESET_ISOLATION":
             samples = [row for row in raw if row.get("case_type") == "reset"]
-            count = sum(row.get("reset_failure_count", 0) for row in samples)
+            case_ids = {row.get("case_id") for row in samples}
+            relevant = [row for row in failures if row.get("case_id") in case_ids and (
+                str(row.get("check_name", "")).startswith("reset_") or
+                str(row.get("check_name", "")).startswith("runtime_"))]
+            force_fail = any(
+                not row.get("runtime_ok", False)
+                or int(row.get("reset_failure_count", 0)) > 0
+                for row in samples)
         else:
             samples = raw
             prefixes = CHECK_PREFIX[name]
-            count = sum(any(
+            relevant = [item for item in failures if any(
                 str(item.get("check_name", "")).startswith(prefix)
-                for prefix in prefixes) for item in failures)
+                for prefix in prefixes)]
+        count = len(relevant)
         checks[name] = _status(
             len(samples), int(count),
-            f"{len(samples)} completed case(s), {int(count)} failure(s)")
+            f"{len(samples)} sample(s), {int(count)} failure record(s)",
+            force_fail=force_fail)
     states = {row["status"] for row in checks.values()}
     overall = "FAIL" if "FAIL" in states else ("N/A" if "N/A" in states else "PASS")
     payload = {
