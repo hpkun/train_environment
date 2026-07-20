@@ -646,8 +646,11 @@ class MissileSimulator(BaseSimulator):
                  overshoot_distance_hysteresis_m: float = 0.0,
                  positive_closing_threshold_mps: float = 0.0):
         super().__init__(uid, color, dt)
-        if guidance_mode != "paper_3v3_eq9_11_v1":
-            raise ValueError("guidance_mode must be 'paper_3v3_eq9_11_v1'")
+        supported_guidance = (
+            "paper_3v3_eq9_11_v1", "paper_eq7_eq11_point_mass_v1")
+        if guidance_mode not in supported_guidance:
+            raise ValueError(
+                f"guidance_mode must be one of {supported_guidance!r}")
         self.guidance_mode = guidance_mode
         self._status = MissileSimulator.INACTIVE
         from configs.brma_mappo_paper_spec import MissileConfig
@@ -667,6 +670,8 @@ class MissileSimulator(BaseSimulator):
         self._K = float(self.config.navigation_constant.value)
         self._nyz_max = float(self.config.maximum_overload_g.value)
         self._Rc = float(self.config.hit_radius_m.value)
+        self._minimum_speed_mps = float(self.config.minimum_speed_mps.value)
+        self._arming_time_s = float(self.config.arming_time_s.value)
         self._launch_speed_mps = launch_speed_mps
         self._overshoot_window_s = float(
             5.0 if overshoot_window_s is None else overshoot_window_s)
@@ -739,7 +744,10 @@ class MissileSimulator(BaseSimulator):
 
     def run(self):
         self._t += self.dt
-        allow_contact = self._contact_checks_started
+        allow_contact = (
+            self._t >= self._arming_time_s
+            if self.guidance_mode == "paper_eq7_eq11_point_mass_v1"
+            else self._contact_checks_started)
         self._contact_checks_started = True
         zero_action = np.zeros(2, dtype=np.float64)
         if self.target_aircraft is None or not self.target_aircraft.is_alive:
@@ -788,6 +796,14 @@ class MissileSimulator(BaseSimulator):
         self._maximum_command_g = max(self._maximum_command_g, command_norm)
         previous_distance = self._distance_pre
         self._state_trans(action)
+        if (self.guidance_mode == "paper_eq7_eq11_point_mass_v1"
+                and np.linalg.norm(self.get_velocity())
+                < self._minimum_speed_mps):
+            self._status = MissileSimulator.MISS
+            self._termination_reason = "low_speed"
+            self._emit_trajectory_sample(self._intercept_diagnostic(
+                action, distance, previous_distance))
+            return
         state = np.concatenate([
             np.asarray(self.get_position(), dtype=np.float64),
             np.asarray(self.get_velocity(), dtype=np.float64)])
@@ -951,8 +967,59 @@ class MissileSimulator(BaseSimulator):
         return command, Rxyz
 
     def _state_trans(self, action):
-        """Update the single constant-speed point-mass model."""
-        self._state_trans_minimal_point_mass(action)
+        """Update the point-mass model selected by the frozen profile."""
+        if self.guidance_mode == "paper_eq7_eq11_point_mass_v1":
+            self._state_trans_paper_eq7_eq8(action)
+        else:
+            self._state_trans_minimal_point_mass(action)
+
+    def _state_trans_paper_eq7_eq8(self, action):
+        """Euler integration of the public Eq.7-Eq.8 point-mass structure."""
+        velocity = np.asarray(self.get_velocity(), dtype=np.float64)
+        speed = max(float(np.linalg.norm(velocity)), 1e-8)
+        gamma = float(np.arctan2(
+            velocity[2], np.hypot(velocity[0], velocity[1])))
+        heading = float(np.arctan2(velocity[1], velocity[0]))
+        ny, nz = [float(value) for value in action]
+
+        cfg = self.config
+        mass0 = float(cfg.initial_mass_kg.value)
+        mass_flow = float(cfg.mass_flow_kg_s.value)
+        thrust_time = float(cfg.thrust_time_s.value)
+        dry_mass = max(mass0 - mass_flow * thrust_time, 1e-6)
+        mass = max(mass0 - mass_flow * min(self._t, thrust_time), dry_mass)
+        thrust = (float(cfg.specific_impulse_s.value) * mass_flow * self._g
+                  if self._t <= thrust_time else 0.0)
+        altitude = max(float(self.get_geodetic()[2]), 0.0)
+        density = 1.225 * np.exp(-altitude / 9300.0)
+        area = np.pi * (0.5 * float(cfg.diameter_m.value)) ** 2
+        drag = (0.5 * density * speed * speed
+                * float(cfg.drag_coefficient.value) * area)
+
+        speed_dot = (thrust - drag) / mass - self._g * np.sin(gamma)
+        cos_gamma = np.cos(gamma)
+        heading_denom = speed * cos_gamma
+        if abs(heading_denom) < 1e-8:
+            heading_denom = np.copysign(1e-8, heading_denom or 1.0)
+        heading_dot = ny * self._g / heading_denom
+        gamma_dot = nz * self._g / speed - self._g * cos_gamma / speed
+
+        self._position[:] += self.dt * np.array([
+            speed * cos_gamma * np.cos(heading),
+            speed * cos_gamma * np.sin(heading),
+            speed * np.sin(gamma),
+        ])
+        speed = max(speed + self.dt * speed_dot, 1e-8)
+        heading += self.dt * heading_dot
+        gamma += self.dt * gamma_dot
+        self._velocity[:] = np.array([
+            speed * np.cos(gamma) * np.cos(heading),
+            speed * np.cos(gamma) * np.sin(heading),
+            speed * np.sin(gamma),
+        ])
+        self._posture[:] = np.array([0.0, gamma, heading])
+        self._geodetic[:] = NEU2LLA(
+            *self.get_position(), self.lon0, self.lat0, self.alt0)
 
     def _state_trans_minimal_point_mass(self, action):
         """Constant-speed point mass with the published PN steering command."""

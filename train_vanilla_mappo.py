@@ -52,6 +52,16 @@ from configs.paper_3v3_spec import (
     PID_THROTTLE_BASE,
     paper_environment_snapshot,
 )
+from configs.paper_6v6_spec import (
+    PAPER_BLUE_POLICY_PROFILE_6V6,
+    PAPER_ENVIRONMENT_PROFILE_6V6,
+    PAPER_MISSILE_GUIDANCE_MODE_6V6,
+    PAPER_PID_PROFILE_6V6,
+    PAPER_REWARD_MODE_6V6,
+    PAPER_REWARD_VERSION_6V6,
+    PID_THROTTLE_BASE_6V6,
+    paper_6v6_environment_snapshot,
+)
 from my_uav_env.pid_controller import PAPER_PID_ERROR_DEFINITION
 from my_uav_env.pid_controller import PAPER_PID_DERIVATIVE_SEMANTICS
 
@@ -640,6 +650,37 @@ def _minimal_altitude_reward_config() -> AltitudeRewardConfig:
         high_altitude_tail=0.1)
 
 
+def _paper_6v6_altitude_reward_config() -> AltitudeRewardConfig:
+    return AltitudeRewardConfig(
+        version="eq17_public_shape_undisclosed_thresholds_sum_6v6_v1",
+        h_min_m=0.0, h_att_m=2000.0, h_adv_m=5000.0,
+        h_max_m=10000.0, d_att_max_m=15000.0,
+        high_altitude_tail=0.1)
+
+
+def _paper_profile_contract(environment_profile: str) -> dict:
+    if environment_profile == PAPER_ENVIRONMENT_PROFILE:
+        return {
+            "team_size": 3, "snapshot": paper_environment_snapshot,
+            "reward_version": REWARD_VERSION,
+            "pid_error_definition": PAPER_PID_ERROR_DEFINITION,
+            "altitude_config": _minimal_altitude_reward_config(),
+            "altitude_interpretation": (
+                "paper_unspecified_engineering_mean_over_alive_enemies"),
+        }
+    if environment_profile == PAPER_ENVIRONMENT_PROFILE_6V6:
+        return {
+            "team_size": 6, "snapshot": paper_6v6_environment_snapshot,
+            "reward_version": PAPER_REWARD_VERSION_6V6,
+            "pid_error_definition": (
+                "eq12_body_transform_atan2_dby_dbx_atan2_dbz_dbx"),
+            "altitude_config": _paper_6v6_altitude_reward_config(),
+            "altitude_interpretation": (
+                "paper_unresolved_sum_over_alive_enemies"),
+        }
+    raise ValueError(f"unsupported environment_profile {environment_profile!r}")
+
+
 def _rollout_layout(replay_buffer_size: int, num_envs: int) -> dict:
     requested = int(replay_buffer_size)
     envs = int(num_envs)
@@ -659,24 +700,24 @@ def _rollout_layout(replay_buffer_size: int, num_envs: int) -> dict:
 
 
 def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
-    if (config.environment_profile != PAPER_ENVIRONMENT_PROFILE
-            or config.num_red != 3 or config.num_blue != 3
+    contract = _paper_profile_contract(config.environment_profile)
+    if (config.num_red != contract["team_size"]
+            or config.num_blue != contract["team_size"]
             or config.max_episode_length != 1400):
-        raise ValueError(
-            f"formal MAPPO checkpoints require {PAPER_ENVIRONMENT_PROFILE}")
-    environment_snapshot = paper_environment_snapshot(seed=config.seed)
+        raise ValueError("formal MAPPO checkpoint dimensions/profile mismatch")
+    environment_snapshot = contract["snapshot"](seed=config.seed)
     rollout_layout = _rollout_layout(config.replay_buffer_size, config.num_envs)
     metadata = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": config.obs_mode,
         "obs_normalization": config.obs_normalization,
-        "reward_version": REWARD_VERSION,
+        "reward_version": contract["reward_version"],
         "reward_mode": config.reward_mode,
         "pid_profile": config.pid_profile,
         "pid_throttle_base": float(config.pid_throttle_base),
         "pid_error_definition": environment_snapshot.get(
             "pid_error_definition", {}).get(
-                "value", PAPER_PID_ERROR_DEFINITION),
+                "value", contract["pid_error_definition"]),
         "derivative_semantics": environment_snapshot.get(
             "derivative_semantics", {}).get(
                 "value", PAPER_PID_DERIVATIVE_SEMANTICS),
@@ -701,8 +742,8 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
             config.initial_condition_randomization_mode),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
         "q_los_alignment_status": "UNRESOLVED / PAPER_INFERRED",
-        "altitude_reward_interpretation": (
-            "paper_unspecified_engineering_mean_over_alive_enemies"),
+        "altitude_reward_interpretation": contract[
+            "altitude_interpretation"],
         "num_red": int(config.num_red),
         "num_blue": int(config.num_blue),
         "max_episode_length": int(config.max_episode_length),
@@ -781,7 +822,7 @@ def _training_core_config(config, checkpoint_meta: dict) -> dict:
         "pid_throttle_base", "reward_mode", "missile_guidance_mode",
         "environment_profile", "blue_policy_profile",
         "initial_condition_randomization_mode")
-    return {
+    core = {
         **{field: getattr(config, field) for field in fields},
         "environment_config_fingerprint": checkpoint_meta[
             "environment_config_fingerprint"],
@@ -789,6 +830,18 @@ def _training_core_config(config, checkpoint_meta: dict) -> dict:
         "altitude_reward_config": checkpoint_meta["altitude_reward_config"],
         "training_log_schema": _training_log_fields(),
     }
+    if config.environment_profile == PAPER_ENVIRONMENT_PROFILE_6V6:
+        snapshot = checkpoint_meta["environment_config"]
+        core.update({
+            "actor_input_dim": int(checkpoint_meta["actor_obs_dim"]),
+            "critic_input_dim": int(checkpoint_meta["global_state_dim"]),
+            "entity_count": int(snapshot["entity_count"]["value"]),
+            "observation_profile": snapshot["observation_profile"]["value"],
+            "global_state_profile": snapshot["global_state_profile"]["value"],
+            "mws_profile": checkpoint_meta["mws_profile"],
+            "sensor_profile": checkpoint_meta["sensor_support_profile"],
+        })
+    return core
 
 
 def _build_training_state(
@@ -955,18 +1008,19 @@ def _actor_evaluation_expected_metadata(
         max_episode_length: int,
         initial_condition_randomization_mode: str) -> dict:
     """Return only runtime semantics required to interpret an Actor."""
-    environment_snapshot = paper_environment_snapshot(seed=None)
+    contract = _paper_profile_contract(environment_profile)
+    environment_snapshot = contract["snapshot"](seed=None)
     return {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": obs_mode,
         "obs_normalization": obs_normalization,
-        "reward_version": REWARD_VERSION,
+        "reward_version": contract["reward_version"],
         "reward_mode": reward_mode,
         "pid_profile": pid_profile,
         "pid_throttle_base": float(pid_throttle_base),
         "pid_error_definition": environment_snapshot.get(
             "pid_error_definition", {}).get(
-                "value", PAPER_PID_ERROR_DEFINITION),
+                "value", contract["pid_error_definition"]),
         "derivative_semantics": environment_snapshot.get(
             "derivative_semantics", {}).get(
                 "value", PAPER_PID_DERIVATIVE_SEMANTICS),
@@ -990,8 +1044,8 @@ def _actor_evaluation_expected_metadata(
             initial_condition_randomization_mode),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
         "q_los_alignment_status": "UNRESOLVED / PAPER_INFERRED",
-        "altitude_reward_interpretation": (
-            "paper_unspecified_engineering_mean_over_alive_enemies"),
+        "altitude_reward_interpretation": contract[
+            "altitude_interpretation"],
         "num_red": int(num_red),
         "num_blue": int(num_blue),
         "max_episode_length": int(max_episode_length),
@@ -1056,7 +1110,8 @@ def _unpack_actor_checkpoint_for_evaluation(
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"invalid checkpoint altitude_reward_config: {exc}") from exc
-    expected_altitude_config = _minimal_altitude_reward_config()
+    expected_altitude_config = _paper_profile_contract(
+        environment_profile)["altitude_config"]
     if altitude_reward_config != expected_altitude_config:
         raise ValueError(
             "actor evaluation contract mismatch: altitude_reward_config: "
@@ -2766,10 +2821,10 @@ def parse_args():
     parser.add_argument("--rnn-hidden-size", type=int,
                         default=defaults.rnn_hidden_size)
     parser.add_argument("--blue-policy-profile",
-        choices=(PAPER_BLUE_POLICY_PROFILE,),
+        choices=(PAPER_BLUE_POLICY_PROFILE, PAPER_BLUE_POLICY_PROFILE_6V6),
         default=defaults.blue_policy_profile)
     parser.add_argument("--environment-profile",
-        choices=(PAPER_ENVIRONMENT_PROFILE,),
+        choices=(PAPER_ENVIRONMENT_PROFILE, PAPER_ENVIRONMENT_PROFILE_6V6),
         default=defaults.environment_profile)
     parser.add_argument("--obs-mode", type=str,
                         choices=("paper_strict",),
@@ -2778,15 +2833,16 @@ def parse_args():
                         choices=("paper_fixed_v1", "none"),
                         default=defaults.obs_normalization)
     parser.add_argument("--pid-profile", type=str,
-                        choices=(PAPER_PID_PROFILE,),
+                        choices=(PAPER_PID_PROFILE, PAPER_PID_PROFILE_6V6),
                         default=defaults.pid_profile)
     parser.add_argument("--pid-throttle-base", type=float,
                         default=defaults.pid_throttle_base)
     parser.add_argument("--reward-mode", type=str,
-                        choices=(PAPER_REWARD_MODE,),
+                        choices=(PAPER_REWARD_MODE, PAPER_REWARD_MODE_6V6),
                         default=defaults.reward_mode)
     parser.add_argument("--missile-guidance-mode", type=str,
-                        choices=(PAPER_MISSILE_GUIDANCE_MODE,),
+                        choices=(PAPER_MISSILE_GUIDANCE_MODE,
+                                 PAPER_MISSILE_GUIDANCE_MODE_6V6),
                         default=defaults.missile_guidance_mode)
     parser.add_argument("--initial-condition-randomization-mode",
                         choices=("deterministic_v1",),
@@ -2843,6 +2899,7 @@ _FORMAL_PAPER_3V3_PRESETS = (
     "vanilla_3v3_paper_smoke",
     "vanilla_3v3_paper_main",
     "vanilla_3v3_paper_100k_diag",
+    "vanilla_6v6_paper_reproduction_diag",
 )
 
 
@@ -2885,7 +2942,8 @@ def make_config_from_args(args) -> Config:
     config.blue_policy_profile = args.blue_policy_profile
     config.environment_profile = args.environment_profile
     config.environment_version = args.environment_profile
-    config.altitude_reward_config = _minimal_altitude_reward_config()
+    config.altitude_reward_config = _paper_profile_contract(
+        config.environment_profile)["altitude_config"]
     config.obs_mode = args.obs_mode
     config.obs_normalization = args.obs_normalization
     config.pid_profile = args.pid_profile
@@ -3227,7 +3285,9 @@ def main():
     print(f"  checkpoint_dir: {config.checkpoint_dir}")
     print(f"  seed: {config.seed}")
     print(f"  device: {device}")
-    print(f"  reward_version: {REWARD_VERSION}")
+    active_reward_version = _paper_profile_contract(
+        config.environment_profile)["reward_version"]
+    print(f"  reward_version: {active_reward_version}")
     print(f"  environment_profile: {config.environment_profile}")
     print(f"  obs_mode: {config.obs_mode}")
     print(f"  obs_normalization: {config.obs_normalization}")
@@ -4037,7 +4097,7 @@ def main():
                              f"{kd_red_missile:.6f}",
                              f"{rwr:.6f}",
                              int(rwr_denominator_zero),
-                             REWARD_VERSION,
+                             active_reward_version,
                              config.reward_mode,
                              config.environment_profile,
                              config.obs_normalization,
@@ -4135,7 +4195,7 @@ def main():
             "KD_Red_MissileOnly": kd_red_missile,
             "RWR":            rwr,
             "RWRDenominatorZero": rwr_denominator_zero,
-            "RewardVersion": REWARD_VERSION,
+            "RewardVersion": active_reward_version,
             "RewardMode": config.reward_mode,
             "EnvironmentProfile": config.environment_profile,
             "ObsNormalization": config.obs_normalization,

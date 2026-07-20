@@ -59,6 +59,13 @@ from configs.paper_3v3_spec import (
     PAPER_REWARD_MODE,
     PID_THROTTLE_BASE,
 )
+from configs.paper_6v6_spec import (
+    PAPER_BLUE_POLICY_PROFILE_6V6,
+    PAPER_ENVIRONMENT_PROFILE_6V6,
+    PAPER_MISSILE_GUIDANCE_MODE_6V6,
+    PAPER_PID_PROFILE_6V6,
+    PAPER_REWARD_MODE_6V6,
+)
 from train_vanilla_mappo import (
     ACTION_DISTRIBUTION_VERSION,
     ENTROPY_ESTIMATOR_VERSION,
@@ -69,6 +76,7 @@ from train_vanilla_mappo import (
     _flatten_obs,
     _joint_team_reward_once,
     _minimal_altitude_reward_config,
+    _paper_profile_contract,
     _ratio_with_denominator_zero,
     _safe_div,
     _unpack_actor_checkpoint_for_evaluation,
@@ -203,7 +211,8 @@ def run_acmi(checkpoint_path: str | None, output_path: str = "eval_battle.acmi",
     rnn_hidden_size = 128  # default; overridden by checkpoint auto-inference
     actor_state = None
     hidden = 128
-    altitude_reward_config = _minimal_altitude_reward_config()
+    altitude_reward_config = _paper_profile_contract(
+        environment_profile)["altitude_config"]
     obs_dim = _compute_obs_dim(
         num_red, num_blue, is_red=True, obs_mode=obs_mode)
 
@@ -547,20 +556,23 @@ if __name__ == "__main__":
         parser.add_argument("--obs-normalization",
                             choices=("paper_fixed_v1", "none"),
                             default="paper_fixed_v1")
-        parser.add_argument("--pid-profile", choices=(PAPER_PID_PROFILE,),
+        parser.add_argument("--pid-profile", choices=(
+                                PAPER_PID_PROFILE, PAPER_PID_PROFILE_6V6),
                             default=PAPER_PID_PROFILE)
         parser.add_argument("--pid-throttle-base", type=float,
                             default=PID_THROTTLE_BASE)
-        parser.add_argument("--reward-mode", choices=(PAPER_REWARD_MODE,),
+        parser.add_argument("--reward-mode", choices=(
+                                PAPER_REWARD_MODE, PAPER_REWARD_MODE_6V6),
                             default=PAPER_REWARD_MODE)
         parser.add_argument("--missile-guidance-mode",
-                            choices=(PAPER_MISSILE_GUIDANCE_MODE,),
+                            choices=(PAPER_MISSILE_GUIDANCE_MODE,
+                                     PAPER_MISSILE_GUIDANCE_MODE_6V6),
                             default=PAPER_MISSILE_GUIDANCE_MODE)
         parser.add_argument("--blue-policy-profile",
-            choices=(PAPER_BLUE_POLICY_PROFILE,),
+            choices=(PAPER_BLUE_POLICY_PROFILE, PAPER_BLUE_POLICY_PROFILE_6V6),
             default=PAPER_BLUE_POLICY_PROFILE)
         parser.add_argument("--environment-profile",
-            choices=(PAPER_ENVIRONMENT_PROFILE,),
+            choices=(PAPER_ENVIRONMENT_PROFILE, PAPER_ENVIRONMENT_PROFILE_6V6),
             default=PAPER_ENVIRONMENT_PROFILE)
         parser.add_argument("--initial-condition-randomization-mode",
                             choices=("deterministic_v1",),

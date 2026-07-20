@@ -10,14 +10,16 @@ from rule_based_agent import _paper_absolute_action, _strict_target_action, _wra
 
 
 PAPER_BLUE_POLICY_PROFILE = "minimal_deterministic_pursuit_v2"
-BLUE_POLICY_PROFILES = (PAPER_BLUE_POLICY_PROFILE,)
+PAPER_BLUE_POLICY_PROFILE_6V6 = "paper_undisclosed_minimal_rule_v1"
+BLUE_POLICY_PROFILES = (
+    PAPER_BLUE_POLICY_PROFILE, PAPER_BLUE_POLICY_PROFILE_6V6)
 
 
 def validate_blue_policy_profile(profile: str) -> str:
     profile = str(profile)
-    if profile != PAPER_BLUE_POLICY_PROFILE:
+    if profile not in BLUE_POLICY_PROFILES:
         raise ValueError(
-            f"blue_policy_profile must be {PAPER_BLUE_POLICY_PROFILE!r}")
+            f"blue_policy_profile must be one of {BLUE_POLICY_PROFILES!r}")
     return profile
 
 

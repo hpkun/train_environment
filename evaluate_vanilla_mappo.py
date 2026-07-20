@@ -24,6 +24,13 @@ from configs.paper_3v3_spec import (
     PAPER_REWARD_MODE,
     PID_THROTTLE_BASE,
 )
+from configs.paper_6v6_spec import (
+    PAPER_BLUE_POLICY_PROFILE_6V6,
+    PAPER_ENVIRONMENT_PROFILE_6V6,
+    PAPER_MISSILE_GUIDANCE_MODE_6V6,
+    PAPER_PID_PROFILE_6V6,
+    PAPER_REWARD_MODE_6V6,
+)
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     CHECKPOINT_SCHEMA_VERSION,
@@ -37,6 +44,7 @@ from train_vanilla_mappo import (
     _flatten_obs,
     _joint_team_reward_once,
     _minimal_altitude_reward_config,
+    _paper_profile_contract,
     _ratio_with_denominator_zero,
     _safe_div,
     _unpack_actor_checkpoint_for_evaluation,
@@ -128,10 +136,12 @@ def parse_args():
     parser.add_argument("--device", type=str, choices=("auto", "cpu", "cuda"),
                         default="auto")
     parser.add_argument("--blue-policy-profile",
-                        choices=(PAPER_BLUE_POLICY_PROFILE,),
+                        choices=(PAPER_BLUE_POLICY_PROFILE,
+                                 PAPER_BLUE_POLICY_PROFILE_6V6),
                         default=PAPER_BLUE_POLICY_PROFILE)
     parser.add_argument("--environment-profile",
-                        choices=(PAPER_ENVIRONMENT_PROFILE,),
+                        choices=(PAPER_ENVIRONMENT_PROFILE,
+                                 PAPER_ENVIRONMENT_PROFILE_6V6),
                         default=PAPER_ENVIRONMENT_PROFILE)
     parser.add_argument("--obs-mode", type=str,
                         choices=("paper_strict",),
@@ -139,14 +149,17 @@ def parse_args():
     parser.add_argument("--obs-normalization", type=str,
                         choices=("paper_fixed_v1", "none"),
                         default="paper_fixed_v1")
-    parser.add_argument("--pid-profile", choices=(PAPER_PID_PROFILE,),
+    parser.add_argument("--pid-profile", choices=(
+                            PAPER_PID_PROFILE, PAPER_PID_PROFILE_6V6),
                         default=PAPER_PID_PROFILE)
     parser.add_argument("--pid-throttle-base", type=float,
                         default=PID_THROTTLE_BASE)
-    parser.add_argument("--reward-mode", choices=(PAPER_REWARD_MODE,),
+    parser.add_argument("--reward-mode", choices=(
+                            PAPER_REWARD_MODE, PAPER_REWARD_MODE_6V6),
                         default=PAPER_REWARD_MODE)
     parser.add_argument("--missile-guidance-mode",
-                        choices=(PAPER_MISSILE_GUIDANCE_MODE,),
+                        choices=(PAPER_MISSILE_GUIDANCE_MODE,
+                                 PAPER_MISSILE_GUIDANCE_MODE_6V6),
                         default=PAPER_MISSILE_GUIDANCE_MODE)
     parser.add_argument("--initial-condition-randomization-mode",
                         choices=("deterministic_v1",),
@@ -195,13 +208,19 @@ def _resolve_checkpoint(path: str | None) -> str | None:
 def _load_actor(args, device: torch.device):
     if args.random:
         print("[INFO] --random set; red team uses random actions.", flush=True)
-        return None, 128, None, _minimal_altitude_reward_config()
+        return (None, 128, None,
+                _paper_profile_contract(getattr(
+                    args, "environment_profile", PAPER_ENVIRONMENT_PROFILE))[
+                    "altitude_config"])
 
     checkpoint = _resolve_checkpoint(args.checkpoint)
     if checkpoint is None:
         print("[WARN] No checkpoint found; red team uses random actions.",
               flush=True)
-        return None, 128, None, _minimal_altitude_reward_config()
+        return (None, 128, None,
+                _paper_profile_contract(getattr(
+                    args, "environment_profile", PAPER_ENVIRONMENT_PROFILE))[
+                    "altitude_config"])
 
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
     obs_dim = _compute_obs_dim(
@@ -435,7 +454,8 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "NumRed": num_red,
             "NumBlue": num_blue,
             "MaxSteps": max_steps,
-            "RewardVersion": REWARD_VERSION,
+            "RewardVersion": _paper_profile_contract(
+                environment_profile)["reward_version"],
             "RewardMode": reward_mode,
             "ObsNormalization": obs_normalization,
             "PIDProfile": pid_profile,
@@ -642,7 +662,8 @@ def main():
     device = _select_device(args.device)
     actor, rnn_hidden_size, _checkpoint, altitude_config = _load_actor(
         args, device)
-    print(f"reward_version: {REWARD_VERSION}", flush=True)
+    print("reward_version: " + str(_paper_profile_contract(
+        args.environment_profile)["reward_version"]), flush=True)
     print(f"environment_profile: {args.environment_profile}", flush=True)
     print(f"pid_throttle_base: {args.pid_throttle_base}", flush=True)
     print(f"action_distribution: {ACTION_DISTRIBUTION_VERSION}", flush=True)

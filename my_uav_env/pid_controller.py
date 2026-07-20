@@ -11,6 +11,7 @@ PAPER_PID_ERROR_DEFINITION = (
 PAPER_PID_DERIVATIVE_SEMANTICS = (
     "first_sample_only_error_derivative_v2")
 PAPER_PID_PROFILE = "paper_3v3_minimal_pid_v2"
+PAPER_6V6_PID_PROFILE = "paper_eq12_eq14_pid_6v6_v1"
 
 
 class PIDLoop:
@@ -90,8 +91,10 @@ class PIDController:
                  throttle_base: float = 0.8, config=None):
         from configs.brma_mappo_paper_spec import PIDConfig
 
-        if profile != PAPER_PID_PROFILE:
-            raise ValueError(f"profile must be {PAPER_PID_PROFILE!r}")
+        if profile not in (PAPER_PID_PROFILE, PAPER_6V6_PID_PROFILE):
+            raise ValueError(
+                f"profile must be {PAPER_PID_PROFILE!r} or "
+                f"{PAPER_6V6_PID_PROFILE!r}")
         self.config = config or PIDConfig()
         self.dt = float(dt)
         self.profile = profile
@@ -171,6 +174,25 @@ class PIDController:
         return (roll_error, pitch_error, desired_neu, desired_ned,
                 desired_body, r_bi)
 
+    @classmethod
+    def paper_6v6_direction_errors(
+            cls, current_rpy, target_pitch, target_heading):
+        """Operational Eq.12-Eq.13 using quadrant-preserving ratios."""
+        roll, pitch, yaw = [float(value) for value in current_rpy]
+        c_theta = np.cos(target_pitch)
+        desired_neu = np.array([
+            c_theta * np.cos(target_heading),
+            c_theta * np.sin(target_heading),
+            np.sin(target_pitch),
+        ], dtype=np.float64)
+        desired_ned = desired_neu * np.array([1.0, 1.0, -1.0])
+        r_bi = cls.ned_to_body_matrix(roll, pitch, yaw)
+        desired_body = r_bi @ desired_ned
+        roll_error = float(np.arctan2(desired_body[1], desired_body[0]))
+        pitch_error = float(np.arctan2(desired_body[2], desired_body[0]))
+        return (roll_error, pitch_error, desired_neu, desired_ned,
+                desired_body, r_bi)
+
     def compute_control(self, current_rpy, current_velocity,
                         target_pitch, target_heading, target_velocity,
                         ned_velocity=None):
@@ -180,9 +202,12 @@ class PIDController:
             self.reset()
             return 0.0, 0.0, 0.0, 0.0
 
+        direction_errors = (
+            self.paper_6v6_direction_errors
+            if self.profile == PAPER_6V6_PID_PROFILE
+            else self.paper_direction_errors)
         roll_error, pitch_error, d_neu, d_ned, d_body, r_bi = (
-            self.paper_direction_errors(
-                current_rpy, target_pitch, target_heading))
+            direction_errors(current_rpy, target_pitch, target_heading))
         aileron = self._roll_pid.step(roll_error, self.dt)
         elevator = self._pitch_pid.step(pitch_error, self.dt)
         velocity_error = float(target_velocity - current_velocity)
@@ -198,7 +223,10 @@ class PIDController:
         )
         saturated = (aileron, elevator, 0.0, throttle)
         self._last_diagnostic = {
-            "formula_version": PAPER_PID_ERROR_DEFINITION,
+            "formula_version": (
+                "paper_eq12_eq14_atan2_ratios_operational_v1"
+                if self.profile == PAPER_6V6_PID_PROFILE
+                else PAPER_PID_ERROR_DEFINITION),
             "derivative_semantics": PAPER_PID_DERIVATIVE_SEMANTICS,
             "setpoint_changed_this_frame": False,
             "pitch_setpoint_delta_rad": 0.0,

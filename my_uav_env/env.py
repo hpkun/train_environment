@@ -32,6 +32,18 @@ from configs.paper_3v3_spec import (
     PID_THROTTLE_BASE,
     paper_environment_snapshot,
 )
+from configs.paper_6v6_spec import (
+    MISSILE_LAUNCH_SPEED_MPS_6V6,
+    PAPER_BLUE_POLICY_PROFILE_6V6,
+    PAPER_ENVIRONMENT_CONFIG_6V6,
+    PAPER_ENVIRONMENT_PROFILE_6V6,
+    PAPER_MISSILE_GUIDANCE_MODE_6V6,
+    PAPER_PID_PROFILE_6V6,
+    PAPER_REWARD_MODE_6V6,
+    PAPER_REWARD_VERSION_6V6,
+    PID_THROTTLE_BASE_6V6,
+    paper_6v6_environment_snapshot,
+)
 from my_uav_env.sensors import SensorTrack, radar_diagnostic
 from my_uav_env.fire_control import FireControlState
 from my_uav_env.blue_policy_profiles import (
@@ -76,7 +88,7 @@ LOAD_DIAGNOSTIC_START_G = 9.0
 
 
 def _is_adapted_profile(env) -> bool:
-    return bool(getattr(env, "is_paper_3v3", False))
+    return bool(getattr(env, "is_paper_profile", False))
 
 
 def _paper_missile_rng(seed: int | None, parent_uid: str,
@@ -193,36 +205,65 @@ class UavCombatEnv(gymnasium.Env):
                  environment_config: PaperEnvironmentConfig | None = None,
                  render_mode=None):
         super().__init__()
+        profiles = {
+            PAPER_ENVIRONMENT_PROFILE: {
+                "fixed": (3, 3, 60, 12, 1400),
+                "config": PAPER_ENVIRONMENT_CONFIG,
+                "pid": PAPER_PID_PROFILE,
+                "reward": PAPER_REWARD_MODE,
+                "missile": PAPER_MISSILE_GUIDANCE_MODE,
+                "blue": PAPER_BLUE_POLICY_PROFILE,
+                "launch_speed": MISSILE_LAUNCH_SPEED_MPS,
+                "reward_version": REWARD_VERSION,
+                "snapshot": paper_environment_snapshot,
+            },
+            PAPER_ENVIRONMENT_PROFILE_6V6: {
+                "fixed": (6, 6, 60, 12, 1400),
+                "config": PAPER_ENVIRONMENT_CONFIG_6V6,
+                "pid": PAPER_PID_PROFILE_6V6,
+                "reward": PAPER_REWARD_MODE_6V6,
+                "missile": PAPER_MISSILE_GUIDANCE_MODE_6V6,
+                "blue": PAPER_BLUE_POLICY_PROFILE_6V6,
+                "launch_speed": MISSILE_LAUNCH_SPEED_MPS_6V6,
+                "reward_version": PAPER_REWARD_VERSION_6V6,
+                "snapshot": paper_6v6_environment_snapshot,
+            },
+        }
+        if environment_profile not in profiles:
+            raise ValueError(f"unsupported environment_profile {environment_profile!r}")
+        contract = profiles[environment_profile]
         fixed = (max_num_red, max_num_blue, sim_freq,
                  agent_interaction_steps, max_steps)
-        if fixed != (3, 3, 60, 12, 1400):
+        if fixed != contract["fixed"]:
             raise ValueError(
-                f"{PAPER_ENVIRONMENT_PROFILE} requires 3V3, 60 Hz, 12 physics frames per "
-                "decision, and 1400 decision steps")
-        if environment_profile != PAPER_ENVIRONMENT_PROFILE:
-            raise ValueError(f"only {PAPER_ENVIRONMENT_PROFILE} is supported")
-        if environment_config not in (None, PAPER_ENVIRONMENT_CONFIG):
-            raise ValueError(f"{PAPER_ENVIRONMENT_PROFILE} does not accept another config")
+                f"{environment_profile} requires {contract['fixed']!r}")
+        if environment_config not in (None, contract["config"]):
+            raise ValueError(f"{environment_profile} does not accept another config")
         if initial_condition_randomization_mode != "deterministic_v1":
             raise ValueError(f"{PAPER_ENVIRONMENT_PROFILE} uses deterministic_v1 initialization")
         if obs_mode != "paper_strict":
             raise ValueError(f"{PAPER_ENVIRONMENT_PROFILE} only supports paper_strict observations")
-        if pid_profile != PAPER_PID_PROFILE:
-            raise ValueError(f"pid_profile must be {PAPER_PID_PROFILE!r}")
-        if reward_mode != PAPER_REWARD_MODE:
-            raise ValueError(f"reward_mode must be {PAPER_REWARD_MODE!r}")
-        if missile_guidance_mode != PAPER_MISSILE_GUIDANCE_MODE:
-            raise ValueError(
-                f"missile_guidance_mode must be {PAPER_MISSILE_GUIDANCE_MODE!r}")
-        if blue_policy_profile != PAPER_BLUE_POLICY_PROFILE:
-            raise ValueError(
-                f"blue_policy_profile must be {PAPER_BLUE_POLICY_PROFILE!r}")
-        self.environment_profile = PAPER_ENVIRONMENT_PROFILE
-        self.is_paper_3v3 = True
+        for name, actual in (
+                ("pid_profile", pid_profile), ("reward_mode", reward_mode),
+                ("missile_guidance_mode", missile_guidance_mode),
+                ("blue_policy_profile", blue_policy_profile)):
+            key = {"pid_profile": "pid", "reward_mode": "reward",
+                   "missile_guidance_mode": "missile",
+                   "blue_policy_profile": "blue"}[name]
+            if actual != contract[key]:
+                raise ValueError(f"{name} must be {contract[key]!r}")
+        self.environment_profile = environment_profile
+        self.is_paper_3v3 = environment_profile == PAPER_ENVIRONMENT_PROFILE
+        self.is_paper_6v6 = environment_profile == PAPER_ENVIRONMENT_PROFILE_6V6
+        self.is_paper_profile = True
         self.is_paper_adapted = True
         self.initial_condition_randomization_mode = "deterministic_v1"
-        self.environment_config = PAPER_ENVIRONMENT_CONFIG
-        num_missiles_per_plane = 2
+        self.environment_config = contract["config"]
+        self._environment_snapshot_factory = contract["snapshot"]
+        self.missile_launch_speed_mps = float(contract["launch_speed"])
+        self.reward_version = str(contract["reward_version"])
+        num_missiles_per_plane = int(
+            self.environment_config.scenario.missiles_per_aircraft.value)
         scenario_cfg = self.environment_config.scenario
         self.scenario_config = scenario_cfg
         self.arena_half_width_m = float(scenario_cfg.arena_half_width_m.value)
@@ -310,6 +351,13 @@ class UavCombatEnv(gymnasium.Env):
                     low=0, high=1,
                     shape=(max_num_blue + max_num_red,), dtype=np.int64),
             })
+            if self.is_paper_6v6:
+                for mask_name in (
+                        "observable_mask", "enemy_detected_mask", "radar_mask",
+                        "approximate_position_mask"):
+                    obs_spaces[aid].spaces[mask_name] = gymnasium.spaces.Box(
+                        low=0, high=1,
+                        shape=(max_num_blue + max_num_red,), dtype=np.int64)
         self.observation_space = gymnasium.spaces.Dict(obs_spaces)
 
         # ---- Internal state (populated in reset) ----
@@ -400,7 +448,8 @@ class UavCombatEnv(gymnasium.Env):
             self._seed = int(self.np_random.integers(0, 2**32 - 1))
             self.np_random = np.random.default_rng(self._seed)
         self._initial_jitter_by_index = {}
-        self._environment_config_snapshot = paper_environment_snapshot(seed=self._seed)
+        self._environment_config_snapshot = self._environment_snapshot_factory(
+            seed=self._seed)
         self.current_step = 0
         self._physics_frame = 0
         self._sim_time = 0.0
@@ -799,7 +848,7 @@ class UavCombatEnv(gymnasium.Env):
             self._lock_target[aid] = None
             self._fire_control_states[aid] = FireControlState(
                 transition_reason="episode_end")
-            if self.is_paper_3v3:
+            if self.is_paper_profile:
                 self._clear_control_state(aid)
         self._launch_quality_records.clear()
         self._launch_quality_step_records = []
@@ -922,7 +971,7 @@ class UavCombatEnv(gymnasium.Env):
             self, aid: str, requested: tuple[float, float, float],
             source: str) -> tuple[float, float, float]:
         """Record target jumps and pass paper Eq.12 inputs through unchanged."""
-        if not self.is_paper_3v3:
+        if not self.is_paper_profile:
             if aid.startswith("blue"):
                 self.blue_policy_controller.record_executed_heading(
                     aid, requested[1], source)
@@ -981,7 +1030,7 @@ class UavCombatEnv(gymnasium.Env):
             sim = self._get_sim(aid)
             if sim is None or not sim.is_alive:
                 targets[aid] = None
-                if self.is_paper_3v3:
+                if self.is_paper_profile:
                     self._clear_control_state(aid)
                 continue
 
@@ -1006,7 +1055,7 @@ class UavCombatEnv(gymnasium.Env):
                     incoming_diag = None
             else:
                 incoming, incoming_diag = None, None
-            if self.is_paper_3v3:
+            if self.is_paper_profile:
                 self._learnable_selected_mws_diagnostics[aid] = (
                     dict(incoming_diag)
                     if isinstance(incoming_diag, dict) else None)
@@ -1085,7 +1134,7 @@ class UavCombatEnv(gymnasium.Env):
                         aid, target_heading, "mws_override")
                 continue
             self._evasion_diagnostics[aid]["active"] = False
-            if self.is_paper_3v3:
+            if self.is_paper_profile:
                 self._deactivate_mws_state(aid)
 
             # =================================================================
@@ -1326,7 +1375,7 @@ class UavCombatEnv(gymnasium.Env):
                 diag["maximum_load_g_seen"] = float("inf")
                 diag["nonfinite_load_frames"] = int(
                     diag.get("nonfinite_load_frames", 0)) + 1
-                if self.is_paper_3v3:
+                if self.is_paper_profile:
                     self._retain_load_frame(
                         aid, sim, g_components, g_load,
                         self._learnable_requested_setpoints.get(aid), target,
@@ -1343,7 +1392,7 @@ class UavCombatEnv(gymnasium.Env):
                 self._death_reasons.setdefault(aid, "Crash_NumericalLoad")
                 self._crashed_this_step.add(aid)
                 continue
-            if self.is_paper_3v3:
+            if self.is_paper_profile:
                 self._update_load_diagnostics(aid, g_load)
                 self._retain_load_frame(
                     aid, sim, g_components, g_load,
@@ -1447,7 +1496,7 @@ class UavCombatEnv(gymnasium.Env):
         label = f"{aid}:{reason}"
         if label not in self._invalid_numerical_reasons:
             self._invalid_numerical_reasons.append(label)
-        if self.is_paper_3v3:
+        if self.is_paper_profile:
             history = list(self._load_frame_history.get(aid, ()))
             last_trace = (self._retained_extreme_load_traces[-1]
                           if self._retained_extreme_load_traces else None)
@@ -1668,7 +1717,7 @@ class UavCombatEnv(gymnasium.Env):
             guidance_mode=self.missile_guidance_mode,
             config=self.environment_config.missile,
             rng=missile_rng,
-            launch_speed_mps=MISSILE_LAUNCH_SPEED_MPS,
+            launch_speed_mps=self.missile_launch_speed_mps,
             overshoot_window_s=MISSILE_OVERSHOOT_WINDOW_S,
             overshoot_distance_hysteresis_m=(
                 MISSILE_OVERSHOOT_DISTANCE_HYSTERESIS_M),
@@ -1894,7 +1943,7 @@ class UavCombatEnv(gymnasium.Env):
                 "blue_team_terminal_reward": 0.0,
                 "red_joint_reward": 0.0,
                 "blue_joint_reward": 0.0,
-                "reward_version": REWARD_VERSION,
+                "reward_version": self.reward_version,
                 "reward_mode": self.reward_mode,
                 "invalid_numerical_episode": True,
             }
@@ -1963,7 +2012,7 @@ class UavCombatEnv(gymnasium.Env):
             "blue_team_terminal_reward": float(terminal_blue),
             "red_joint_reward": float(red_joint),
             "blue_joint_reward": float(blue_joint),
-            "reward_version": REWARD_VERSION,
+            "reward_version": self.reward_version,
             "reward_mode": self.reward_mode,
         }
         self._episode_stats["EpisodeRedJointReturn"] += red_joint
@@ -2057,7 +2106,7 @@ class UavCombatEnv(gymnasium.Env):
         if not enemy_alts:
             return 0.0
 
-        if _is_adapted_profile(self):
+        if self.is_paper_3v3:
             return altitude_reward_pairwise_mean_eq17(
                 alt_ego, enemy_alts, config=self.altitude_reward_config)
         return altitude_reward_pairwise_sum_eq17(
@@ -2107,27 +2156,50 @@ class UavCombatEnv(gymnasium.Env):
 
         ally_vecs = np.zeros((max_allies, 10), dtype=np.float32)
         enemy_vecs = np.zeros((max_enemies, 10), dtype=np.float32)
+        observable_mask = np.zeros(1 + max_allies + max_enemies, dtype=np.int64)
+        enemy_detected_mask = np.zeros_like(observable_mask)
+        radar_mask = np.zeros_like(observable_mask)
+        approximate_position_mask = np.zeros_like(observable_mask)
+        observable_mask[0] = int(alive)
         if alive:
             for j, ally in enumerate(ally_sims):
                 if ally.is_alive:
                     ally_vecs[j] = extract_relative_state(
                         sim, ally, radar_detected=True)
+                    observable_mask[1 + j] = 1
+                    radar_mask[1 + j] = 1
             for j, enemy in enumerate(enemy_sims):
                 if enemy.is_alive:
                     track = self._get_sensor_track(sim, enemy)
                     enemy_vecs[j] = extract_relative_state(
                         sim, enemy,
-                        radar_detected=(track.source == "radar_full"),
+                        radar_detected=(track.source in (
+                            "radar_full", "eo_full")),
                         target_position_override=track.position_estimate)
+                    slot = 1 + max_allies + j
+                    observable_mask[slot] = int(track.valid)
+                    enemy_detected_mask[slot] = int(
+                        track.source in ("radar_full", "eo_full"))
+                    radar_mask[slot] = int(track.source == "radar_full")
+                    approximate_position_mask[slot] = int(
+                        track.valid and track.source != "radar_full")
 
         entity_mask = 1 - slot_aligned_alive_mask(self, agent_id)
 
-        return {
+        result = {
             "ego_state": ego_state.astype(np.float32),
             "ally_states": ally_vecs,
             "enemy_states": enemy_vecs,
             "entity_mask": entity_mask.astype(np.int64),
         }
+        if self.is_paper_6v6:
+            result.update({
+                "observable_mask": observable_mask,
+                "enemy_detected_mask": enemy_detected_mask,
+                "radar_mask": radar_mask,
+                "approximate_position_mask": approximate_position_mask,
+            })
+        return result
 
     def _get_info(self, reward_components: dict | None = None) -> dict:
         info = {}
@@ -2144,7 +2216,7 @@ class UavCombatEnv(gymnasium.Env):
         }
         for aid in self.agent_ids:
             sim = self._get_sim(aid)
-            if (self.is_paper_3v3
+            if (self.is_paper_profile
                     and (sim is None or not sim.is_alive)):
                 self._clear_control_state(aid)
             # Return per-step delta and reset counter so callers can safely
@@ -2166,7 +2238,7 @@ class UavCombatEnv(gymnasium.Env):
                 "fire_control": self._fire_control_states[aid].snapshot(),
                 "evasion": dict(self._evasion_diagnostics.get(aid, {})),
             }
-            if self.is_paper_3v3:
+            if self.is_paper_profile:
                 mws_state = self._learnable_mws_state.get(
                     aid, self._empty_mws_state())
                 info[aid].update({
@@ -2220,7 +2292,7 @@ class UavCombatEnv(gymnasium.Env):
             mws_diag[f"{team}_mws_warning_to_hit_mean_s"] = mws_diag[
                 f"{team}_warning_to_hit_mean_s"]
         info["__mws_diag__"] = mws_diag
-        if self.is_paper_3v3:
+        if self.is_paper_profile:
             info["__load_diag__"] = {
                 "invalid_nonfinite_load_count": sum(
                     "NonFiniteLoad" in reason
@@ -2275,7 +2347,7 @@ class UavCombatEnv(gymnasium.Env):
                 reason in ("Crash_BattleVolume", "Crash_HighAlt", "Crash_LowAlt")
                 for reason in self._death_reasons.values()),
         }
-        if self.is_paper_3v3:
+        if self.is_paper_profile:
             info["__episode__"].update({
                 "RedMWSWarningGenerations": int(mws_diag.get(
                     "red_warning_generations", 0)),
@@ -2353,6 +2425,11 @@ class UavCombatEnv(gymnasium.Env):
         now = self._physics_frame * self.physics_dt
         if self._is_detected_by_radar(observer_sim, target_sim):
             return SensorTrack("radar_full", target_sim.uid,
+                               np.asarray(target_sim.get_position(), dtype=np.float64),
+                               now, 0.0, 1.0, True, True, True)
+        if self.is_paper_6v6 and self._is_detected_by_electro_optical(
+                observer_sim, target_sim):
+            return SensorTrack("eo_full", target_sim.uid,
                                np.asarray(target_sim.get_position(), dtype=np.float64),
                                now, 0.0, 1.0, True, True, True)
         if _is_adapted_profile(self):
@@ -2467,7 +2544,7 @@ class UavCombatEnv(gymnasium.Env):
 
     def _make_initial_jitter(self) -> dict[int, dict[str, float]]:
         count = max(self.max_num_red, self.max_num_blue)
-        if (not self.is_paper_3v3
+        if (not self.is_paper_profile
                 or self.initial_condition_randomization_mode == "deterministic_v1"):
             return {
                 index: {"along_m": 0.0, "lateral_m": 0.0,
