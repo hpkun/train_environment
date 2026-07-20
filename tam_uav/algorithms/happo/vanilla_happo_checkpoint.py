@@ -13,7 +13,7 @@ from uav_env.JSBSim.paper.protocol import (
 from uav_env.JSBSim.paper.action_semantics import NEUTRAL_ACTION_SEMANTICS
 
 
-FORMAT = "tam_paper_heterogeneous_reward_vanilla_happo_v4"
+FORMAT = "tam_paper_heterogeneous_reward_vanilla_happo_v5"
 REQUIRED_ENVIRONMENT_FIELDS = (
     "environment_fidelity_revision", "experiment_protocol", "initial_perturbation",
     "dynamics_backend", "paper_silent_assumptions_present", "scenario",

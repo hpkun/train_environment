@@ -16,17 +16,18 @@ from .protocol import (
     ENVIRONMENT_FIDELITY_REVISION, NOMINAL_PERTURBATION,
     PAPER_5V4_GENERALIZATION_PROTOCOL, PAPER_NOMINAL_PROTOCOL,
     PAPER_SILENT_ASSUMPTIONS_PRESENT, REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED,
+    BASIC_MANOEUVRE_ACTION_MAPPING_UNPUBLISHED,
     TERMINATION_RESOLUTION,
-    derived_environment_values)
+    environment_values, validate_parameter_provenance)
 
 
 class TAMPaperTask:
     def __init__(self, config: dict):
         self.config = config
+        validate_parameter_provenance(config)
         self.published = dict(config["published_parameters"])
-        self.inferred = dict(config["inferred_parameters"])
-        self.derived = derived_environment_values(
-            self.published["maximum_attack_range_m"])
+        self.unpublished = dict(config["unpublished_parameters"])
+        self.derived = environment_values(self.unpublished)
         self.simulation_frequency = int(self.published["simulation_frequency_hz"])
         self.physics_frames = int(self.published["physics_frames_per_action"])
         decision_frequency = float(self.published["decision_frequency_hz"])
@@ -37,8 +38,10 @@ class TAMPaperTask:
         self.decision_dt = self.physics_frames * self.physics_dt
         self.episode_limit = int(self.published["episode_limit_steps"])
         self.controlled_side = "red"
+        self.initial_conditions = config["scenario_initial_conditions"]
         self.scenario_name = str(config.get(
-            "scenario", f"{len(config['red_agents'])}v{len(config['blue_agents'])}"))
+            "scenario", f"{len(self.initial_conditions['red_agents'])}v"
+                        f"{len(self.initial_conditions['blue_agents'])}"))
         self.initial_perturbation = str(
             config.get("initial_perturbation", NOMINAL_PERTURBATION))
         self.experiment_protocol = str(config.get(
@@ -47,11 +50,10 @@ class TAMPaperTask:
             else "pre_fidelity_diagnostic"))
         self.scenario = ScenarioBuilder(config)
         self.observation = PaperObservation(
-            self.published, self.inferred,
-            int(config["max_red_agents"]), int(config["max_blue_agents"]))
-        self.weapon = PaperWeaponManager(self.published, self.inferred)
-        self.reward = PaperReward(self.published, self.inferred)
-        self.opponent = GreedyPaperOpponent(self.published, self.inferred)
+            self.published, self.unpublished)
+        self.weapon = PaperWeaponManager(self.published, self.unpublished)
+        self.reward = PaperReward(self.published, self.unpublished)
+        self.opponent = GreedyPaperOpponent(self.published, self.unpublished)
         self.agents = []
         self.current_targets: dict[str, str | None] = {}
         self.target_scores: dict[str, dict] = {}
@@ -82,8 +84,9 @@ class TAMPaperTask:
         self.event_sequence_counter = 0
         self.target_consistency_violation_count = 0
         self.episode_return = {a.agent_id: 0.0 for a in self.agents}
-        obs = self.observation.build(self.agents, self.weapon.missiles)
-        self._update_targets(obs)
+        self._update_targets()
+        obs = self.observation.build(
+            self.agents, self.weapon.missiles, self.current_targets)
         info = self._build_info([], {}, {}, None, None, {}, {}, {})
         self.last_info = info
         return obs, info
@@ -92,8 +95,9 @@ class TAMPaperTask:
         """Prepare and freeze the target snapshot for exactly one decision step."""
         if self._decision_context is not None:
             return self._decision_context
-        pre_obs = self.observation.build(self.agents, self.weapon.missiles)
-        self._update_targets(pre_obs)
+        self._update_targets()
+        pre_obs = self.observation.build(
+            self.agents, self.weapon.missiles, self.current_targets)
         self.decision_context_counter += 1
         by_id = {agent.agent_id: agent for agent in self.agents}
         self._decision_context = {
@@ -205,13 +209,17 @@ class TAMPaperTask:
         consistency_violations = self._target_consistency_violations(
             context, target_used_by_weapon, target_used_by_reward)
         self.target_consistency_violation_count += len(consistency_violations)
+        if consistency_violations:
+            raise RuntimeError(
+                f"decision target snapshot mismatch: {consistency_violations}")
         terminated, truncated, winner, reason = self._termination()
         rewards, components = self.reward.compute(
             self.agents, self.current_targets, reward_scores,
             self.weapon.missiles, events, out_step, alive_at_start)
         for aid, value in rewards.items():
             self.episode_return[aid] += float(value)
-        obs = self.observation.build(self.agents, self.weapon.missiles)
+        obs = self.observation.build(
+            self.agents, self.weapon.missiles, self.current_targets)
         alive_at_end = {a.agent_id: a.alive for a in self.agents}
         just_died = {aid: alive_at_start[aid] and not alive_at_end[aid]
                      for aid in alive_at_start}
@@ -301,20 +309,19 @@ class TAMPaperTask:
 
     def controlled_agent_ids_from_config(self):
         return [str(entry.get("id", f"red_{idx}"))
-                for idx, entry in enumerate(self.config["red_agents"])]
+                for idx, entry in enumerate(self.initial_conditions["red_agents"])]
 
-    def _update_targets(self, obs):
+    def _update_targets(self):
         sides = {side: sorted([a for a in self.agents if a.side == side], key=lambda a: a.agent_id)
                  for side in ("red", "blue")}
         diagnostics, all_scores = {}, {}
         for ego in self.agents:
             previous = self.current_targets.get(ego.agent_id)
             enemies = sides["blue" if ego.side == "red" else "red"]
-            visible_mask = obs[ego.agent_id]["enemy_mask"]
             scores = {}
             if ego.alive:
-                for idx, target in enumerate(enemies):
-                    if idx < len(visible_mask) and visible_mask[idx] > 0.5 and target.alive:
+                for target in enemies:
+                    if target.alive:
                         scores[target.agent_id] = assess_pair(
                             ego.position, ego.velocity, target.position, target.velocity,
                             self.published["maximum_attack_range_m"],
@@ -406,6 +413,13 @@ class TAMPaperTask:
             "blue_policy_fidelity": BLUE_POLICY_FIDELITY,
             "reference_8_exact_blue_fsm_reproduced": (
                 REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED),
+            "basic_manoeuvre_action_mapping_unpublished": (
+                BASIC_MANOEUVRE_ACTION_MAPPING_UNPUBLISHED),
+            "height_reward_exact_formula_available": False,
+            "height_reward_implementation": "unpublished_height_reward_approximation",
+            "observation_visibility": "all_alive_fixed_slots_no_range_gate",
+            "target_selection_tie_break": self.unpublished["target_selection_tie_break"],
+            "execution_aircraft_model_provenance": "unpublished",
             "winner": winner, "termination_reason": reason,
             "red_alive": sum(a.alive for a in red), "blue_alive": sum(a.alive for a in blue),
             "red_combat_alive": len(self._combat_units("red")),

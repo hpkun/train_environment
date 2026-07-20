@@ -31,10 +31,12 @@ def wrapped_heading_error_deg(actual, expected):
 def check_scenario(scenario, seed=2026):
     config_path = ROOT / "uav_env" / "JSBSim" / "configs" / SCENARIOS[scenario]
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    initial = config["scenario_initial_conditions"]
+    roles = config["role_definitions"]
     configured = {
         item["id"]: (item, side)
-        for side, entries in (("red", config["red_agents"]),
-                              ("blue", config["blue_agents"]))
+        for side, entries in (("red", initial["red_agents"]),
+                              ("blue", initial["blue_agents"]))
         for item in entries
     }
     env = make_paper_env(
@@ -46,7 +48,8 @@ def check_scenario(scenario, seed=2026):
         for agent in env.task.agents:
             expected, expected_side = configured[agent.agent_id]
             expected_type = str(expected["type"])
-            expected_model = str(config["aircraft_type_params"][expected_type]["aircraft_model"])
+            expected_model = str(
+                roles[expected_type]["unpublished_execution_aircraft_model"])
             runtime = {
                 "longitude_deg": agent._get_property("position/long-gc-deg"),
                 "latitude_deg": agent._get_property("position/lat-geod-deg"),
@@ -87,7 +90,7 @@ def check_scenario(scenario, seed=2026):
                     and agent.aircraft_type.aircraft_model == expected_model
                     and agent.alive
                     and agent.missile_left == int(
-                        config["aircraft_type_params"][expected_type]["missile_num"])),
+                        roles[expected_type]["missile_num"])),
             })
         max_error = {key: max(row["absolute_error"][key] for row in rows)
                      for key in TOLERANCE}

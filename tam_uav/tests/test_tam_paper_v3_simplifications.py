@@ -14,8 +14,7 @@ from uav_env.JSBSim.paper.action_semantics import (
     UPPER_CENTER_VALUE, map_action_indices)
 from uav_env.JSBSim.paper.missile import PaperMissile, TIMEOUT_DERIVATION
 from uav_env.JSBSim.paper.opponent import MANOEUVRES
-from uav_env.JSBSim.paper.protocol import (
-    MAX_INCOMING_MISSILES, derived_environment_values)
+from uav_env.JSBSim.paper.protocol import environment_values
 from uav_env.JSBSim.paper.reward import (
     paper_height_reward, scenario_derived_reward_cap)
 from uav_env.JSBSim.paper.weapon import PaperWeaponManager
@@ -30,31 +29,30 @@ def env_for(name="tam_paper_env_v1_3v2.yaml"):
     return make_env(str(CONFIG.parent / name), dynamics_backend="simple")
 
 
-def test_detection_ranges_and_perfect_mav_sharing():
+def test_no_detection_ranges_or_mav_track_sharing():
     env = env_for()
     env.reset(seed=1)
     by_id = {agent.agent_id: agent for agent in env.task.agents}
     red_uav, mav, blue = by_id["red_1"], by_id["red_0"], by_id["blue_0"]
     blue.position = np.zeros(3)
     red_uav.position = np.array([14000.0, 0.0, 0.0])
-    assert env.task.observation._visible(red_uav, blue, [])
+    obs = env.task.observation.build(env.task.agents, [])
+    assert obs[red_uav.agent_id]["enemy_mask"].sum() == 2
     red_uav.position = np.array([14000.01, 0.0, 0.0])
-    assert not env.task.observation._visible(red_uav, blue, [])
+    obs = env.task.observation.build(env.task.agents, [])
+    assert obs[red_uav.agent_id]["enemy_mask"].sum() == 2
     mav.position = np.array([28000.0, 0.0, 0.0])
-    assert env.task.observation._visible(mav, blue, [mav])
     mav.position = np.array([28000.01, 0.0, 0.0])
-    assert not env.task.observation._visible(mav, blue, [mav])
     red_uav.position = np.array([20000.0, 0.0, 0.0])
     mav.position = np.array([10000.0, 0.0, 0.0])
-    assert env.task.observation._visible(red_uav, blue, [mav])
     mav.kill("shotdown")
-    assert not env.task.observation._visible(red_uav, blue, [])
+    obs = env.task.observation.build(env.task.agents, [])
+    assert obs[red_uav.agent_id]["enemy_mask"].sum() == 2
     env.close()
 
 
-def test_scenario_derived_slots_zone_and_normalization():
-    values = derived_environment_values(14000.0)
-    assert MAX_INCOMING_MISSILES == 4 * 2 == 8
+def test_unpublished_slots_zone_and_normalization():
+    values = environment_values(yaml.safe_load(CONFIG.read_text())["unpublished_parameters"])
     assert values["combat_zone_radius_m"] == 28000.0
     assert values["position_norm_m"] == 28000.0
     assert values["altitude_norm_m"] == 6000.0
@@ -158,7 +156,7 @@ def test_mav_hit_validation_death_order_and_uav_reward_unchanged():
     env.close()
 
 
-def test_exactly_seven_atomic_manoeuvres_all_scored_and_tie_breaks_first(monkeypatch):
+def test_exactly_seven_unpublished_atomic_manoeuvres_are_all_scored():
     assert list(MANOEUVRES) == [
         "level", "accelerate", "decelerate", "left_turn", "right_turn", "climb", "dive"]
     assert all(np.asarray(action).shape == (4,) for action in MANOEUVRES.values())
@@ -170,13 +168,13 @@ def test_exactly_seven_atomic_manoeuvres_all_scored_and_tie_breaks_first(monkeyp
     assert info["neutral_action_semantics"] == NEUTRAL_ACTION_SEMANTICS
     by_id = {agent.agent_id: agent for agent in env.task.agents}
     agent, target = by_id["blue_0"], by_id["red_1"]
-    fixed = (agent.position.copy(), agent.velocity.copy(), agent.pitch,
-             agent.heading, agent.speed)
-    monkeypatch.setattr(env.task.opponent, "_predict", lambda _agent, _indices: fixed)
     action, diagnostics = env.task.opponent.act(agent, target, [])
     assert set(diagnostics["candidates"]) == set(MANOEUVRES)
-    assert diagnostics["manoeuvre"] == "level"
-    assert action.tolist() == list(MANOEUVRES["level"])
+    assert not hasattr(env.task.opponent, "_predict")
+    totals = {name: row["total_dense_reward"]
+              for name, row in diagnostics["candidates"].items()}
+    assert totals[diagnostics["manoeuvre"]] == max(totals.values())
+    assert action.tolist() == list(MANOEUVRES[diagnostics["manoeuvre"]])
     env.close()
 
 
@@ -184,7 +182,7 @@ def test_weapon_signature_and_missile_timeout_are_simplified():
     assert list(inspect.signature(PaperWeaponManager.try_launch).parameters) == [
         "self", "shooter", "target", "simulation_time_s"]
     config = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
-    inferred = config["inferred_parameters"]
+    inferred = config["unpublished_parameters"]
     assert "maximum_missile_speed_mps" not in inferred
     assert "missile_max_flight_time_s" not in inferred
     missile = PaperMissile(
@@ -201,11 +199,11 @@ def test_weapon_signature_and_missile_timeout_are_simplified():
 def test_complete_60hz_missile_timeout_lifecycle_and_single_report():
     config = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
     manager = PaperWeaponManager(
-        config["published_parameters"], config["inferred_parameters"])
+        config["published_parameters"], config["unpublished_parameters"])
     missile = PaperMissile(
         "lifecycle", "red_1", "blue_0", np.zeros(3),
         np.array([1.0, 0.0, 0.0]),
-        config["published_parameters"] | config["inferred_parameters"])
+        config["published_parameters"] | config["unpublished_parameters"])
     manager.missiles.append(missile)
     target = SimpleNamespace(
         agent_id="blue_0", side="blue", alive=True,
@@ -224,7 +222,7 @@ def test_complete_60hz_missile_timeout_lifecycle_and_single_report():
     assert missile.termination_reason == "timeout"
     assert missile.flight_time_s == pytest.approx(56.0, abs=dt)
     telemetry = missile.telemetry()
-    assert telemetry["derived_timeout_s"] == pytest.approx(56.0)
+    assert telemetry["unpublished_timeout_s"] == pytest.approx(56.0)
     assert telemetry["timeout_derivation"] == TIMEOUT_DERIVATION
     assert [event["reason"] for event in termination_events] == ["timeout"]
     frozen = (missile.position.copy(), missile.velocity.copy(), missile.flight_time_s)
@@ -263,25 +261,21 @@ def test_40_level_action_grid_has_no_exact_zero_and_placeholder_is_inactive():
     env.close()
 
 
-def test_removed_free_parameters_are_absent_from_formal_configs():
-    removed = {
-        "combat_zone_radius_m", "uav_direct_detection_range_m", "mav_detection_range_m",
-        "position_norm_m", "altitude_norm_m", "situation_height_norm_m",
-        "max_incoming_missiles", "optimal_altitude_m", "maximum_altitude_m",
-        "mav_d_danger_m", "mav_d_safe_m", "mav_d_opt_m", "mav_d_max_m",
-        "mav_death_penalty", "mav_team_kill_bonus", "mav_team_kill_bonus_cap",
-        "maximum_missile_speed_mps", "missile_max_flight_time_s",
-    }
+def test_engineering_parameters_are_explicitly_unpublished():
+    required = {"combat_zone_radius_m", "position_normalization_m",
+                "altitude_normalization_m", "situation_height_normalization_m",
+                "entity_slot_capacity", "mav_reward_distance_thresholds_m",
+                "missile_timeout_s"}
     for path in CONFIG.parent.glob("tam_paper_env_v1_*.yaml"):
-        inferred = yaml.safe_load(path.read_text(encoding="utf-8"))["inferred_parameters"]
-        assert removed.isdisjoint(inferred)
+        inferred = yaml.safe_load(path.read_text(encoding="utf-8"))["unpublished_parameters"]
+        assert required <= set(inferred)
+        assert "uav_direct_detection_range_m" not in inferred
+        assert "mav_detection_range_m" not in inferred
 
 
-def test_fidelity_document_records_timeout_and_reference_8_evidence_boundary():
-    text = (ROOT / "docs" / "tam_paper_environment_fidelity.md").read_text(
-        encoding="utf-8")
-    assert "PAPER_SILENT_DERIVED_SIMPLIFICATION" in text
-    assert "2_times_attack_range_over_inferred_initial_speed" in text
-    assert "10.1016/j.dt.2022.08.010" in text
-    assert "REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED = false" in text
-    assert "PAPER_ENVIRONMENT_EXACTLY_REPRODUCED = false" in text
+def test_fidelity_document_records_v5_evidence_boundary():
+    text = (ROOT / "uav_env" / "JSBSim" / "README.md").read_text(encoding="utf-8")
+    assert "published_environment_reconstruction_v5" in text
+    assert "reference_8_exact_blue_fsm_reproduced=false" in text
+    assert "execution substrates" in text
+    assert "height_reward_exact_formula_available=false" in text

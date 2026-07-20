@@ -14,7 +14,7 @@ import numpy as np
 
 
 G = 9.80665
-TIMEOUT_DERIVATION = "2_times_attack_range_over_inferred_initial_speed"
+TIMEOUT_DERIVATION = "explicit_unpublished_parameter"
 
 
 def analytic_los_rates(relative_position: np.ndarray,
@@ -68,11 +68,8 @@ class PaperMissile:
         self.termination_reason = None
         self.navigation_gain_y = float(self.config["navigation_gain_y"])
         self.navigation_gain_z = float(self.config["navigation_gain_z"])
-        # PAPER_SILENT_DERIVED_SIMPLIFICATION: this combines the published
-        # attack range with inferred initial speed and a paper-silent factor 2.
         self.timeout_derivation = TIMEOUT_DERIVATION
-        self.timeout_s = (2.0 * float(self.config["maximum_attack_range_m"])
-                          / float(self.config["missile_initial_speed_mps"]))
+        self.timeout_s = float(self.config["missile_timeout_s"])
 
     @property
     def alive(self) -> bool:
@@ -161,6 +158,6 @@ class PaperMissile:
             "distance_m": self.distance_m,
             "flight_time_s": self.flight_time_s,
             "timeout_derivation": self.timeout_derivation,
-            "derived_timeout_s": self.timeout_s,
+            "unpublished_timeout_s": self.timeout_s,
             "termination_reason": self.termination_reason,
         }

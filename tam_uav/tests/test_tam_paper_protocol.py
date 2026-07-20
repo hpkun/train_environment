@@ -14,13 +14,13 @@ from uav_env.JSBSim.paper.protocol import (
 
 
 def test_protocol_constants_and_nominal_validation():
-    assert ENVIRONMENT_FIDELITY_REVISION == "published_rules_simplified_v4"
+    assert ENVIRONMENT_FIDELITY_REVISION == "published_environment_reconstruction_v5"
     assert BLUE_POLICY_FIDELITY == "minimal_greedy_basic_manoeuvre_reconstruction"
     assert REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED is False
     assert PAPER_NOMINAL_PROTOCOL == "paper_nominal"
     for scenario in ("2v2", "3v2", "5v4"):
         validate_nominal_protocol(scenario, "none")
-        with pytest.raises(ValueError, match="generalization"):
+        with pytest.raises(ValueError, match="perturbation"):
             validate_nominal_protocol(scenario, "low")
 
 

@@ -61,7 +61,7 @@ def test_opponent_scores_target_and_threat_at_same_prediction_time():
     assert not np.allclose(moving_totals, stationary_totals)
     for row in moving["candidates"].values():
         assert row["prediction_time_s"] == pytest.approx(0.2)
-        assert row["threat_prediction"] == "constant_velocity"
+        assert row["threat_prediction"] == "constant_velocity_unpublished"
         assert row["predicted_target_position_m"] == pytest.approx(
             (target.position + np.array([0.0, 350.0, 0.0]) * 0.2).tolist())
     assert moving["candidates"][moving["manoeuvre"]]["total_dense_reward"] == max(
@@ -119,7 +119,7 @@ def test_published_missile_metadata_and_explicit_drag_units():
     for path in CONFIG_DIR.glob("tam_paper_env_v1_*.yaml"):
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
         published = config["published_parameters"]
-        inferred = config["inferred_parameters"]
+        inferred = config["unpublished_parameters"]
         assert published["missile_mass_kg"] == 84.0
         assert published["missile_length_m"] == 2.87
         assert published["missile_diameter_m"] == 0.127

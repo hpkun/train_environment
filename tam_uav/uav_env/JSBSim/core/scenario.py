@@ -15,28 +15,29 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 class ScenarioBuilder:
     def __init__(self, config: dict):
         self.config = config
+        self.initial = config["scenario_initial_conditions"]
         self.aircraft_types = build_aircraft_types(config)
         self.dynamics_backend = str(config.get("dynamics_backend", "simple"))
         self.model_root = Path(config.get("jsbsim_model_root", "uav_env/JSBSim/models"))
         if not self.model_root.is_absolute():
             self.model_root = PROJECT_ROOT / self.model_root
-        self.reference_lat = float(config.get("reference_lat", 60.0))
-        self.reference_lon = float(config.get("reference_lon", 120.0))
-        self.reference_alt = float(config.get("reference_alt", 0.0))
+        self.reference_lat = float(self.initial["reference_lla"]["latitude_deg"])
+        self.reference_lon = float(self.initial["reference_lla"]["longitude_deg"])
+        self.reference_alt = float(self.initial["reference_lla"]["altitude_m"])
         self.simulation_frequency = int(
             config.get("published_parameters", {}).get("simulation_frequency_hz", 60))
 
     def build(self, rng: np.random.Generator) -> list[AircraftPlatform]:
         agents: list[AircraftPlatform] = []
-        agents.extend(self._build_side("red", self.config.get("red_agents", []), rng))
-        agents.extend(self._build_side("blue", self.config.get("blue_agents", []), rng))
+        agents.extend(self._build_side("red", self.initial["red_agents"], rng))
+        agents.extend(self._build_side("blue", self.initial["blue_agents"], rng))
         return agents
 
     def _build_side(self, side: str, entries: list[dict], rng: np.random.Generator):
         result = []
-        pos_range = self.config.get("initial_position_range", {})
-        alt_range = self.config.get("initial_altitude_range", [5500.0, 6500.0])
-        vel_range = self.config.get("initial_velocity_range", [220.0, 280.0])
+        pos_range = self.initial.get("initial_position_range", {})
+        alt_range = self.initial.get("initial_altitude_range", [5500.0, 6500.0])
+        vel_range = self.initial.get("initial_velocity_range", [220.0, 280.0])
         side_cfg = pos_range.get(side, {})
         x_range = side_cfg.get("x", [-8000.0, -6000.0] if side == "red" else [6000.0, 8000.0])
         y_range = side_cfg.get("y", [-1200.0, 1200.0])
@@ -86,7 +87,7 @@ class ScenarioBuilder:
 
     def _perturbation(self, rng: np.random.Generator) -> dict[str, float]:
         level = str(self.config.get("initial_perturbation", "none"))
-        bounds = self.config.get("initial_perturbation_levels", {}).get(level)
+        bounds = self.initial.get("initial_perturbation_levels", {}).get(level)
         if not bounds:
             return {key: 0.0 for key in ("altitude_m", "longitude_deg", "latitude_deg",
                                          "heading_deg", "speed_mps")}

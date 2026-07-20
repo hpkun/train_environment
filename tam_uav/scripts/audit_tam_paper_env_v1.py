@@ -28,7 +28,7 @@ from scripts.vanilla_happo_runtime import stack_controlled_rule_actions
 from uav_env.JSBSim.paper.protocol import (
     BLUE_POLICY_FIDELITY, ENVIRONMENT_FIDELITY_REVISION,
     GENERALIZATION_PERTURBATION_LEVELS,
-    NOMINAL_PERTURBATION, derived_environment_values, validate_generalization_protocol,
+    NOMINAL_PERTURBATION, environment_values, validate_generalization_protocol,
     validate_nominal_protocol, REFERENCE_8_EXACT_BLUE_FSM_REPRODUCED)
 from uav_env.JSBSim.paper.missile import TIMEOUT_DERIVATION
 
@@ -231,14 +231,16 @@ def _introspect(config: Path, backend: str) -> dict:
 def _config_consumption(config: dict) -> list[dict]:
     rows = []
     for source_key, published in (("published_parameters", True),
-                                  ("inferred_parameters", False)):
+                                  ("unpublished_parameters", False),
+                                  ("derived_parameters", False)):
         for name in sorted(config[source_key]):
             rows.append({
                 "parameter": name,
                 "source": source_key,
                 "consumer": PARAMETER_CONSUMERS.get(name, "paper environment contract"),
                 "published": published,
-                "inferred": not published,
+                "unpublished": source_key == "unpublished_parameters",
+                "derived": source_key == "derived_parameters",
                 "direct_dynamics_use": name not in {
                     "missile_mass_kg", "missile_length_m", "missile_diameter_m"},
             })
@@ -359,14 +361,13 @@ def main() -> int:
             },
         },
         "config_consumption_table": _config_consumption(config),
-        "derived_environment_parameters": derived_environment_values(
-            config["published_parameters"]["maximum_attack_range_m"]),
+        "environment_engineering_parameters": environment_values(
+            config["unpublished_parameters"]),
         "missile_timeout": {
-            "classification": "PAPER_SILENT_DERIVED_SIMPLIFICATION",
+            "classification": "UNPUBLISHED_PARAMETER",
             "timeout_derivation": TIMEOUT_DERIVATION,
-            "derived_timeout_s": (
-                2.0 * config["published_parameters"]["maximum_attack_range_m"]
-                / config["inferred_parameters"]["missile_initial_speed_mps"]),
+            "unpublished_timeout_s": config["unpublished_parameters"][
+                "missile_timeout_s"],
         },
         "missile_published_metadata": {
             key: config["published_parameters"][key] for key in (

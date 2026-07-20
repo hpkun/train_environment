@@ -23,12 +23,14 @@ from uav_env.JSBSim.paper.env import TAMPaperEnv
 def mirrored_config(config):
     mirrored = copy.deepcopy(config)
     mirrored.pop("env_type", None)
-    original_red = copy.deepcopy(config["red_agents"])
-    original_blue = copy.deepcopy(config["blue_agents"])
-    mirrored["red_agents"] = [dict(agent, id=f"red_{index}")
-                              for index, agent in enumerate(original_blue)]
-    mirrored["blue_agents"] = [dict(agent, id=f"blue_{index}")
-                               for index, agent in enumerate(original_red)]
+    initial = mirrored["scenario_initial_conditions"]
+    original = config["scenario_initial_conditions"]
+    original_red = copy.deepcopy(original["red_agents"])
+    original_blue = copy.deepcopy(original["blue_agents"])
+    initial["red_agents"] = [dict(agent, id=f"red_{index}")
+                             for index, agent in enumerate(original_blue)]
+    initial["blue_agents"] = [dict(agent, id=f"blue_{index}")
+                              for index, agent in enumerate(original_red)]
     mirrored["scenario"] = "2v2"
     return mirrored
 

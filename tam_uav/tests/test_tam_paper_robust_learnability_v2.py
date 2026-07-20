@@ -195,6 +195,8 @@ def test_symmetry_config_is_in_memory_and_does_not_change_yaml():
     import yaml
     config = yaml.safe_load(before.decode("utf-8"))
     mirrored = mirrored_config(config)
-    assert mirrored["red_agents"][0]["lat_deg"] == config["blue_agents"][0]["lat_deg"]
-    assert mirrored["red_agents"][0]["id"] == "red_0"
+    mirrored_initial = mirrored["scenario_initial_conditions"]
+    initial = config["scenario_initial_conditions"]
+    assert mirrored_initial["red_agents"][0]["lat_deg"] == initial["blue_agents"][0]["lat_deg"]
+    assert mirrored_initial["red_agents"][0]["id"] == "red_0"
     assert path.read_bytes() == before

@@ -196,6 +196,19 @@ class SimpleKinematicAircraftPlatform:
                 return missile
         return None
 
+    def clone_for_prediction(self):
+        """Deterministic test-backend clone; formal configs use JSBSim below."""
+        clone = SimpleKinematicAircraftPlatform(
+            self.agent_id, self.side, self.aircraft_type, self.position.copy(),
+            self.velocity.copy(), float(self.heading), pitch=float(self.pitch),
+            roll=float(self.roll), alive=bool(self.alive),
+            missile_left=int(self.missile_left))
+        clone.apply_direct_fcs_command(self.direct_fcs_command)
+        return clone
+
+    def close(self) -> None:
+        return None
+
 
 class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
     """JSBSim-backed aircraft with the same public attributes as the simple backend."""
@@ -355,6 +368,30 @@ class JSBSimAircraftPlatform(SimpleKinematicAircraftPlatform):
             "throttle_position_norm": self._get_property("fcs/throttle-pos-norm"),
             "throttle_adapter": "command_only_no_adapter",
         }
+
+    def clone_for_prediction(self):
+        """Create an independent JSBSim carrier at the exact public flight state.
+
+        Candidate rollout state never touches the official aircraft FDM, time,
+        counters, events, weapons, or runtime diagnostics.
+        """
+        clone = JSBSimAircraftPlatform(
+            self.agent_id, self.side, self.aircraft_type,
+            self.position.copy(), self.velocity.copy(), float(self.heading),
+            pitch=float(self.pitch), roll=float(self.roll),
+            model_root=str(self.model_root), model_name=self.model_name,
+            reference_lat=self.reference_lat, reference_lon=self.reference_lon,
+            reference_alt=self.reference_alt,
+            simulation_frequency=self.simulation_frequency,
+            suppress_output=self.suppress_output)
+        clone.position = self.position.copy()
+        clone.velocity = self.velocity.copy()
+        clone.heading = float(self.heading)
+        clone.pitch = float(self.pitch)
+        clone.roll = float(self.roll)
+        clone._reset_fdm()
+        clone.apply_direct_fcs_command(self.direct_fcs_command)
+        return clone
 
     def step_physics_once(self, dt: float | None = None) -> bool:
         del dt

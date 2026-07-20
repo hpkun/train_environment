@@ -316,7 +316,9 @@ def evaluate_policy_panel(
         "paper_generalization_experiment", "paper_silent_assumptions_present")
     metadata_keys += (
         "neutral_action_semantics", "blue_policy_fidelity",
-        "reference_8_exact_blue_fsm_reproduced")
+        "reference_8_exact_blue_fsm_reproduced",
+        "basic_manoeuvre_action_mapping_unpublished",
+        "height_reward_exact_formula_available")
     combined_actions = []
     for record in records:
         count = record["active_action_sample_count"]

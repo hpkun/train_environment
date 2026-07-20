@@ -87,5 +87,5 @@ def test_disable_evaluation_skips_all_evaluation_outputs(monkeypatch, capsys):
     assert '"config_snapshot"' not in stdout
 
 
-def test_environment_revision_remains_published_rules_simplified_v4():
-    assert ENVIRONMENT_FIDELITY_REVISION == "published_rules_simplified_v4"
+def test_environment_revision_is_v5_reconstruction():
+    assert ENVIRONMENT_FIDELITY_REVISION == "published_environment_reconstruction_v5"

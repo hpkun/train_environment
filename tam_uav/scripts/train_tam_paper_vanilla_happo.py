@@ -330,6 +330,9 @@ def main():
                                 else "parameter_sharing_ablation"),
     } | protocol_metadata(
         args.scenario, NOMINAL_PERTURBATION, "jsbsim", PAPER_NOMINAL_PROTOCOL)
+    snapshot.update({key: env.config[key] for key in (
+        "published_parameters", "unpublished_parameters", "derived_parameters",
+        "scenario_initial_conditions", "role_definitions")})
     try:
         from torch.utils.tensorboard import SummaryWriter
         writer = SummaryWriter(output / "tensorboard")

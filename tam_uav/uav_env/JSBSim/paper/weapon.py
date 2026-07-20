@@ -11,9 +11,9 @@ COINCIDENT_POSITION_EPSILON_M = 1.0e-6
 
 
 class PaperWeaponManager:
-    def __init__(self, published: dict, inferred: dict):
+    def __init__(self, published: dict, unpublished: dict):
         self.published = published
-        self.inferred = inferred
+        self.unpublished = unpublished
         self.missiles: list[PaperMissile] = []
         self.last_launch_time_s: dict[str, float] = {}
         self.counter = 0
@@ -46,7 +46,7 @@ class PaperWeaponManager:
         direction = target.position - shooter.position
         self.counter += 1
         missile_id = f"{shooter.agent_id}_M{self.counter:04d}"
-        config = {**self.published, **self.inferred}
+        config = {**self.published, **self.unpublished}
         missile = PaperMissile(missile_id, shooter.agent_id, target.agent_id,
                                shooter.position.copy(), direction, config)
         self.missiles.append(missile)

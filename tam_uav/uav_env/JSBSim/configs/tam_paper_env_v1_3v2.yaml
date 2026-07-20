@@ -1,5 +1,8 @@
 env_type: jsbsim_tam_paper
 paper_environment_mode: tam_paper_env_v1
+environment_fidelity_revision: published_environment_reconstruction_v5
+scenario: 3v2
+experiment_protocol: paper_nominal
 dynamics_backend: jsbsim
 jsbsim_model_root: uav_env/JSBSim/data
 reference_lat: 60.0
@@ -23,7 +26,13 @@ published_parameters:
   missile_mass_kg: 84.0
   missile_length_m: 2.87
   missile_diameter_m: 0.127
-inferred_parameters:
+  direct_fcs_action_dimensions: [throttle, aileron, elevator, rudder]
+  action_levels_per_dimension: 40
+  throttle_command_range: [0.4, 0.9]
+  control_surface_command_range: [-1.0, 1.0]
+  uav_reward_weights: {height: 10.0, speed: 10.0, angle: 15.0, distance: 10.0, dodge: 30.0}
+  event_rewards: {kill: 200.0, death_or_crash: -200.0, out_of_zone: -100.0}
+unpublished_parameters:
   # Paper does not publish the following engineering parameters.
   missile_initial_speed_mps: 500.0
   powered_duration_s: 3.0
@@ -32,31 +41,48 @@ inferred_parameters:
   effective_quadratic_drag_per_m: 0.00012
   missile_speed_reward_norm_mps: 1000.0
   reward_global_scale: 1.0
-initial_perturbation_levels:
+  execution_aircraft_models: {mav: f22, attack_uav: f16}
+  missile_timeout_s: 56.0
+  height_reward_approximation: {exact_formula_available: false, nominal_altitude_m: 6000.0}
+  combat_zone_radius_m: 28000.0
+  position_normalization_m: 28000.0
+  altitude_normalization_m: 6000.0
+  situation_height_normalization_m: 6000.0
+  entity_slot_capacity: {red: 5, blue: 4, incoming_missiles: 8}
+  mav_reward_distance_thresholds_m: {danger: 7000.0, safe: 14000.0, optimal: 14000.0, maximum: 28000.0}
+  blue_policy: {candidate_set: minimal_basic_manoeuvres, candidate_backend: independent_jsbsim_clone_12_frames, reference_8_exact_blue_fsm_reproduced: false, basic_manoeuvre_action_mapping_unpublished: true}
+  target_selection_tie_break: lexicographic_agent_id_unpublished
+  dodge_threat_selection: minimum_time_to_reach_unpublished
+  posthumous_reward_semantics: event_sequence_ordered_unpublished
+  termination_semantics: {combat_unit_elimination: unpublished, simultaneous_resolution: decision_step_boundary_unpublished}
+derived_parameters: {decision_dt_s: 0.2}
+initial_perturbation_levels: &perturbations
   low: {altitude_m: 500.0, longitude_deg: 0.005, latitude_deg: 0.005, heading_deg: 5.0, speed_mps: 20.0}
   medium: {altitude_m: 1000.0, longitude_deg: 0.01, latitude_deg: 0.01, heading_deg: 10.0, speed_mps: 35.0}
   large: {altitude_m: 1500.0, longitude_deg: 0.015, latitude_deg: 0.015, heading_deg: 15.0, speed_mps: 50.0}
-aircraft_type_params:
+role_definitions:
   mav:
-    aircraft_model: f22
+    unpublished_execution_aircraft_model: f22
     role: mav
     missile_num: 0
-    max_speed_scale: 1.0
-    max_g: 9.0
     reward_role: mav
   attack_uav:
-    aircraft_model: f16
+    unpublished_execution_aircraft_model: f16
     role: attack_uav
     missile_num: 2
-    max_speed_scale: 1.0
-    max_g: 9.0
     reward_role: attack_uav
 max_red_agents: 3
 max_blue_agents: 2
-red_agents:
+red_agents: &red_agents
   - {id: red_0, type: mav, role: mav, lon_deg: 120.02, lat_deg: 59.98, altitude_m: 6000.0, speed_mps: 250.0, heading_deg: 0.0}
   - {id: red_1, type: attack_uav, role: attack_uav, lon_deg: 120.0, lat_deg: 60.0, altitude_m: 6000.0, speed_mps: 250.0, heading_deg: 0.0}
   - {id: red_2, type: attack_uav, role: attack_uav, lon_deg: 120.04, lat_deg: 60.0, altitude_m: 6000.0, speed_mps: 250.0, heading_deg: 0.0}
-blue_agents:
+blue_agents: &blue_agents
   - {id: blue_0, type: attack_uav, role: attack_uav, lon_deg: 120.0, lat_deg: 60.2, altitude_m: 6000.0, speed_mps: 250.0, heading_deg: 180.0}
   - {id: blue_1, type: attack_uav, role: attack_uav, lon_deg: 120.04, lat_deg: 60.2, altitude_m: 6000.0, speed_mps: 250.0, heading_deg: 180.0}
+scenario_initial_conditions:
+  provenance: mixed_published_nominal_and_unpublished_layout
+  reference_lla: {latitude_deg: 60.0, longitude_deg: 120.0, altitude_m: 0.0}
+  initial_perturbation_levels: *perturbations
+  red_agents: *red_agents
+  blue_agents: *blue_agents

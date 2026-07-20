@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from .situation import assess_pair
-from .protocol import derived_environment_values
+from .protocol import environment_values
 
 
 OBS_KEYS = ("ego_state", "ally_states", "enemy_states", "incoming_missile_states",
@@ -13,12 +13,12 @@ OBS_KEYS = ("ego_state", "ally_states", "enemy_states", "incoming_missile_states
 
 
 class PaperObservation:
-    def __init__(self, published: dict, inferred: dict, max_red: int, max_blue: int):
+    def __init__(self, published: dict, unpublished: dict):
         self.published = published
-        self.inferred = inferred
-        self.max_red = max_red
-        self.max_blue = max_blue
-        self.derived = derived_environment_values(published["maximum_attack_range_m"])
+        self.unpublished = unpublished
+        self.derived = environment_values(unpublished)
+        self.max_red = self.derived["max_red_agents"]
+        self.max_blue = self.derived["max_blue_agents"]
         self.max_incoming = int(self.derived["max_incoming_missiles"])
         self.position_norm_m = float(self.derived["position_norm_m"])
         self.altitude_norm_m = float(self.derived["altitude_norm_m"])
@@ -28,14 +28,16 @@ class PaperObservation:
         enemies = self.max_blue if side == "red" else self.max_red
         return allies, enemies
 
-    def build(self, agents, missiles) -> dict[str, dict[str, np.ndarray]]:
+    def build(self, agents, missiles, selected_targets=None) -> dict[str, dict[str, np.ndarray]]:
         by_side = {side: sorted([a for a in agents if a.side == side], key=lambda a: a.agent_id)
                    for side in ("red", "blue")}
-        mavs = [a for a in by_side["red"] if a.aircraft_type.role == "mav" and a.alive]
         result = {}
         for ego in agents:
             allies = [a for a in by_side[ego.side] if a.agent_id != ego.agent_id]
             enemies = by_side["blue" if ego.side == "red" else "red"]
+            selected = None if selected_targets is None else selected_targets.get(ego.agent_id)
+            enemies = sorted(enemies, key=lambda item: (
+                item.agent_id != selected, item.agent_id))
             max_allies, max_enemies = self.shapes_for(ego.side)
             ally_states = np.zeros((max_allies, 5), dtype=np.float32)
             enemy_states = np.zeros((max_enemies, 5), dtype=np.float32)
@@ -47,7 +49,7 @@ class PaperObservation:
                         ally_states[idx] = self._relative(ego, target.position, target.velocity)
                         ally_mask[idx] = 1.0
                 for idx, target in enumerate(enemies[:max_enemies]):
-                    if target.alive and self._visible(ego, target, mavs):
+                    if target.alive:
                         enemy_states[idx] = self._relative(ego, target.position, target.velocity)
                         enemy_mask[idx] = 1.0
             incoming = [m for m in missiles if m.alive and m.target_id == ego.agent_id]
@@ -102,14 +104,3 @@ class PaperObservation:
             pair.ata_rad / np.pi,
             pair.aa_rad / np.pi,
         ], dtype=np.float32)
-
-    def _visible(self, ego, target, mavs) -> bool:
-        distance = float(np.linalg.norm(target.position - ego.position))
-        if distance <= float(self.derived["uav_direct_detection_range_m"]):
-            return True
-        if ego.side == "red" and ego.aircraft_type.role != "mav":
-            return any(np.linalg.norm(target.position - mav.position)
-                       <= float(self.derived["mav_detection_range_m"]) for mav in mavs)
-        if ego.aircraft_type.role == "mav":
-            return distance <= float(self.derived["mav_detection_range_m"])
-        return False

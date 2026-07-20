@@ -73,7 +73,7 @@ def test_maximum_launch_range_and_interval_remain_enforced():
     env.close()
 
 
-def test_mav_track_sharing_stops_immediately_after_death():
+def test_all_alive_enemies_remain_observable_without_mav_track_sharing():
     env = _env()
     env.reset(seed=2)
     by_id = {a.agent_id: a for a in env.task.agents}
@@ -84,7 +84,7 @@ def test_mav_track_sharing_stops_immediately_after_death():
     assert obs[uav.agent_id]["enemy_mask"][0] == 1.0
     mav.kill("shotdown")
     obs = env.task.observation.build(env.task.agents, [])
-    assert obs[uav.agent_id]["enemy_mask"][0] == 0.0
+    assert obs[uav.agent_id]["enemy_mask"][0] == 1.0
     env.close()
 
 
@@ -127,7 +127,7 @@ def test_info_contains_per_agent_reward_and_missile_accounting():
     assert set(info["missile_termination_reasons"]) == {
         "hit", "timeout", "target_dead", "nonfinite"
     }
-    assert info["environment_fidelity_revision"] == "published_rules_simplified_v4"
+    assert info["environment_fidelity_revision"] == "published_environment_reconstruction_v5"
     assert info["reference_8_exact_blue_fsm_reproduced"] is False
     assert info["termination_resolution"] == "decision_step_boundary"
     assert info["experiment_protocol"] == "paper_nominal"

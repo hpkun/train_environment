@@ -42,7 +42,7 @@ def test_2v2_role_and_side_metrics_do_not_invent_mav():
     }
     record = finish_episode(
         accumulator, env, info, 20, "vanilla_happo",
-        "published_rules_simplified_v4", "paper_nominal")
+        "published_environment_reconstruction_v5", "paper_nominal")
     assert record["red_team_episode_return"] == 40.0
     assert record["role_mean_return/mav"] is None
     assert record["role_total_return/mav"] is None
@@ -73,7 +73,7 @@ def test_controlled_reward_components_and_side_events_are_separate():
     }
     record = finish_episode(
         accumulator, env, info, 1, "vanilla_happo",
-        "published_rules_simplified_v4", "paper_nominal")
+        "published_environment_reconstruction_v5", "paper_nominal")
     assert record["reward_component/controlled_total/r_event"] == 3.0
     assert not any("blue_" in key for key in record if key.startswith("reward_component/agent"))
     assert (record["red_missiles_fired"], record["red_hits"]) == (3, 2)
@@ -117,7 +117,7 @@ def test_analyzer_reports_insufficient_data_without_episodes(tmp_path):
         "total_environment_steps": 128}), encoding="utf-8")
     (tmp_path / "summary.json").write_text(json.dumps({
         "actual_final_environment_steps": 128,
-        "checkpoint_environment_fidelity_revision": "published_rules_simplified_v4"}),
+        "checkpoint_environment_fidelity_revision": "published_environment_reconstruction_v5"}),
         encoding="utf-8")
     (tmp_path / "baseline_reference.json").write_text("{}", encoding="utf-8")
     for name in ("episodes.csv", "training.csv", "evaluation_history.csv"):

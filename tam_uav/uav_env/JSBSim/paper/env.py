@@ -16,13 +16,14 @@ class TAMPaperEnv:
             raise ValueError("jsbsim_tam_paper requires paper_environment_mode=tam_paper_env_v1")
         self.config = dict(config)
         self.task = TAMPaperTask(self.config)
+        initial = config["scenario_initial_conditions"]
         self.rng = np.random.default_rng(config.get("seed"))
         self.agent_ids = self.task.controlled_agent_ids_from_config()
         self.red_ids = list(self.agent_ids)
         self.blue_ids = [str(a.get("id", f"blue_{i}"))
-                         for i, a in enumerate(config["blue_agents"])]
+                         for i, a in enumerate(initial["blue_agents"])]
         self.agent_roles = {str(a.get("id", f"red_{i}")): a["role"]
-                            for i, a in enumerate(config["red_agents"])}
+                            for i, a in enumerate(initial["red_agents"])}
         self.num_agents = self.n_agents = len(self.agent_ids)
         self.tam_action_distribution = "multidiscrete_categorical"
         self.tam_action_levels = ACTION_LEVELS

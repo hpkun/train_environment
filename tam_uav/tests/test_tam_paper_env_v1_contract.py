@@ -62,11 +62,13 @@ def test_paper_config_and_environment_contract(name, red, blue, mavs):
     assert cfg["published_parameters"]["maximum_attack_range_m"] == 14000
     assert cfg["published_parameters"]["launch_interval_s"] == 25
     assert cfg["initial_perturbation"] == "none"
-    assert "minimum_launch_range_m" not in cfg["inferred_parameters"]
-    assert "structural_limit_grace_s" not in cfg["inferred_parameters"]
-    assert len(cfg["red_agents"]) == red
-    assert len(cfg["blue_agents"]) == blue
-    assert sum(a["role"] == "mav" for a in cfg["red_agents"]) == mavs
+    assert "inferred_parameters" not in cfg
+    assert "minimum_launch_range_m" not in cfg["unpublished_parameters"]
+    assert "structural_limit_grace_s" not in cfg["unpublished_parameters"]
+    initial = cfg["scenario_initial_conditions"]
+    assert len(initial["red_agents"]) == red
+    assert len(initial["blue_agents"]) == blue
+    assert sum(a["role"] == "mav" for a in initial["red_agents"]) == mavs
 
     env = make_env(str(path), dynamics_backend="simple")
     obs, info = env.reset(seed=7)
@@ -97,7 +99,8 @@ def test_action_mapping_is_direct_and_exact():
 def test_table_initial_states_are_unchanged(name):
     cfg = yaml.safe_load((CONFIG_DIR / name).read_text(encoding="utf-8"))
     actual = {}
-    for item in cfg["red_agents"] + cfg["blue_agents"]:
+    initial = cfg["scenario_initial_conditions"]
+    for item in initial["red_agents"] + initial["blue_agents"]:
         actual[item["id"]] = (
             item["lon_deg"], item["lat_deg"], item["altitude_m"],
             item["speed_mps"], item["heading_deg"],
@@ -149,6 +152,7 @@ def test_point_mass_missile_has_pn_limits_and_variable_speed():
         "powered_acceleration_mps2": 100.0,
         "effective_quadratic_drag_per_m": 1.0e-5,
         "hit_radius_m": 30.0,
+        "missile_timeout_s": 56.0,
     }
     missile = PaperMissile("m1", "red_0", "blue_0", np.zeros(3),
                            np.array([500.0, 0.0, 0.0]), cfg)

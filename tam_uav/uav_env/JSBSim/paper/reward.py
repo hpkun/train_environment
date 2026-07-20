@@ -7,7 +7,7 @@ import math
 import numpy as np
 
 from .situation import SituationScore
-from .protocol import NOMINAL_ALTITUDE_M, derived_environment_values
+from .protocol import environment_values
 
 
 TEAM_KILL_REWARD_PER_ENEMY = 200.0
@@ -41,8 +41,10 @@ def uav_angle_reward(ata_rad: float, aa_rad: float) -> float:
     return float(1.0 - (ata_rad + aa_rad) / np.pi)
 
 
-def paper_height_reward(altitude_m: float, minimum_safe_altitude_m: float) -> float:
-    """Paper-silent continuous simplification using 750 m and nominal 6000 m."""
+def unpublished_height_reward_approximation(
+        altitude_m: float, minimum_safe_altitude_m: float,
+        nominal_altitude_m: float = 6000.0) -> float:
+    """Numerical approximation: the paper does not publish P_V or P_H."""
     altitude = float(altitude_m)
     minimum = float(minimum_safe_altitude_m)
     if altitude <= 0.0:
@@ -50,15 +52,19 @@ def paper_height_reward(altitude_m: float, minimum_safe_altitude_m: float) -> fl
     if altitude < minimum:
         return float(-1.0 + altitude / minimum)
     return float(np.clip(
-        (altitude - minimum) / (NOMINAL_ALTITUDE_M - minimum), 0.0, 1.0))
+        (altitude - minimum) / (float(nominal_altitude_m) - minimum), 0.0, 1.0))
+
+
+# Compatibility import only; v5 metadata and components never call this exact-paper reward.
+paper_height_reward = unpublished_height_reward_approximation
 
 
 class PaperReward:
-    def __init__(self, published: dict, inferred: dict):
+    def __init__(self, published: dict, unpublished: dict):
         self.published = published
-        self.inferred = inferred
-        self.derived = derived_environment_values(published["maximum_attack_range_m"])
-        self.global_scale = float(inferred.get("reward_global_scale", 1.0))
+        self.unpublished = unpublished
+        self.derived = environment_values(unpublished)
+        self.global_scale = float(unpublished["reward_global_scale"])
         self.credited_enemy_ids: dict[str, set[str]] = {}
         self.cumulative_team_kill_bonus: dict[str, float] = {}
 
@@ -119,7 +125,8 @@ class PaperReward:
                     "r_team_kill_bonus_cumulative", "r_team_kill_bonus_cap",
                     "r_death", "r_event", "total")
         else:
-            keys = ("r_height", "r_speed", "r_angle", "r_distance",
+            keys = ("r_height_approximation", "height_reward_exact_formula_available",
+                    "r_speed", "r_angle", "r_distance",
                     "r_dodge_angle", "r_dodge_speed", "r_dodge", "r_event", "total")
         return {key: 0.0 for key in keys}
 
@@ -223,8 +230,9 @@ class PaperReward:
 
     def _uav(self, agent, target, pair: SituationScore | None, missiles,
              kills: int, out_of_zone: bool, just_died: bool):
-        r_height = paper_height_reward(
-            agent.position[2], self.published["minimum_safe_altitude_m"])
+        r_height = unpublished_height_reward_approximation(
+            agent.position[2], self.published["minimum_safe_altitude_m"],
+            self.unpublished["height_reward_approximation"]["nominal_altitude_m"])
         if target is not None and pair is not None:
             r_speed = uav_speed_reward(agent.speed, target.speed)
             r_angle = uav_angle_reward(pair.ata_rad, pair.aa_rad)
@@ -241,16 +249,22 @@ class PaperReward:
             lam = float(np.arccos(np.clip(np.dot(los, threat.velocity) / denom, -1.0, 1.0)))
             r_dodge_angle = -float(np.cos(lam))
             r_dodge_speed = ((threat.decision_start_speed_mps - threat.speed_mps)
-                             / float(self.inferred["missile_speed_reward_norm_mps"]))
+                             / float(self.unpublished["missile_speed_reward_norm_mps"]))
         r_dodge = r_dodge_angle + r_dodge_speed
-        event = 200.0 * kills
+        events = self.published["event_rewards"]
+        event = float(events["kill"]) * kills
         if just_died and not agent.out_of_boundary:
-            event -= 200.0
+            event += float(events["death_or_crash"])
         if out_of_zone:
-            event -= 100.0
-        total = 10.0 * r_height + 10.0 * r_speed + 15.0 * r_angle + 10.0 * r_distance + 30.0 * r_dodge + event
+            event += float(events["out_of_zone"])
+        weights = self.published["uav_reward_weights"]
+        total = (weights["height"] * r_height + weights["speed"] * r_speed
+                 + weights["angle"] * r_angle + weights["distance"] * r_distance
+                 + weights["dodge"] * r_dodge + event)
         return total, {
-            "r_height": r_height, "r_speed": r_speed, "r_angle": r_angle,
+            "r_height_approximation": r_height,
+            "height_reward_exact_formula_available": False,
+            "r_speed": r_speed, "r_angle": r_angle,
             "r_distance": r_distance, "r_dodge_angle": r_dodge_angle,
             "r_dodge_speed": r_dodge_speed, "r_dodge": r_dodge,
             "r_event": event,

@@ -21,7 +21,7 @@ def env_for(name="tam_paper_env_v1_3v2.yaml", backend="simple"):
 
 def missile_config():
     env = env_for()
-    config = {**env.task.published, **env.task.inferred}
+    config = {**env.task.published, **env.task.unpublished}
     env.close()
     return config
 
@@ -29,11 +29,12 @@ def missile_config():
 def test_formal_config_has_single_frequency_source_and_no_trim_or_warmup():
     cfg = yaml.safe_load((CONFIG_DIR / "tam_paper_env_v1_3v2.yaml").read_text())
     assert "simulation_frequency" not in cfg
-    assert "direct_fcs_static_trim_by_model" not in cfg["inferred_parameters"]
-    assert "reset_warmup_seconds" not in cfg["inferred_parameters"]
-    assert "reset_warmup_throttle" not in cfg["inferred_parameters"]
+    assert "inferred_parameters" not in cfg
+    assert "direct_fcs_static_trim_by_model" not in cfg["unpublished_parameters"]
+    assert "reset_warmup_seconds" not in cfg["unpublished_parameters"]
+    assert "reset_warmup_throttle" not in cfg["unpublished_parameters"]
     assert all("model_path" not in value and "radar_range" not in value
-               for value in cfg["aircraft_type_params"].values())
+               for value in cfg["role_definitions"].values())
     assert (cfg["published_parameters"]["decision_frequency_hz"]
             == cfg["published_parameters"]["simulation_frequency_hz"]
             / cfg["published_parameters"]["physics_frames_per_action"])
@@ -98,12 +99,12 @@ def test_every_decision_reselects_best_target_and_records_change():
     a.position = ego.position + np.array([5000.0, 0.0, 0.0])
     b.position = ego.position + np.array([-15000.0, 0.0, 0.0])
     obs = env.task.observation.build(env.task.agents, [])
-    env.task._update_targets(obs)
+    env.task._update_targets()
     assert env.task.current_targets[ego.agent_id] == a.agent_id
     a.position = ego.position + np.array([-15000.0, 0.0, 0.0])
     b.position = ego.position + np.array([5000.0, 0.0, 1000.0])
     obs = env.task.observation.build(env.task.agents, [])
-    env.task._update_targets(obs)
+    env.task._update_targets()
     assert env.task.current_targets[ego.agent_id] == b.agent_id
     assert env.task.target_diagnostics[ego.agent_id]["target_changed"] is True
     env.close()
@@ -257,7 +258,7 @@ def test_reselected_target_is_shared_by_launch_and_reward(monkeypatch):
     env.close()
 
 
-def test_opponent_argmax_uses_formal_reward_and_distinguishes_left_right():
+def test_opponent_argmax_uses_formal_reward():
     env = env_for()
     env.reset(seed=52)
     by_id = {a.agent_id: a for a in env.task.agents}
@@ -266,14 +267,11 @@ def test_opponent_argmax_uses_formal_reward_and_distinguishes_left_right():
     action_left, diag_left = env.task.opponent.act(agent, target, [])
     target.position = agent.position + np.array([5000.0, -5000.0, 0.0])
     action_right, diag_right = env.task.opponent.act(agent, target, [])
-    assert "left" in diag_left["manoeuvre"]
-    assert "right" in diag_right["manoeuvre"]
-    assert not np.array_equal(action_left, action_right)
     for diag in (diag_left, diag_right):
         totals = {name: row["total_dense_reward"] for name, row in diag["candidates"].items()}
         assert totals[diag["manoeuvre"]] == max(totals.values())
         assert set(next(iter(diag["candidates"].values()))["reward_components"]) == {
-            "r_height", "r_speed", "r_angle", "r_distance", "r_dodge"
+            "r_height_approximation", "r_speed", "r_angle", "r_distance", "r_dodge"
         }
     env.close()
 
