@@ -72,17 +72,15 @@ state, not proof that the launch window is wrong.
 | Item | Paper statement / equation / table | Current implementation | Status | Notes |
 |---|---|---|---|---|
 | Blue rule policy | §4.1: Blue uniformly adopts a rule-based strategy; performs target allocation/pursuit, missile evasion by warning | `rule_based_agent.blue_coordinated_actions()` controls Blue; environment handles scripted missile evasion layer | MATCH in concept | Blue being non-learning is paper-consistent. |
-| Target allocation/pursuit | §4.1 states target allocation and pursuit according to battlefield situation | Greedy assignment, target scoring from observation, lead pursuit for radar tracks | PARTIAL | Paper does not provide exact rule equations in extracted text. Current implementation is an engineering baseline. |
+| Target allocation/pursuit | §4.1 states target allocation and pursuit according to battlefield situation | Deterministic unique-nearest assignment; current-LOS pursuit at fixed 300 m/s | PARTIAL | Paper does not publish exact rule equations; this is the minimal engineering interpretation. |
 | AWACS reacquisition | Table 2 note supports approximate enemy position through RWS/AWACS when radar is blind | Blue distinguishes radar vs AWACS coarse tracks and can pursue coarse bearing with lower confidence | PARTIAL / engineering implementation | Uses observation-space coarse bearing, not Red global position. Concept is paper-consistent, exact baseline unknown. |
-| Boundary safety | Paper has boundary reward, not explicit Blue boundary autopilot | Blue has ownship-only no-target boundary patrol and near-boundary safety override | ENGINEERING ENHANCEMENT | Necessary to avoid scripted Blue flying out while no target is selected. Could make Blue stronger/more stable than an unspecified paper rule baseline. |
-| GCAS | Paper does not describe Blue-only GCAS in extracted text | Training default `enable_blue_gcas=False`; env supports optional Blue GCAS | MATCH for training default / engineering option | As long as default stays false, Blue-only GCAS is not active in vanilla training. |
-| Anti-stall / hard deck / energy protection | Paper has flight status rewards and missile evasion scripts; not exact Blue autopilot details | Blue rule policy includes hard deck, descent-rate safety, stall/anti-stall and trim compensation | ENGINEERING ENHANCEMENT | These protect the rule baseline. They may make Blue stronger or more robust than a minimal paper baseline. |
+| Boundary safety | Paper has boundary reward, not explicit Blue boundary autopilot | No boundary patrol or near-boundary action override in the formal profile | MINIMAL ENGINEERING INTERPRETATION | Boundary reward and termination remain unchanged. |
+| GCAS | Paper does not describe Blue-only GCAS | Disabled and absent from the formal profile | MATCH to minimality constraint | Red and Blue receive no GCAS command injection. |
+| Anti-stall / hard deck / energy protection | Not published as Blue policy details | No recovery state machine or Blue-specific protection in the formal profile | MINIMAL ENGINEERING INTERPRETATION | Numerical auditing and termination checks remain monitor/health mechanisms only. |
 
-Risk assessment: current Blue may be stronger than an unspecified paper rule
-baseline because of boundary safety, stall protection, lead pursuit, AWACS
-reacquisition, and target deconfliction. However, these are Blue-only scripted
-baseline details; changing them during the vanilla MAPPO diagnostic would
-confound comparison unless paper code precisely defines the Blue policy.
+Risk assessment: exact paper target allocation, pursuit, and MWS scripts remain
+unpublished. The current deterministic minimal interpretation avoids additional
+Blue safety or prediction advantages but is still not an exact paper-code match.
 
 ## 6. Reward formula
 

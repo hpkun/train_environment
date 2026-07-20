@@ -176,7 +176,8 @@ def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool,
                      include_aux_obs: bool | None = None) -> int:
     """Return the fixed Table 1/Table 2 actor input dimension."""
     if obs_mode != "paper_strict" or include_aux_obs:
-        raise ValueError("paper_3v3_v1 only supports strict entity observations")
+        raise ValueError(
+            f"{PAPER_ENVIRONMENT_PROFILE} only supports strict entity observations")
     if is_red:
         n_ally = num_red - 1
         n_enemy = num_blue
@@ -190,7 +191,7 @@ def _compute_obs_dim(num_red: int, num_blue: int, is_red: bool,
 def _compute_global_state_dim(num_red: int, obs_mode: str = "paper_strict") -> int:
     """Paper CTDE state: native ego state of every red UAV."""
     if obs_mode != "paper_strict":
-        raise ValueError("paper_3v3_v1 only supports paper_strict")
+        raise ValueError(f"{PAPER_ENVIRONMENT_PROFILE} only supports paper_strict")
     return num_red * 10
 
 
@@ -200,7 +201,7 @@ def _global_state_from_local_obs_flats(
 ) -> np.ndarray:
     """Extract and concatenate each red agent's leading ego-state entity."""
     if obs_mode != "paper_strict":
-        raise ValueError("paper_3v3_v1 only supports paper_strict")
+        raise ValueError(f"{PAPER_ENVIRONMENT_PROFILE} only supports paper_strict")
     entity_dim = 10
     return np.concatenate([
         np.asarray(obs, dtype=np.float32).reshape(-1)[:entity_dim]
@@ -341,7 +342,8 @@ def _flatten_obs(obs_np: dict, obs_mode: str = "paper_strict",
                  obs_normalization: str = "paper_fixed_v1") -> np.ndarray:
     """Flatten only the six Table 1/Table 2 entities (6 x 10)."""
     if obs_mode != "paper_strict" or include_aux_obs:
-        raise ValueError("paper_3v3_v1 excludes auxiliary and legacy observations")
+        raise ValueError(
+            f"{PAPER_ENVIRONMENT_PROFILE} excludes auxiliary and legacy observations")
     if obs_normalization not in ("paper_fixed_v1", "none"):
         raise ValueError("obs_normalization must be 'paper_fixed_v1' or 'none'")
     if obs_normalization == "paper_fixed_v1":
@@ -660,7 +662,8 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
     if (config.environment_profile != PAPER_ENVIRONMENT_PROFILE
             or config.num_red != 3 or config.num_blue != 3
             or config.max_episode_length != 1400):
-        raise ValueError("formal MAPPO checkpoints require paper_3v3_v1")
+        raise ValueError(
+            f"formal MAPPO checkpoints require {PAPER_ENVIRONMENT_PROFILE}")
     environment_snapshot = paper_environment_snapshot(seed=config.seed)
     rollout_layout = _rollout_layout(config.replay_buffer_size, config.num_envs)
     metadata = {
@@ -687,6 +690,13 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "environment_version": str(config.environment_version),
         "environment_profile": str(config.environment_profile),
         "blue_policy_profile": str(config.blue_policy_profile),
+        "mws_profile": environment_snapshot["mws_profile"]["value"],
+        "red_mws_mode": environment_snapshot["red_mws_mode"]["value"],
+        "blue_mws_mode": environment_snapshot["blue_mws_mode"]["value"],
+        "sensor_support_profile": environment_snapshot[
+            "sensor_support_profile"]["value"],
+        "missile_model_scope": environment_snapshot[
+            "missile_model_scope"]["value"],
         "initial_condition_randomization_mode": str(
             config.initial_condition_randomization_mode),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
@@ -969,6 +979,13 @@ def _actor_evaluation_expected_metadata(
         "environment_version": environment_profile,
         "environment_profile": environment_profile,
         "blue_policy_profile": blue_policy_profile,
+        "mws_profile": environment_snapshot["mws_profile"]["value"],
+        "red_mws_mode": environment_snapshot["red_mws_mode"]["value"],
+        "blue_mws_mode": environment_snapshot["blue_mws_mode"]["value"],
+        "sensor_support_profile": environment_snapshot[
+            "sensor_support_profile"]["value"],
+        "missile_model_scope": environment_snapshot[
+            "missile_model_scope"]["value"],
         "initial_condition_randomization_mode": (
             initial_condition_randomization_mode),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
@@ -3061,7 +3078,8 @@ def main():
         if args.preset not in _FORMAL_PAPER_3V3_PRESETS:
             choices = ", ".join(_FORMAL_PAPER_3V3_PRESETS)
             raise ValueError(
-                f"formal vanilla MAPPO only accepts paper_3v3_v1 presets: {choices}"
+                f"formal vanilla MAPPO only accepts "
+                f"{PAPER_ENVIRONMENT_PROFILE} presets: {choices}"
             )
         from configs.experiment_presets import get_preset
         preset = get_preset(args.preset)

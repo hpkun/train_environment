@@ -34,9 +34,11 @@ INTENTIONAL_3V3_DEVIATION = "intentional_3v3_deviation"
 INTENTIONAL_3V3_DEVIATION_DERIVED = "intentional_3v3_deviation_derived"
 INTENTIONAL_MODEL_SIMPLIFICATION = "intentional_model_simplification"
 
-PAPER_ENVIRONMENT_PROFILE = "paper_3v3_v1"
-PAPER_BLUE_POLICY_PROFILE = "simple_dynamic_pursuit_with_mws"
-PAPER_PID_PROFILE = "paper_3v3_pid_v1"
+PAPER_ENVIRONMENT_PROFILE = "paper_3v3_minimal_v2"
+PAPER_BLUE_POLICY_PROFILE = "minimal_deterministic_pursuit_v2"
+PAPER_MWS_PROFILE = "minimal_symmetric_ttc_break_v2"
+PAPER_PID_PROFILE = "paper_3v3_minimal_pid_v2"
+PAPER_SENSOR_SUPPORT_PROFILE = "deterministic_radar_or_quantized_position_v1"
 PAPER_REWARD_MODE = "paper_joint"
 PAPER_MISSILE_GUIDANCE_MODE = "paper_3v3_eq9_11_v1"
 PAPER_CHECKPOINT_SCHEMA = "vanilla_mappo_paper_3v3_v2"
@@ -181,13 +183,33 @@ PAPER_PROFILE_METADATA = {
         "paper_table1_table2_entity_mask_v1", PAPER_EQUATION_OPERATIONAL,
         "The Table 1/Table 2 fields are explicit; the Gym dictionary and mask "
         "container are an operational interface."),
-    "blue_policy_profile": sv(PAPER_BLUE_POLICY_PROFILE, PAPER_UNSPECIFIED_ENGINEERING),
-    "red_mws_mode": sv("scripted_ttc_evasion_v1", PAPER_UNSPECIFIED_ENGINEERING),
-    "blue_mws_mode": sv("scripted_ttc_evasion_v1", PAPER_UNSPECIFIED_ENGINEERING),
-    "pid_profile": sv(PAPER_PID_PROFILE, PAPER_EQUATION_OPERATIONAL),
-    "pid_error_definition": sv(PAPER_PID_ERROR_DEFINITION, PAPER_EQUATION_OPERATIONAL),
+    "blue_policy_profile": sv(
+        PAPER_BLUE_POLICY_PROFILE, PAPER_UNSPECIFIED_ENGINEERING,
+        "Deterministic unique-nearest assignment and current-LOS pursuit."),
+    "mws_profile": sv(
+        PAPER_MWS_PROFILE, PAPER_UNSPECIFIED_ENGINEERING,
+        "Symmetric minimum-positive-TTC selection and stateless fixed break."),
+    "red_mws_mode": sv(PAPER_MWS_PROFILE, PAPER_UNSPECIFIED_ENGINEERING),
+    "blue_mws_mode": sv(PAPER_MWS_PROFILE, PAPER_UNSPECIFIED_ENGINEERING),
+    "pid_structure": sv("roll_pitch_speed_three_loop", PAPER_EXPLICIT),
+    "pid_profile": sv(PAPER_PID_PROFILE, PAPER_UNSPECIFIED_ENGINEERING),
+    "pid_error_definition": sv(
+        PAPER_PID_ERROR_DEFINITION, PAPER_UNSPECIFIED_ENGINEERING),
     "derivative_semantics": sv(
         PAPER_PID_DERIVATIVE_SEMANTICS, PAPER_UNSPECIFIED_ENGINEERING),
+    "formal_control_extras": sv({
+        "gcas": False,
+        "setpoint_rate_limiter": False,
+        "heading_low_pass_filter": False,
+        "dynamic_gain_scheduling": False,
+        "stall_or_overspeed_recovery": False,
+        "automatic_pull_up_or_altitude_hold": False,
+        "blue_specific_protection": False,
+    }, PAPER_UNSPECIFIED_ENGINEERING),
+    "sensor_support_profile": sv(
+        PAPER_SENSOR_SUPPORT_PROFILE, PAPER_UNSPECIFIED_ENGINEERING,
+        "Deterministic radar tracks, otherwise fixed-grid position only; no "
+        "track hold, noise, target velocity, or prediction."),
     "missile_profile": sv(PAPER_MISSILE_GUIDANCE_MODE, PAPER_EQUATION_OPERATIONAL),
     "missile_launch_speed_mps": sv(
         MISSILE_LAUNCH_SPEED_MPS, PAPER_UNSPECIFIED_ENGINEERING),
@@ -213,7 +235,7 @@ PAPER_PROFILE_METADATA = {
     "aircraft_load_interpretation": sv(
         "paper_unspecified_engineering_total_pilot_load_norm",
         PAPER_UNSPECIFIED_ENGINEERING),
-    "missile_dynamics_scope": sv(
+    "missile_model_scope": sv(
         "constant_speed_point_mass_with_eq9_eq11_guidance_only",
         INTENTIONAL_MODEL_SIMPLIFICATION),
     "coarse_horizontal_grid_m": sv(

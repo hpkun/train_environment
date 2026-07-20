@@ -4,6 +4,15 @@
 
 Current reward version: `paper_literal_eq15_eq20_ta1_tail01_joint_v4`.
 
+Current environment profile: `paper_3v3_minimal_v2`.
+
+The formal profile uses deterministic unique-nearest Blue target assignment,
+current-LOS pure pursuit at 300 m/s, symmetric minimum-positive-TTC MWS with a
+stateless fixed 60-degree break, and only roll/pitch/speed PID feedback loops.
+GCAS, boundary patrol, lead pursuit, target prediction, setpoint rate limiting,
+heading filtering, gain scheduling, recovery state machines, and Blue-specific
+flight protection are disabled or absent from the formal path.
+
 The current experiment is a 3V3 Vanilla MAPPO diagnostic environment, not a
 complete numerical reproduction of the paper's 6V6 BRMA-MAPPO experiment.
 The paper table records a maximum training budget of `1.5e7` steps; current
@@ -51,7 +60,7 @@ should **not** be mixed with `paper_literal_eq15_eq20_ta1_tail01_joint_v4` resul
 | Item | Paper reference | Status |
 |---|---|---|
 | JSBSim F-16 flight dynamics | 搂2.2 | Shared engine for both teams |
-| PID Bank-to-Turn high-level action | 搂2.4 | Three-loop roll/pitch/velocity PID with gimbal protection, heading LPF, anti-inversion |
+| PID Bank-to-Turn high-level action | 搂2.4 | Minimal roll/pitch/velocity PID; integral and output limiting only |
 | Action range pitch/heading/velocity | 搂2.4 | pitch 卤90掳, heading 卤180掳, velocity 102鈥?08 m/s |
 | Missile cooldown | 0.5 s | `missile_cooldown_frames` scaled with `sim_freq` |
 | Missile lock delay | 0.25 s | `missile_lock_delay_frames` scaled with `sim_freq` |
@@ -63,7 +72,7 @@ should **not** be mixed with `paper_literal_eq15_eq20_ta1_tail01_joint_v4` resul
 | Altitude reward (eq.17-style) | Pairwise relative, quadratic segments | `_altitude_reward` uses `altitude_reward_pairwise_mean_eq17` |
 | Situation reward geometry | Paper definition unresolved | `_situation_reward` uses inferred `compute_velocity_q_los` + `compute_3d_range` |
 | Terminal reward (eq.23) | Team-level `r_end`, per-agent share | Computed as `raw_r_end / max_num_team`, sum equals paper value |
-| GCAS asymmetry | Blue-only safety net | `enable_gcas_for_blue` flag; training uses `False` |
+| Control symmetry | Paper profile | No GCAS or Blue-specific control protection |
 
 ## 3. Still approximate / not fully aligned
 
@@ -74,13 +83,13 @@ should **not** be mixed with `paper_literal_eq15_eq20_ta1_tail01_joint_v4` resul
 | Speed reward (eq.19) | Mach conversion constant (340 m/s) approximate; needs paper verification | P1 |
 | Ta first branch | `Ta=1.0` for `q_LOS < 4 deg` | paper-explicit |
 | q_LOS definition | Current implementation is observer velocity-to-LOS | UNRESOLVED / PAPER_INFERRED |
-| Observation space | Still 11-dim engineering Dict, not strict Table 1 / Table 2 10-dim | P1 |
+| Observation space | Strict Table 1 / Table 2 10-dim entities; Actor 60, Critic 30 | current formal contract |
 | Strict paper observation | `train_attention_mappo.py --obs-adapter strict` uses strict 10-dim actor observations with normalization | P1 |
 | Strict observation API | `UavCombatEnv.get_strict_entity_observation()` and `get_strict_team_observations()` exposed; `reset()`/`step()` still return 11-dim engineering Dict | P1 |
 | Critic global state | `train_attention_mappo.py --critic-state strict-global` wires strict team global state into critic; `--critic-state engineering` keeps legacy flattened obs | P1 鈥?needs training validation |
 | Global state candidate | `global_state.py` wired into attention training via `--critic-state strict-global` (2v2 dim=88 vs engineering 106) | P1 |
-| Blue rule policy | No-target cruise boundary patrol tuned: starts ~12km before boundary (was 18km), heading gain pressure-scaled (gentle early, strong near edge). Combat / target selection unchanged | P2 |
-| `num_missiles_per_plane` | Default `999` (no limit); paper does not specify a fixed value | P2 |
+| Blue rule policy | Deterministic unique-nearest assignment and current-LOS pursuit at 300 m/s | paper mechanism, engineering details |
+| `num_missiles_per_plane` | Fixed at 2 in the current 3V3 contract | engineering parameter |
 | MAPPO-Attention Eq.33 encoder | `attention_models.py` supports `encoder_mode="paper_eq33"`. Default `current` unchanged | P1 |
 | MAPPO-Attention critic | `CentralizedAttentionCritic` available via `--critic-state attention-entities`. Uses shared EntityObservationEncoder per red agent; no BRMA mask. `engineering`/`strict-global` flattened critic retained as legacy | P1 |
 | BRMA mask generator | Standalone API added: `BRMAMaskGenerator`, count-constrained random/biased masks, mask fusion, Gumbel-ST. **Not wired** into rollout/PPO; no behavior change | P1 |
@@ -94,7 +103,7 @@ should **not** be mixed with `paper_literal_eq15_eq20_ta1_tail01_joint_v4` resul
 | BRMA Gaussian params storage | `BRMARolloutStorage` stores `mu_unmasked`, `mu_masked`, `sigma_unmasked`, and `sigma_masked` for future exact KL mask loss. Not consumed by PPO yet | P1 |
 | BRMA standalone mask-generator train step | `brma.train_step` computes KL-minus-entropy mask-generator loss through the selected soft mask path and can step an externally supplied optimizer in static tests. Actor parameters are frozen; not wired into PPO/training | P1 |
 | BRMA train mode minimal integration | `train_attention_mappo.py --brma-mode train` is available and disabled by default. It updates only the mask generator after PPO; actor/critic PPO losses and rollout actions remain unchanged | P1 |
-| PID stabilisation | Engineering additions (deadband, heading LPF, velocity R_BI, anti-inversion) | P2 |
+| PID operational geometry and gains | Three-loop structure is paper-explicit; exact error geometry and gains are engineering choices | P2 |
 
 ## 4. Current module layout
 
@@ -152,7 +161,12 @@ Root compatibility shims (still retained):
    available** proceed to MaskVectorGenerator optimizer integration /
    BRMA-MAPPO.
 
-## 6. Blue no-target cruise boundary patrol
+## 6. Historical Blue boundary-patrol notes (superseded)
+
+The current `paper_3v3_minimal_v2` formal path does not call a boundary patrol,
+near-boundary override, lead pursuit, dynamic speed scheduler, stall recovery,
+or Blue-only safety layer. The material below records an older engineering
+profile and is not the active 3V3 environment contract.
 
 The old blue no-target cruise behavior kept `heading_cmd = 0.0`, which means
 "keep current heading" in the rule-agent internal convention. If no red target

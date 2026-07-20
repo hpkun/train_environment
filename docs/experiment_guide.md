@@ -2,6 +2,16 @@
 
 ## 0. Paper environment defaults
 
+Formal environment profile: `paper_3v3_minimal_v2`.
+
+This 3V3 Vanilla MAPPO diagnostic uses deterministic unique-nearest Blue target
+assignment, direct current-LOS pursuit at 300 m/s, symmetric minimum-positive-
+TTC MWS with no direction/heading latch, and a minimal roll/pitch/speed PID.
+The formal path has no GCAS, boundary patrol, lead pursuit, target prediction,
+setpoint limiter, heading filter, gain scheduling, recovery state machine, or
+Blue-specific flight protection. Reward version remains
+`paper_literal_eq15_eq20_ta1_tail01_joint_v4`.
+
 The vanilla MAPPO entry point now defaults to the paper environment scale:
 6v6, `max_episode_length=1400`, `obs_mode="paper_strict"`, and
 `enable_gcas_for_blue=False`. This is still a pure MAPPO baseline, not the
@@ -121,7 +131,7 @@ D:\conda_envs\envs_dirs\brmamappo\python.exe train_vanilla_mappo.py --num-red 6 
 
 ## 6. 鎵归噺璇勪及
 
-`evaluate_vanilla_mappo.py` 涓嶇敓鎴?ACMI锛屼富瑕佺敤浜庡灞€缁熻璁烘枃寮忔寚鏍囥€傞粯璁?`enable_blue_gcas=False`锛屼笌璁粌鑴氭湰鍜?ACMI 鍗曞眬璇勪及淇濇寔涓€鑷淬€傝嫢闇€瑕佹樉寮忓紑鍚摑鏂?GCAS锛屽彲娣诲姞 `--enable-blue-gcas`銆?
+`evaluate_vanilla_mappo.py` uses the same `paper_3v3_minimal_v2` semantics as training. GCAS is not part of the formal profile.
 
 闅忔満绛栫暐 smoke test锛?
 
@@ -362,7 +372,11 @@ python train_attention_mappo.py --preset attention_1v1_strict_smoke
 
 This command triggers JSBSim/env reset and is for local user runs only; Codex does not run it.
 
-## 19. Blue no-target cruise boundary patrol
+## 19. Historical Blue boundary-patrol notes (superseded)
+
+The current `paper_3v3_minimal_v2` formal profile does not execute the boundary
+patrol or safety override described below. This section is retained only as
+historical engineering context.
 
 Blue rule policy target pursuit is still based on its existing observation and
 target-selection logic. It has not been given radar-blind red-position tracking.

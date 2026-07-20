@@ -9,12 +9,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from configs.experiment_presets import EXPERIMENT_PRESETS
 from configs.paper_3v3_spec import (
     PAPER_BLUE_POLICY_PROFILE,
     PAPER_ENVIRONMENT_CONFIG,
     PAPER_ENVIRONMENT_PROFILE,
+    PAPER_MWS_PROFILE,
     PAPER_MISSILE_GUIDANCE_MODE,
     PAPER_PID_PROFILE,
+    PAPER_SENSOR_SUPPORT_PROFILE,
     PAPER_UNSPECIFIED_ENGINEERING,
     paper_environment_snapshot,
 )
@@ -168,11 +171,31 @@ def test_formal_profile_contract_and_dimensions():
     assert snapshot["situation_reward_q_los_definition"]["source"] == (
         "paper_inferred")
     assert snapshot["environment_config_fingerprint"] != (
-        "3d27c1c727f7ba67568dd002aebab7315091424ffa956a97b4734d4063a864c0")
+        "472a29e9da6bc6e96f7b9dac77889d3f7fcfa055835fca19d8efffe4f0b9d7b0")
+    assert snapshot["mws_profile"]["value"] == PAPER_MWS_PROFILE
+    assert snapshot["red_mws_mode"]["value"] == PAPER_MWS_PROFILE
+    assert snapshot["blue_mws_mode"]["value"] == PAPER_MWS_PROFILE
+    assert snapshot["sensor_support_profile"]["value"] == (
+        PAPER_SENSOR_SUPPORT_PROFILE)
+    assert snapshot["missile_model_scope"]["source"] == (
+        "intentional_model_simplification")
+    assert snapshot["pid_structure"]["value"] == "roll_pitch_speed_three_loop"
+    assert snapshot["pid_structure"]["source"] == "paper_explicit"
+    assert snapshot["pid_error_definition"]["source"] == (
+        PAPER_UNSPECIFIED_ENGINEERING)
+    assert all(not enabled for enabled in
+               snapshot["formal_control_extras"]["value"].values())
     assert snapshot["environment_config"]["missile"]["navigation_constant"][
         "source"] == "paper_unspecified_engineering"
     assert snapshot["environment_config"]["missile"]["model"]["source"] == (
         "intentional_model_simplification")
+    for preset_name in (
+            "vanilla_3v3_paper_smoke", "vanilla_3v3_paper_main",
+            "vanilla_3v3_paper_100k_diag"):
+        preset = EXPERIMENT_PRESETS[preset_name]
+        assert preset["environment_profile"] == PAPER_ENVIRONMENT_PROFILE
+        assert preset["blue_policy_profile"] == PAPER_BLUE_POLICY_PROFILE
+        assert preset["pid_profile"] == PAPER_PID_PROFILE
 
 
 def test_environment_rejects_nonformal_contracts():
@@ -284,34 +307,101 @@ def test_rcs_is_nonconstant_and_fourth_root_range():
     assert ratio == pytest.approx(
         (cfg.range_constant.value * side ** 0.25)
         / (cfg.range_constant.value * front ** 0.25))
+    left = bilinear_rcs_m2(
+        -np.pi / 2, 0.0, cfg.azimuth_grid_deg.value,
+        cfg.elevation_grid_deg.value, cfg.table_m2.value)
+    above = bilinear_rcs_m2(
+        0.0, np.pi / 2, cfg.azimuth_grid_deg.value,
+        cfg.elevation_grid_deg.value, cfg.table_m2.value)
+    below = bilinear_rcs_m2(
+        0.0, -np.pi / 2, cfg.azimuth_grid_deg.value,
+        cfg.elevation_grid_deg.value, cfg.table_m2.value)
+    assert left == pytest.approx(side)
+    assert above == pytest.approx(below)
+    assert cfg.table_m2.source == PAPER_UNSPECIFIED_ENGINEERING
+
+
+def _strict_blue_obs(ranges, bearings=None, elevations=None):
+    ranges = list(ranges)
+    bearings = [0.0] * len(ranges) if bearings is None else list(bearings)
+    elevations = [0.0] * len(ranges) if elevations is None else list(elevations)
+    enemies = np.zeros((len(ranges), 10), dtype=np.float32)
+    for index, (distance, bearing, elevation) in enumerate(
+            zip(ranges, bearings, elevations)):
+        enemies[index, 6] = elevation
+        enemies[index, 7] = bearing
+        enemies[index, 9] = distance
+    return {"enemy_states": enemies}
 
 
 def test_dynamic_nearest_unique_assignment_and_live_switch():
     controller = BluePolicyController(PAPER_BLUE_POLICY_PROFILE)
     controller.reset(["blue_0", "blue_1", "blue_2"],
                      ["red_0", "red_1", "red_2"], {}, {})
-    own = {"blue_0": np.array([0.0, 0.0, 0.0]),
-           "blue_1": np.array([0.0, 10.0, 0.0]),
-           "blue_2": np.array([0.0, 20.0, 0.0])}
-    enemies = {"red_0": np.array([100.0, 0.0, 0.0]),
-               "red_1": np.array([100.0, 10.0, 0.0]),
-               "red_2": np.array([100.0, 20.0, 0.0])}
+    blue_obs = {
+        "blue_0": _strict_blue_obs([100.0, 110.0, 120.0]),
+        "blue_1": _strict_blue_obs([110.0, 100.0, 120.0]),
+        "blue_2": _strict_blue_obs([120.0, 110.0, 100.0]),
+    }
     kwargs = dict(
-        blue_obs={}, num_blue=3, num_red=3, engaged_targets=set(),
-        own_positions=own, own_headings={key: 0.0 for key in own},
-        current_step=0, own_alive={key: True for key in own},
-        enemy_positions=enemies,
-        enemy_alive={key: True for key in enemies})
+        blue_obs=blue_obs, num_blue=3, num_red=3, engaged_targets=set(),
+        own_positions={}, own_headings={key: 0.0 for key in blue_obs},
+        current_step=0, own_alive={key: True for key in blue_obs},
+        enemy_positions={"red_0": np.full(3, 999999.0)},
+        enemy_alive={f"red_{index}": True for index in range(3)})
     actions = controller.act(**kwargs)
     assert controller.current_targets == {
         "blue_0": "red_0", "blue_1": "red_1", "blue_2": "red_2"}
     assert all(action[2] == pytest.approx((300.0 - 102.0) / 306.0 * 2 - 1)
                for action in actions.values())
-    enemies["red_0"] = np.array([1000.0, 0.0, 0.0])
-    enemies["red_1"] = np.array([10.0, 0.0, 0.0])
+    blue_obs["blue_0"] = _strict_blue_obs([1000.0, 10.0, 120.0])
     controller.act(**kwargs)
     assert controller.current_targets["blue_0"] == "red_1"
     assert controller.target_switch_counts["blue_0"] == 1
+
+
+def test_blue_assignment_ties_use_fixed_ids_and_no_random(monkeypatch):
+    def random_forbidden(*_args, **_kwargs):
+        raise AssertionError("Blue policy must not consume random numbers")
+
+    monkeypatch.setattr(np.random, "random", random_forbidden)
+    monkeypatch.setattr(np.random, "choice", random_forbidden)
+    controller = BluePolicyController(PAPER_BLUE_POLICY_PROFILE)
+    controller.reset(["blue_0", "blue_1"], ["red_0", "red_1"], {}, {})
+    blue_obs = {
+        "blue_0": _strict_blue_obs([100.0, 100.0]),
+        "blue_1": _strict_blue_obs([100.0, 100.0]),
+    }
+    controller.act(
+        blue_obs, 2, 2, set(), {}, {key: 0.0 for key in blue_obs}, 0,
+        own_alive={key: True for key in blue_obs},
+        enemy_positions={"red_0": np.zeros(3), "red_1": np.zeros(3)},
+        enemy_alive={"red_0": True, "red_1": True})
+    assert controller.current_targets == {
+        "blue_0": "red_0", "blue_1": "red_1"}
+
+
+def test_blue_pure_pursuit_uses_current_los_and_fixed_speed():
+    controller = BluePolicyController(PAPER_BLUE_POLICY_PROFILE)
+    controller.reset(["blue_0"], ["red_0"], {}, {})
+    elevation = np.arctan2(100.0, np.hypot(100.0, 100.0))
+    blue_obs = {"blue_0": _strict_blue_obs(
+        [np.sqrt(30000.0)], [np.pi / 4.0], [elevation])}
+    actions = controller.act(
+        blue_obs, 1, 1, set(), {}, {"blue_0": 0.0}, 0,
+        own_alive={"blue_0": True},
+        enemy_positions={"red_0": np.array([-999.0, -999.0, -999.0])},
+        enemy_alive={"red_0": True})
+    action = actions["blue_0"]
+    assert action[0] * np.pi / 2.0 == pytest.approx(
+        elevation)
+    assert action[1] * np.pi == pytest.approx(np.pi / 4.0)
+    assert action[2] == pytest.approx((300.0 - 102.0) / 306.0 * 2.0 - 1.0)
+    source = Path("my_uav_env/blue_policy_profiles.py").read_text(
+        encoding="utf-8").lower()
+    assert "lead pursuit" not in source
+    assert "prediction" not in source
+    assert "np.random" not in source
 
 
 def test_mws_selects_positive_ttc_and_rejects_receding():
@@ -331,6 +421,33 @@ def test_mws_selects_positive_ttc_and_rejects_receding():
     assert select_most_dangerous_missile(aircraft, [receding]) == (None, None)
 
 
+def test_mws_selects_minimum_positive_ttc_with_deterministic_tie_break():
+    aircraft = FakeAircraft("red_0", (1000.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    slow = SimpleNamespace(
+        uid="m1", is_alive=True, target_aircraft=aircraft,
+        get_position=lambda: np.array([0.0, 0.0, 0.0]),
+        get_velocity=lambda: np.array([500.0, 0.0, 0.0]))
+    urgent = SimpleNamespace(
+        uid="m0", is_alive=True, target_aircraft=aircraft,
+        get_position=lambda: np.array([500.0, 0.0, 0.0]),
+        get_velocity=lambda: np.array([600.0, 0.0, 0.0]))
+    selected, diag = select_most_dangerous_missile(
+        aircraft, [slow, urgent])
+    assert selected is urgent
+    assert diag["time_to_closest_approach_s"] < 1.0
+
+
+def test_mws_direction_is_geometric_symmetric_and_deterministic():
+    assert UavCombatEnv._mws_turn_direction("red_0", 0.2) == -1.0
+    assert UavCombatEnv._mws_turn_direction("blue_0", 0.2) == -1.0
+    assert UavCombatEnv._mws_turn_direction("red_0", -0.2) == 1.0
+    assert UavCombatEnv._mws_turn_direction("blue_0", -0.2) == 1.0
+    assert UavCombatEnv._mws_turn_direction("red_0", 0.0) == 1.0
+    assert UavCombatEnv._mws_turn_direction("blue_0", 0.0) == 1.0
+    assert UavCombatEnv._mws_turn_direction("red_1", 0.0) == -1.0
+    assert UavCombatEnv._mws_turn_direction("blue_1", 0.0) == -1.0
+
+
 def test_pid_direction_errors_and_first_derivative():
     roll, pitch, *_ = PIDController.paper_direction_errors(
         (0.0, 0.0, 0.0), 0.0, np.pi)
@@ -343,16 +460,41 @@ def test_pid_direction_errors_and_first_derivative():
     assert loop._last_diagnostic["d"] == pytest.approx(2.0)
 
 
-def test_pid_setpoint_change_suppresses_one_derivative_frame():
+def test_minimal_pid_does_not_add_setpoint_change_derivative_suppression():
     pid = PIDController(
         1 / 60, profile=PAPER_PID_PROFILE,
         throttle_base=0.8, config=PAPER_ENVIRONMENT_CONFIG.pid)
     pid.compute_control((0, 0, 0), 300, 0, 0, 300)
     pid.compute_control((0, 0, 0), 300, 0, 1, 300)
-    assert pid._last_diagnostic["setpoint_changed_this_frame"]
-    assert pid._last_diagnostic["roll_pid"]["d"] == 0.0
-    pid.compute_control((0, 0, 0), 300, 0, 1, 300)
     assert not pid._last_diagnostic["setpoint_changed_this_frame"]
+    assert not pid._last_diagnostic[
+        "derivative_suppressed_for_setpoint_change"]
+    assert pid._last_diagnostic["roll_pid"]["d"] != 0.0
+
+
+def test_formal_pid_has_only_three_feedback_loops_and_bounded_outputs():
+    pid = PIDController(
+        1 / 60, profile=PAPER_PID_PROFILE,
+        throttle_base=0.8, config=PAPER_ENVIRONMENT_CONFIG.pid)
+    loop_names = sorted(
+        name for name, value in vars(pid).items()
+        if isinstance(value, PIDLoop))
+    assert loop_names == ["_pitch_pid", "_roll_pid", "_velocity_pid"]
+    controls = pid.compute_control(
+        (0.0, 0.0, 0.0), 0.0, np.pi / 2.0, np.pi, 408.0)
+    assert all(np.isfinite(controls))
+    assert -1.0 <= controls[0] <= 1.0
+    assert -1.0 <= controls[1] <= 1.0
+    assert controls[2] == 0.0
+    assert 0.0 <= controls[3] <= 1.0
+    assert all(np.isfinite(loop._integral)
+               for loop in (pid._roll_pid, pid._pitch_pid, pid._velocity_pid))
+    source = Path("my_uav_env/pid_controller.py").read_text(
+        encoding="utf-8").lower()
+    for forbidden in (
+            "gcas", "rate limiter", "low-pass", "gain scheduling",
+            "stall recovery", "overspeed recovery", "automatic pull-up"):
+        assert forbidden not in source
 
 
 def test_missile_creation_frame_guard_then_contact_sample(monkeypatch):
@@ -599,6 +741,9 @@ def test_actor_evaluation_restores_checkpoint_altitude_reward_config():
     ("reward_mode", "incompatible"),
     ("missile_guidance_mode", "incompatible"),
     ("blue_policy_profile", "incompatible"),
+    ("mws_profile", "incompatible"),
+    ("sensor_support_profile", "incompatible"),
+    ("missile_model_scope", "incompatible"),
 ])
 def test_actor_evaluation_rejects_runtime_semantic_mismatch(
         field, incompatible):
@@ -711,6 +856,35 @@ def test_training_resume_accepts_new_reward_and_rejects_old_reward_version():
         "paper_literal_eq15_eq20_joint_v3")
     with pytest.raises(ValueError, match="core configuration mismatch"):
         _validate_training_state(old, config, metadata)
+
+
+def test_minimal_environment_rejects_old_profile_training_and_actor_state():
+    payload, config = _evaluation_actor_payload()
+    old_actor = copy.deepcopy(payload)
+    old_actor["metadata"]["environment_profile"] = "paper_3v3_v1"
+    old_actor["metadata"]["environment_version"] = "paper_3v3_v1"
+    old_actor["metadata"]["environment_config_fingerprint"] = (
+        "472a29e9da6bc6e96f7b9dac77889d3f7fcfa055835fca19d8efffe4f0b9d7b0")
+    with pytest.raises(
+            ValueError, match="environment_profile|environment_version|fingerprint"):
+        _unpack_evaluation_actor(old_actor)
+
+    metadata = _checkpoint_metadata(config, 60, 30)
+    training_state = {
+        "schema_version": TRAINING_STATE_SCHEMA_VERSION,
+        "checkpoint_metadata": dict(metadata),
+        "core_config": _training_core_config(config, metadata),
+        "runtime": {"total_steps": 100_000},
+    }
+    old_training_state = copy.deepcopy(training_state)
+    old_training_state["core_config"]["environment_profile"] = "paper_3v3_v1"
+    old_training_state["core_config"]["environment_config_fingerprint"] = (
+        "472a29e9da6bc6e96f7b9dac77889d3f7fcfa055835fca19d8efffe4f0b9d7b0")
+    with pytest.raises(ValueError, match="core configuration mismatch"):
+        _validate_training_state(old_training_state, config, metadata)
+
+    _unpack_evaluation_actor(payload)
+    _validate_training_state(training_state, config, metadata)
 
 
 def test_random_evaluation_does_not_resolve_or_validate_checkpoint():
@@ -1201,22 +1375,59 @@ def test_both_teams_mws_override_with_same_semantics():
         env.close()
 
 
+def test_mws_no_threat_immediately_restores_base_action(monkeypatch):
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        aid = "red_0"
+        sim = env.red_planes[aid]
+        incoming = SimpleNamespace(
+            uid="blue_missile_test",
+            get_position=lambda: sim.get_position() + np.array([1000.0, 0.0, 0.0]))
+        warning = {"value": (incoming, {
+            "closing_speed_mps": 500.0,
+            "time_to_closest_approach_s": 2.0,
+            "candidate_is_approaching": True,
+        })}
+        monkeypatch.setattr(
+            sim, "get_missile_warning_diagnostic", lambda: warning["value"])
+        actions = {aid: np.zeros(3, dtype=np.float32)}
+        rng_before = copy.deepcopy(env.np_random.bit_generator.state)
+        evasion = env._parse_actions(actions)[aid]
+        assert env.np_random.bit_generator.state == rng_before
+        assert env._learnable_command_sources[aid] == "mws_override"
+        assert evasion[2] == pytest.approx(300.0)
+
+        warning["value"] = (None, None)
+        base = env._parse_actions(actions)[aid]
+        assert env.np_random.bit_generator.state == rng_before
+        assert env._learnable_command_sources[aid] == "base_policy"
+        assert base == pytest.approx((0.0, 0.0, 255.0))
+        assert env._learnable_mws_state[aid]["active_missile_uid"] is None
+    finally:
+        env.close()
+
+
 @pytest.mark.parametrize("aid, team, other", [
     ("red_0", "red", "blue"),
     ("blue_0", "blue", "red"),
 ])
-def test_mws_generation_and_flip_statistics_are_team_scoped(aid, team, other):
+def test_mws_is_not_direction_latched_and_statistics_are_team_scoped(
+        aid, team, other):
     env = UavCombatEnv()
     try:
         env.reset(seed=3)
         incoming = SimpleNamespace(uid=f"{other}_missile_test")
-        env._mws_evasion_target(aid, incoming, 0.0, 1.0)
-        env._mws_evasion_target(aid, incoming, 0.0, -1.0)
+        first = env._mws_evasion_target(aid, incoming, 0.0, 1.0)
+        second = env._mws_evasion_target(aid, incoming, 0.2, -1.0)
         diag = env._mws_decision_diagnostics
         assert diag[f"{team}_warning_generations"] == 1
-        assert diag[f"{team}_suppressed_direction_flip_attempts"] == 1
+        assert diag[f"{team}_suppressed_direction_flip_attempts"] == 0
+        assert diag[f"{team}_direction_changes_within_same_missile"] == 1
         assert diag[f"{team}_maximum_continuous_decisions"] == 2
         assert diag[f"{team}_target_heading_delta_max_deg"] == pytest.approx(60.0)
+        assert first[1] == pytest.approx(np.deg2rad(60.0))
+        assert second[1] == pytest.approx(0.2 - np.deg2rad(60.0))
         assert diag[f"{other}_warning_generations"] == 0
         assert diag[f"{other}_suppressed_direction_flip_attempts"] == 0
         assert diag[f"{other}_maximum_continuous_decisions"] == 0
@@ -1258,3 +1469,89 @@ def test_joint_reward_is_identical_within_each_team_and_finite():
         sim.get_position = original
     finally:
         env.close()
+
+
+def test_seed3_reset_reward_components_match_pre_simplification_snapshot():
+    env = UavCombatEnv()
+    try:
+        env.reset(seed=3)
+        rewards, components = env._compute_rewards()
+        assert rewards["red_0"] == pytest.approx(0.4481508138835726)
+        assert rewards["blue_0"] == pytest.approx(0.44815081388362965)
+        expected_raw_adv = {
+            "red_0": 0.9461188332581016,
+            "red_1": 1.0954346329103632,
+            "red_2": 0.946118626388383,
+            "blue_0": 0.9461188332584443,
+            "blue_1": 1.0954346329108664,
+            "blue_2": 0.9461186263876147,
+        }
+        expected_raw_alt = {
+            "red_0": 1.1356841393232269e-12,
+            "red_1": 0.0,
+            "red_2": 0.0,
+            "blue_0": 1.5140481461154802e-12,
+            "blue_1": 0.0,
+            "blue_2": 7.567280135845067e-13,
+        }
+        expected_fields = {
+            "raw_r_pitch", "raw_r_roll", "raw_r_alt", "raw_r_bound",
+            "raw_r_vel", "raw_r_adv", "r_pitch", "r_roll", "r_alt",
+            "r_bound", "r_vel", "r_adv", "r_death", "r_end",
+            "local_reward", "joint_reward", "reward_mode", "reward_version",
+            "red_local_reward_sum", "blue_local_reward_sum",
+            "red_team_terminal_reward", "blue_team_terminal_reward",
+            "red_joint_reward", "blue_joint_reward",
+        }
+        for aid, expected in expected_raw_adv.items():
+            assert set(components[aid]) == expected_fields
+            assert components[aid]["raw_r_adv"] == pytest.approx(expected)
+            assert components[aid]["raw_r_alt"] == pytest.approx(
+                expected_raw_alt[aid], abs=1e-15)
+            assert components[aid]["r_adv"] == pytest.approx(0.15 * expected)
+            assert components[aid]["r_alt"] == pytest.approx(
+                0.04 * expected_raw_alt[aid], abs=1e-16)
+            assert components[aid]["local_reward"] == pytest.approx(
+                components[aid]["r_adv"] + components[aid]["r_alt"])
+            assert components[aid]["reward_version"] == REWARD_VERSION
+            for field in ("raw_r_pitch", "raw_r_roll", "raw_r_bound",
+                          "raw_r_vel", "r_death", "r_end"):
+                assert components[aid][field] == pytest.approx(0.0)
+    finally:
+        env.close()
+
+
+def test_minimal_profile_repeated_fixed_action_step_is_deterministic():
+    def run_once():
+        env = UavCombatEnv()
+        try:
+            obs, _ = env.reset(seed=3)
+            blue_actions = env.blue_policy_actions(
+                {aid: obs[aid] for aid in env.blue_ids})
+            actions = {
+                aid: np.zeros(3, dtype=np.float32) for aid in env.red_ids}
+            actions.update(blue_actions)
+            next_obs, rewards, terminated, truncated, _ = env.step(actions)
+            return {
+                "blue_actions": copy.deepcopy(blue_actions),
+                "obs": copy.deepcopy(next_obs),
+                "rewards": dict(rewards),
+                "terminated": dict(terminated),
+                "truncated": dict(truncated),
+                "rng": copy.deepcopy(env.np_random.bit_generator.state),
+            }
+        finally:
+            env.close()
+
+    first = run_once()
+    second = run_once()
+    assert first.keys() == second.keys()
+    for aid in first["blue_actions"]:
+        np.testing.assert_array_equal(
+            first["blue_actions"][aid], second["blue_actions"][aid])
+    for aid in first["obs"]:
+        for field in first["obs"][aid]:
+            np.testing.assert_array_equal(
+                first["obs"][aid][field], second["obs"][aid][field])
+    for field in ("rewards", "terminated", "truncated", "rng"):
+        assert first[field] == second[field]

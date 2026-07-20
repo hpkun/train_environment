@@ -6,10 +6,10 @@ from collections import Counter
 
 import numpy as np
 
-from rule_based_agent import _paper_absolute_action, _wrap_pi
+from rule_based_agent import _paper_absolute_action, _strict_target_action, _wrap_pi
 
 
-PAPER_BLUE_POLICY_PROFILE = "simple_dynamic_pursuit_with_mws"
+PAPER_BLUE_POLICY_PROFILE = "minimal_deterministic_pursuit_v2"
 BLUE_POLICY_PROFILES = (PAPER_BLUE_POLICY_PROFILE,)
 
 
@@ -22,7 +22,7 @@ def validate_blue_policy_profile(profile: str) -> str:
 
 
 class BluePolicyController:
-    """Per-environment dynamic nearest-target pursuit controller."""
+    """Deterministic unique-nearest assignment and current-LOS pursuit."""
 
     _HEADING_DISCONTINUITY_RAD = np.deg2rad(30.0)
 
@@ -57,9 +57,8 @@ class BluePolicyController:
 
     @classmethod
     def _assign_targets(cls, num_blue: int, num_red: int,
-                        own_positions: dict[str, np.ndarray],
+                        blue_obs: dict[str, dict],
                         own_alive: dict[str, bool],
-                        enemy_positions: dict[str, np.ndarray],
                         enemy_alive: dict[str, bool]):
         assignments: dict[str, int | None] = {}
         taken: set[int] = set()
@@ -68,19 +67,17 @@ class BluePolicyController:
             if not own_alive.get(blue_id, False):
                 assignments[blue_id] = None
                 continue
-            own_position = np.asarray(
-                own_positions.get(blue_id, np.full(3, np.nan)),
+            enemy_states = np.asarray(
+                blue_obs.get(blue_id, {}).get("enemy_states", ()),
                 dtype=np.float64)
             candidates = []
             for target_index in range(num_red):
                 target_id = f"red_{target_index}"
-                target_position = np.asarray(
-                    enemy_positions.get(target_id, np.full(3, np.nan)),
-                    dtype=np.float64)
-                distance = float(np.linalg.norm(target_position - own_position))
+                state = (enemy_states[target_index]
+                         if target_index < len(enemy_states) else np.array(()))
+                distance = float(state[9]) if state.size == 10 else float("nan")
                 if (enemy_alive.get(target_id, False)
-                        and np.all(np.isfinite(own_position))
-                        and np.all(np.isfinite(target_position))
+                        and state.size == 10 and np.all(np.isfinite(state))
                         and distance > 0.0):
                     candidates.append((target_index, distance))
             candidates.sort(key=lambda item: (item[1], item[0]))
@@ -131,19 +128,17 @@ class BluePolicyController:
             enemy_alive: dict[str, bool] | None = None,
             assigned_targets: dict[str, str | None] | None = None,
             ) -> dict[str, np.ndarray]:
-        del engaged_targets, current_step, assigned_targets
-        own_positions = own_positions or {}
+        del (engaged_targets, current_step, assigned_targets, own_positions,
+             enemy_positions)
         own_headings = own_headings or {}
         selected_missiles = selected_missiles or {}
         mws_detected = mws_detected or {}
         own_alive = own_alive or {
             f"blue_{index}": True for index in range(num_blue)}
-        enemy_positions = enemy_positions or {}
         enemy_alive = enemy_alive or {
             f"red_{index}": True for index in range(num_red)}
         assignments = self._assign_targets(
-            num_blue, num_red, own_positions, own_alive,
-            enemy_positions, enemy_alive)
+            num_blue, num_red, blue_obs, own_alive, enemy_alive)
 
         actions: dict[str, np.ndarray] = {}
         self.latest_per_blue = []
@@ -172,13 +167,10 @@ class BluePolicyController:
                 action = _paper_absolute_action(0.0, heading, speed_mps=300.0)
                 reason = "no_valid_target_hold"
             else:
-                relative = (np.asarray(enemy_positions[target_id], dtype=np.float64)
-                            - np.asarray(own_positions[blue_id], dtype=np.float64))
-                heading = _wrap_pi(float(np.arctan2(relative[1], relative[0])))
-                pitch = float(np.arctan2(
-                    relative[2], max(np.hypot(relative[0], relative[1]), 1e-9)))
-                action = _paper_absolute_action(
-                    pitch, heading, speed_mps=300.0)
+                action = _strict_target_action(
+                    blue_obs.get(blue_id, {}), target_index,
+                    own_heading=float(own_headings.get(blue_id, 0.0)))
+                heading = _wrap_pi(float(action[1]) * np.pi)
                 reason = "dynamic_nearest_unique_first"
 
             actions[blue_id] = np.asarray(action, dtype=np.float32)

@@ -197,16 +197,16 @@ class UavCombatEnv(gymnasium.Env):
                  agent_interaction_steps, max_steps)
         if fixed != (3, 3, 60, 12, 1400):
             raise ValueError(
-                "paper_3v3_v1 requires 3V3, 60 Hz, 12 physics frames per "
+                f"{PAPER_ENVIRONMENT_PROFILE} requires 3V3, 60 Hz, 12 physics frames per "
                 "decision, and 1400 decision steps")
         if environment_profile != PAPER_ENVIRONMENT_PROFILE:
-            raise ValueError("only paper_3v3_v1 is supported")
+            raise ValueError(f"only {PAPER_ENVIRONMENT_PROFILE} is supported")
         if environment_config not in (None, PAPER_ENVIRONMENT_CONFIG):
-            raise ValueError("paper_3v3_v1 does not accept another config")
+            raise ValueError(f"{PAPER_ENVIRONMENT_PROFILE} does not accept another config")
         if initial_condition_randomization_mode != "deterministic_v1":
-            raise ValueError("paper_3v3_v1 uses deterministic_v1 initialization")
+            raise ValueError(f"{PAPER_ENVIRONMENT_PROFILE} uses deterministic_v1 initialization")
         if obs_mode != "paper_strict":
-            raise ValueError("paper_3v3_v1 only supports paper_strict observations")
+            raise ValueError(f"{PAPER_ENVIRONMENT_PROFILE} only supports paper_strict observations")
         if pid_profile != PAPER_PID_PROFILE:
             raise ValueError(f"pid_profile must be {PAPER_PID_PROFILE!r}")
         if reward_mode != PAPER_REWARD_MODE:
@@ -611,12 +611,7 @@ class UavCombatEnv(gymnasium.Env):
         return self._engaged_targets
 
     def get_blue_own_positions(self) -> dict[str, np.ndarray]:
-        """Return current blue ownship positions for cruise boundary patrol.
-
-        This is not part of the learning observation and does not expose enemy
-        state. It is only used by the hand-coded blue policy to avoid no-target
-        cruise flying indefinitely out of the battlefield.
-        """
+        """Return current Blue ownship positions for rule-policy commands."""
 
         result: dict[str, np.ndarray] = {}
         for bid, sim in self.blue_planes.items():
@@ -627,9 +622,8 @@ class UavCombatEnv(gymnasium.Env):
     def get_blue_own_kinematics(self) -> dict[str, dict]:
         """Return blue ownship position and heading for rule-based policy.
 
-        This is not part of learning observation and does not expose enemy
-        state. It is only used by the hand-coded blue policy for boundary
-        patrol/safety.
+        This is not part of the learning observation. The minimal Blue policy
+        uses it only as the origin for direct current-LOS pursuit.
         """
 
         result: dict[str, dict] = {}
@@ -651,10 +645,6 @@ class UavCombatEnv(gymnasium.Env):
             blue_id: bool(sim.is_alive)
             for blue_id, sim in self.blue_planes.items()
         }
-        enemy_positions = {
-            red_id: np.asarray(sim.get_position(), dtype=np.float64)
-            for red_id, sim in self.red_planes.items()
-        }
         enemy_alive = {
             red_id: bool(sim.is_alive) for red_id, sim in self.red_planes.items()
         }
@@ -670,7 +660,7 @@ class UavCombatEnv(gymnasium.Env):
             {aid: data["heading"] for aid, data in kinematics.items()},
             self.current_step, selected_missiles, mws_detected,
             own_alive=own_alive,
-            enemy_positions=enemy_positions,
+            enemy_positions=None,
             enemy_alive=enemy_alive,
             assigned_targets=None)
 
@@ -874,28 +864,35 @@ class UavCombatEnv(gymnasium.Env):
             aid, self._empty_mws_state())
         team = "blue" if aid.startswith("blue_") else "red"
         missile_uid = str(incoming.uid)
-        if state["active_missile_uid"] != missile_uid:
+        same_missile = state["active_missile_uid"] == missile_uid
+        if not same_missile:
             generation = int(state.get("warning_generation", 0)) + 1
-            target_heading = self._wrap_angle_rad(
-                current_heading + turn_direction * np.deg2rad(60.0))
-            state.update({
-                "active_missile_uid": missile_uid,
-                "break_direction": float(turn_direction),
-                "break_reference_heading": float(current_heading),
-                "break_target_heading": target_heading,
-                "warning_start_physics_frame": int(self._physics_frame),
-                "warning_start_decision_step": int(self.current_step),
-                "previous_warning_active": True,
-                "warning_generation": generation,
-                "continuous_decisions": 0,
-            })
             self._mws_decision_diagnostics[f"{team}_warning_generations"] += 1
-        elif float(state["break_direction"]) != float(turn_direction):
-            # The stored direction is authoritative for an existing missile.
+        else:
+            generation = int(state.get("warning_generation", 0))
+        previous_direction = float(state.get("break_direction", 0.0))
+        if same_missile and previous_direction != float(turn_direction):
             self._mws_decision_diagnostics[
-                f"{team}_suppressed_direction_flip_attempts"] += 1
-        state["previous_warning_active"] = True
-        state["continuous_decisions"] += 1
+                f"{team}_direction_changes_within_same_missile"] += 1
+        target_heading = self._wrap_angle_rad(
+            current_heading + turn_direction * np.deg2rad(60.0))
+        state.update({
+            "active_missile_uid": missile_uid,
+            "break_direction": float(turn_direction),
+            "break_reference_heading": float(current_heading),
+            "break_target_heading": target_heading,
+            "warning_start_physics_frame": (
+                state.get("warning_start_physics_frame")
+                if same_missile else int(self._physics_frame)),
+            "warning_start_decision_step": (
+                state.get("warning_start_decision_step")
+                if same_missile else int(self.current_step)),
+            "previous_warning_active": True,
+            "warning_generation": generation,
+            "continuous_decisions": (
+                int(state.get("continuous_decisions", 0)) + 1
+                if same_missile else 1),
+        })
         continuous_key = f"{team}_maximum_continuous_decisions"
         self._mws_decision_diagnostics[continuous_key] = max(
             self._mws_decision_diagnostics[continuous_key],
@@ -907,7 +904,19 @@ class UavCombatEnv(gymnasium.Env):
         self._mws_decision_diagnostics[delta_key] = max(
             self._mws_decision_diagnostics[delta_key],
             float(delta_deg))
-        return 0.0, float(state["break_target_heading"]), 300.0
+        return 0.0, target_heading, 300.0
+
+    @staticmethod
+    def _mws_turn_direction(aid: str, signed_bearing_rad: float) -> float:
+        if signed_bearing_rad > 1e-12:
+            return -1.0
+        if signed_bearing_rad < -1e-12:
+            return 1.0
+        try:
+            index = int(str(aid).rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            index = sum(ord(char) for char in str(aid))
+        return 1.0 if index % 2 == 0 else -1.0
 
     def _finalize_target(
             self, aid: str, requested: tuple[float, float, float],
@@ -1042,7 +1051,7 @@ class UavCombatEnv(gymnasium.Env):
                 ao = np.arctan2((vn * de - ve * dn) / (vh * rh),
                                 (vn * dn + ve * de) / (vh * rh))
                 if getattr(self, "is_paper_adapted", False):
-                    turn_dir = -1.0 if ao > 0 else 1.0
+                    turn_dir = self._mws_turn_direction(aid, float(ao))
                     requested = self._mws_evasion_target(
                         aid, incoming, current_heading, turn_dir)
                     targets[aid] = self._finalize_target(
