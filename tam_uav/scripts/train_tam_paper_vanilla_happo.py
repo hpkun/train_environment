@@ -342,11 +342,7 @@ def main():
         json.dumps(snapshot, indent=2), encoding="utf-8")
     print(
         f"[CONFIG] scenario={args.scenario} seed={args.seed} "
-        f"total_steps={args.total_environment_steps} device={device} "
-        f"actor=[{','.join(map(str, policy.actor_hidden_sizes))}] "
-        f"critic=[{','.join(map(str, policy.critic_hidden_sizes))}] "
-        f"value_loss={trainer.value_loss_type} huber_delta={trainer.huber_delta:g} "
-        f"pure_happo=true evaluation={str(not args.disable_evaluation).lower()}")
+        f"total_steps={args.total_environment_steps}")
     csv_path = output / "training.csv"
     episode_writer = RecordWriter(output / "episodes.csv", output / "episodes.jsonl")
     evaluation_writer = None

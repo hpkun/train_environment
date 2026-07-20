@@ -91,17 +91,17 @@ confound comparison unless paper code precisely defines the Blue policy.
 | Weighted sum | Eq.23 paragraph: weights `0.01, 0.002, 0.04, 0.04, 0.02, 0.15` | `_compute_rewards()` uses exactly these weights | MATCH | Components are per-agent plus terminal share. |
 | Pitch eq.15 | Severe penalty if `|theta| > pi/3`; linear penalty for `pi/4 < |theta| < pi/3` | `_pitch_penalty()` matches extracted formula structure | MATCH / NEEDS VISUAL VERIFICATION | Formula text extraction is garbled but current form matches prior audit interpretation. |
 | Roll eq.16 | Penalty if `|roll| > pi/4 & |pitch| > pi/4` | `_roll_penalty()` uses both conditions | MATCH | Aligned. |
-| Altitude eq.17 | Pairwise relative altitude, quadratic segments, `0.1` high-altitude tail | `_altitude_reward()` uses `altitude_reward_pairwise_mean_eq17()` over alive enemies | MATCH / PARTIAL | Structure aligned; exact coefficients `h1/h2` and thresholds should remain marked for paper/code verification. |
+| Altitude eq.17 | Pairwise relative altitude, quadratic segments, `0.1` high-altitude tail | `_altitude_reward()` uses `altitude_reward_pairwise_mean_eq17()` over alive enemies with tail `0.1` | MATCH / PARTIAL | Tail `0.1` is paper-explicit. Thresholds and `D_att,max` remain `paper_unspecified_engineering`. |
 | Boundary eq.18 | Fixed penalty if `|x| > 4e4` or `|y| > 4e4` | `_boundary_penalty()` returns `-10` once if either axis exceeds ±40 km | MATCH to eq.18 | Tension remains with Table 4 `100 km × 100 km`. |
 | Velocity eq.19 | Penalty if below 0.3 Mach; severe if below 0.2 Mach | `_speed_penalty()` uses Mach = speed / 340, same two segments | MATCH / PARTIAL | Mach reference constant is engineering approximation. |
-| Ta eq.20 | Extracted text shows first segment may be `10` for `q_LOS < 4°`, then piecewise decline | Current `ta_angle_advantage_fixed()` is continuous, non-negative, normalized `[0,1]` | PARTIAL / intentional scale deviation | Current reward version keeps normalized scale to avoid silent 10x reward change. A `10`-scale Ta should be a separate ablation if verified. |
+| Ta eq.20 | PDF formula gives `Ta=1.0` for `q_LOS < 4 deg`, followed by the published piecewise branches | Current `ta_angle_advantage_fixed()` returns `1.0` in the first branch and preserves the other branches literally | MATCH / branch-boundary interpretation unresolved | The discontinuity at 4 deg is not smoothed or normalized. |
 | Td eq.21 | `1` when distance ≤ 15 km; `exp(1 - D/15)` when larger | `td_distance_advantage()` follows this form with distance in meters converted internally | MATCH | Current situation reward uses 3D Euclidean distance. |
-| q_LOS / situation geometry | Eq.20 uses `q_LOS`; Table 2 includes LOS angles and qLOS | Current `_situation_reward()` uses 3D body-x LOS angle from `compute_body_x_q_los()` | PARTIAL | Plausible strict Table 2 interpretation; still needs paper/code verification against exact q_LOS definition. |
+| q_LOS / situation geometry | Eq.20 uses `q_LOS`; Table 2 includes LOS angles and qLOS | Current `_situation_reward()` uses 3D velocity-to-LOS angle from `compute_velocity_q_los()` | UNRESOLVED / PAPER_INFERRED | The paper does not publish a sufficiently precise independent q_LOS geometry definition. |
 | Situation eq.22 | `sum_j(lambda1 * Ta_i^j * Td_i^j - lambda2 * Ta_j^i * Td_j^i)`, lambda1=1, lambda2=0.8 | `_situation_reward()` uses `1.0 * Ta_ij * Td_ij - 0.8 * Ta_ji * Td_ij` | PARTIAL | Since distance is symmetric, `Td_ij == Td_ji`; using one `Td` is equivalent if same distance function applies both ways. |
 | Terminal eq.23 | Team-level `rend = 30 * (Nred - Nblue)` unless equal | Current env computes team-level value and shares across team members | PARTIAL / engineering implementation | Sum over team equals paper team reward. Per-agent share avoids multiplying terminal reward by team size. |
 | Death / crash penalty | Not found in extracted paper reward equations | Dead/crashed agent gets `r_death = -10` on crash frame | ENGINEERING ADDITION | This improves causal credit for crashes but is not in extracted paper formula. |
 
-Current reward version is `fixed_ta_alt_eq17_3dlos_v1`. It should not be mixed
+Current reward version is `paper_literal_eq15_eq20_ta1_tail01_joint_v4`. It should not be mixed
 with earlier reward logs.
 
 ## 7. MAPPO algorithm and hyperparameters
@@ -109,9 +109,9 @@ with earlier reward logs.
 | Item | Paper statement / equation / table | Current implementation | Status | Notes |
 |---|---|---|---|---|
 | Algorithm | Paper main method is BRMA-MAPPO; comparison includes non-attention baselines and MAPPO-Attention | `train_vanilla_mappo.py` is vanilla MLP MAPPO baseline | PARTIAL | This is not BRMA-MAPPO and should be labeled vanilla baseline. |
-| Training scale | Paper in-domain training uses 6v6 | Current default/preset main is 2v2 | MISMATCH for paper main | Intentional staged baseline. Do not claim paper main 6v6 result. |
+| Training scale | Paper in-domain training uses 6v6 | Current formal environment is a 3v3 Vanilla MAPPO diagnostic | MISMATCH for paper main | Do not claim a full 6v6 BRMA-MAPPO numerical reproduction. |
 | Rollout threads | Table 3: 32 | Current default `num_envs=8`; preset `vanilla_2v2_main` uses 8 | MISMATCH | Reduced for local stability/resource constraints. |
-| Total steps | Table 3 extracted text appears as `1 5 107`, likely `1.5e7` or OCR artifact; earlier project assumed `1e7` | Current default `total_env_steps=10_000_000` | NEEDS PAPER TEXT VERIFICATION | Do not silently claim exact match. Verify original PDF table visually. |
+| Total steps | Paper Table 3 gives `1.5e7` maximum training steps | Current diagnostic presets do not establish a 15M-step reproduction | MISMATCH | The current 3v3 Vanilla diagnostic must not be presented as the paper's full training run. |
 | Max episode length | Table 3: 1400 | Current `max_episode_length=1400` | MATCH | |
 | Replay buffer size | Table 3: 2000 | Current `replay_buffer_size=2000` | MATCH | With 8 envs, rollout is 250 env steps per worker. |
 | Hidden sizes | Table 3: `[128, 128]` | Actor: input FC 128, GRU 128, MLP head 64; critic hidden 128 via config | PARTIAL | Not a two-layer `[128,128]` actor MLP in the strict paper sense; has GRU and smaller action head. |
@@ -161,7 +161,7 @@ Interpretation:
 
 Only issues that affect paper fidelity are listed here.
 
-1. **Training scale mismatch**: current formal baseline is 2v2, while paper
+1. **Training scale mismatch**: current formal diagnostic is 3v3, while paper
    in-domain training is 6v6. A 10M 2v2 run is useful but should not be labeled
    the paper's 6v6 main result.
 2. **Rollout threads mismatch**: paper Table 3 uses 32 rollout threads; current
@@ -173,16 +173,15 @@ Only issues that affect paper fidelity are listed here.
 5. **Battlefield area ambiguity**: eq.18 implies ±40 km, but Table 4 extracted
    text says `100 km × 100 km × 10 km`. This must be verified before claiming
    exact environment match.
-6. **Ta scale mismatch**: current normalized `Ta` is intentionally not the
-   possible paper `10`-scale first segment. This should remain a separate reward
-   scale ablation, not a silent baseline change.
+6. **Ta boundary interpretation**: the paper-explicit first branch is now
+   `Ta=1.0`; the remaining published branches are preserved without smoothing,
+   including the boundary behavior at 4 degrees.
 7. **Blue rule baseline exactness**: paper states rule-based target allocation,
    pursuit, and missile evasion but does not expose exact rule implementation in
    extracted text. Current Blue policy includes engineering protections and may
    be stronger than the paper baseline.
-8. **Total training steps ambiguity**: extracted Table 3 OCR for max steps is
-   ambiguous. Verify visually whether paper uses `1e7`, `1.5e7`, or another
-   value before final reproduction claims.
+8. **Training scale mismatch**: the paper maximum is `1.5e7` steps in its 6v6
+   setting. The current 3v3 Vanilla MAPPO work is diagnostic only.
 
 Not blockers for continuing diagnostics:
 
@@ -196,10 +195,9 @@ Not blockers for continuing diagnostics:
 
 Recommended path:
 
-1. Continue with a **500K or 1M paper-aligned diagnostic** under the current
-   `fixed_ta_alt_eq17_3dlos_v1` reward version and existing missile launch
-   window. This is the correct next step because 100K is too short and std is
-   stable.
+1. Use only separately approved diagnostics under
+   `paper_literal_eq15_eq20_ta1_tail01_joint_v4`; this audit does not establish
+   full paper reproduction, learnability, or convergence.
 2. Do **not** change MAPPO entropy, learnable std, reward scales, or missile
    launch gates based on the current 100K data.
 3. Use launch diagnostics during the 500K/1M run to track whether Red's

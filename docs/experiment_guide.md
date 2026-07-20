@@ -19,10 +19,17 @@ Use 1v1/2v2 presets only as smoke or debugging runs. For example:
 python train_vanilla_mappo.py --preset vanilla_2v2_smoke --total-env-steps 2000
 ```
 
-Current reward version is `paper_eq20_ta_alt_eq17_3dlos_v1`: situation reward
-uses paper Eq.20 Ta original scale, Eq.21 Td, and 3D body-x q_LOS. Blue-only
-GCAS is an explicit engineering debug option and is not part of the default
-paper environment.
+Current reward version is `paper_literal_eq15_eq20_ta1_tail01_joint_v4`:
+Eq.20 uses `Ta=1.0` below 4 degrees and Eq.17 uses the paper-explicit `0.1`
+tail. Situation reward currently uses observer velocity-to-LOS q_LOS; this
+geometry remains `UNRESOLVED / PAPER_INFERRED` rather than a confirmed match.
+
+This is a 3V3 Vanilla MAPPO diagnostic, not the paper's complete 6V6
+BRMA-MAPPO numerical reproduction. The paper table records `1.5e7` maximum
+training steps. Altitude thresholds, `D_att,max`, PID gains, initial state,
+formation spacing, missile count, RCS/radar constants, EO half-angle, MWS,
+Blue policy details, action distribution/std, and full missile dynamics remain
+paper-unspecified engineering choices.
 
 ## 1. Conda 鐜
 
@@ -101,7 +108,7 @@ CLI 鍙傛暟浠嶅彲瑕嗙洊 preset锛?
 python train_vanilla_mappo.py --preset vanilla_2v2_smoke --total-env-steps 2000
 ```
 
-褰撳墠榛樿 reward version 涓?`paper_eq20_ta_alt_eq17_3dlos_v1`銆傝瑙?
+Current default reward version: `paper_literal_eq15_eq20_ta1_tail01_joint_v4`. See:
 [docs/current_environment_alignment_status.md](current_environment_alignment_status.md)銆?
 
 ## 5. 璁烘枃寮?6v6 璁粌鍛戒护妯℃澘
@@ -321,21 +328,21 @@ python train_attention_mappo.py --preset attention_1v1_strict_critic_smoke
 
 ## 18. Reward version 鏍囪
 
-褰撳墠 reward version 涓?`paper_eq20_ta_alt_eq17_3dlos_v1`銆?
+Current reward version: `paper_literal_eq15_eq20_ta1_tail01_joint_v4`.
 
 瀹屾暣鐨勭幆澧冨榻愮姸鎬佽 [docs/current_environment_alignment_status.md](current_environment_alignment_status.md)銆?
 
-`paper_eq20_ta_alt_eq17_3dlos_v1` 琛ㄧず锛?
+`paper_literal_eq15_eq20_ta1_tail01_joint_v4` means:
 
-1. Ta 浣跨敤杩炵画闈炶礋褰掍竴鍖栫増鏈紱
+1. Eq.20 first branch uses the paper-explicit `Ta=1.0`; the other branches are preserved without smoothing.
 2. altitude reward 浣跨敤 pairwise eq.17-style锛堝惈 high-altitude 0.1 tail锛夛紱
-3. situation reward 宸蹭粠 2D 姘村钩闈?AO/TA 鍒囨崲涓?3D body-x q_LOS + 3D distance銆?
+3. Situation reward uses 3D velocity-to-LOS q_LOS plus 3D distance. Geometry alignment is `UNRESOLVED / PAPER_INFERRED`.
 
 娉ㄦ剰锛?
 
 - 涓嶈涓?`fixed_ta_v1`銆乣fixed_ta_alt_eq17_v1`銆佹垨 legacy reward 鏃ュ織娣峰悎姣旇緝銆?
 - 鏂板疄楠屽缓璁娇鐢ㄥ甫鐗堟湰鍚嶇殑鏃ュ織鏂囦欢锛屼緥濡?`vanilla_3dlos_v1.csv`銆?
-- 濡傛灉鍚庣画闇€瑕?paper Ta scale (10脳) ablation锛屽簲鍙﹀紑 reward-scale 瀹為獙锛屼笉瑕佷笌 `paper_eq20_ta_alt_eq17_3dlos_v1` baseline 娣峰悎銆?
+- Do not directly compare older reward-version checkpoints or logs with `paper_literal_eq15_eq20_ta1_tail01_joint_v4`.
 ## 18. Attention strict observation adapter
 
 `train_attention_mappo.py` now supports three actor observation adapters:

@@ -20,6 +20,9 @@ from configs.paper_3v3_spec import (
 )
 from my_uav_env.alignment.reward_utils import (
     DEFAULT_ALTITUDE_REWARD_CONFIG,
+    REWARD_VERSION,
+    AltitudeRewardConfig,
+    altitude_reward_paper_eq17,
     ta_angle_advantage_fixed,
     td_distance_advantage,
 )
@@ -152,8 +155,20 @@ def test_formal_profile_contract_and_dimensions():
         "arena_altitude_min_m"]
     assert low_altitude["value"] == pytest.approx(100.0)
     assert low_altitude["source"] == PAPER_UNSPECIFIED_ENGINEERING
+    assert snapshot["reward_version"]["value"] == REWARD_VERSION
+    assert snapshot["altitude_reward_high_altitude_tail"]["value"] == (
+        pytest.approx(0.1))
+    assert snapshot["altitude_reward_high_altitude_tail"]["source"] == (
+        "paper_explicit")
+    thresholds = snapshot["altitude_reward_engineering_thresholds_m"]
+    assert thresholds["source"] == PAPER_UNSPECIFIED_ENGINEERING
+    assert thresholds["value"]["d_att_max_m"] == pytest.approx(10000.000001)
+    assert snapshot["situation_reward_q_los_definition"]["value"] == (
+        "observer_velocity_to_target_los_3d_v1")
+    assert snapshot["situation_reward_q_los_definition"]["source"] == (
+        "paper_inferred")
     assert snapshot["environment_config_fingerprint"] != (
-        "3686728c40163c88388932de0beb132e15024687879e03f982fd4715aa6d4d9d")
+        "3d27c1c727f7ba67568dd002aebab7315091424ffa956a97b4734d4063a864c0")
     assert snapshot["environment_config"]["missile"]["navigation_constant"][
         "source"] == "paper_unspecified_engineering"
     assert snapshot["environment_config"]["missile"]["model"]["source"] == (
@@ -394,10 +409,120 @@ def test_hit_probability_direction():
 
 
 @pytest.mark.parametrize("angle, expected", [
-    (0.0, 10.0), (4.0, 1.0 + 22.0 / 15.0),
-    (15.0, 1.0), (35.0, 0.0), (36.0, 0.0)])
+    (0.0, 1.0), (3.999999, 1.0),
+    (4.0, 1.0 + 22.0 / 15.0),
+    (15.0, 1.0), (15.000001, 0.99999995),
+    (35.0, 0.0), (36.0, 0.0)])
 def test_ta_reward_boundaries(angle, expected):
     assert ta_angle_advantage_fixed(angle) == pytest.approx(expected)
+
+
+def test_formal_eq17_tail_and_engineering_thresholds():
+    config = _minimal_altitude_reward_config()
+    assert config.version == "eq17_minimal_finite_tail01_v2"
+    assert config.high_altitude_tail == pytest.approx(0.1)
+    assert config.h_min_m == pytest.approx(0.0)
+    assert config.h_att_m == pytest.approx(2000.0)
+    assert config.h_adv_m == pytest.approx(5000.0)
+    assert config.h_max_m == pytest.approx(10000.0)
+    assert config.d_att_max_m == pytest.approx(10000.000001)
+    assert altitude_reward_paper_eq17(
+        10000.0000005, config) == pytest.approx(0.1)
+
+
+def test_reward_formula_change_preserves_nonreward_runtime(monkeypatch):
+    import my_uav_env.env as env_module
+
+    current_ta = env_module.ta_angle_advantage_fixed
+    legacy_altitude = AltitudeRewardConfig(
+        version="eq17_minimal_finite_tail_v1",
+        h_min_m=0.0,
+        h_att_m=2000.0,
+        h_adv_m=5000.0,
+        h_max_m=10000.0,
+        d_att_max_m=10000.000001,
+        high_altitude_tail=0.0,
+    )
+
+    def legacy_ta(q_los_deg):
+        if abs(float(q_los_deg)) < 4.0:
+            return 10.0
+        return current_ta(q_los_deg)
+
+    def run_once(altitude_config, ta_function):
+        monkeypatch.setattr(env_module, "ta_angle_advantage_fixed", ta_function)
+        env = UavCombatEnv(altitude_reward_config=altitude_config)
+        try:
+            env.reset(seed=3)
+            actions = {
+                aid: np.zeros(3, dtype=np.float32) for aid in env.agent_ids}
+            obs, _rewards, terminated, truncated, _info = env.step(actions)
+            return {
+                "obs": copy.deepcopy(obs),
+                "terminated": dict(terminated),
+                "truncated": dict(truncated),
+                "aircraft": {
+                    aid: {
+                        "position": env._get_sim(aid).get_position(),
+                        "velocity": env._get_sim(aid).get_velocity(),
+                        "rpy": env._get_sim(aid).get_rpy(),
+                        "alive": env._get_sim(aid).is_alive,
+                        "missiles_left": env._get_sim(aid).num_left_missiles,
+                    }
+                    for aid in env.agent_ids
+                },
+                "death_reasons": dict(env._death_reasons),
+                "missile_ids": sorted(env._missiles_in_flight),
+                "engaged_targets": sorted(env._engaged_targets),
+                "fire_control": {
+                    aid: copy.deepcopy(vars(state))
+                    for aid, state in env._fire_control_states.items()
+                },
+                "rng_state": copy.deepcopy(env.np_random.bit_generator.state),
+            }
+        finally:
+            env.close()
+
+    legacy = run_once(legacy_altitude, legacy_ta)
+    current = run_once(_minimal_altitude_reward_config(), current_ta)
+
+    assert legacy.keys() == current.keys()
+    for aid in legacy["obs"]:
+        assert legacy["obs"][aid].keys() == current["obs"][aid].keys()
+        for field in legacy["obs"][aid]:
+            np.testing.assert_array_equal(
+                legacy["obs"][aid][field], current["obs"][aid][field])
+        for field in ("position", "velocity", "rpy"):
+            np.testing.assert_array_equal(
+                legacy["aircraft"][aid][field],
+                current["aircraft"][aid][field])
+        assert legacy["aircraft"][aid]["alive"] == (
+            current["aircraft"][aid]["alive"])
+        assert legacy["aircraft"][aid]["missiles_left"] == (
+            current["aircraft"][aid]["missiles_left"])
+    for field in (
+            "terminated", "truncated", "death_reasons", "missile_ids",
+            "engaged_targets", "fire_control", "rng_state"):
+        assert legacy[field] == current[field]
+
+
+def test_active_alignment_docs_have_no_superseded_ta_or_q_los_claims():
+    paths = (
+        Path("docs/current_environment_alignment_status.md"),
+        Path("docs/experiment_guide.md"),
+        Path("docs/paper_alignment_audit_vanilla_baseline.md"),
+        Path("docs/paper_env_reward_audit.md"),
+        Path("docs/reward_formula_alignment_plan.md"),
+    )
+    text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+    for stale in (
+            "Ta=10", "Ta = 10", "10-scale Ta", "3D body-x q_LOS",
+            "paper_eq20_ta_alt_eq17_3dlos_v1",
+            "fixed_ta_alt_eq17_3dlos_v1"):
+        assert stale not in text
+    assert "paper_literal_eq15_eq20_ta1_tail01_joint_v4" in text
+    assert "UNRESOLVED / PAPER_INFERRED" in text
+    assert "velocity-to-LOS" in text
 
 
 @pytest.mark.parametrize("distance, expected", [
@@ -452,22 +577,23 @@ def test_actor_evaluation_ignores_num_envs_and_buffer_metadata():
 def test_actor_evaluation_restores_checkpoint_altitude_reward_config():
     payload, _ = _evaluation_actor_payload()
     _, _, restored, _, _ = _unpack_evaluation_actor(payload)
-    assert restored.version == "eq17_minimal_finite_tail_v1"
+    assert restored.version == "eq17_minimal_finite_tail01_v2"
     assert restored.d_att_max_m == pytest.approx(10000.000001)
-    assert restored.high_altitude_tail == pytest.approx(0.0)
+    assert restored.high_altitude_tail == pytest.approx(0.1)
     assert restored != DEFAULT_ALTITUDE_REWARD_CONFIG
 
     env = UavCombatEnv(altitude_reward_config=restored)
     try:
         assert env.altitude_reward_config is restored
         assert env.altitude_reward_config.version == (
-            "eq17_minimal_finite_tail_v1")
+            "eq17_minimal_finite_tail01_v2")
     finally:
         env.close()
 
 
 @pytest.mark.parametrize("field, incompatible", [
     ("environment_config_fingerprint", "incompatible"),
+    ("reward_version", "paper_literal_eq15_eq20_joint_v3"),
     ("action_distribution", "incompatible"),
     ("pid_profile", "incompatible"),
     ("reward_mode", "incompatible"),
@@ -527,6 +653,21 @@ def test_actor_evaluation_requires_altitude_reward_config():
         _unpack_evaluation_actor(payload)
 
 
+def test_actor_evaluation_rejects_old_eq17_zero_tail_config():
+    payload, _ = _evaluation_actor_payload()
+    payload["metadata"]["altitude_reward_config"] = {
+        "version": "eq17_minimal_finite_tail_v1",
+        "h_min_m": 0.0,
+        "h_att_m": 2000.0,
+        "h_adv_m": 5000.0,
+        "h_max_m": 10000.0,
+        "d_att_max_m": 10000.000001,
+        "high_altitude_tail": 0.0,
+    }
+    with pytest.raises(ValueError, match="altitude_reward_config"):
+        _unpack_evaluation_actor(payload)
+
+
 def test_evaluate_and_acmi_import_the_shared_evaluation_contract():
     evaluate_source = Path("evaluate_vanilla_mappo.py").read_text(
         encoding="utf-8")
@@ -550,6 +691,26 @@ def test_training_resume_contract_still_rejects_rollout_mismatch():
     payload["core_config"]["replay_buffer_size"] = 500
     with pytest.raises(ValueError, match="core configuration mismatch"):
         _validate_training_state(payload, config, metadata)
+
+
+def test_training_resume_accepts_new_reward_and_rejects_old_reward_version():
+    _, config = _evaluation_actor_payload()
+    metadata = _checkpoint_metadata(config, 60, 30)
+    payload = {
+        "schema_version": TRAINING_STATE_SCHEMA_VERSION,
+        "checkpoint_metadata": dict(metadata),
+        "core_config": _training_core_config(config, metadata),
+        "runtime": {"total_steps": 100_000},
+    }
+    _validate_training_state(payload, config, metadata)
+
+    old = copy.deepcopy(payload)
+    old["checkpoint_metadata"]["reward_version"] = (
+        "paper_literal_eq15_eq20_joint_v3")
+    old["core_config"]["reward_version"] = (
+        "paper_literal_eq15_eq20_joint_v3")
+    with pytest.raises(ValueError, match="core configuration mismatch"):
+        _validate_training_state(old, config, metadata)
 
 
 def test_random_evaluation_does_not_resolve_or_validate_checkpoint():

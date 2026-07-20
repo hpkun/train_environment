@@ -24,10 +24,12 @@ from my_uav_env.pid_controller import (
     PAPER_PID_DERIVATIVE_SEMANTICS,
     PAPER_PID_ERROR_DEFINITION,
 )
+from my_uav_env.alignment.reward_utils import REWARD_VERSION
 
 
 PAPER_UNSPECIFIED_ENGINEERING = "paper_unspecified_engineering"
 PAPER_EQUATION_OPERATIONAL = "paper_equation_operational"
+PAPER_INFERRED = "paper_inferred"
 INTENTIONAL_3V3_DEVIATION = "intentional_3v3_deviation"
 INTENTIONAL_3V3_DEVIATION_DERIVED = "intentional_3v3_deviation_derived"
 INTENTIONAL_MODEL_SIMPLIFICATION = "intentional_model_simplification"
@@ -193,9 +195,19 @@ PAPER_PROFILE_METADATA = {
     "missile_maximum_command_g": PAPER_MISSILE.maximum_overload_g,
     "missile_lifetime_s": PAPER_MISSILE.maximum_flight_time_s,
     "reward_mode": sv(PAPER_REWARD_MODE, PAPER_EQUATION_OPERATIONAL),
+    "reward_version": sv(REWARD_VERSION, PAPER_EQUATION_OPERATIONAL),
+    "altitude_reward_high_altitude_tail": sv(0.1, PAPER_EXPLICIT),
+    "altitude_reward_engineering_thresholds_m": sv(
+        {"h_min_m": 0.0, "h_att_m": 2000.0, "h_adv_m": 5000.0,
+         "h_max_m": 10000.0, "d_att_max_m": 10000.000001},
+        PAPER_UNSPECIFIED_ENGINEERING),
     "altitude_pair_aggregation": sv(
         "paper_unspecified_engineering_mean_over_alive_enemies",
         PAPER_UNSPECIFIED_ENGINEERING),
+    "situation_reward_q_los_definition": sv(
+        "observer_velocity_to_target_los_3d_v1", PAPER_INFERRED,
+        "UNRESOLVED / PAPER_INFERRED: the paper does not independently define "
+        "the q_LOS geometry used by Eq.20."),
     "actor_input_dim": sv(60, INTENTIONAL_3V3_DEVIATION_DERIVED),
     "critic_input_dim": sv(30, INTENTIONAL_3V3_DEVIATION_DERIVED),
     "aircraft_load_interpretation": sv(

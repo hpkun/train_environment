@@ -632,10 +632,10 @@ def _training_log_fields() -> list[str]:
 
 def _minimal_altitude_reward_config() -> AltitudeRewardConfig:
     return AltitudeRewardConfig(
-        version="eq17_minimal_finite_tail_v1",
+        version="eq17_minimal_finite_tail01_v2",
         h_min_m=0.0, h_att_m=2000.0, h_adv_m=5000.0,
         h_max_m=10000.0, d_att_max_m=10000.000001,
-        high_altitude_tail=0.0)
+        high_altitude_tail=0.1)
 
 
 def _rollout_layout(replay_buffer_size: int, num_envs: int) -> dict:
@@ -667,7 +667,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": config.obs_mode,
         "obs_normalization": config.obs_normalization,
-        "reward_version": "paper_3v3_joint_eq15_23_v1",
+        "reward_version": REWARD_VERSION,
         "reward_mode": config.reward_mode,
         "pid_profile": config.pid_profile,
         "pid_throttle_base": float(config.pid_throttle_base),
@@ -690,6 +690,7 @@ def _checkpoint_metadata(config, obs_dim: int, global_state_dim: int) -> dict:
         "initial_condition_randomization_mode": str(
             config.initial_condition_randomization_mode),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
+        "q_los_alignment_status": "UNRESOLVED / PAPER_INFERRED",
         "altitude_reward_interpretation": (
             "paper_unspecified_engineering_mean_over_alive_enemies"),
         "num_red": int(config.num_red),
@@ -774,6 +775,8 @@ def _training_core_config(config, checkpoint_meta: dict) -> dict:
         **{field: getattr(config, field) for field in fields},
         "environment_config_fingerprint": checkpoint_meta[
             "environment_config_fingerprint"],
+        "reward_version": checkpoint_meta["reward_version"],
+        "altitude_reward_config": checkpoint_meta["altitude_reward_config"],
         "training_log_schema": _training_log_fields(),
     }
 
@@ -947,7 +950,7 @@ def _actor_evaluation_expected_metadata(
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "obs_mode": obs_mode,
         "obs_normalization": obs_normalization,
-        "reward_version": "paper_3v3_joint_eq15_23_v1",
+        "reward_version": REWARD_VERSION,
         "reward_mode": reward_mode,
         "pid_profile": pid_profile,
         "pid_throttle_base": float(pid_throttle_base),
@@ -969,6 +972,7 @@ def _actor_evaluation_expected_metadata(
         "initial_condition_randomization_mode": (
             initial_condition_randomization_mode),
         "q_los_version": "observer_velocity_to_target_los_3d_v1",
+        "q_los_alignment_status": "UNRESOLVED / PAPER_INFERRED",
         "altitude_reward_interpretation": (
             "paper_unspecified_engineering_mean_over_alive_enemies"),
         "num_red": int(num_red),
@@ -1035,6 +1039,12 @@ def _unpack_actor_checkpoint_for_evaluation(
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"invalid checkpoint altitude_reward_config: {exc}") from exc
+    expected_altitude_config = _minimal_altitude_reward_config()
+    if altitude_reward_config != expected_altitude_config:
+        raise ValueError(
+            "actor evaluation contract mismatch: altitude_reward_config: "
+            f"checkpoint={raw_altitude_config!r}, "
+            f"evaluation={asdict(expected_altitude_config)!r}")
 
     state = payload["state_dict"]
     required_weights = (
@@ -3199,7 +3209,7 @@ def main():
     print(f"  checkpoint_dir: {config.checkpoint_dir}")
     print(f"  seed: {config.seed}")
     print(f"  device: {device}")
-    print("  reward_version: paper_3v3_joint_eq15_23_v1")
+    print(f"  reward_version: {REWARD_VERSION}")
     print(f"  environment_profile: {config.environment_profile}")
     print(f"  obs_mode: {config.obs_mode}")
     print(f"  obs_normalization: {config.obs_normalization}")
@@ -4009,7 +4019,7 @@ def main():
                              f"{kd_red_missile:.6f}",
                              f"{rwr:.6f}",
                              int(rwr_denominator_zero),
-                             "paper_3v3_joint_eq15_23_v1",
+                             REWARD_VERSION,
                              config.reward_mode,
                              config.environment_profile,
                              config.obs_normalization,
@@ -4107,7 +4117,7 @@ def main():
             "KD_Red_MissileOnly": kd_red_missile,
             "RWR":            rwr,
             "RWRDenominatorZero": rwr_denominator_zero,
-            "RewardVersion": "paper_3v3_joint_eq15_23_v1",
+            "RewardVersion": REWARD_VERSION,
             "RewardMode": config.reward_mode,
             "EnvironmentProfile": config.environment_profile,
             "ObsNormalization": config.obs_normalization,

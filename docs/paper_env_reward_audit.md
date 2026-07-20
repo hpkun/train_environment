@@ -2,7 +2,8 @@
 
 > **Current status**: see [docs/current_environment_alignment_status.md](current_environment_alignment_status.md)
 > for the up-to-date alignment summary.  Earlier passes recorded in this audit are
-> historical context only.
+> historical context only. Superseded statements must not be treated as the
+> active environment contract.
 
 Detailed reward formula correction plan is in [docs/reward_formula_alignment_plan.md](reward_formula_alignment_plan.md).
 
@@ -10,9 +11,9 @@ Detailed reward formula correction plan is in [docs/reward_formula_alignment_pla
 
 ## 结论摘要
 
-当前项目已经完成了一批低耦合对齐项：雷达最大探测距离的 RCS 四次方根关系、导弹锁定/发射间隔、导弹命中概率、roll/altitude/boundary reward 的公式修正，situation reward 已切换到 3D body-x q_LOS，以及训练/评估日志指标扩展。
+当前项目已经完成了一批低耦合对齐项：雷达最大探测距离的 RCS 四次方根关系、导弹锁定/发射间隔、导弹命中概率、roll/altitude/boundary reward 的公式修正，situation reward 使用 3D velocity-to-LOS q_LOS，以及训练/评估日志指标扩展。
 
-仍需重点关注的问题：Ta scale 仍为归一化 `[0,1]`（论文 eq.20 可能为 `10`）；strict Table 1/Table 2 observation 尚未接入训练；critic global state 尚未按论文设计。
+当前更正：论文 Eq.20 第一段为 `Ta=1.0`，不是 `10`；其余历史审计项仅作背景记录。
 
 ## 审计优先级定义
 
@@ -299,7 +300,7 @@ else:
 
 旧的 `ta_angle_advantage_current()` 仍保留在 `reward_utils.py`，用于追踪历史行为和对比旧训练日志。`td_distance_advantage()` 目前仍直接复用旧的 Td 距离公式。
 
-该修正没有采用论文中可能存在的 `10` 倍 Ta 量级，而是保持当前 baseline 的归一化 reward 尺度，只修复负值和分段不连续问题。若后续确认论文原始实验使用 `10` 倍 Ta，应作为单独 reward-scale ablation，而不是混入当前 vanilla / attention baseline。
+后续 PDF 原图核对已确认论文 Eq.20 第一段为 `Ta=1.0`；当前正式实现保留论文其余分段，不进行平滑或额外归一化。
 
 本轮仍未修改：
 
@@ -389,11 +390,11 @@ GCAS 状态：
    - `geometry_diagnostics.py` 已用于对比 current AO/TA 与 strict body-frame q_los。
    - `situation_reward_candidates.py` 已新增 body-x 3D 和 velocity-LOS 3D 候选函数。
    - 在高度差场景下，2D AO/TA 与 3D q_LOS 已被诊断为不同（above-ahead: 2D=0° vs 3D≈11.3°）。
-   - 当前环境 `_situation_reward()` **已切换** 到 3D body-x q_LOS + 3D distance。
+   - 当前环境 `_situation_reward()` 使用 3D velocity-to-LOS q_LOS + 3D distance；几何对齐状态为 `UNRESOLVED / PAPER_INFERRED`。
    - `los_geometry.py` 提供 canonical `compute_body_x_q_los` / `compute_3d_range`。
    - `get2d_AO_TA_R()` 公共函数未删除，仍可用于其它几何/观测用途。
    - 2D AO/TA 候选公式保留在 `situation_reward_candidates.py` 供消融对比。
-   - Reward version 更新为 `fixed_ta_alt_eq17_3dlos_v1`。
+   - 当前 Reward version 为 `paper_literal_eq15_eq20_ta1_tail01_joint_v4`。
    - 已修复 `_make_entity_vec` 中 AO_signed 的共线歧义：`side_flag==0` 时保留 unsigned AO，
      避免正后方目标在 11 维 observation 中被错误表示为 0（与正前方混淆）。
 3. P1：核对 pitch/speed reward 的精确斜率与权重量级。

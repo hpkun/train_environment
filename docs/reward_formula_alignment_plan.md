@@ -84,7 +84,7 @@ r_board = -10 if |x| > 4 * 10^4 or |y| > 4 * 10^4
 - `Angle1 = 4/180 * pi`
 - `Angle2 = 15/180 * pi`
 - `Angle3 = 35/180 * pi`
-- `Ta = 10` if `q_Los < Angle1`
+- `Ta = 1` if `q_Los < Angle1`
 - `Ta = 1 + (2 * 15/180*pi - q_Los) / (15/180*pi)` if `Angle1 < q_Los < Angle2`
 - `Ta = 1 - (q_Los - 15/180*pi) / (35/180*pi - 15/180*pi)` if `Angle2 < q_Los < Angle3`
 - `Ta = 0` otherwise
@@ -323,15 +323,17 @@ Implications:
 
 ### Actual situation reward switch (completed)
 
-`_situation_reward()` has been switched from 2D AO/TA to 3D body-x q_LOS:
+`_situation_reward()` uses 3D velocity-to-LOS q_LOS and 3D distance:
 
-- `q_ij = compute_body_x_q_los(ego_pos, ego_rpy, enemy_pos)` — LOS from ego
-  to enemy relative to ego body x-axis.
-- `q_ji = compute_body_x_q_los(enemy_pos, enemy_rpy, ego_pos)` — same from
-  enemy perspective.
+> Alignment status: **UNRESOLVED / PAPER_INFERRED**. The paper does not
+> publish an independent q_LOS geometric definition precise enough to classify
+> the current velocity-to-LOS interpretation as an exact match.
+
+- `q_ij = compute_velocity_q_los(ego_pos, ego_velocity, enemy_pos)`.
+- `q_ji = compute_velocity_q_los(enemy_pos, enemy_velocity, ego_pos)`.
 - Distance uses `compute_3d_range` (3D Euclidean) instead of horizontal-only R.
 - Ta/Td composition formula and weights (1.0 / 0.8) are unchanged.
-- Reward version updated to `fixed_ta_alt_eq17_3dlos_v1`.
+- Reward version updated to `paper_literal_eq15_eq20_ta1_tail01_joint_v4`.
 
 The 2D AO/TA formulation is preserved in `situation_reward_candidates.py`
 as `current_formula` for ablation comparisons.  `get2d_AO_TA_R()` is not

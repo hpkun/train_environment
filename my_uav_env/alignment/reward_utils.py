@@ -2,7 +2,7 @@
 
 These helpers document and test situation-reward Ta/Td formulas.  The
 ``current`` functions preserve historical behavior for audits; the fixed Ta
-function now implements the paper Eq.20 original scale used by the environment.
+function implements the paper Eq.20 piecewise curve used by the environment.
 """
 from __future__ import annotations
 
@@ -10,21 +10,21 @@ import math
 from dataclasses import dataclass
 from typing import Callable
 
-REWARD_VERSION = "paper_literal_eq15_eq20_joint_v3"
+REWARD_VERSION = "paper_literal_eq15_eq20_ta1_tail01_joint_v4"
 """Reward version identifier for logs and evaluation outputs.
 
-``paper_literal_eq15_eq20_joint_v3`` means:
+``paper_literal_eq15_eq20_ta1_tail01_joint_v4`` means:
 
 1. pitch penalty uses the literal discontinuous Eq.15 ``/ 12`` segment;
-2. situation reward Ta uses the paper Eq.20 original scale, including
-   ``Ta=10`` when ``q_LOS < 4 deg`` and the literal lower branch at 4 deg;
-3. altitude reward uses a pairwise Eq.17 structure with separately versioned
-   engineering thresholds and an explicitly unbounded default tail;
-4. situation reward geometry uses
-   3D body-x q_LOS and 3D Euclidean distance.
+2. situation reward Ta uses ``Ta=1`` when ``q_LOS < 4 deg`` and preserves the
+   existing literal lower branches at and above 4 deg;
+3. altitude reward uses the paper-explicit ``0.1`` high-altitude tail with
+   separately versioned engineering thresholds;
+4. situation reward geometry uses an inferred 3D observer-velocity-to-LOS
+   angle and 3D Euclidean distance; the exact paper q_LOS geometry is unresolved.
 
-``fixed_ta_alt_eq17_3dlos_v1`` and earlier logs should not be mixed with
-``paper_eq20_ta_alt_eq17_3dlos_v1`` results.
+All earlier reward-version logs should not be mixed with this version's
+results.
 """
 
 
@@ -80,10 +80,10 @@ def td_distance_advantage_current(distance_m: float) -> float:
 
 
 def ta_angle_advantage_fixed(q_deg: float) -> float:
-    """Paper Eq.20 angle-advantage curve using the original reward scale."""
+    """Paper Eq.20 angle-advantage curve with its explicit first branch."""
     q = abs(q_deg)
     if q < 4.0:
-        return 10.0
+        return 1.0
     if q <= 15.0:
         return 1.0 + 2.0 * (15.0 - q) / 15.0
     if q <= 35.0:

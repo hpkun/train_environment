@@ -2,38 +2,41 @@
 
 ## 0. Current paper-aligned defaults
 
-Current reward version: `paper_eq20_ta_alt_eq17_3dlos_v1`.
+Current reward version: `paper_literal_eq15_eq20_ta1_tail01_joint_v4`.
 
-Vanilla main environment defaults now target the paper setting: 6v6,
-`max_episode_length=1400`, `obs_mode="paper_strict"`, and
-`enable_gcas_for_blue=False`.
+The current experiment is a 3V3 Vanilla MAPPO diagnostic environment, not a
+complete numerical reproduction of the paper's 6V6 BRMA-MAPPO experiment.
+The paper table records a maximum training budget of `1.5e7` steps; current
+diagnostic budgets must not be described as reproducing that result.
 
-The situation reward uses paper Eq.20 Ta original scale, including `Ta=10`
-for `q_LOS <= 4 deg`, paper Eq.21 Td with meter inputs converted to km, and
-3D body-x q_LOS. The legacy 11-dim engineering observation remains available
-only via `obs_mode="engineering"`.
+The situation reward uses `Ta=1.0` for `q_LOS < 4 deg`, preserves the existing
+remaining Eq.20 branches, and uses Eq.21 Td. The implemented q_LOS is the 3D
+angle from observer velocity to target LOS. Its correspondence to the paper is
+`UNRESOLVED / PAPER_INFERRED`, not a confirmed match.
 
-Engineering assumptions retained: altitude reward thresholds, RCS front/side
-approximation, photoelectric cone half-angle, missile physical parameters,
-and optional Blue-only GCAS/debug safety layers.
+Engineering assumptions retained: altitude reward thresholds and `D_att,max`,
+PID gains, initial altitude/speed, formation spacing, missiles per aircraft,
+RCS/radar constants, EO half-angle, MWS and Blue policy details, continuous
+action distribution/std parameterization, and complete missile dynamics.
 
-Last updated: after situation-reward 3D body-x q_LOS switch.
+The Eq.17 `0.1` high-altitude tail is paper-explicit. Its effective interval is
+still constrained by engineering thresholds and must not be presented as a
+complete recovery of unpublished Eq.17 parameters.
 
 ## 1. Current reward / environment version
 
 ```python
-REWARD_VERSION = "paper_eq20_ta_alt_eq17_3dlos_v1"
+REWARD_VERSION = "paper_literal_eq15_eq20_ta1_tail01_joint_v4"
 ```
 
 This version includes:
 
-1. **fixed Ta curve** 鈥?continuous, non-negative, normalized `[0, 1]` angle-advantage function
-   (`ta_angle_advantage_fixed`).
+1. **literal Ta first branch** - `Ta=1.0` for `q_LOS < 4 deg`; the other
+   existing branches are unchanged and are not artificially smoothed.
 2. **pairwise eq.17-style altitude reward** 鈥?mean of `altitude_reward_paper_eq17` over
    alive enemies, with high-altitude `0.1` tail.
-3. **3D body-x q_LOS situation reward** 鈥?`_situation_reward()` uses
-   `compute_body_x_q_los(ego_pos, ego_rpy, enemy_pos)` instead of the old 2D horizontal
-   `get2d_AO_TA_R`.
+3. **inferred velocity q_LOS situation reward** - `_situation_reward()` uses
+   `compute_velocity_q_los(observer_pos, observer_velocity, target_pos)`.
 4. **3D Euclidean distance in situation reward** 鈥?`compute_3d_range` replaces the old
    horizontal-only `R`.
 5. **signed AO collinear fix** 鈥?`_make_entity_vec` uses `_signed_ao_from_unsigned_and_side`
@@ -41,7 +44,7 @@ This version includes:
    entity observation vector.
 
 Older reward versions (`fixed_ta_v1`, `fixed_ta_alt_eq17_v1`, and legacy pre-pass19 logs)
-should **not** be mixed with `paper_eq20_ta_alt_eq17_3dlos_v1` results.
+should **not** be mixed with `paper_literal_eq15_eq20_ta1_tail01_joint_v4` results.
 
 ## 2. Aligned or mostly aligned items
 
@@ -58,7 +61,7 @@ should **not** be mixed with `paper_eq20_ta_alt_eq17_3dlos_v1` results.
 | Boundary reward (eq.18) | `-10` if `\|x\|` or `\|y\|` > 4脳10鈦?| `_boundary_penalty` uses `BATTLEFIELD_HALF_SIZE` |
 | Roll reward (eq.16) | Dual-condition `\|蠁\|>蟺/4 & \|胃\|>蟺/4` | `_roll_penalty` matches formula |
 | Altitude reward (eq.17-style) | Pairwise relative, quadratic segments | `_altitude_reward` uses `altitude_reward_pairwise_mean_eq17` |
-| Situation reward geometry | 3D body-frame LOS | `_situation_reward` uses `compute_body_x_q_los` + `compute_3d_range` |
+| Situation reward geometry | Paper definition unresolved | `_situation_reward` uses inferred `compute_velocity_q_los` + `compute_3d_range` |
 | Terminal reward (eq.23) | Team-level `r_end`, per-agent share | Computed as `raw_r_end / max_num_team`, sum equals paper value |
 | GCAS asymmetry | Blue-only safety net | `enable_gcas_for_blue` flag; training uses `False` |
 
@@ -69,8 +72,8 @@ should **not** be mixed with `paper_eq20_ta_alt_eq17_3dlos_v1` results.
 | RCS model | Front/side approximation, not paper table interpolation | P2 |
 | Pitch reward (eq.15) | Middle-segment slope needs paper text visual verification | P1 |
 | Speed reward (eq.19) | Mach conversion constant (340 m/s) approximate; needs paper verification | P1 |
-| Ta scale | Paper Eq.20 original scale is the current default | aligned |
-| q_LOS definition | Current choice is body-x LOS angle; velocity-q candidate exists in `situation_reward_candidates.py` | P1 鈥?pending paper confirmation |
+| Ta first branch | `Ta=1.0` for `q_LOS < 4 deg` | paper-explicit |
+| q_LOS definition | Current implementation is observer velocity-to-LOS | UNRESOLVED / PAPER_INFERRED |
 | Observation space | Still 11-dim engineering Dict, not strict Table 1 / Table 2 10-dim | P1 |
 | Strict paper observation | `train_attention_mappo.py --obs-adapter strict` uses strict 10-dim actor observations with normalization | P1 |
 | Strict observation API | `UavCombatEnv.get_strict_entity_observation()` and `get_strict_team_observations()` exposed; `reset()`/`step()` still return 11-dim engineering Dict | P1 |
@@ -118,8 +121,7 @@ Root compatibility shims (still retained):
 ## 5. Recommended next steps
 
 1. **Do not delete root compatibility shims yet.** They protect external imports.
-2. **Run a short 6v6 vanilla baseline** under `paper_eq20_ta_alt_eq17_3dlos_v1` to verify the
-   3D q_LOS switch does not destabilise training.
+2. **Run only separately approved diagnostics** under `paper_literal_eq15_eq20_ta1_tail01_joint_v4`; the current 3v3 Vanilla environment is not a full 6v6 BRMA-MAPPO reproduction.
 3. **Evaluate the trained baseline** with `evaluate_vanilla_mappo.py` to get metrics under
    the new reward version.
 4. **Validate strict Table 1/Table 2 attention training locally** with

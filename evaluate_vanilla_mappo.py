@@ -27,6 +27,7 @@ from configs.paper_3v3_spec import (
 from rule_based_agent import blue_coordinated_actions
 from train_vanilla_mappo import (
     CHECKPOINT_SCHEMA_VERSION,
+    REWARD_VERSION,
     ACTION_DISTRIBUTION_VERSION,
     ENTROPY_ESTIMATOR_VERSION,
     VanillaActor,
@@ -434,7 +435,7 @@ def run_one_episode(actor, rnn_hidden_size: int, num_red: int, num_blue: int,
             "NumRed": num_red,
             "NumBlue": num_blue,
             "MaxSteps": max_steps,
-            "RewardVersion": "paper_3v3_joint_eq15_23_v1",
+            "RewardVersion": REWARD_VERSION,
             "RewardMode": reward_mode,
             "ObsNormalization": obs_normalization,
             "PIDProfile": pid_profile,
@@ -641,7 +642,7 @@ def main():
     device = _select_device(args.device)
     actor, rnn_hidden_size, _checkpoint, altitude_config = _load_actor(
         args, device)
-    print("reward_version: paper_3v3_joint_eq15_23_v1", flush=True)
+    print(f"reward_version: {REWARD_VERSION}", flush=True)
     print(f"environment_profile: {args.environment_profile}", flush=True)
     print(f"pid_throttle_base: {args.pid_throttle_base}", flush=True)
     print(f"action_distribution: {ACTION_DISTRIBUTION_VERSION}", flush=True)

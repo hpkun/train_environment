@@ -75,8 +75,11 @@ def test_disable_evaluation_skips_all_evaluation_outputs(monkeypatch, capsys):
         assert summary["best_evaluation_red_team_return"] is None
 
     stdout = capsys.readouterr().out
-    assert "[CONFIG] scenario=2v2" in stdout
-    assert "evaluation=false" in stdout
+    assert "[CONFIG] scenario=2v2 seed=9137 total_steps=1" in stdout
+    assert "device=" not in stdout
+    assert "actor=" not in stdout
+    assert "value_loss=" not in stdout
+    assert "evaluation=" not in stdout
     assert "[TRAIN] step=1/1" in stdout
     assert "reward100=" in stdout and "win100=" in stdout
     assert "[DONE] steps=1" in stdout

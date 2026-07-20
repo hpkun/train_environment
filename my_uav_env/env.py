@@ -250,10 +250,10 @@ class UavCombatEnv(gymnasium.Env):
         self.missile_guidance_mode = missile_guidance_mode
         if altitude_reward_config is None:
             altitude_reward_config = AltitudeRewardConfig(
-                version="eq17_finite_engineering_mean_v1",
+                version="eq17_minimal_finite_tail01_v2",
                 h_min_m=0.0, h_att_m=2000.0, h_adv_m=5000.0,
                 h_max_m=10000.0, d_att_max_m=10000.000001,
-                high_altitude_tail=0.0)
+                high_altitude_tail=0.1)
         elif isinstance(altitude_reward_config, dict):
             altitude_reward_config = AltitudeRewardConfig(
                 **altitude_reward_config)
@@ -1885,7 +1885,7 @@ class UavCombatEnv(gymnasium.Env):
                 "blue_team_terminal_reward": 0.0,
                 "red_joint_reward": 0.0,
                 "blue_joint_reward": 0.0,
-                "reward_version": "paper_3v3_joint_eq15_23_v1",
+                "reward_version": REWARD_VERSION,
                 "reward_mode": self.reward_mode,
                 "invalid_numerical_episode": True,
             }
@@ -1954,7 +1954,7 @@ class UavCombatEnv(gymnasium.Env):
             "blue_team_terminal_reward": float(terminal_blue),
             "red_joint_reward": float(red_joint),
             "blue_joint_reward": float(blue_joint),
-            "reward_version": "paper_3v3_joint_eq15_23_v1",
+            "reward_version": REWARD_VERSION,
             "reward_mode": self.reward_mode,
         }
         self._episode_stats["EpisodeRedJointReturn"] += red_joint
